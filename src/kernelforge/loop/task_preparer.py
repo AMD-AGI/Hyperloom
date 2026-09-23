@@ -33,6 +33,7 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
+from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
     ExternalArtifactTransaction,
@@ -284,10 +285,9 @@ def _deadline_timeout(deadline_unix: float, default: float) -> float:
 def _cleanup_probe(out_path: str, probe_dir: str) -> None:
     """Remove the probe's output shards and its sitecustomize directory."""
     for path in (out_path, *glob.glob(f"{out_path}.*")):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             os.unlink(path)
-    with contextlib.suppress(Exception):
-        shutil.rmtree(probe_dir, ignore_errors=True)
+    shutil.rmtree(probe_dir, ignore_errors=True)
 
 
 # Replay counts are non-negative, so negative values carry the reason a count
@@ -520,22 +520,16 @@ async def _count_graph_replays(
         )
     except asyncio.TimeoutError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
-        with contextlib.suppress(Exception):
-            from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-            cleanup_current_owned_aiter_locks()
+        cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         return PROBE_FAILED, "benchmark timed out"
     except asyncio.CancelledError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
-        with contextlib.suppress(Exception):
-            from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-            cleanup_current_owned_aiter_locks()
+        cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         raise
     except Exception as exc:  # noqa: BLE001
@@ -586,12 +580,12 @@ async def _check_profile_contract(
         )
     except asyncio.TimeoutError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
         return False, "profile-run timed out"
     except asyncio.CancelledError:
         _kill_process_group(proc)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=10)
         raise
     output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
@@ -855,7 +849,7 @@ def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
     for p in paths:
         try:
             snap[p] = p.read_bytes() if p.is_file() else None
-        except Exception:
+        except OSError:
             snap[p] = None
     return snap
 
@@ -869,7 +863,7 @@ def _restore(snapshot: dict[Path, bytes | None]) -> None:
                     p.unlink()
             else:
                 p.write_bytes(original)
-        except Exception:
+        except OSError:
             continue
 
 
@@ -954,7 +948,7 @@ def _git_changed_since(workspace: Path, base_sha: str) -> list[str]:
 def _remove_new_untracked(workspace: Path, pre_untracked: set[str]) -> None:
     """Delete untracked files that appeared during prep (rollback of new files)."""
     for rel in _git_untracked(workspace) - pre_untracked:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             (workspace / rel).unlink()
 
 
@@ -966,7 +960,7 @@ def _safe_rmtree(path: Path | None) -> None:
 
 
 def _safe_unlink(path: Path) -> None:
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         if path.is_file():
             path.unlink()
 
@@ -992,7 +986,7 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
     for cand in sorted(ref_dir.rglob("graph_harness.py")):
         try:
             text = cand.read_text()
-        except Exception:
+        except OSError:
             continue
         if "def cuda_graph_bench" in text and "dirty" in text:
             return text
@@ -1009,7 +1003,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         if examples and Path(examples).is_dir():
             shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)
             return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
 
     # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
@@ -1019,7 +1013,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
         (ref_dir / "driver_template.py").write_text(REFERENCE_DRIVER_TEMPLATE.lstrip("\n"))
         return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
         return None
 
@@ -1226,7 +1220,7 @@ def _kill_process_group(proc) -> None:
         except Exception:  # noqa: BLE001 - group may already be gone
             pass
     if not signalled:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             proc.kill()
 
 
@@ -1314,7 +1308,7 @@ async def _run_prepare_agent(
 def _read_limited(path: Path, limit: int = 16000) -> str:
     try:
         return path.read_text(errors="replace")[:limit]
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -1897,7 +1891,7 @@ async def prepare_task(
         if provided_harness and not driver_external:
             try:
                 uses_harness = "graph_harness" in driver_path.read_text()
-            except Exception:
+            except OSError:
                 uses_harness = True
             if not uses_harness:
                 _safe_unlink(harness_path)

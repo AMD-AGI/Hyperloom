@@ -60,7 +60,7 @@ def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
 
     captured: dict[str, str] = {}
 
-    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         captured["state"] = state
         return [GitHubPr(number=7, title="perf fastpath", html_url="https://github.com/x/y/pull/7")]
 
@@ -79,7 +79,7 @@ def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
 def test_pr_monitor_search_state_open_only_default(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
-    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         captured["state"] = state
         return []
 
@@ -121,7 +121,7 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
 
     seen_repo_urls: list[str] = []
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         seen_repo_urls.append(repo_url)
         return [
             GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
@@ -156,13 +156,13 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
         candidate_refs=["main"],
     )
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit, states=("open",)):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit, states=("open",)):
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -184,7 +184,7 @@ def test_pr_monitor_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
     """When gap_description yields keywords, dispatcher uses /v1/search/prs."""
     captured: dict[str, object] = {}
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         captured["called"] = "search"
         captured["query"] = query
         captured["limit"] = limit
@@ -227,7 +227,7 @@ def test_pr_monitor_falls_back_to_list_when_search_returns_empty(monkeypatch) ->
         calls.append("search")
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         calls.append("list")
         return [
             GitHubPr(number=40, title="NPU Ascend backend", html_url="u40"),
@@ -257,7 +257,7 @@ def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> N
     def fake_search(*_a, **_kw):
         raise src.PRMonitorError("404 Not Found at /v1/search/prs")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -291,7 +291,7 @@ def test_pr_monitor_no_gap_uses_label_only_path(monkeypatch) -> None:
         captured["called"] = "search"
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -361,7 +361,7 @@ def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
     """End-to-end: --framework-keywords sent as PR Monitor query verbatim, bypassing the gap_description auto-extract."""
     captured: dict[str, object] = {}
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         captured["query"] = query
         return [GitHubPr(number=99, title="mi300x perf PR", html_url="u")]
 
@@ -399,7 +399,7 @@ def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
 def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch) -> None:
     """A dense+mi300x PR must rank ahead of PR:25769 MegaMoE at the enumerate_candidates boundary."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         return [
             GitHubPr(
                 number=25769,
@@ -435,7 +435,7 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
 def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> None:
     """The dispatcher transports the rerank score on every pr_monitor Candidate; order is score-descending, stable on ties."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         return [
             GitHubPr(number=10, title="optimize sglang bf16 dense attention on mi300x", html_url="u10"),
             GitHubPr(number=11, title="MegaMoE NextN A2A", html_url="u11"),
@@ -469,7 +469,7 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
         return [GitHubPr(number=30, title="generic PR", html_url="u30")]
 
     monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
@@ -491,7 +491,7 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
 def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) -> None:
     """Anti rerank is a no-op when the gap carries no anti-trigger keyword."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
         return [
             GitHubPr(number=10, title="fp8 moe perf improvement", html_url="u10"),
             GitHubPr(number=11, title="fp8 attention fusion", html_url="u11"),

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.timeutil import now_iso
+
 
 def coerce_optional_str(value: Any) -> str | None:
     """Coerce a value to a non-empty stripped string, or ``None``."""
@@ -24,6 +26,23 @@ def coerce_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def call_key_fields(record: Any) -> dict[str, Any]:
+    """The ``ts``-stamped join keys both halves of one LLM call (token row, conversation row) carry."""
+    return {
+        "session_id": str(record.session_id),
+        "ts": now_iso(),
+        "component": str(record.component),
+        "call_id": coerce_optional_str(record.call_id),
+        "role": coerce_optional_str(record.role),
+        "task_id": coerce_optional_str(record.task_id),
+        "dyn_id": coerce_optional_str(record.dyn_id),
+        "tick": coerce_optional_int(record.tick),
+        "phase": coerce_optional_str(record.phase),
+        "turn": coerce_optional_int(record.turn),
+        "model": coerce_optional_str(record.model),
+    }
 
 
 def validate_closed_row(
@@ -48,4 +67,4 @@ def validate_closed_row(
         raise error_cls(f"{label} row 'component'={component!r} is not one of {sorted(valid_components)!r}")
 
 
-__all__ = ["coerce_optional_str", "coerce_optional_int", "validate_closed_row"]
+__all__ = ["call_key_fields", "coerce_optional_str", "coerce_optional_int", "validate_closed_row"]

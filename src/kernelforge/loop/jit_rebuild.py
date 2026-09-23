@@ -19,22 +19,19 @@ _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")
 
 def force_jit_rebuild(paths: Iterable[str]) -> None:
     """Make the framework recompile the kernel from the current source."""
-    try:
-        source_paths = [str(path) for path in paths if path]
-        strs = [path.lower() for path in source_paths]
-        if not strs:
-            return
-        # Only C/C++ HIP kernels have the prebuilt-.so shadowing problem; forcing a rebuild for a Triton (.py) task
-        # would recompile aiter's C++ for nothing.
-        if not any(s.endswith(_CPP_EXTS) for s in strs):
-            return
-        joined = " ".join(strs)
+    source_paths = [str(path) for path in paths if path]
+    strs = [path.lower() for path in source_paths]
+    if not strs:
+        return
+    # Only C/C++ HIP kernels have the prebuilt-.so shadowing problem; forcing a rebuild for a Triton (.py) task
+    # would recompile aiter's C++ for nothing.
+    if not any(s.endswith(_CPP_EXTS) for s in strs):
+        return
+    joined = " ".join(strs)
 
-        if "aiter" in joined:
-            # A fresh source digest selects an empty private shard and therefore rebuilds exactly once.
-            activate_aiter_cache_for_sources(source_paths)
-    except Exception as exc:  # noqa: BLE001 - best-effort safety net
-        log.debug("force_jit_rebuild skipped: %r", exc)
+    if "aiter" in joined:
+        # A fresh source digest selects an empty private shard and therefore rebuilds exactly once.
+        activate_aiter_cache_for_sources(source_paths)
 
 
 def tracked_source_changes(workspace: str | Path) -> list[str]:

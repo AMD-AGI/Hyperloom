@@ -889,10 +889,7 @@ class ProfileExecutor(BaselineExecutor):
 
         from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
+        roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(
             probe_dir=probe_dir,
             source_roots=roots,
@@ -936,7 +933,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+        except Exception as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1063,7 +1060,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+        except Exception as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,

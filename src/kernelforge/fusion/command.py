@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import click
 
+from hyperloom.common.io import atomic_write_json
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
@@ -1729,16 +1730,12 @@ def _export_salvage_patch(
         return False
     # This output directory may be reused.
     _clear_kernel_keep_checkpoint(out)
-    try:
-        artifacts = export_artifacts(
-            repo_root,
-            source_file,
-            out,
-            pristine_dir=pristine_dir or None,
-        )
-    except Exception as exc:  # noqa: BLE001 — export must never fail the gate.
-        log.warning("fusion patch export failed: %s: %s", type(exc).__name__, exc)
-        return False
+    artifacts = export_artifacts(
+        repo_root,
+        source_file,
+        out,
+        pristine_dir=pristine_dir or None,
+    )
     if not artifacts.patch:
         return False
     patch = Path(artifacts.patch)
@@ -1758,11 +1755,8 @@ def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "")
         "repo_root": repo_root,
         "note": getattr(vr, "note", ""),
     }
-    path = out / KERNEL_KEEP_CHECKPOINT
-    tmp = path.with_suffix(".json.tmp")
     with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload, make_parents=False)
 
 
 def _clear_kernel_keep_checkpoint(out: Path) -> None:

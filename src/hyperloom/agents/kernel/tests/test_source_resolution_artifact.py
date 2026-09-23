@@ -15,9 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import tracelens_analysis as tl  # noqa: E402
+import tracelens_analysis as tl
 
-from hyperloom.common import kernel_source_contract as ksc  # noqa: E402
+from hyperloom.common import kernel_source_contract as ksc
 
 
 # --- envelope and entry contract -------------------------------------------

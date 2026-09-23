@@ -66,7 +66,7 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
         # Operator logs without it remain inconclusive.
         hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
         report = parse_log_file(server_log, hit_logging=hit_logging or None)
-    except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
+    except Exception:
         log.debug("could not parse %s for demand", server_log, exc_info=True)
         return ""
 
@@ -106,7 +106,7 @@ def _load_demand_report(demand_json: str) -> dict | None:
         from .evidence import load_demand
 
         return load_demand(demand_json)
-    except Exception:  # noqa: BLE001 - evidence must never fail the run
+    except Exception:
         log.debug("could not load demand report", exc_info=True)
         return None
 
@@ -136,7 +136,7 @@ def _coverage_gaps(
                 encoding="utf-8",
             )
         return gaps
-    except Exception:  # noqa: BLE001 - a report must never fail the run
+    except Exception:
         log.debug("could not record coverage gaps", exc_info=True)
         return []
 
@@ -207,7 +207,7 @@ def _attempt_tier3(
             encoding="utf-8",
         )
         return _tier3_result(outcome, decision.gap)
-    except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
+    except Exception:
         log.warning("tier3 attempt failed; tuning continues", exc_info=True)
         return None
 
@@ -451,7 +451,7 @@ def run(
     # Analyze model
     try:
         profile = analyze_model(model_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - model analysis is third-party
         log.error("Model analysis failed: %s", exc)
         report_dict = {
             "status": "failed",

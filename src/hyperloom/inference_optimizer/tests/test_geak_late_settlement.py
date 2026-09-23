@@ -65,6 +65,7 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
         old_coord = coord
         coord = Coordinator.__new__(Coordinator)
         coord.session_dir = old_coord.session_dir
+        coord.bus = old_coord.bus
         coord.shared_state = state = SharedState.load_or_init(coord.session_dir)
         assert coord.phase_kernel._kernel_timeline() is None
 

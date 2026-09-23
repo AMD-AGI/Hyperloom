@@ -110,7 +110,7 @@ def note_failure(
             # Nowhere to park it: the warning above is the whole record.
             return
         record_write_warning(session, component=component, exc=error)
-    except Exception:  # noqa: BLE001 — the note is the last thing that may fail quietly
+    except Exception:
         log.debug("recorder: could not park the failure note for %s", section, exc_info=True)
     finally:
         _parking.active = False

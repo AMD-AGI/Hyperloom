@@ -76,7 +76,7 @@ class RayInfeasibleError(RuntimeError):
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     """Raise :exc:`RayInfeasibleError` when the cluster cannot satisfy the request."""
-    import ray  # noqa: PLC0415
+    import ray
 
     totals = ray.cluster_resources()
     cluster_gpus = float(totals.get("GPU", 0))
@@ -154,7 +154,7 @@ def _pdeathsig_preexec() -> None:
     :func:`._server_lifecycle.reap_orphaned_servers`.
     """
     try:
-        import ctypes  # noqa: PLC0415
+        import ctypes
 
         # PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -200,7 +200,7 @@ class ManagedServerProcess:
             if os.name == "posix":
                 # New session (distinct pgid) so the whole tree reaps atomically; PR_SET_PDEATHSIG so an unexpected
                 # owner death still kills the child.
-                self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                self._proc = subprocess.Popen(
                     cmd,
                     env=env,
                     cwd=cwd,
@@ -211,7 +211,7 @@ class ManagedServerProcess:
                     preexec_fn=_pdeathsig_preexec,
                 )
             else:  # pragma: no cover - non-posix fallback
-                self._proc = subprocess.Popen(  # noqa: S603
+                self._proc = subprocess.Popen(
                     cmd,
                     env=env,
                     cwd=cwd,
@@ -272,7 +272,7 @@ class ManagedServerProcess:
 
 def _serving_actor_body() -> Any:
     """Build the ServingActor class (imports ray lazily so import is cheap)."""
-    import ray  # noqa: PLC0415
+    import ray
 
     @ray.remote
     class ServingActor:
@@ -332,10 +332,10 @@ def _serving_actor_body() -> Any:
             session_remaining_sec=None,
         ):
             """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
-            import subprocess as _sp  # noqa: PLC0415
+            import subprocess as _sp
 
-            from ..cancel_channel import CancelScope, use_cancel_scope  # noqa: PLC0415
-            from ._ray_backend import _run_subprocess_worker  # noqa: PLC0415
+            from ..cancel_channel import CancelScope, use_cancel_scope
+            from ._ray_backend import _run_subprocess_worker
 
             scope = CancelScope()
             self._round_scope = scope
@@ -462,7 +462,7 @@ class ServingLease:
         self._refuse_if_quarantined("ensure")
         if self._actor is not None:
             return
-        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+        from ._ray_backend import get_ray_backend
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
         _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
@@ -481,7 +481,7 @@ class ServingLease:
         session_remaining_sec: float | None = None,
     ) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
-        from ..cancel_channel import cancel_scope_listener  # noqa: PLC0415
+        from ..cancel_channel import cancel_scope_listener
 
         if self._quarantined:
             # Reported the way an ensure failure is, rather than raised: callers
@@ -532,14 +532,11 @@ class ServingLease:
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
-        import subprocess as _sp  # noqa: PLC0415
+        import subprocess as _sp
 
-        import ray  # noqa: PLC0415
+        import ray
 
-        # Resolve Ray's exception classes defensively.
-        _ray_exc = getattr(ray, "exceptions", None)
-        _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
-        _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
+        _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
         try:
             # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
             # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
@@ -550,7 +547,7 @@ class ServingLease:
                 timeout=timeout,
                 cancel_scope=cancel_scope,
             )
-        except _actor_err as exc:  # type: ignore[misc]
+        except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
             # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
@@ -562,13 +559,13 @@ class ServingLease:
             )
             self._actor = None
             try:
-                from ._ray_backend import mark_ray_backend_unhealthy  # noqa: PLC0415
+                from ._ray_backend import mark_ray_backend_unhealthy
 
                 mark_ray_backend_unhealthy()
             except Exception:  # noqa: BLE001 - failure recovery must not raise
                 pass
             return 1, "", f"ray_actor_error: {exc}"[:2000]
-        except _task_err as exc:  # type: ignore[misc]
+        except _task_err as exc:
             # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling
             # runs, not a session crash.
             log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
@@ -606,9 +603,9 @@ class ServingLease:
         Raises:
             subprocess.TimeoutExpired: The round did not return inside the wall-clock ceiling.
         """
-        import ray  # noqa: PLC0415
+        import ray
 
-        from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE  # noqa: PLC0415
+        from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 
         started_at = time.monotonic()
         wait_ceiling = _round_wait_timeout_sec(timeout)
@@ -753,7 +750,7 @@ class ServingLease:
     def _abandon_ref(self, ref: Any) -> None:
         """Drop a round this lease will never collect. Never raises."""
         try:
-            import ray  # noqa: PLC0415
+            import ray
 
             # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
             # interrupt, and ``force=True`` is rejected for actor tasks.
@@ -763,7 +760,7 @@ class ServingLease:
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
         """Tell the actor to stop the round it is running. Never raises."""
-        import ray  # noqa: PLC0415
+        import ray
 
         actor = self._actor
         if actor is None:
@@ -795,7 +792,7 @@ class ServingLease:
         if self._actor is None:
             return
         try:
-            import ray  # noqa: PLC0415
+            import ray
 
             ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
         except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
@@ -822,7 +819,7 @@ class ServingLease:
         if self._actor is None:
             return
         try:
-            import ray  # noqa: PLC0415
+            import ray
 
             ray.kill(self._actor)
         except Exception:  # noqa: BLE001 — teardown must not raise
@@ -847,8 +844,8 @@ def maybe_serving_lease(
     ensure_log_path: Any = None,
 ) -> ServingLease | None:
     """Return a :class:`ServingLease` when single-node Ray execution is active."""
-    from ._multi_node_env import is_multi_node  # noqa: PLC0415
-    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+    from ._multi_node_env import is_multi_node
+    from ._ray_backend import _should_use_ray_backend
 
     if not _should_use_ray_backend() or is_multi_node():
         return None
@@ -888,7 +885,7 @@ class GpuSpecialistLease:
         stdin_path: str | None = None,
     ) -> None:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
-        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+        from ._ray_backend import get_ray_backend
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
         _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
@@ -908,7 +905,7 @@ class GpuSpecialistLease:
             return self._pid
         if self._start_ref is None:
             return None
-        import ray  # noqa: PLC0415
+        import ray
 
         ready, _ = ray.wait([self._start_ref], num_returns=1, timeout=0)
         if not ready:
@@ -925,7 +922,7 @@ class GpuSpecialistLease:
         """Return whether the specialist subprocess is still running."""
         if self._actor is None:
             return False
-        import ray  # noqa: PLC0415
+        import ray
 
         try:
             return bool(ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC))
@@ -938,7 +935,7 @@ class GpuSpecialistLease:
         """Return the subprocess exit code, or ``None`` while running / actor dead."""
         if self._actor is None:
             return None
-        import ray  # noqa: PLC0415
+        import ray
 
         try:
             return ray.get(self._actor.exit_code.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
@@ -949,7 +946,7 @@ class GpuSpecialistLease:
         """Keep the lease until the worker positively acknowledges tree teardown."""
         if self._actor is None:
             return True
-        import ray  # noqa: PLC0415
+        import ray
 
         try:
             return ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC) is True
@@ -963,7 +960,7 @@ class GpuSpecialistLease:
         stopped = self.stop()
         if not stopped:
             log.warning("GpuSpecialistLease.close: stop unconfirmed; forcing actor kill")
-        import ray  # noqa: PLC0415
+        import ray
 
         try:
             ray.kill(self._actor)
@@ -983,8 +980,8 @@ def maybe_gpu_specialist_lease(
     """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active."""
     if num_gpus <= 0:
         return None
-    from ._multi_node_env import is_multi_node  # noqa: PLC0415
-    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+    from ._multi_node_env import is_multi_node
+    from ._ray_backend import _should_use_ray_backend
 
     if not _should_use_ray_backend() or is_multi_node():
         return None

@@ -138,16 +138,3 @@ def test_string_extra_envs_ignored(monkeypatch):
     s = _fake_self()
     _run(s, domain="moe", proposals=[{"name": "v", "extra_envs": "MORI=1"}])
     assert s.tasks.calls == []
-
-
-def test_enqueue_failure_is_swallowed(monkeypatch):
-    # Bookkeeping must never be blocked by an enqueue error.
-    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
-
-    async def _boom(**kwargs):
-        raise RuntimeError("queue down")
-
-    s.tasks.create_or_return_existing = _boom
-    # Must not raise.
-    _run(s, domain="moe", proposals=[{"name": "v", "extra_args": "--x"}])

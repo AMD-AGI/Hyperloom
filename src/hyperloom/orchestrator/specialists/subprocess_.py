@@ -774,7 +774,7 @@ class _RayLeaseProcess:
         latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
         real failure immediately rather than looping until the wall-clock cap.
         """
-        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+        from hyperloom.orchestrator.actions.executors._ray_serving import (
             _RAY_ACTOR_DIED_RC,
         )
 
@@ -939,7 +939,7 @@ class SpecialistSubprocessDispatcher:
         env = _build_specialist_env()
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
+        from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
@@ -1471,7 +1471,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+            except Exception:
                 log.exception("specialist progress callback raised")
             break
         return newest

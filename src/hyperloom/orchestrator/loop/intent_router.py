@@ -22,7 +22,6 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
-    coerce_needs_gpu,
     collapse_verdict_map,
     collapse_verdicts,
     format_exc_brief,
@@ -30,6 +29,7 @@ from .coordinator_helpers import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
+from hyperloom.common.env import is_truthy
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message, TOPIC_ALLOWLIST
@@ -108,22 +108,15 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
         # assembler here loses nothing.
         producer, producer_ref = PRODUCER_ORCHESTRATION, ""
     scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
-    try:
-        recorder.record_proposal(
-            proposal_id,
-            arm=ARM_CONFIG,
-            producer=producer,
-            producer_ref=producer_ref,
-            lever_kind=LEVER_CONFIG,
-            scope=scopes.pop() if len(scopes) == 1 else "",
-        )
-        recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: config proposal row failed for %s",
-            proposal_id,
-            exc_info=True,
-        )
+    recorder.record_proposal(
+        proposal_id,
+        arm=ARM_CONFIG,
+        producer=producer,
+        producer_ref=producer_ref,
+        lever_kind=LEVER_CONFIG,
+        scope=scopes.pop() if len(scopes) == 1 else "",
+    )
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
 
 
 def _variant_review_rows(
@@ -221,7 +214,7 @@ def _record_phase_proposal(router: Any, pending: Any) -> None:
             candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
             variant_name=payload.get("variant_name") or params.get("variant_name"),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
 
 
@@ -263,7 +256,7 @@ def _record_phase_proposal_review(
             alternative_action=advice.get("alternative_action"),
             variants=variants,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
 
 
@@ -315,36 +308,29 @@ def _record_critic_review(
 
     fields = payload or {}
     grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
-    try:
-        recorder.record_proposal_review(
+    recorder.record_proposal_review(
+        proposal_id,
+        verdict=authored or effective,
+        effective_verdict=effective,
+        held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+        reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+        reason=reason,
+        confidence=fields.get("confidence"),
+        failure_reason_code=str(fields.get("failure_reason_code") or ""),
+        advisory=advisory,
+        variants=variants,
+    )
+    recorder.record_proposal_step(
+        proposal_id,
+        step=STEP_REVIEWED,
+        outcome=effective,
+        reason=reason,
+    )
+    if effective == "reject":
+        recorder.settle_proposal(
             proposal_id,
-            verdict=authored or effective,
-            effective_verdict=effective,
-            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
-            reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
-            reason=reason,
-            confidence=fields.get("confidence"),
-            failure_reason_code=str(fields.get("failure_reason_code") or ""),
-            advisory=advisory,
-            variants=variants,
-        )
-        recorder.record_proposal_step(
-            proposal_id,
-            step=STEP_REVIEWED,
-            outcome=effective,
-            reason=reason,
-        )
-        if effective == "reject":
-            recorder.settle_proposal(
-                proposal_id,
-                disposition=DISPOSITION_DROPPED,
-                reason=reason or "critic_rejected",
-            )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: critic review row failed for %s",
-            proposal_id,
-            exc_info=True,
+            disposition=DISPOSITION_DROPPED,
+            reason=reason or "critic_rejected",
         )
 
 
@@ -367,7 +353,7 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
             reauthored=bool(outcome.get("reauthored")),
             patch_verdict_key=outcome.get("patch_verdict_key"),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
 
 
@@ -382,14 +368,7 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder = getter() if callable(getter) else None
     if recorder is None:
         return
-    try:
-        recorder.record_proposal_review_outcome(proposal_id, **outcome)
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: review outcome row failed for %s",
-            proposal_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
 class IntentRouter:
@@ -483,7 +462,7 @@ class IntentRouter:
                 )
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("intent handler for %s raised", source)
             self._record_coordinator_exception(
                 stage="handle_intent",
@@ -501,7 +480,7 @@ class IntentRouter:
                         "error": format_exc_brief(exc, limit=500),
                     },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("failed to record handle_intent_exception observation")
             return
 
@@ -640,17 +619,14 @@ class IntentRouter:
         held_by_name: dict[str, str],
     ) -> None:
         """Log when a mixed map still proceeds, for traceability."""
-        try:
-            sub_verdicts = list(held_by_name.values())
-            if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
-                log.warning(
-                    "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
-                    target,
-                    verdict,
-                    sub_verdicts,
-                )
-        except Exception:  # noqa: BLE001 - audit log must never affect flow
-            pass
+        sub_verdicts = list(held_by_name.values())
+        if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
+            log.warning(
+                "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
+                target,
+                verdict,
+                sub_verdicts,
+            )
 
     async def _record_verdict_hold(
         self,
@@ -755,7 +731,7 @@ class IntentRouter:
                     patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — best-effort mirror
+            except Exception:
                 log.exception(
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
@@ -798,7 +774,7 @@ class IntentRouter:
                 await self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
-            except Exception:  # noqa: BLE001 — accounting must never wedge the loop
+            except Exception:
                 log.exception(
                     "enablement rearm on critic-reject failed for task=%s",
                     sid_candidate,
@@ -896,7 +872,7 @@ class IntentRouter:
                     )
                     try:
                         self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception("delegate specialist: source-patch prune save failed")
                 return
         # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
@@ -926,19 +902,14 @@ class IntentRouter:
                 if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
                 # Any GPU-holding specialist serializes against serving via gpu_research_lane.
-                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
+                needs_gpu = is_truthy(params.get("needs_gpu"))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
-                    try:
-                        # Shared with the GPU-pool lease so the two TTLs never drift.
-                        ttl = self._coord._gpu_lease_ttl_sec(
-                            int(ttl or 0),
-                            params=params,
-                        )
-                    except Exception:  # noqa: BLE001 — fall back to registry ttl
-                        log.exception(
-                            "failed to re-source gpu_research_lane TTL; using registry default",
-                        )
+                    # Shared with the GPU-pool lease so the two TTLs never drift.
+                    ttl = self._coord._gpu_lease_ttl_sec(
+                        int(ttl or 0),
+                        params=params,
+                    )
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
@@ -1045,26 +1016,22 @@ class IntentRouter:
 
         An analysis dispatched this way opens no roofline event of its own, so
         without this the snapshot counter it advanced has nothing on the
-        timeline to account for it. Best-effort: a failed record never breaks
-        the request.
+        timeline to account for it.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
 
-            record_trace_analyze_request(
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                run_id=str(getattr(request_msg, "msg_id", "") or ""),
-                status=str(result.get("status") or ""),
-                result=result,
-                requested_by=source,
-                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
-                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
-                top_k=payload.get("top_k"),
-                snapshot=getattr(self.shared_state, "last_trace_analyze", None),
-                cache_hit=cache_hit,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change routing
-            log.debug("kernel timeline: trace_analyze request capture failed", exc_info=True)
+        record_trace_analyze_request(
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            run_id=str(getattr(request_msg, "msg_id", "") or ""),
+            status=str(result.get("status") or ""),
+            result=result,
+            requested_by=source,
+            request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+            trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+            top_k=payload.get("top_k"),
+            snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+            cache_hit=cache_hit,
+        )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
@@ -1197,7 +1164,7 @@ class IntentRouter:
                                 merged_payload,
                                 **handler_kwargs,
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception(
                             "kernel_request_handler[%s] crashed for source=%s",
                             kind,
@@ -1315,19 +1282,18 @@ class IntentRouter:
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
         try:
-            task = await self.tasks.get(task_id)
-            started = _parse_iso_unix(task.updated_at)
-            if started > 0:
-                running_sec = max(0.0, time.time() - started)
-        except Exception:  # noqa: BLE001 — fall back to the full TTL
-            log.exception("extend_lease: could not read running age for task=%s", task_id)
+            started = _parse_iso_unix((await self.tasks.get(task_id)).updated_at)
+        except TaskNotFound:
+            started = 0.0
+        if started > 0:
+            running_sec = max(0.0, time.time() - started)
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         gpu_error = ""
         try:
             gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
-        except Exception as exc:  # noqa: BLE001 — lane extension already landed
+        except Exception as exc:
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
@@ -1338,7 +1304,7 @@ class IntentRouter:
             from ..specialists.subprocess_ import grant_wall_budget_extension
 
             grant_wall_budget_extension(task_id, extra_sec)
-        except Exception as exc:  # noqa: BLE001 — lease rows already moved
+        except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
         # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
@@ -1385,7 +1351,7 @@ class IntentRouter:
                     reason=f"prune_branch:{family}",
                 ):
                     self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — prune must not fail on bookkeeping
+            except Exception:
                 log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
@@ -1495,7 +1461,7 @@ class IntentRouter:
             tmp = inbox.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
             tmp.replace(inbox)
-        except Exception:  # noqa: BLE001 — steering is best-effort
+        except Exception:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:

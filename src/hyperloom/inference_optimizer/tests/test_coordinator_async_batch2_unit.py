@@ -822,7 +822,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
 
 
 # -- _context_analysis_reader fallback (path read) --------------------------
-def test_context_analysis_reader_path_fallback_on_format_error(
+def test_context_analysis_reader_falls_back_to_the_recorded_path(
     coord: Coordinator,
     tmp_path,
     monkeypatch,
@@ -830,11 +830,7 @@ def test_context_analysis_reader_path_fallback_on_format_error(
     md = tmp_path / "analysis.md"
     md.write_text("# roofline snapshot\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-
-    def _boom() -> str:
-        raise RuntimeError("format failed")
-
-    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", _boom)
+    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord._context_analysis_reader()
     assert "roofline snapshot" in out
 
@@ -844,11 +840,7 @@ def test_context_analysis_reader_unreadable_path(
     monkeypatch,
 ) -> None:
     coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
-    monkeypatch.setattr(
-        coord.shared_state,
-        "_format_analysis_md_full",
-        lambda: (_ for _ in ()).throw(RuntimeError("x")),
-    )
+    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord._context_analysis_reader()
     assert "unreadable" in out or "no analysis.md" in out
 
@@ -1287,8 +1279,11 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
+    calls: list[dict] = []
+
     class _Scorer:
-        async def score(self, *, gap, proposals):
+        async def score(self, *, gap, proposals, task_id=None, tick=None, phase=None):
+            calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
     coord._proposal_scorer = _Scorer()
@@ -1301,6 +1296,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
         },
         source="specialist:rec-spec-3",
     )
+    assert calls == [{"proposals": [{"name": "p1"}], "task_id": "rec-spec-3"}]
 
 
 # -- finalize_recipe_and_journal (KB path) ---------------------------
@@ -2155,7 +2151,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")  # noqa: E501
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={

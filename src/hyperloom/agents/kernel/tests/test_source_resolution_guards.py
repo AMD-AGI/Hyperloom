@@ -17,8 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import tracelens_analysis as tl  # noqa: E402
-import tracelens_skill_runner as tsr  # noqa: E402
+import tracelens_analysis as tl
+import tracelens_skill_runner as tsr
 
 
 _HEADERS = [

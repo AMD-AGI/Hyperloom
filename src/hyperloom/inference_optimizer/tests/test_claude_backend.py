@@ -32,7 +32,7 @@ class FakeToolUseBlock:
     input: dict[str, Any]
 
     @classmethod
-    def __init_subclass__(cls, **kwargs):  # noqa: D401
+    def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
 

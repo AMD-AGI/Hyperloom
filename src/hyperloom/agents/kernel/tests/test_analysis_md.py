@@ -14,9 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _analysis_md as am  # noqa: E402
-import _bypass_report as br  # noqa: E402
-from test_bypass_report import _KERNELS, _analyze  # noqa: E402
+import _analysis_md as am
+import _bypass_report as br
+from test_bypass_report import _KERNELS, _analyze
 
 
 def _sample_kwargs():
