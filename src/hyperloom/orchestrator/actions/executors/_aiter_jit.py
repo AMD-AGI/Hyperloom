@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
 import logging
 import os
 import re
@@ -14,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.aiter_jit_cache import invalidate_jit_cache, resolve_jit_build_dir
+from hyperloom.common.aiter_jit_cache import invalidate_jit_cache, resolve_package_root, resolve_serving_context
 
 log = logging.getLogger(__name__)
 
@@ -64,13 +63,9 @@ _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"
 
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery."""
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+    aiter_root = resolve_package_root()
+    if aiter_root is None:
         return []
-    if spec is None or not spec.origin:
-        return []
-    aiter_root = Path(spec.origin).parent
     return [
         str(aiter_root / "jit"),
         str(aiter_root / "jit" / "build"),
@@ -227,13 +222,9 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] |
         # Preserve the legacy explicit-override contract: callers use this variable to constrain a diagnostic/test
         # sweep to one tree.
         return _dedupe_existing_dirs([override_path / "build", override_path], unreadable)
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):
-        spec = None
-    if spec is not None and spec.origin:
-        aiter_root = Path(spec.origin).parent
-        candidates.append(aiter_root / "jit" / "build")
+    package_root = resolve_package_root()
+    if package_root is not None:
+        candidates.append(package_root / "jit" / "build")
     candidates.extend(
         Path(path)
         for path in (
@@ -471,14 +462,14 @@ def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
     one CSV still boots against every CSV aiter merges, so the missing kernel can
     belong to a variable the round never set -- and to one absent from
     :data:`AITER_ENV_TO_SERVING_MODULES` entirely, which leaves the env-keyed drop
-    with nothing to unlink and the retry certain to fail the same way. The error text
+    with no module to invalidate and the retry certain to fail the same way. The error text
     names the kernel, and the kernel names its module.
 
     Args:
         texts: Error strings or log excerpts from the failed round.
 
     Returns:
-        Module stems to unlink, deduplicated, empty when no kernel was named.
+        Module stems to invalidate, deduplicated, empty when no kernel was named.
     """
     blob = "\n".join(t for t in texts if t)
     modules: list[str] = []
@@ -570,36 +561,9 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
     return True
 
 
-def _resolve_serving_package_root() -> Path | None:
-    """Locate package configs independently of the runtime's writable cache."""
-    candidates = [Path(path) for path in _resolve_aiter_jit_dir_dynamic()]
-    if not candidates:
-        candidates = [Path(path) for path in AITER_JIT_PROBE_PATHS if Path(path).is_dir()]
-    if not candidates:
-        return None
-    jit = candidates[0]
-    return jit.parent.parent if jit.name == "build" else jit.parent
-
-
-def _resolve_serving_jit_dir() -> Path | None:
-    """The runtime cache holding serving modules, unless explicitly overridden."""
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override and Path(override).is_dir():
-        return Path(override)
-    build = resolve_jit_build_dir(_resolve_serving_package_root())
-    return build.parent if build is not None else None
-
-
-def _jit_build_dir(jit_dir: Path) -> Path:
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override and jit_dir == Path(override) and jit_dir.name == "build":
-        return jit_dir
-    return jit_dir / "build"
-
-
-def _invalidate_jit_build(jit_dir: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
+def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
     """Invalidate selected modules and build state, surfacing transaction failure."""
-    record = invalidate_jit_cache(_jit_build_dir(jit_dir), backup_dir, modules=modules)
+    record = invalidate_jit_cache(jit_build, backup_dir, modules=modules)
     if record["status"] == "failed":
         raise OSError(record["error"])
     return record
@@ -660,12 +624,14 @@ def prepare_serving_so_for_csvs(
     Returns:
         A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
     """
-    jit_dir = _resolve_serving_jit_dir()
-    if jit_dir is None:
+    context = resolve_serving_context(
+        os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
+    )
+    if context is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    # Runtime caches may live outside the package; only manual trees without a
-    # discoverable package keep configs/ beside jit/. Pinned CSVs bypass this.
-    configs_dir = (_resolve_serving_package_root() or jit_dir.parent) / "configs"
+    package_root, jit_build = context
+    jit_dir = jit_build.parent
+    configs_dir = package_root / "configs"
     modules_needed: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
@@ -685,7 +651,7 @@ def prepare_serving_so_for_csvs(
     if not modules_needed_t:
         return {"action": "skip", "jit_dir": str(jit_dir)}
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
-    invalidation = _invalidate_jit_build(jit_dir, dest, modules_needed_t)
+    invalidation = _invalidate_jit_build(jit_build, dest, modules_needed_t)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
     log.info(
         "aiter serving so does not cover tuned CSV; invalidated %d module(s) jit_build=%s",
@@ -715,12 +681,16 @@ def drop_serving_so_for_envs(
             kernel belongs to a variable this round never set. Without them an env
             that maps to no module invalidates none and the retry repeats the failure.
     """
-    jit_dir = _resolve_serving_jit_dir()
-    if jit_dir is None:
+    context = resolve_serving_context(
+        os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
+    )
+    if context is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
+    _, jit_build = context
+    jit_dir = jit_build.parent
     modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
-    invalidation = _invalidate_jit_build(jit_dir, dest, modules)
+    invalidation = _invalidate_jit_build(jit_build, dest, modules)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
     return {
         "action": "invalidate",

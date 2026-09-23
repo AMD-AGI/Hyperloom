@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -75,6 +76,7 @@ def test_missing_cache_still_records_requested_scope(tmp_path, scope):
     assert record["status"] == "clean"
     assert record["module_names"] == []
     assert record["module_scope"] == (None if scope is None else list(scope))
+    assert set(record) == {"src", "status", "build_existed", "module_scope", "module_names", "moved_at"}
     assert not build.parent.exists()
 
 
@@ -86,20 +88,18 @@ def test_invalid_scope_fails_without_moving_build(jit, tmp_path, scope):
     assert (jit.parent / "module_gemm.so").read_bytes() == b"module_gemm"
 
 
-@pytest.mark.parametrize("legacy_full", (False, True))
-def test_legacy_records_keep_explicit_full_or_build_only_semantics(jit, tmp_path, legacy_full):
+def test_legacy_record_without_scope_restores_only_build(jit, tmp_path):
     backup_root = tmp_path / "backups"
-    record = cache.invalidate_jit_cache(jit, backup_root, None if legacy_full else ())
+    record = cache.invalidate_jit_cache(jit, backup_root, ())
     record.pop("module_scope")
-    if not legacy_full:
-        record.pop("modules_invalidated")
-        record.pop("module_names")
-        record.pop("build_existed")
+    record.pop("module_names")
+    record.pop("build_existed")
     candidate = jit.parent / "candidate.so"
     candidate.write_bytes(b"candidate")
     result = cache.restore_jit_cache(record, jit, backup_root)
     assert result["status"] == "ok", result
-    assert candidate.exists() is not legacy_full
+    assert candidate.read_bytes() == b"candidate"
+    assert (jit.parent / "module_gemm.so").read_bytes() == b"module_gemm"
     assert (jit / "baseline.o").read_bytes() == b"baseline build"
 
 
@@ -139,7 +139,7 @@ def test_missing_or_incomplete_backup_does_not_delete_candidates(jit, tmp_path, 
         {"module_scope": "all"},
         {"module_scope": []},
         {"module_scope": ["module_other"]},
-        {"modules_invalidated": "yes", "module_scope": "absent"},
+        {"module_scope": "absent"},
     ),
 )
 def test_unknown_or_conflicting_scope_cannot_expand_restore(jit, tmp_path, change):
@@ -241,6 +241,106 @@ def test_resolver_writable_package_keeps_lexical_path(jit, monkeypatch):
     monkeypatch.delenv("AITER_JIT_DIR", raising=False)
     monkeypatch.setattr(cache.os, "access", lambda *args: True)
     assert cache.resolve_jit_build_dir(jit.parent.parent) == jit
+
+
+@pytest.fixture
+def discoverable_package(tmp_path, monkeypatch):
+    package = tmp_path / "site" / "aiter"
+    (package / "jit").mkdir(parents=True)
+    (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.syspath_prepend(str(package.parent))
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    return package
+
+
+def test_package_discovery_prefers_importable_package_without_importing(discoverable_package, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    (venv / "lib/python3.12/site-packages/aiter").mkdir(parents=True)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv))
+    assert cache.resolve_package_root() == discoverable_package
+    assert "aiter" not in sys.modules
+
+
+def test_package_discovery_uses_search_locations_not_origin(discoverable_package, monkeypatch):
+    spec = importlib.util.spec_from_file_location("aiter", discoverable_package / "__init__.py")
+    spec.origin = None
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: spec)
+    assert cache.resolve_package_root() == discoverable_package
+
+
+@pytest.mark.parametrize("package_dir", ["site-packages", "dist-packages"])
+@pytest.mark.parametrize("missing", ["none", "import-error", "invalid-spec", "module-only"])
+def test_package_discovery_uses_existing_isolated_venv(tmp_path, monkeypatch, package_dir, missing):
+    venv = tmp_path / "venv"
+    package = venv / "lib" / "python3.12" / package_dir / "aiter"
+    package.mkdir(parents=True)
+    monkeypatch.setenv("VLLM_VENV_ROOT", f"  {venv}  ")
+
+    def missing_spec(_):
+        if missing == "import-error":
+            raise ImportError("no aiter")
+        if missing == "invalid-spec":
+            raise ValueError("no spec")
+        if missing == "module-only":
+            return importlib.util.spec_from_file_location("aiter", tmp_path / "aiter.py")
+        return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", missing_spec)
+    assert cache.resolve_package_root() == package
+    package.rmdir()
+    assert cache.resolve_package_root() is None
+
+
+@pytest.mark.parametrize("leaf", ["jit", "jit/build"])
+def test_serving_context_wrapper_owns_both_paths(discoverable_package, tmp_path, monkeypatch, leaf):
+    selected = tmp_path / "manual" / leaf
+    selected.mkdir(parents=True)
+    monkeypatch.setenv("AITER_JIT_DIR", str(tmp_path / "runtime"))
+    assert cache.resolve_serving_context(f"  {selected}  ") == (tmp_path / "manual", tmp_path / "manual/jit/build")
+    assert "aiter" not in sys.modules
+
+
+@pytest.mark.parametrize("runtime", ["runtime-cache", "runtime/build", "~/literal", " runtime-cache ", ""])
+def test_serving_context_runtime_override_does_not_move_configs(discoverable_package, tmp_path, monkeypatch, runtime):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AITER_JIT_DIR", runtime)
+    expected = (discoverable_package, Path(runtime).absolute() / "build") if runtime else None
+    assert cache.resolve_serving_context() == expected
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_serving_context_readonly_home_does_not_move_configs(discoverable_package, tmp_path, monkeypatch, initialized):
+    home = tmp_path / "home"
+    jit = home / ".aiter/jit"
+    if initialized:
+        jit.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(os, "access", lambda *_: False)
+    expected = (discoverable_package, jit / "build") if initialized else None
+    assert cache.resolve_serving_context() == expected
+
+
+def test_serving_context_ignores_missing_wrapper(discoverable_package, tmp_path):
+    assert cache.resolve_serving_context(tmp_path / "missing") == (
+        discoverable_package,
+        discoverable_package / "jit/build",
+    )
+
+
+@pytest.mark.parametrize("leaf", ["jit", "jit/build"])
+def test_serving_context_retains_caller_probes_only_when_package_missing(tmp_path, monkeypatch, leaf):
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: None)
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    assert cache.resolve_serving_context() is None
+    probe = tmp_path / "manual" / leaf
+    probe.mkdir(parents=True)
+    assert cache.resolve_serving_context(jit_probe_paths=(str(tmp_path / "missing"), str(probe))) == (
+        tmp_path / "manual",
+        tmp_path / "manual/jit/build",
+    )
 
 
 @pytest.mark.parametrize("alias_side", ("src", "expected"))
@@ -360,6 +460,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 assert not any(name.startswith(('hyperloom', 'aiter', 'torch')) for name in sys.modules)
 root = Path(sys.argv[2])
+package = root / 'site' / 'aiter'
+(package / 'jit').mkdir(parents=True)
+(package / '__init__.py').write_text("raise AssertionError('AITER must not be imported')", encoding='utf-8')
+sys.path.insert(0, str(package.parent))
+assert module.resolve_package_root() == package
+assert module.resolve_serving_context() == (package, package / 'jit' / 'build')
+assert not any(name.startswith(('hyperloom', 'aiter', 'torch')) for name in sys.modules)
 record = module.invalidate_jit_cache(root / 'jit' / 'build', root / 'backups', ())
 assert record['status'] == 'clean', record
 assert module.restore_jit_cache(record, root / 'jit' / 'build', root / 'backups')['status'] == 'ok'

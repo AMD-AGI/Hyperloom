@@ -3,13 +3,14 @@
 
 """Resolve and transact AITER runtime JIT caches without importing AITER.
 
-Callers authorize package locations and backup roots. This stdlib-only module
-owns cache scope, backup integrity, and filesystem operations, and can also be
-shipped as a standalone file to inference workers.
+Callers authorize backup roots. This stdlib-only module owns package discovery,
+cache locations, scope, backup integrity, and filesystem operations, and can
+also be shipped as a standalone file to inference workers.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -17,6 +18,24 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def resolve_package_root() -> Path | None:
+    """Locate AITER without importing it, including the isolated vLLM venv."""
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        return Path(next(iter(spec.submodule_search_locations)))
+    vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
+    if vllm_venv:
+        lib = Path(vllm_venv) / "lib"
+        for package_dir in ("site-packages", "dist-packages"):
+            for package in sorted(lib.glob(f"python*/{package_dir}/aiter")):
+                if package.is_dir():
+                    return package
+    return None
 
 
 def resolve_jit_build_dir(package_root: str | Path | None) -> Path | None:
@@ -37,6 +56,33 @@ def resolve_jit_build_dir(package_root: str | Path | None) -> Path | None:
         if not jit.is_dir():
             return None
     return jit / "build"
+
+
+def resolve_serving_context(
+    wrapper_override: str | Path | None = None, *, jit_probe_paths: tuple[str, ...] = ()
+) -> tuple[Path, Path] | None:
+    """Return the package/config root and runtime JIT build directory together.
+
+    An existing wrapper override selects both configs and cache from that tree;
+    legacy explicit ``jit/build`` paths are accepted. Otherwise runtime cache
+    overrides never relocate package configs. Caller probes are a last resort
+    for package discovery, not a fallback for an unavailable runtime cache.
+    """
+    override = str(wrapper_override).strip() if wrapper_override is not None else ""
+    if override and Path(override).is_dir():
+        jit = Path(override)
+        if jit.name == "build":
+            jit = jit.parent
+        return jit.parent, jit / "build"
+    package = resolve_package_root()
+    if package is None:
+        for raw in jit_probe_paths:
+            jit = Path(raw)
+            if jit.is_dir():
+                package = jit.parent.parent if jit.name == "build" else jit.parent
+                break
+    build = resolve_jit_build_dir(package)
+    return (package, build) if package is not None and build is not None else None
 
 
 def trusted_jit_build_dir(path: str | Path, expected: str | Path) -> bool:
@@ -139,7 +185,6 @@ def invalidate_jit_cache(
         record.update(
             status="ok" if build_existed or serving else "clean",
             build_existed=build_existed,
-            modules_invalidated=scope is None or bool(scope),
             module_scope=scope,
             module_names=[module.name for module in serving],
             moved_at=datetime.now(timezone.utc).isoformat(),
@@ -151,17 +196,6 @@ def invalidate_jit_cache(
     except (OSError, shutil.Error, ValueError, RuntimeError) as exc:
         record.update(status="failed", error=f"JIT cache invalidation failed: {exc}", rollback_errors=[])
     return record
-
-
-def _record_scope(record: dict[str, Any]) -> list[str] | None:
-    if "module_scope" in record:
-        return _module_scope(record["module_scope"])
-    invalidated = record.get("modules_invalidated", False)
-    if invalidated is True:
-        return None
-    if invalidated is not False:
-        raise ValueError("invalid legacy modules_invalidated flag")
-    return []
 
 
 def _backup_directory(raw: str, src: Path, backup_root: str | Path | None) -> Path | None:
@@ -207,10 +241,10 @@ def restore_jit_cache(
     """Restore a baseline after validating the entire record and backup inventory.
 
     Selected restores delete only requested stems, including modules absent at
-    invalidation time. Legacy modules_invalidated=True means full scope; records
-    without scope or that flag are build-only. A legacy clean record needs no
-    backup. Module copies precede the build move so copy failure leaves the build
-    backup available for retry. Expected errors return status=failed.
+    invalidation time. A null module_scope selects all modules; an empty or
+    absent scope is build-only. A legacy clean record needs no backup. Module
+    copies precede the build move so copy failure leaves the build backup
+    available for retry. Expected errors return status=failed.
     """
     if not isinstance(record, dict) or record.get("status") not in {"ok", "clean"}:
         return {"status": "skipped", "reason": "no backup recorded"}
@@ -221,7 +255,7 @@ def restore_jit_cache(
     try:
         if not trusted_jit_build_dir(src, expected_jit_build_dir):
             raise ValueError(f"jit/build src {src} does not match expected dir {expected_jit_build_dir}")
-        scope = _record_scope(record)
+        scope = _module_scope(record.get("module_scope", []))
         backup, modules = _restore_inventory(record, src, backup_root, scope)
         candidates = _serving_modules(src.parent, scope)
         if any(module.is_dir() and not module.is_symlink() for module in candidates):
