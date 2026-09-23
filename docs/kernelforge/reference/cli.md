@@ -115,7 +115,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
-| `--roofline-ceiling <auto\|compute\|off\|file>` | `auto` | The per-shape theoretical achievable latency this campaign measures its attainment against. `auto` uses `<W>/forge_experiments/roofline_ceiling/performance_ceiling.json` when it exists and is silently skipped when it does not; `compute` estimates one at campaign start, once the baseline has fixed the scored case set and its per-case times, and a `--resume` reads that one back rather than estimating again, so the target stays fixed for the campaign; `off` declines one that is present; any other value is a path, and a path that does not resolve is an error rather than a silent skip. Session-scoped, so a corrected ceiling takes effect on the next `--resume` without invalidating the campaign. |
+| `--roofline-ceiling <on\|off>` | `off` | Whether the campaign has a per-shape theoretical achievable latency to measure its attainment against. `off` skips it entirely, including any report already sitting in the workspace. `on` estimates one on a fresh campaign once the baseline has fixed the scored case set and its per-case times, which costs a profiler pass and an analyst session, typically tens of minutes; on `--resume` it reuses the ceiling this campaign already estimated, so the target stays fixed for the campaign, and estimates again only when that report can no longer be read or no longer covers every scored case. Session-scoped: pass it on every `--resume` that should keep the ceiling. |
 | `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, e.g. `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
 
 ### Rounds and lanes
@@ -389,17 +389,16 @@ bound under hardware limits and legal algorithm constraints; it does not claim
 an implementation reaching it exists.
 
 The command is self-contained: it collects its own evidence, runs its own
-analyst session, and shares no state with a campaign. It runs before
-`forge-loop` or `forge-rewrite-by-flydsl` and publishes
-`performance_ceiling.json` plus `performance_ceiling_analysis.md`, which those
-commands pick up through their `--roofline-ceiling auto` default.
+analyst session, publishes `performance_ceiling.json` plus
+`performance_ceiling_analysis.md`, and shares no state with a campaign. No
+campaign reads what it publishes. Run it when you want the ceiling before
+committing a campaign's budget to the kernel.
 
-A campaign can also estimate its own, with `forge-loop --roofline-ceiling
-compute`. That path is the cheaper one: the ceiling is derived once the baseline
-has already fixed the scored case set and measured each case over repeated runs,
-so it needs no discovery pass of its own and its sanity reference is the
-campaign's median rather than a single run. Run this command standalone when
-you want the ceiling before committing a campaign's budget to the kernel.
+A campaign that wants a ceiling estimates its own, with `forge-loop
+--roofline-ceiling on`. That path is the cheaper one: the ceiling is derived
+once the baseline has already fixed the scored case set and measured each case
+over repeated runs, so it needs no discovery pass of its own and its sanity
+reference is the campaign's median rather than a single run.
 
 This command reports no attainment ratio. It has no baseline to divide by
 except a single run of the benchmark; a campaign measures its own attainment

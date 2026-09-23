@@ -470,11 +470,6 @@ class IterationConfig:
     # How large a per-case improvement has to be, relative to the case's own time, before a KEEP counts as having been
     # configured for that case.
     config_coverage_min_move_ratio: float = CONFIG_COVERAGE_MIN_MOVE_RATIO
-    # Published ``performance_ceiling.json`` whose per-shape theoretical latencies the campaign measures its
-    # attainment against. Session-scoped rather than part of the campaign configuration, because a ceiling is a
-    # derived estimate that can be recomputed, corrected or withdrawn between sessions without invalidating the
-    # campaign. It decides when to stop, never which candidate is better: see ``_is_roofline_target_met``.
-    ceiling_report_path: str = ""
     # Mean per-case attainment (``ceiling / measured``, equal-weight across scored cases) at which the campaign has
     # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
     # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
@@ -582,9 +577,13 @@ class IterationLoop(AnalysisRuntimeMixin):
     ):
         self.ic = iter_config
         # Produces a ceiling report for this kernel, given the case set and per-case latencies the baseline
-        # established. Injected rather than built here so the loop needs no view of the agent-backend registry: the
-        # analyst is a different role, in a read-only sandbox, and resolving it is the caller's job.
+        # established; ``None`` unless the operator turned the roofline ceiling on. Injected rather than built here so
+        # the loop needs no view of the agent-backend registry: the analyst is a different role, and resolving it is
+        # the caller's job.
         self._ceiling_estimator = ceiling_estimator
+        # Where this campaign's ceiling was published, once it has one: set by ``_establish_ceiling``, never by the
+        # caller. It decides when to stop, never which candidate is better: see ``_is_roofline_target_met``.
+        self._ceiling_report_path = ""
         # Declared here so persistence works before the methods that populate them have run.
         self._best_case_times: dict[str, float] = {}
         # Pairs this process selected and could not stage.
@@ -2532,13 +2531,14 @@ class IterationLoop(AnalysisRuntimeMixin):
     async def _establish_ceiling(self) -> None:
         """Estimate this kernel's per-shape ceiling once per campaign, before its first round.
 
-        Runs only when the caller supplied an estimator and named no report of
-        its own. The estimate costs a profiler pass and an analyst session, and
-        it must not change for the life of the campaign: the ceiling is a
-        property of the operator and the box, not of the current implementation,
-        and the stop rule divides by it, so a second estimate would move the
-        target between segments of one campaign. A resumed campaign therefore
-        reads back the ceiling its run state records instead of estimating.
+        Runs only when the caller supplied an estimator, which is to say the
+        operator turned the roofline ceiling on. A fresh campaign estimates. A
+        resumed one reads back the ceiling its run state records, and estimates
+        only when that report can no longer be used. The estimate costs a
+        profiler pass and an analyst session, and it must not change for the
+        life of the campaign: the ceiling is a property of the operator and the
+        box, not of the current implementation, and the stop rule divides by it,
+        so a second estimate would move the target between segments.
 
         The case set and per-case latencies come from the baseline measured just
         above, which is both a better clock than a single run and one driver run
@@ -2548,7 +2548,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         simply has no attainment target and runs to its time budget, which is
         what every campaign did before this existed.
         """
-        if self._ceiling_estimator is None or str(self.ic.ceiling_report_path or "").strip():
+        if self._ceiling_estimator is None:
             return
         scored = self._scored_case_ids()
         if not scored:
@@ -2567,7 +2567,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [roofline] no ceiling for this campaign: {exc}")
             return
 
-        self.ic.ceiling_report_path = str(outcome.report_path)
+        self._ceiling_report_path = str(outcome.report_path)
         self._ceiling_report = outcome.report
         self._record_ceiling()
         for note in outcome.notes:
@@ -2594,7 +2594,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         path = str(self.run_state.ceiling_report_path or "").strip()
         if not path:
             return False
-        self.ic.ceiling_report_path = path
+        self._ceiling_report_path = path
         self._ceiling_report = _CEILING_UNLOADED
         report = self._ceiling()
         if report is None:
@@ -2603,7 +2603,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             missing = sorted(set(scored) - set(report.ideal_ms()))
             reason = f"has no figure for {', '.join(missing)}" if missing else ""
         if reason:
-            self.ic.ceiling_report_path = ""
+            self._ceiling_report_path = ""
             self._ceiling_report = _CEILING_UNLOADED
             print(f"  [roofline] the ceiling this campaign published at {path} {reason}, so estimating again")
             return False
@@ -2613,7 +2613,7 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _record_ceiling(self) -> None:
         """Checkpoint where this campaign's ceiling was published, for a resume to read back."""
         try:
-            self.run_state.ceiling_report_path = str(self.ic.ceiling_report_path)
+            self.run_state.ceiling_report_path = self._ceiling_report_path
             self.state_store.save(self.run_state)
         except Exception:  # noqa: BLE001 - persistence is best-effort
             self.persistence_degraded = True
@@ -3047,7 +3047,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         part-way through a campaign is picked up at the next iteration, and a
         missing or corrupt one costs a log line rather than the run.
         """
-        path = str(self.ic.ceiling_report_path or "").strip()
+        path = self._ceiling_report_path.strip()
         if not path:
             return None
         cached = getattr(self, "_ceiling_report", _CEILING_UNLOADED)

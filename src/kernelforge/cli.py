@@ -325,42 +325,13 @@ def _is_long_horizon(max_hours: float) -> bool:
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
 
 
+CEILING_ON = "on"
 CEILING_OFF = "off"
-CEILING_AUTO = "auto"
-CEILING_COMPUTE = "compute"
-
-
-def _resolve_ceiling_report(selection: str, workspace_dir: str) -> str:
-    """Resolve ``--roofline-ceiling`` to a report path, or ``""`` when there is none.
-
-    An explicit path that does not exist is an error: the operator asked for a
-    specific ceiling and silently running without it would hide the typo behind
-    a campaign that merely planned slightly worse. ``auto`` is the opposite --
-    it means "use one if it is there" -- so a missing file is simply no ceiling.
-    ``compute`` resolves to nothing here on purpose: the estimate needs the case
-    set and the per-case latencies the baseline produces, so it is made inside
-    the loop rather than guessed at before it.
-    """
-    choice = str(selection or "").strip()
-    if not choice or choice.lower() in {CEILING_OFF, CEILING_COMPUTE}:
-        return ""
-    if choice.lower() == CEILING_AUTO:
-        from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
-
-        candidate = Path(workspace_dir) / WORKSPACE_SUBDIR / REPORT_FILENAME
-        return str(candidate) if candidate.is_file() else ""
-    resolved = Path(choice).expanduser()
-    if not resolved.is_file():
-        raise click.BadParameter(
-            f"--roofline-ceiling {choice!r} is not a readable report",
-            param_hint="--roofline-ceiling",
-        )
-    return str(resolved)
 
 
 def _make_ceiling_estimator(
     *,
-    selection: str,
+    enabled: bool,
     workspace_dir: str,
     driver_script: str,
     source_files: Sequence[str],
@@ -370,17 +341,19 @@ def _make_ceiling_estimator(
 ):
     """Build the callable the loop uses to estimate a ceiling, or ``None``.
 
-    Only ``--roofline-ceiling compute`` asks for one. The analyst runs in its
-    own read-only session under its own role, so the backend is resolved here,
-    where the registry already lives, and the loop is handed a callable instead
-    of a dependency on it.
+    Only ``--roofline-ceiling on`` asks for one, because an estimate costs a
+    profiler pass and an analyst session. Whether it is called is the loop's
+    decision: a fresh campaign estimates, and a resumed one reads back the
+    ceiling it already estimated. The analyst runs in its own session under its
+    own role, so the backend is resolved here, where the registry already
+    lives, and the loop is handed a callable instead of a dependency on it.
 
     The benchmark the estimate is taken against is the one the campaign scores,
     built by ``bench_command`` rather than assembled again here: a ceiling
     derived against a differently timed region would not be comparable with the
     latencies it is divided by.
     """
-    if str(selection or "").strip().lower() != CEILING_COMPUTE:
+    if not enabled:
         return None
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
@@ -403,14 +376,14 @@ def _make_ceiling_estimator(
     return estimate
 
 
-def _validate_roofline_target(target: float, selection: str) -> float:
+def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
     """Check the attainment target is a fraction, and that a ceiling can reach it.
 
     A target above one is unreachable by construction -- attainment is bounded
-    by the ceiling it divides by -- and a target with ``--roofline-ceiling off``
-    is a stop condition that can never fire. Both are refused rather than run,
-    because either one leaves a campaign quietly ignoring the limit its operator
-    thought they had set.
+    by the ceiling it divides by -- and a target without ``--roofline-ceiling
+    on`` is a stop condition that can never fire. Both are refused rather than
+    run, because either one leaves a campaign quietly ignoring the limit its
+    operator thought they had set.
     """
     value = float(target or 0.0)
     if value <= 0:
@@ -420,9 +393,9 @@ def _validate_roofline_target(target: float, selection: str) -> float:
             f"--roofline-target {value} is a fraction of the ceiling, so it cannot exceed 1.0",
             param_hint="--roofline-target",
         )
-    if str(selection or "").strip().lower() == CEILING_OFF:
+    if not ceiling_enabled:
         raise click.BadParameter(
-            "--roofline-target needs a ceiling to measure against, but --roofline-ceiling is 'off'",
+            "--roofline-target needs a ceiling to measure against; pass --roofline-ceiling on",
             param_hint="--roofline-target",
         )
     return value
@@ -939,14 +912,15 @@ def _make_lane_agent_factory(
 )
 @click.option(
     "--roofline-ceiling",
-    "ceiling_report",
-    default="auto",
-    help="Per-shape theoretical achievable latency the campaign measures its "
-    "attainment against. 'auto' (default) uses "
-    "<workspace>/forge_experiments/roofline_ceiling/performance_ceiling.json "
-    "when one has been published, 'compute' estimates one at campaign start "
-    "once the baseline is measured (and --resume reads that one back), 'off' "
-    "disables it, and any other value is read as a path to a published report.",
+    "roofline_ceiling",
+    type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
+    default=CEILING_OFF,
+    help="Estimate the per-shape theoretical achievable latency the campaign "
+    "measures its attainment against. 'off' (default) skips it. 'on' estimates "
+    "it on a fresh campaign once the baseline is measured, which costs a "
+    "profiler pass and an analyst session, and on --resume reuses the ceiling "
+    "the campaign already estimated, estimating again only when that report "
+    "can no longer be read. Pass it on every --resume that should keep it.",
 )
 @click.option(
     "--roofline-target",
@@ -1126,7 +1100,7 @@ def forge_loop(
     supervisor_backend,
     profile_timeout_sec,
     profiling,
-    ceiling_report,
+    roofline_ceiling,
     roofline_target,
     prepare_task,
     task_type,
@@ -1388,9 +1362,8 @@ def forge_loop(
         merge_stacking=merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
-        # Per-shape theoretical ceiling, when one has been published, and the attainment of it that ends the run.
-        ceiling_report_path=_resolve_ceiling_report(ceiling_report, workspace_dir),
-        roofline_target=_validate_roofline_target(roofline_target, ceiling_report),
+        # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
+        roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -1621,7 +1594,7 @@ def forge_loop(
         config,
         resume=resume,
         ceiling_estimator=_make_ceiling_estimator(
-            selection=ceiling_report,
+            enabled=roofline_ceiling == CEILING_ON,
             workspace_dir=workspace_dir,
             driver_script=iter_config.driver_script,
             source_files=source_files_list,
