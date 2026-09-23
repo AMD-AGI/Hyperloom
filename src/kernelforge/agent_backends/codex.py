@@ -764,19 +764,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,

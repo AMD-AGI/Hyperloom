@@ -110,6 +110,21 @@ def test_waiver_comment_allows_broad_suppress(tmp_path: Path) -> None:
     assert main([str(p)]) == 0
 
 
+def test_waiver_survives_a_formatter_wrapped_header(tmp_path: Path) -> None:
+    p = write(
+        tmp_path,
+        "wrapped.py",
+        """\
+        import contextlib
+        with contextlib.suppress(
+            Exception
+        ):  # broad-suppress: caller-supplied callback
+            cb()
+        """,
+    )
+    assert main([str(p)]) == 0
+
+
 def test_waiver_without_a_reason_is_rejected(tmp_path: Path) -> None:
     p = write(
         tmp_path,

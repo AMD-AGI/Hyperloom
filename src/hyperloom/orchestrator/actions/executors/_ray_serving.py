@@ -414,8 +414,9 @@ class ServingLease:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
         import subprocess as _sp
 
-        from ray.exceptions import RayActorError as _actor_err, RayTaskError as _task_err
+        import ray
 
+        _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
         try:
             rc, out, err = self._await_or_cancel(
                 ref,

@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import uuid
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -1009,6 +1010,10 @@ def open_json(path: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+#: What :func:`open_json` raises on a missing, truncated, or corrupt (possibly gzipped) trace.
+UNREADABLE_TRACE_ERRORS: tuple[type[Exception], ...] = (OSError, EOFError, ValueError, zlib.error)
+
+
 def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> int:
     """Count GPU kernel events in a torch_profiler trace.
 
@@ -1024,7 +1029,7 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     """
     try:
         payload = open_json(trace_file)
-    except ValueError:
+    except UNREADABLE_TRACE_ERRORS:
         return 0
     events = payload.get("traceEvents") if isinstance(payload, dict) else None
     if not isinstance(events, list):
@@ -1549,7 +1554,7 @@ def _count_kernels_if_readable(path: Path) -> tuple[bool, int]:
         return True, count
     try:
         payload = open_json(path)
-    except Exception:  # noqa: BLE001 - unreadable is a distinct answer, not a crash
+    except UNREADABLE_TRACE_ERRORS:
         return False, 0
     if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
         return False, 0

@@ -175,21 +175,21 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     """
     if not kernel_id:
         return
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
-        record_integrate_verdict(
-            macro_cycle=macro_cycle,
-            integration_id=f"geak-{kernel_id}",
-            kernel_id=kernel_id,
-            decision=str(entry.get("last_decision") or ""),
-            status=str(entry.get("last_status") or ""),
-            attempt_count=entry.get("attempt_count"),
-            gain_pct=entry.get("best_gain_pct"),
-            basis=str(entry.get("basis") or ""),
-            alignment_status=str(entry.get("alignment_status") or ""),
-            gain_attributed=bool(entry.get("validated", True)),
-            settled_at=str(entry.get("updated_at") or ""),
-        )
+    record_integrate_verdict(
+        macro_cycle=macro_cycle,
+        integration_id=f"geak-{kernel_id}",
+        kernel_id=kernel_id,
+        decision=str(entry.get("last_decision") or ""),
+        status=str(entry.get("last_status") or ""),
+        attempt_count=entry.get("attempt_count"),
+        gain_pct=entry.get("best_gain_pct"),
+        basis=str(entry.get("basis") or ""),
+        alignment_status=str(entry.get("alignment_status") or ""),
+        gain_attributed=bool(entry.get("validated", True)),
+        settled_at=str(entry.get("updated_at") or ""),
+    )
 
 
 class KernelPhase(PhaseHandler):

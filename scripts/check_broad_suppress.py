@@ -55,7 +55,8 @@ def _scan_file(path: pathlib.Path) -> Iterator[tuple[int, str]]:
             caught = {ast.unparse(a) for a in call.args}
             if not caught & _BROAD:
                 continue
-            if _WAIVER.search(lines[node.lineno - 1]):
+            header = lines[node.lineno - 1 : node.body[0].lineno - 1]
+            if any(_WAIVER.search(line) for line in header):
                 continue
             yield node.lineno, f"suppress({', '.join(sorted(caught))})"
 
