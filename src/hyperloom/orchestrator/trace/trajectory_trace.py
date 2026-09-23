@@ -46,7 +46,11 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({STATUS_COMPLETED, STATUS_FAILED, 
 VALID_STATUSES: frozenset[str] = OPEN_STATUSES | TERMINAL_STATUSES | {STATUS_POINT}
 
 EVENT_SESSION = "session"
-VALID_EVENT_TYPES: frozenset[str] = frozenset({EVENT_SESSION})
+EVENT_LLM_CALL = "llm.call"
+# One model request inside an LLM call (a tool round trip); its usage is informational and never re-summed into
+# spend, which ``llm_calls.jsonl`` owns.
+EVENT_LLM_REQUEST = "llm.request"
+VALID_EVENT_TYPES: frozenset[str] = frozenset({EVENT_SESSION, EVENT_LLM_CALL, EVENT_LLM_REQUEST})
 
 VALID_COMPONENTS: frozenset[str] = _LLM_COMPONENTS | {"coordinator"}
 
@@ -198,6 +202,7 @@ def _build_row(
     status: str,
     span_id: str,
     start_ts: str | None,
+    ts: str | None,
     attributes: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Assemble one closed-schema row from the resolved context."""
@@ -207,7 +212,7 @@ def _build_row(
         "event_id": uuid.uuid4().hex,
         "event_type": event_type,
         "status": status,
-        "ts": now_iso(),
+        "ts": ts or now_iso(),
         "start_ts": coerce_optional_str(start_ts),
         "writer": _WRITER.writer,
         "seq": _WRITER.next_seq(),
@@ -230,13 +235,15 @@ def record_event(
     status: str = STATUS_POINT,
     span_id: str | None = None,
     start_ts: str | None = None,
+    ts: str | None = None,
     attributes: dict[str, Any] | None = None,
     **context: Any,
 ) -> str | None:
     """Append one event to this process's trajectory shard.
 
-    ``context`` overrides :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no
-    ``session_dir`` is in scope; otherwise returns the row's ``span_id``, minted when not given.
+    ``ts`` defaults to now; pass it when the event is written after it happened. ``context`` overrides
+    :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no ``session_dir`` is in
+    scope; otherwise returns the row's ``span_id``, minted when not given.
     """
     ctx = _overlay(_CONTEXT.get(), context)
     if ctx.session_dir is None:
@@ -249,6 +256,7 @@ def record_event(
             status=status,
             span_id=span_id,
             start_ts=start_ts,
+            ts=ts,
             attributes=attributes,
         )
         _validate_row(row)
@@ -274,6 +282,24 @@ class TrajectorySpan:
             raise TrajectoryRowError(f"span terminal status={status!r} is not one of {sorted(TERMINAL_STATUSES)!r}")
         self.status = status
         self.attributes.update(attributes)
+
+
+_LLM_CALL_SUMMARY_KEYS: tuple[str, ...] = (
+    "model",
+    "stop_reason",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "reasoning_output_tokens",
+    "context_tokens_peak",
+)
+
+
+def llm_call_summary(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """The ``llm.call`` terminal attributes read off a backend turn's metadata (text fields excluded)."""
+    md = metadata or {}
+    return {key: md[key] for key in _LLM_CALL_SUMMARY_KEYS if md.get(key) is not None}
 
 
 def _error_attributes(exc: BaseException) -> dict[str, Any]:
@@ -339,6 +365,8 @@ def load_events(session_dir: Path) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "EVENT_LLM_CALL",
+    "EVENT_LLM_REQUEST",
     "EVENT_SESSION",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
@@ -356,6 +384,7 @@ __all__ = [
     "VALID_EVENT_TYPES",
     "VALID_STATUSES",
     "current_context",
+    "llm_call_summary",
     "load_events",
     "load_shard",
     "new_span_id",

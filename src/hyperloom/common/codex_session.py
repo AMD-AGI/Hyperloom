@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
+from hyperloom.common.token_usage import uncached_input_tokens
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
@@ -610,10 +611,11 @@ def normalize_codex_usage(usage: Any) -> dict[str, int]:
         breakdown = breakdown.model_dump()
     if not isinstance(breakdown, dict):
         return {}
+    cached = _usage_int(breakdown, "cached_input_tokens")
     normalized = {
-        "input_tokens": _usage_int(breakdown, "input_tokens"),
+        "input_tokens": uncached_input_tokens(_usage_int(breakdown, "input_tokens"), cached),
         "output_tokens": _usage_int(breakdown, "output_tokens"),
-        "cache_read_input_tokens": _usage_int(breakdown, "cached_input_tokens"),
+        "cache_read_input_tokens": cached,
         "reasoning_output_tokens": _usage_int(breakdown, "reasoning_output_tokens"),
     }
     window_source = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {}) or {}

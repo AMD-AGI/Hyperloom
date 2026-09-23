@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from ..trace.llm_trace import new_call_id
+from ..trace.trajectory_trace import current_context
 from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
@@ -222,16 +223,17 @@ class CodexBackend:
         metadata: dict[str, Any] = {
             "model": self.model,
             "thread_id": sdk_result.thread_id,
-            # Pairs this turn's token row with its conversation row.
-            "call_id": new_call_id(),
+            # Pairs this turn's token row with its conversation row. A caller that opened an ``llm.call`` trajectory
+            # span owns the id.
+            "call_id": current_context().call_id or new_call_id(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": cache_read_tokens,
             "reasoning_output_tokens": reasoning_tokens,
-            # Codex reports per-turn counts, so the input side already is this request's context size — the figure the
-            # checkpoint policy compares against the model's window.
-            "context_tokens_peak": input_tokens,
+            # Codex reports per-turn counts, so the input side (uncached + cached) is this request's context size — the
+            # figure the checkpoint policy compares against the model's window.
+            "context_tokens_peak": input_tokens + cache_read_tokens,
             # Stated by Codex per turn, and better than any table this side keeps: the compaction trigger is a
             # fraction of it.
             "model_context_window": safe_int(usage.get("model_context_window")),

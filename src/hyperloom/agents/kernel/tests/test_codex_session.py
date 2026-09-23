@@ -1172,7 +1172,7 @@ def test_load_codex_sdk_returns_the_installed_module():
 
 
 def test_run_codex_turn_normalizes_usage(tmp_path, monkeypatch):
-    """The turn's token usage is normalized into the canonical four-key dict."""
+    """The turn's token usage is normalized into the canonical four-key dict, input counting only uncached tokens."""
     result = _FakeTurnResult(
         final_response="  wrote the report  ",
         usage=type(
@@ -1207,7 +1207,7 @@ def test_run_codex_turn_normalizes_usage(tmp_path, monkeypatch):
     assert session.thread_id == "thread-fake"
     assert session.error == ""
     assert session.usage == {
-        "input_tokens": 120,
+        "input_tokens": 108,
         "output_tokens": 34,
         "cache_read_input_tokens": 12,
         "reasoning_output_tokens": 4096,

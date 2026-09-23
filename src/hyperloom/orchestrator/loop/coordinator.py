@@ -77,8 +77,14 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from ..trace.trajectory_trace import EVENT_SESSION, trajectory_scope, trajectory_span
+from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    EVENT_SESSION,
+    llm_call_summary,
+    trajectory_scope,
+    trajectory_span,
+)
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
@@ -1857,7 +1863,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents."""
+        """Run one reactor turn for ``agent_name`` and route its intents, scoped as that agent on the trajectory."""
+        with trajectory_scope(component=agent_name, agent=agent_name):
+            await self._reactor_turn(agent_name)
+
+    async def _reactor_turn(self, agent_name: str) -> None:
+        """Body of :meth:`_reactor_pass`."""
         backend = self.backends[agent_name]
         sys_prompt = await self._load_system_prompt(agent_name)
         prompt = await self._compose_prompt(agent_name)
@@ -1876,19 +1887,27 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 pass
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
+        call_id = new_call_id()
         try:
-            result: BackendTurnResult = await backend.run(
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                max_turns=0,
-            )
+            with trajectory_span(
+                EVENT_LLM_CALL,
+                call_id=call_id,
+                attributes={"name": agent_name, "model": getattr(backend, "model", None)},
+            ) as call_span:
+                result: BackendTurnResult = await backend.run(
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    tools=tools,
+                    max_turns=0,
+                )
+                call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
+                    call_id=call_id,
                 )
             await self._record_observation(
                 "coordinator",
@@ -1993,6 +2012,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
@@ -2001,6 +2021,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 component=agent_name,
                 role=agent_name,
                 error=error,
+                call_id=call_id,
+                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
                 latency_ms=latency_ms,

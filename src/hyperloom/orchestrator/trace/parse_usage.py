@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.token_usage import uncached_input_tokens
 
 from ._row_utils import coerce_optional_int
 
@@ -67,12 +68,23 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     return projected
 
 
+def _claude_stream_model(obj: dict[str, Any]) -> str | None:
+    """The model a stream-json row names: an assistant message's, else the ``system/init`` row's."""
+    message = obj.get("message")
+    model = message.get("model") if obj.get("type") == "assistant" and isinstance(message, dict) else None
+    if model is None and obj.get("type") == "system":
+        model = obj.get("model")
+    # The CLI stamps locally generated assistant messages (errors, interrupts) with ``<synthetic>``.
+    return model if isinstance(model, str) and model and not model.startswith("<") else None
+
+
 def parse_claude_stream_json_usage(
     log_path: str | Path,
-) -> dict[str, int | None] | None:
-    """Extract the final ``usage`` from a Claude CLI ``stream-json`` log."""
+) -> dict[str, Any] | None:
+    """Extract the final ``usage`` (plus the serving ``model``, when named) from a Claude CLI ``stream-json`` log."""
     path = Path(log_path)
     last_usage: dict[str, Any] | None = None
+    model: str | None = None
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -85,6 +97,7 @@ def parse_claude_stream_json_usage(
                     continue
                 if not isinstance(obj, dict):
                     continue
+                model = _claude_stream_model(obj) or model
                 usage = obj.get("usage")
                 if isinstance(usage, dict) and usage:
                     # A result-typed row is authoritative over earlier usage.
@@ -95,7 +108,10 @@ def parse_claude_stream_json_usage(
     except OSError as exc:
         log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return None
-    return normalize_usage(last_usage)
+    normalized: dict[str, Any] | None = normalize_usage(last_usage)
+    if normalized is not None and model is not None:
+        normalized["model"] = model
+    return normalized
 
 
 def parse_claude_stream_json_response(
@@ -426,6 +442,10 @@ def _codex_usage_to_canonical(usage: Any) -> dict[str, int | None] | None:
     normalized = normalize_usage(renamed)
     if normalized is None:
         return None
+    normalized["input_tokens"] = uncached_input_tokens(
+        normalized["input_tokens"],
+        normalized["cache_read_input_tokens"],
+    )
     reasoning = coerce_optional_int(usage.get(_CODEX_REASONING_TOKENS_KEY))
     if reasoning is not None:
         normalized[_CODEX_REASONING_TOKENS_KEY] = reasoning

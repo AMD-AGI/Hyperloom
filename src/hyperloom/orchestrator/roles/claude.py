@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from ..prompts.transport import TRANSPORT_TOOLS
 from ..trace.llm_trace import new_call_id
+from ..trace.trajectory_trace import current_context
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -33,6 +34,7 @@ from .base import (
     retry_with_backoff,
     safe_int,
 )
+from .claude_requests import ClaudeRequestTracker
 from .mcp_context_tools import (
     CONTEXT_TOOL_QUALIFIED_NAMES,
     MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
@@ -295,7 +297,12 @@ class ClaudeBackend:
             """Run one SDK invocation under an amplified per-attempt idle timeout."""
             attempt_state["n"] += 1
             idle_timeout_s = self.call_timeout_s * (_RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1))
-            return await self._invoke_and_collect(full_prompt, options, idle_timeout_s=idle_timeout_s)
+            return await self._invoke_and_collect(
+                full_prompt,
+                options,
+                idle_timeout_s=idle_timeout_s,
+                attempt=attempt_state["n"],
+            )
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
             """Record a transient-failure retry warning into the call log."""
@@ -387,8 +394,8 @@ class ClaudeBackend:
                 "tool_blocks": tool_block_count,
                 "model": self.model,
                 # Pairs this turn's token row with its conversation row; both halves are written from this one
-                # metadata dict.
-                "call_id": new_call_id(),
+                # metadata dict. A caller that opened an ``llm.call`` trajectory span owns the id.
+                "call_id": current_context().call_id or new_call_id(),
                 # Why the model stopped ("end_turn" / "max_tokens" / ...).
                 "stop_reason": stop_reason,
                 "cache_creation_input_tokens": cache_creation,
@@ -558,7 +565,8 @@ class ClaudeBackend:
         system_prompt: str | None,
     ) -> Any:
         """Build the SDK options object for one turn."""
-        kwargs: dict[str, Any] = {"max_turns": max_turns}
+        # Stream events are what time each model request inside the call (see ``claude_requests``).
+        kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
             kwargs["model"] = self.model
         cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
@@ -643,11 +651,18 @@ class ClaudeBackend:
                 self._active_stderr.append(text)
 
     async def _invoke_and_collect(
-        self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
+        self,
+        prompt: str,
+        options: Any,
+        *,
+        idle_timeout_s: float | None = None,
+        attempt: int = 1,
     ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
         """Stream SDK messages, collecting intents, raw text, tool counts, the latest `ResultMessage.usage` dict, the
-        SDK ``session_id`` and the model's ``stop_reason``.
+        SDK ``session_id`` and the model's ``stop_reason``. Each model request of the attempt, finished or cut off,
+        lands on the trajectory ledger as an ``llm.request`` row.
         """
+        requests = ClaudeRequestTracker()
         intents: list[Intent] = []
         text_chunks: list[str] = []
         result_chunks: list[str] = []
@@ -673,6 +688,7 @@ class ClaudeBackend:
                         message = await stream_iter.__anext__()
                 except StopAsyncIteration:
                     break
+                requests.observe(message)
                 # Capture the session token from any message; last seen wins.
                 msg_session = getattr(message, "session_id", None)
                 if isinstance(msg_session, str) and msg_session:
@@ -737,6 +753,7 @@ class ClaudeBackend:
             else:
                 raise
         finally:
+            requests.record_trajectory(attempt=attempt, fallback_model=self.model)
             # Best-effort: close the (async-gen) stream so an idle-timeout abort doesn't leak a half-consumed
             # generator.
             aclose = getattr(stream, "aclose", None)
@@ -802,7 +819,7 @@ class ClaudeBackend:
 
     def _record_message_diagnostic(self, message: Any) -> None:
         diag = self._active_turn_diagnostic
-        if diag is None:
+        if diag is None or type(message).__name__ == "StreamEvent":
             return
         summary: dict[str, Any] = {"type": type(message).__name__}
         for name in ("is_error", "subtype", "request_id"):

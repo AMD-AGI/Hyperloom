@@ -40,8 +40,11 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.common.token_usage import uncached_input_tokens
+from ..trace._row_utils import coerce_optional_int
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from ..trace.parse_usage import reasoning_output_tokens
+from ..trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -973,8 +976,8 @@ class CriticAgentBackend:
         )
         max_tokens = self._resolve_max_completion_tokens()
         # One id per review call, shared by its token row and its conversation row so the two halves pair on the call
-        # rather than on a ts second.
-        call_id = new_call_id()
+        # rather than on a ts second. A caller that opened an ``llm.call`` trajectory span owns the id.
+        call_id = current_context().call_id or new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1148,10 +1151,11 @@ class CriticAgentBackend:
         """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
         if usage is None:
             return
-        try:
-            acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        cached = coerce_optional_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
+        prompt = coerce_optional_int(getattr(usage, "prompt_tokens", None))
+        acc["input_tokens"] += uncached_input_tokens(prompt, cached) or 0
+        if cached is not None:
+            acc["cache_read_input_tokens"] = acc.get("cache_read_input_tokens", 0) + cached
         try:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
