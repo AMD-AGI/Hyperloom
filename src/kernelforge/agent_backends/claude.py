@@ -184,28 +184,6 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
     return translated
 
 
-def _options_accept(options_type: Any, field: str) -> bool:
-    """Whether this SDK's options type carries ``field``.
-
-    Read off the dataclass when it is one and off the constructor otherwise, so
-    a fake options object in a test is treated as accepting everything -- the
-    same as the real type it stands in for.
-    """
-    import dataclasses
-    import inspect
-
-    if dataclasses.is_dataclass(options_type):
-        return any(item.name == field for item in dataclasses.fields(options_type))
-    try:
-        signature = inspect.signature(options_type)
-    except (TypeError, ValueError):
-        return True
-    parameters = signature.parameters
-    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
-        return True
-    return field in parameters
-
-
 def _load_claude_sdk() -> tuple[Any, Any]:
     """Load the optional Claude SDK or raise a provider-level error."""
     try:
@@ -563,11 +541,6 @@ class ClaudeBackend:
         provider_options = self._provider_options(spec)
         if resume_session_id:
             provider_options["resume"] = resume_session_id
-        if "tools" in provider_options and not _options_accept(self._options_type, "tools"):
-            # Naming the built-in base set is a saving, not a requirement: an SDK
-            # too old to have the field must still run rather than fail to build
-            # its options at all.
-            provider_options.pop("tools")
         options = self._options_type(**provider_options)
         text_parts: list[str] = []
         tool_calls: list[tuple[str, dict[str, Any]]] = []
