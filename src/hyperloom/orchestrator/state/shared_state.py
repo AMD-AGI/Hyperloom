@@ -12,13 +12,14 @@ import shlex
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.dataclass_serde import fast_asdict
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json
@@ -1285,7 +1286,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this state to a plain JSON-compatible dict."""
-        return asdict(self)
+        return fast_asdict(self)
 
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).

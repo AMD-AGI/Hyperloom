@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: State serialization pilot
+
+on:
+  push:
+    branches: [feature/leixin/ci-state-serialization-20260922]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: state-pilot-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated validation tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'ruff==0.16.2'
+      - name: Validate only the candidate and pilot files
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" -m ruff check --no-cache \
+            src/hyperloom/common/dataclass_serde.py \
+            src/hyperloom/common/tests/test_dataclass_serde.py \
+            src/hyperloom/orchestrator/state/shared_state.py \
+            .github/scripts/ci_state_pilot.py
+          "$RUNNER_TEMP/tools/bin/python" -m ruff format --check \
+            src/hyperloom/common/dataclass_serde.py \
+            src/hyperloom/common/tests/test_dataclass_serde.py \
+            src/hyperloom/orchestrator/state/shared_state.py \
+            .github/scripts/ci_state_pilot.py
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/ci-state-pilot.yml
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Create the fixed subject and install target dependencies once
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_state_pilot.py prepare \
+            --subject "$RUNNER_TEMP/subject"
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/target/bin/python" -m pip install -e "$RUNNER_TEMP/subject[test,ci]"
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+      - name: Check contracts and measure unprofiled paired experiments
+        run: |
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_state_pilot.py run \
+            --subject "$RUNNER_TEMP/subject" --output "$RUNNER_TEMP/state-pilot" \
+            --python "$RUNNER_TEMP/target/bin/python"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: state-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/state-pilot/*.json
+            ${{ runner.temp }}/state-pilot/*.xml
+            ${{ runner.temp }}/state-pilot/*.log
+          if-no-files-found: error
+          retention-days: 7
