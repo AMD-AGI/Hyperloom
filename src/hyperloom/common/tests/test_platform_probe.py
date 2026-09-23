@@ -201,7 +201,7 @@ def _make_plat():
 
 def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
     """All-healthy ok record: gpu sub-dict keys, host, and None-vs-False multi_node."""
-    # Same justification as the degrade cases: no injectable root on this entry.
+    # platform_fingerprint takes no injectable root, so its probes are monkeypatched.
     fake_stack = {"rocm": "6.0.0", "driver": "amdgpu"}
     monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
     monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", lambda: 8)

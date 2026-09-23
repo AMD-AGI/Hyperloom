@@ -156,7 +156,6 @@ def platform_fingerprint(
             "multi_node_session": multi_node,
             **plat.as_dict(),
         }
-        # Each block below degrades on its own: one unreadable file must not take the whole platform record with it.
         record["gpu"] = {
             # PCI devices bound to amdgpu: what the host has, not what the run could see. *_VISIBLE_DEVICES
             # masking does not change this number, so it is named for the host to keep it from being read as the

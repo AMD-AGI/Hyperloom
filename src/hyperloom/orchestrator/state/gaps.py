@@ -111,7 +111,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
+        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.

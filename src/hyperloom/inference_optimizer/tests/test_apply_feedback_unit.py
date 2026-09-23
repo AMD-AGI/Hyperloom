@@ -177,7 +177,7 @@ def test_build_apply_feedback_with_root_unreadable_patch(tmp_path):
     assert fb.source_context == ""
 
 
-# Exception-guard branches (helpers must swallow and return "")
+# Unreadable targets yield no source context
 
 
 def _unreadable(*_args, **_kwargs):

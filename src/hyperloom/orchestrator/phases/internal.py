@@ -26,7 +26,7 @@ class InternalTasksPhase(PhaseHandler):
         reason: str,
         round_id: int,
     ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft)."""
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
@@ -268,7 +268,7 @@ class InternalTasksPhase(PhaseHandler):
             )
 
     def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
-        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft)."""
+        """Seed static-recon bridge candidates into gaps[] (idempotent)."""
         block = done_payload.get("recon")
         if not isinstance(block, dict):
             return

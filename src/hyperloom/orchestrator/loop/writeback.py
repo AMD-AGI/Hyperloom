@@ -2937,19 +2937,19 @@ class WritebackCollaborator:
             proposals=proposals,
         )
 
-        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain. Fail-soft.
+        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
             await self._coord._harvest_specialist_findings(done_payload)
 
         # Consume static-recon bridge candidates into gaps[] so the
-        # freeform specialist picks them up with a precise mandate. Fail-soft.
+        # freeform specialist picks them up with a precise mandate.
         if domain == "static_recon_specialist":
             self._coord._consume_static_recon(done_payload)
 
         # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
-        # (already harvested above). Fail-soft.
+        # (already harvested above).
         self._coord._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
@@ -3722,7 +3722,7 @@ class WritebackCollaborator:
         # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
-        # seed the gaps[] ledger from baseline (best-effort).
+        # seed the gaps[] ledger from baseline.
         await self._refresh_gaps(reason="baseline_done")
         if self.shared_state.baseline_tput > 0:
             await self._drain_queued_baselines(reason="baseline_established")
