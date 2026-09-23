@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json
 
@@ -203,11 +203,7 @@ def _load_assembled(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
-    disabled = os.environ.get(
-        "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER",
-        "",
-    ).strip().lower() in ("1", "true", "yes")
-    if disabled:
+    if env_bool("INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER"):
         return {}
     try:
         from .recorder import assemble_parts, has_parts
