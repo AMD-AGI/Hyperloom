@@ -1633,12 +1633,14 @@ def materialize_config_with_envs(
             # appended, and this layer's profiler bounds get treated as
             # invalid and dropped instead of launched. Assert ``profiler=torch``
             # here so the probed fragment is self-consistent; do not append a
-            # ``torch_profiler_dir`` pointed at the task root -- Magpie's
-            # launcher already emits ``<workspace>/torch_trace`` after
-            # EXTRA_VLLM_ARGS and vLLM's last-wins merge keeps that directory.
-            # ``baseline.py`` injects a probe-only dir for argv preflight;
-            # ``bypass_engine`` appends the real dir after extra args. An
-            # operator-set flag is left untouched either way.
+            # ``torch_profiler_dir`` here. On the real ``vllm serve`` line Magpie's
+            # launcher emits ``<workspace>/torch_trace`` *before* ``EXTRA_VLLM_ARGS``;
+            # vLLM's last-wins merge would let a second ``torch_profiler_dir`` in
+            # ``EXTRA_VLLM_ARGS`` override Magpie and send traces to the task root.
+            # With no dir in ``EXTRA_VLLM_ARGS``, steady-state traces stay under
+            # ``<workspace>/torch_trace``. ``baseline.py`` / ``bypass_engine`` use
+            # probe-only dirs on other paths; an operator-set flag in the YAML is
+            # left untouched.
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
             if tracelens_patch_ok:

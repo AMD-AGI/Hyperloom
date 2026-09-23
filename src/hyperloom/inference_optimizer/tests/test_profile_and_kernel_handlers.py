@@ -446,9 +446,10 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    # ``profiler=torch`` belongs in the launched fragment; ``torch_profiler_dir``
-    # is left to Magpie's launcher (after EXTRA_VLLM_ARGS) and to argv-preflight
-    # probe injection in ``baseline.py``, not a task-root placeholder here.
+    # ``profiler=torch`` belongs in the launched fragment; do not add
+    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
+    # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
     assert "--profiler-config.profiler torch" in extra, extra
     assert "--profiler-config.torch_profiler_dir" not in extra, extra
 
