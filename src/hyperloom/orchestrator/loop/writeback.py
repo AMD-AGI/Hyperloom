@@ -4152,20 +4152,17 @@ class WritebackCollaborator:
                     measured_generation,
                     working_generation,
                 )
-                try:
-                    await self._record_observation(
-                        "coordinator",
-                        "observation",
-                        {
-                            "kind": "stale_stack_revalidation",
-                            "task_id": task.task_id,
-                            "measured_recipe_generation": int(measured_generation),
-                            "working_recipe_generation": working_generation,
-                            "geak_fallback": bool((task.params or {}).get("geak_fallback")),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 - observation is best-effort
-                    log.exception("stale stack revalidation: observation emit failed")
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "stale_stack_revalidation",
+                        "task_id": task.task_id,
+                        "measured_recipe_generation": int(measured_generation),
+                        "working_recipe_generation": working_generation,
+                        "geak_fallback": bool((task.params or {}).get("geak_fallback")),
+                    },
+                )
             # A GEAK revalidation (2b) must assert config identity + that the
             # optimization engaged before stamping validated, else replay via
             # the GEAK harness (2a). Native revalidations keep the

@@ -156,8 +156,6 @@ _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 #: rather than unsetting it, and a bare ``{"0","false","no","off"}`` check read
 #: every one of those as "enabled" -- the opposite of what was written.
 _SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disable", "disabled"})
-#: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
-_GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
 #: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
 #: Searched rather than matched from the start: an SGLang without the profiler
@@ -268,33 +266,7 @@ def _shard_order_key(shard: tuple[Path, str, str | None]) -> tuple[int, str, str
 
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance block for the TraceShapeManifest."""
-    try:
-        return _shared_build_provenance(args, env=os.environ, probe=True)
-    except Exception:  # noqa: BLE001 — provenance must never break the manifest.
-        pass
-
-    def _env(*names: str) -> Any:
-        for n in names:
-            v = os.environ.get(n)
-            if v:
-                return v
-        return None
-
-    return {
-        "_provenance_source": "wp1_stub",
-        "model_name": args.model_name or None,
-        "model_path": getattr(args, "model_path", "") or None,
-        "framework": args.framework or None,
-        "target_platform": args.target_platform or None,
-        "gfx_arch": _env(_GFX_ENV),
-        "dtype": args.precision or _env("PRECISION"),
-        "tp": _env("TP"),
-        "ep": _env("EP"),
-        "concurrency": _env("CONC", "CONCURRENCY"),
-        "isl": _env("ISL"),
-        "osl": _env("OSL"),
-        "graph_mode": _env("HYPERLOOM_GRAPH_MODE"),
-    }
+    return _shared_build_provenance(args, env=os.environ, probe=True)
 
 
 def _maybe_build_shape_manifest(
