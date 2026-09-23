@@ -30,25 +30,16 @@ def patch_env(tmp_path, monkeypatch):
     return fw, bak
 
 
-def _strip_pod_script_header(body: str) -> str:
-    lines = body.splitlines()
-    if lines and lines[0].startswith("#!"):
-        lines = lines[1:]
-    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
-    return "\n".join(lines).strip()
-
-
-def _bundle_kernel_node_ops() -> str:
-    root = _repo_root() / "multi_node" / "scripts"
-    chunks = [_strip_pod_script_header((root / dep).read_text(encoding="utf-8")) for dep in ("patch_path_safety.py",)]
-    main_body = _strip_pod_script_header((root / "kernel_node_ops.py").read_text(encoding="utf-8"))
-    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
-
-
 def _load(unique_name: str):
+    from hyperloom.inference_optimizer.multi_node.cli import _read_bundled_pod_python_script
+
     mod = types.ModuleType(unique_name)
     mod.__dict__["__file__"] = str(_repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py")
-    exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
+    bundle = _read_bundled_pod_python_script("kernel_node_ops.py")
+    with pytest.MonkeyPatch.context() as context:
+        for name in ("aiter_jit_cache", "patch_path_safety"):
+            context.setitem(sys.modules, name, sys.modules.get(name))
+        exec(compile(bundle, "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod
 
@@ -314,10 +305,42 @@ def test_bench_invalid_files_json_fails(tmp_path, capsys):
     assert "JSON" in payload["error"]
 
 
+def test_finalize_success_returns_zero_and_removes_backups(patch_env, capsys):
+    _fw, bak = patch_env
+    k = _load("kno_finalize_ok")
+    backup = bak / "kernel.bak"
+    backup.write_bytes(b"baseline")
+
+    rc = k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(backup)}])))
+
+    payload = _last_json(capsys)
+    assert rc == 0
+    assert payload["status"] == "finalized"
+    assert payload["deleted"] == [str(backup)]
+    assert not backup.exists()
+
+
+@pytest.mark.parametrize("invalid_json", [False, True])
+def test_finalize_failure_returns_nonzero_without_deleting_outside_backup(patch_env, capsys, invalid_json):
+    _fw, bak = patch_env
+    k = _load("kno_finalize_failed")
+    outside = bak.parent / "outside.bak"
+    outside.write_bytes(b"untouched")
+    records = "{" if invalid_json else json.dumps([{"backup_path": str(outside)}])
+
+    rc = k._do_finalize(argparse.Namespace(records_json=records))
+
+    payload = _last_json(capsys)
+    assert rc == 1
+    assert payload["status"] == "failed"
+    assert payload["error"]
+    assert outside.read_bytes() == b"untouched"
+
+
 def test_emit_status_to_returncode_contract():
     k = _load("kno_emit")
-    # ok/restored/noop_missing_backup -> 0; everything else -> 1.
-    for ok_status in ("ok", "restored", "noop_missing_backup"):
+    # Completed operations return zero; failures and unknown states do not.
+    for ok_status in ("ok", "restored", "finalized", "noop_missing_backup"):
         assert k._emit({"status": ok_status}) == 0
     for bad_status in ("failed", "error", ""):
         assert k._emit({"status": bad_status}) == 1
