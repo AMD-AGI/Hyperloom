@@ -805,12 +805,12 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 failed_concs=[variant_conc(fb) for fb in failed_boots],
             )
         # Incremental flush after boot point.
-        _maybe_flush(
+        _flush_partial_conc_sweep_report(
             state=state,
             session_dir=session_dir,
             json_path=json_path,
             csv_path=csv_path,
-            all_results=_all_results_ref,
+            results=list(_all_results_ref),
             concs=list(concs_desc),
             isl=isl,
             osl=osl,
@@ -945,12 +945,12 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     ),
                 )
             # Incremental flush after each reuse point.
-            _maybe_flush(
+            _flush_partial_conc_sweep_report(
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,
                 csv_path=csv_path,
-                all_results=_all_results_ref,
+                results=list(_all_results_ref),
                 concs=list(concs_desc),
                 isl=isl,
                 osl=osl,
@@ -1087,12 +1087,12 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         _concs = [int(v.extra_envs["CONC"]) for v in grid if v.extra_envs.get("CONC")]
         _isl = int(next((v.extra_envs["ISL"] for v in grid if v.extra_envs.get("ISL")), "0"))
         _osl = int(next((v.extra_envs["OSL"] for v in grid if v.extra_envs.get("OSL")), "0"))
-        _maybe_flush(
+        _flush_partial_conc_sweep_report(
             state=state,
             session_dir=session_dir,
             json_path=json_path,
             csv_path=csv_path,
-            all_results=_all_results_ref,
+            results=list(_all_results_ref),
             concs=_concs,
             isl=_isl,
             osl=_osl,
@@ -1108,54 +1108,6 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             recorder=recorder,
         )
     return arm_results
-
-
-def _maybe_flush(  # noqa: PLR0913
-    *,
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    all_results: list[VariantResult],
-    concs: list[int],
-    isl: int,
-    osl: int,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    workspace: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    budget_exhausted: bool,
-    budget_skip_reason: str,
-    budget_remaining_sec: float | None,
-    recorder: Any = None,
-) -> None:
-    """Build a partial payload from *all_results* and flush it via :func:`_flush_partial_conc_sweep_report`.
-
-    A thin convenience wrapper that avoids repeating the argument list at every
-    call site.
-    """
-    _flush_partial_conc_sweep_report(
-        results=list(all_results),
-        state=state,
-        session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=concs,
-        isl=isl,
-        osl=osl,
-        opt_args=opt_args,
-        opt_envs=opt_envs,
-        workspace=workspace,
-        started_at=started_at,
-        total_budget_sec=total_budget_sec,
-        has_budget=has_budget,
-        budget_exhausted=budget_exhausted,
-        budget_skip_reason=budget_skip_reason,
-        budget_remaining_sec=budget_remaining_sec,
-        recorder=recorder,
-    )
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
