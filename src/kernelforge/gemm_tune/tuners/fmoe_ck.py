@@ -129,8 +129,8 @@ class FmoeCKTuner(BaseTuner):
                     "none of the %d observed MoE token count(s) appear in the "
                     "CK 2-stage token hint %s" % (len(tokens), sorted(allowed)[:8])
                 )
-        # Without a restrictive token hint, the caller's token-list length is the budget: keep that many observed
-        # counts, spread across their range.
+        # The length of ``ctx.tokens`` is the caller's coverage budget: at most that many rows, thinned out across
+        # the observed range rather than truncated at either end.
         budget = len(self.ctx.tokens) if self.ctx.tokens else 0
         if budget and len(tokens) > budget:
             observed = len(tokens)
