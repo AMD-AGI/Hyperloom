@@ -13,36 +13,11 @@ from typing import Any
 from hyperloom.common.env_safety import redact_secret_values
 
 from hyperloom.common.io import append_jsonl
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
-from ._row_utils import (
-    coerce_optional_int as _coerce_optional_int,
-    coerce_optional_str as _coerce_optional_str,
-    validate_closed_row,
-)
+from ._row_utils import call_key_fields, validate_closed_row
 from .llm_trace import VALID_COMPONENTS
 
 log = logging.getLogger(__name__)
-
-
-# Canonical, ordered field contract for one ``conversations.jsonl`` row.
-_ROW_FIELDS: frozenset[str] = frozenset(
-    {
-        "session_id",
-        "ts",
-        "component",
-        "call_id",
-        "role",
-        "task_id",
-        "dyn_id",
-        "tick",
-        "phase",
-        "turn",
-        "model",
-        "prompt",
-        "response",
-    }
-)
 
 
 class ConversationRowError(ValueError):
@@ -88,17 +63,7 @@ class ConversationRecord:
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting the prompt / response text."""
         return {
-            "session_id": str(self.session_id),
-            "ts": now_iso(),
-            "component": str(self.component),
-            "call_id": _coerce_optional_str(self.call_id),
-            "role": _coerce_optional_str(self.role),
-            "task_id": _coerce_optional_str(self.task_id),
-            "dyn_id": _coerce_optional_str(self.dyn_id),
-            "tick": _coerce_optional_int(self.tick),
-            "phase": _coerce_optional_str(self.phase),
-            "turn": _coerce_optional_int(self.turn),
-            "model": _coerce_optional_str(self.model),
+            **call_key_fields(self),
             "prompt": redact_secrets(_coerce_text(self.prompt)),
             "response": redact_secrets(_coerce_text(self.response)),
         }
@@ -140,12 +105,8 @@ def append_conversation(
             log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
 
 
-# Sanity guard: dataclass fields (minus the write-time ``ts``) must stay in lockstep with the on-disk row schema.
-_DATACLASS_FIELDS: frozenset[str] = frozenset(f.name for f in fields(ConversationRecord))
-assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
-    "ConversationRecord fields drifted from _ROW_FIELDS: "
-    f"dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"
-)
+# The closed on-disk schema: every record field plus the write-time ``ts``.
+_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(ConversationRecord)) | {"ts"}
 
 
 __all__ = [
