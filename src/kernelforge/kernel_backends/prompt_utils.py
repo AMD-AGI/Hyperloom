@@ -35,10 +35,12 @@ them with the `Read` tool; what follows is the part you must not have to look up
   editable file: an `os.environ.get(...)` default says NOTHING about the edit
   surface. Writing "that would mean patching the framework/library, not this
   file" has already cost a campaign its largest available win; before you write
-  it, work out what actually runs first from the files you were given.
-- **`lever_cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Read it on
-  the host as `FORGE_SWEEP_<NAME>` defaulting to today's value, echo
-  `sweep_const: <NAME> <value>` on every read (a point with no echo fails and
+  it, work out what actually runs first from the files you were given. Reaching a
+  constant someone else reads from the environment is in scope; authoring a new
+  environment read in the kernel you submit is not.
+- **`lever_cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Read
+  the constant on the host as `FORGE_SWEEP_<NAME>` defaulting to today's value,
+  echo `sweep_const: <NAME> <value>` on every read (a point with no echo fails and
   carries no time), parse a BOOLEAN knob against an explicit token set rather
   than with `bool(value)` (`bool("0")` is `True`, so the OFF point would time the
   ON kernel and the echo would still confirm it), and take one data point per
@@ -48,8 +50,10 @@ them with the `Read` tool; what follows is the part you must not have to look up
   the WRAPPER when your session names one). Sweep coupled constants JOINTLY, and
   sweep every inherited literal in BOTH directions. Sweep numbers are
   exploratory; the canonical gate still decides what survives.
-  **KEEP the knobs, defaulted to the winning literals, for the whole search.** A
-  knob collapsed mid-campaign is an axis the next session would have to
-  re-author before it can even ask the question, which means it never asks.
-  Strip them only at final submission, and only if the deliverable must be
-  knob-free — then re-run the gate to prove the collapse changed nothing."""
+  **The knobs last one turn.** Instrument the kernel in place — the driver loads
+  it from where the task put it, so a copy elsewhere is a file it never runs —
+  and before you end the turn, replace every `FORGE_SWEEP_` read with the literal
+  it selected, delete the echo, and re-run the driver on the file you submit.
+  What carries an axis to the next session is the constant you name in this
+  iteration's lesson — the values you timed and what they cost — not a knob left
+  behind in the shipped file for someone to mistake for live configuration."""
