@@ -446,39 +446,12 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    # ``profiler=torch`` and a trace dir have to be asserted here too, not left to
-    # Magpie's launcher script alone: that script prepends its own flags *before*
-    # EXTRA_VLLM_ARGS at actual launch, but the argv preflight probe only sees
-    # EXTRA_VLLM_ARGS, and vLLM's ProfilerConfig validator rejects
-    # delay/max_iterations without both present in the checked fragment.
+    # ``profiler=torch`` belongs in the launched fragment; do not add
+    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
+    # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
     assert "--profiler-config.profiler torch" in extra, extra
-    assert "--profiler-config.torch_profiler_dir" in extra, extra
-
-
-def test_candidate_trace_dirs_covers_the_vllm_output_root(tmp_path):
-    """vLLM writes rank traces into the run output dir, one level above the Magpie workspace."""
-    from hyperloom.orchestrator.actions.executors.profile import _candidate_trace_dirs
-
-    workspace = tmp_path / "task" / "benchmark_vllm_20260922"
-    assert _candidate_trace_dirs(workspace) == [
-        workspace / "torch_trace",
-        workspace,
-        workspace / "capture_traces",
-        workspace.parent / "capture_traces",
-        workspace.parent,
-    ]
-
-
-def test_materialize_profile_pins_magpie_and_vllm_to_one_trace_dir(tmp_path, monkeypatch):
-    """Whichever of the two duplicate flags vLLM keeps, the trace has to land where discovery looks."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    injected = envs["EXTRA_VLLM_ARGS"].split("--profiler-config.torch_profiler_dir ", 1)[1].split()[0]
-    assert envs["VLLM_TORCH_PROFILER_DIR"] == injected
+    assert "--profiler-config.torch_profiler_dir" not in extra, extra
 
 
 def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
@@ -2473,7 +2446,9 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
                 }
             )
         )
-        _gz_trace(workspace / "rank0.177.pt.trace.json.gz", 128)
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(exist_ok=True)
+        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
         capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
         _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
@@ -2490,12 +2465,13 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
         res = await sub.run_task(task)
 
     workspace = output_dir / "benchmark_vllm_20260501_001122"
-    complete_trace = workspace / "rank0.177.pt.trace.json.gz"
+    torch_trace = workspace / "torch_trace"
+    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(workspace)
+    assert res.result["trace_dir"] == str(torch_trace)
     assert res.result["trace_files"] == [str(complete_trace)]
-    assert res.result["main_trace_path"] == str(workspace)
+    assert res.result["main_trace_path"] == str(torch_trace)
     assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
     assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
