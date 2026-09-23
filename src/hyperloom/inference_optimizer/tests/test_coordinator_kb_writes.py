@@ -595,16 +595,49 @@ def test_close_publishes_last_validated_snapshot_not_newer_working_recipe(tmp_pa
         "stack_len": 1,
         "validated_at": "2026-09-22T00:00:00+00:00",
     }
+    state.last_action_failures = [{"action": "explore", "name": "later-crash", "reason": "oom"}]
 
     outcome = coord.finalize_recipe_and_journal()
 
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row["best_throughput"] == 2000.0
     assert row["best_config"]["extra_server_args"] == "--page-size 16"
+    assert len(row["what_worked"]) == 1
+    assert "oom" in [f.get("reason") for f in row["what_failed"]]
     assert outcome["published_recipe_generation"] == 1
     assert outcome["published_recipe_fingerprint"] == "fingerprint-a"
     assert state.current_best["tput"] == 2200.0
     assert len(state.optimization_stack) == 2
+
+
+def test_close_publishes_evidence_recorded_after_the_last_validation(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+    assert coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "validated-a", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+    )
+    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+
+    state.last_action_failures = [{"action": "explore", "name": "later-crash", "reason": "oom"}]
+    state.gaps = [
+        {
+            "canonical_id": "gap-later",
+            "provenance": "https://pr/later",
+            "attempts": [{"variant_name": "later-revert", "outcome": "REVERT", "gain_pct": -3.0}],
+        }
+    ]
+    assert state.working_recipe_generation == state.validated_recipe_generation
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome["result_type"] == "written"
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["best_config"]["extra_server_args"] == "--page-size 16"
+    assert [f.get("reason") for f in row["what_failed"]] == ["oom", "reverted"]
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.

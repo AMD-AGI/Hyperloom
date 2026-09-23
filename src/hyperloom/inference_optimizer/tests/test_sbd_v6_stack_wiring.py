@@ -195,7 +195,7 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert state.validated_recipe_generation == state.working_recipe_generation == 1
         assert state.validated_recipe_snapshot["current_best"] == state.current_best
         assert state.validated_recipe_snapshot["optimization_stack"] == state.optimization_stack
-        assert state.validated_recipe_snapshot["recipe_attrs"]["best_throughput"] == 1100.0
+        assert "recipe_attrs" not in state.validated_recipe_snapshot
         # The whole-stack figure and the ledger were measured independently.
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 

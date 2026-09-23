@@ -1024,9 +1024,6 @@ class WritebackCollaborator:
             "source": source,
             "validated_at": ts,
         }
-        self.shared_state.validated_recipe_snapshot["recipe_attrs"] = self._build_recipe_attrs_from_state(
-            use_validated_snapshot=False
-        )
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
@@ -2384,11 +2381,7 @@ class WritebackCollaborator:
                     reverted_rows.append(row)
         return kept_sources, kept_by_gap, reverted_rows
 
-    def _build_recipe_attrs_from_state(
-        self,
-        *,
-        use_validated_snapshot: bool = True,
-    ) -> dict[str, Any]:
+    def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState` (defensive getattr).
 
         Returns:
@@ -2397,10 +2390,6 @@ class WritebackCollaborator:
             writes.
         """
         ss = self.shared_state
-        snapshot = getattr(ss, "validated_recipe_snapshot", {}) or {}
-        snapshot_attrs = snapshot.get("recipe_attrs") if isinstance(snapshot, Mapping) else None
-        if use_validated_snapshot and isinstance(snapshot_attrs, Mapping):
-            return deepcopy(dict(snapshot_attrs))
         current_best = getattr(ss, "current_best", {}) or {}
         opt_stack = getattr(ss, "optimization_stack", []) or []
         gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
