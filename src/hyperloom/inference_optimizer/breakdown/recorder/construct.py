@@ -11,7 +11,7 @@ an event when no session is bound.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .event_rows import rows_for_event
