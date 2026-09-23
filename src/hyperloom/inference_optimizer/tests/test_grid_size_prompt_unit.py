@@ -18,7 +18,7 @@ def _grid_prompt_surfaces() -> list[str]:
 def test_both_grid_surfaces_state_the_same_target_and_ceiling():
     for surface in _grid_prompt_surfaces():
         assert "4" in surface
-        assert "maximum 8" in surface
+        assert "maximum 6" in surface
     assert all("Untested proposals (current cycle)" in s for s in _grid_prompt_surfaces()[1:])
 
 

@@ -47,7 +47,7 @@ QUEUE_PRIORITY = 1
 MAX_PROPOSALS = 4
 
 #: Proposals surfaced in total, batch plus overflow. Orchestration's own ceiling
-#: is "4 per grid, hard maximum 8", so 8 is the most it could ever dispatch in
+#: is "4 per grid, hard maximum 6", so 6 is the most it could ever dispatch in
 #: one round and anything past that is genuinely surplus.
 #:
 #: The batch size used to be a discard threshold, which threw away fresh
@@ -55,14 +55,7 @@ MAX_PROPOSALS = 4
 #: and sixth were dropped while the queue still had room for them. Keeping them
 #: also gives the batch something to refill from when exclusion thins it, which
 #: is cheaper than spending a second generation round on the same question.
-#:
-#: Raised 6 -> 8 to match ``samples=8``: at the old cap a round that returned
-#: eight distinct deltas lost two to ``over_surface_cap`` before orchestration
-#: ever saw them, and on the Gemma-4-31B slot both casualties were the widest
-#: deltas the predictor produced. The cap was throwing away exactly the
-#: proposals no other proposer was offering. Queue rows cost nothing until
-#: something benches them, so the ceiling belongs at the sample count.
-MAX_QUEUED = 8
+MAX_QUEUED = 6
 
 
 def delta_pairs(extra_args: Any, extra_envs: Any) -> frozenset[tuple[str, str]]:
