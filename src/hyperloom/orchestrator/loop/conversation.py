@@ -63,7 +63,19 @@ class ConversationCollaborator:
             log.exception("Coordinator: Fleet KB read failed")
             return ""
         self._coord._fleet_kb_last_read = evidence
-        return evidence.prompt_block if evidence.status == "completed" else ""
+        if evidence.status != "completed" or not evidence.prompt_block:
+            return ""
+        return "\n".join(
+            (
+                "=== Fleet KB warm-start evidence ===",
+                ("INVARIANT: the original Recipe benchmark measurement remains the gain-accounting baseline."),
+                (
+                    "Historical configurations may seed proposals/current-best "
+                    "candidates only; never replace benchmark_baseline."
+                ),
+                evidence.prompt_block,
+            )
+        )
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""

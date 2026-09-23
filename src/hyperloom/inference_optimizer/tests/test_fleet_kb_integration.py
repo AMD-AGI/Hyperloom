@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.fleet_kb import (
@@ -45,13 +46,40 @@ def _state(tick: int = 7):
         model_name="Qwen3-8B",
         phase="FRAMEWORK_AGENT",
         baseline_tput=100.0,
-        current_best="stack-a",
+        current_best={"action": "explore", "tput": 112.0},
         current_action="explore",
+        attempts_history=[{"throughput": 111.0, "decision": "keep"}],
+        optimization_stack=["stack-a"],
+        current_top_bottleneck=lambda: "decode bandwidth",
         to_prompt_summary=lambda: "analysis_md=decode is bandwidth bound",
     )
 
 
-def test_fleet_read_context_is_runtime_shaped_and_cached_per_tick(tmp_path) -> None:
+def test_fleet_read_context_is_runtime_shaped_and_cached_by_context(tmp_path) -> None:
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "task_config": {
+                        "model_name": "manifest-model",
+                        "gpu_type": "mi355x",
+                        "framework_name": "sglang",
+                        "framework_version": "0.5.18",
+                        "precision": "bf16",
+                        "architecture": {
+                            "model_type": "qwen3",
+                            "architectures": ["Qwen3ForCausalLM"],
+                        },
+                        "tp": 8,
+                        "conc": 64,
+                        "isl": 1024,
+                        "osl": 128,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     client = FakeClient()
     integration = FleetKBIntegration(client, tmp_path)
     state = _state()
@@ -62,16 +90,40 @@ def test_fleet_read_context_is_runtime_shaped_and_cached_per_tick(tmp_path) -> N
     )
     second = integration.read_for_framework(
         state,
-        untested_proposals="ignored on cached read",
+        untested_proposals="fp8 KV cache",
+    )
+    state.tick = 8
+    third = integration.read_for_framework(
+        state,
+        untested_proposals="fp8 KV cache",
+    )
+    changed = integration.read_for_framework(
+        state,
+        untested_proposals="paged attention",
     )
 
     assert first == second
-    assert len(client.calls) == 1
+    assert third.read_id == first.read_id
+    assert third.tick == 8
+    assert changed.read_id != first.read_id
+    assert len(client.calls) == 2
     _, context, kwargs = client.calls[0]
-    assert context["model"] == "Qwen3-8B"
-    assert context["baseline_tput"] == 100.0
-    assert context["untested_proposals"] == "fp8 KV cache"
-    assert kwargs["operation_id"] == "fleet-read-session-1-2-7"
+    assert context["identity"]["model"] == "Qwen3-8B"
+    assert context["identity"]["gpu"] == "mi355x"
+    assert context["identity"]["architecture"] == "Qwen3ForCausalLM"
+    assert context["workload"] == {
+        "tp": 8,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 128,
+    }
+    assert context["benchmark_baseline"]["throughput"] == 100.0
+    assert context["current_best"]["throughput"] == 112.0
+    assert context["observations"]["untested_directions"] == "fp8 KV cache"
+    assert context["recent_results"] == [{"throughput": 111.0, "decision": "keep"}]
+    assert "candidate_change" not in context
+    assert "question" not in context
+    assert kwargs["operation_id"].startswith("fleet-read-session-1-")
 
 
 def test_conversation_fleet_block_is_fail_open_and_records_exposure(tmp_path) -> None:
@@ -102,7 +154,9 @@ def test_conversation_fleet_block_is_fail_open_and_records_exposure(tmp_path) ->
 
     block = asyncio.run(collaborator._fleet_kb_prompt_block("proposal"))
 
-    assert block == evidence.prompt_block
+    assert evidence.prompt_block in block
+    assert "original Recipe benchmark measurement remains" in block
+    assert "never replace benchmark_baseline" in block
     assert coordinator._fleet_kb_last_read == evidence
 
 
