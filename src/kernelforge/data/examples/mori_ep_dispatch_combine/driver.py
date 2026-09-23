@@ -109,9 +109,12 @@ _KERNEL_TYPE_MAP = {
 
 # All 6 keys are mandatory (program.md says so explicitly).
 _REQUIRED_CFG_KEYS = (
-    "dispatch_block_num", "dispatch_warp_per_block",
-    "combine_block_num", "combine_warp_per_block",
-    "kernel_type", "combine_zero_copy",
+    "dispatch_block_num",
+    "dispatch_warp_per_block",
+    "combine_block_num",
+    "combine_warp_per_block",
+    "kernel_type",
+    "combine_zero_copy",
 )
 
 
@@ -176,8 +179,13 @@ def _build_op(rank: int, world_size: int, dtype, combine_dtype, max_tokens: int)
 
 
 def _combine_with_config(
-    op, cfg: dict, expert_output: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor,
-    call_reset: bool = False, prime_buffer: bool = True,
+    op,
+    cfg: dict,
+    expert_output: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    call_reset: bool = False,
+    prime_buffer: bool = True,
 ):
     """Runs op.combine() honoring cfg[\"combine_zero_copy\"] (default False)."""
     block_num = cfg["combine_block_num"]
@@ -188,14 +196,22 @@ def _combine_with_config(
         if prime_buffer:
             buf[:n].copy_(expert_output)
         return op.combine(
-            buf[:n], weights, indices,
-            block_num=block_num, warp_per_block=warp_per_block,
-            use_external_inp_buf=0, call_reset=call_reset,
+            buf[:n],
+            weights,
+            indices,
+            block_num=block_num,
+            warp_per_block=warp_per_block,
+            use_external_inp_buf=0,
+            call_reset=call_reset,
         )
     return op.combine(
-        expert_output, weights, indices,
-        block_num=block_num, warp_per_block=warp_per_block,
-        use_external_inp_buf=1, call_reset=call_reset,
+        expert_output,
+        weights,
+        indices,
+        block_num=block_num,
+        warp_per_block=warp_per_block,
+        use_external_inp_buf=1,
+        call_reset=call_reset,
     )
 
 
@@ -206,18 +222,26 @@ def _make_routing(n_tokens: int, world_size: int, rank: int, device, scale: floa
     indices = torch.empty(n_tokens, _NUM_EXPERTS_PER_TOKEN, dtype=torch.int32, device=device)
     for i in range(n_tokens):
         perm = torch.randperm(total_experts, device=device)
-        indices[i] = perm[: _NUM_EXPERTS_PER_TOKEN].to(torch.int32)
+        indices[i] = perm[:_NUM_EXPERTS_PER_TOKEN].to(torch.int32)
     # Uniform weights summing to 1 per token: an identity-expert round trip then reconstructs the original token
     # exactly (modulo bf16 rounding).
     weights = torch.full(
-        (n_tokens, _NUM_EXPERTS_PER_TOKEN), 1.0 / _NUM_EXPERTS_PER_TOKEN,
-        dtype=torch.float32, device=device,
+        (n_tokens, _NUM_EXPERTS_PER_TOKEN),
+        1.0 / _NUM_EXPERTS_PER_TOKEN,
+        dtype=torch.float32,
+        device=device,
     )
     return x, weights, indices
 
 
 def _correctness_worker(
-    rank: int, world_size: int, n_tokens: int, scale: float, dtype, combine_dtype, result_path: str,
+    rank: int,
+    world_size: int,
+    n_tokens: int,
+    scale: float,
+    dtype,
+    combine_dtype,
+    result_path: str,
 ) -> None:
     _dist_setup(rank, world_size)
     op = None
@@ -249,12 +273,21 @@ def _correctness_worker(
             test_data = (test_data[0], all_rank_indices, all_rank_input, all_rank_weights, all_rank_scales)
 
         dispatch_output, dispatch_weights, dispatch_scales, dispatch_indices, dispatch_recv_num_token = op.dispatch(
-            all_rank_input[rank], all_rank_weights[rank], all_rank_scales[rank], all_rank_indices[rank],
-            block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+            all_rank_input[rank],
+            all_rank_weights[rank],
+            all_rank_scales[rank],
+            all_rank_indices[rank],
+            block_num=cfg["dispatch_block_num"],
+            warp_per_block=cfg["dispatch_warp_per_block"],
         )
         test_case.check_dispatch_result(
-            op, test_data, dispatch_output, dispatch_weights, dispatch_scales,
-            dispatch_indices, dispatch_recv_num_token,
+            op,
+            test_data,
+            dispatch_output,
+            dispatch_weights,
+            dispatch_scales,
+            dispatch_indices,
+            dispatch_recv_num_token,
         )
 
         # Identity expert: a real expert would still cast its dispatch-dtype input to whatever (typically
@@ -265,14 +298,23 @@ def _correctness_worker(
         # of being random (identity expert has no other transformation to apply).
         expert_output = dispatch_output.to(combine_dtype)
         combine_output, combine_output_weight = _combine_with_config(
-            op, cfg, expert_output, dispatch_weights, all_rank_indices[rank], call_reset=True,
+            op,
+            cfg,
+            expert_output,
+            dispatch_weights,
+            all_rank_indices[rank],
+            call_reset=True,
         )
         # combine_data_type defaults to config.data_type (dispatch's dtype) -- must be overridden explicitly here
         # whenever combine_dtype differs (the fp8-dispatch/bf16-combine "bench" mode), or check_combine_ result
         # computes its reference at the WRONG precision and every token spuriously "mismatches" by exactly an
         # fp8-rounding delta.
         test_case.check_combine_result(
-            op, test_data, combine_output, combine_output_weight, combine_data_type=combine_dtype,
+            op,
+            test_data,
+            combine_output,
+            combine_output_weight,
+            combine_data_type=combine_dtype,
         )
         torch.cuda.synchronize()
 
@@ -289,21 +331,35 @@ def _capture_bench_graphs(op, cfg, x_fp8, weights, indices, combine_input, n_rec
     dispatch_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(dispatch_graph):
         _do, dispatch_weights, _dsc, _di, _rn = op.dispatch(
-            x_fp8, weights, None, indices,
-            block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+            x_fp8,
+            weights,
+            None,
+            indices,
+            block_num=cfg["dispatch_block_num"],
+            warp_per_block=cfg["dispatch_warp_per_block"],
         )
 
     combine_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(combine_graph):
         _combine_with_config(
-            op, cfg, combine_input[:n_recv], dispatch_weights, indices, prime_buffer=False,
+            op,
+            cfg,
+            combine_input[:n_recv],
+            dispatch_weights,
+            indices,
+            prime_buffer=False,
         )
     torch.cuda.synchronize()
     return dispatch_graph, combine_graph
 
 
 def _bench_worker(
-    rank: int, world_size: int, warmup: int, iters: int, graph_mode: bool, result_path: str,
+    rank: int,
+    world_size: int,
+    warmup: int,
+    iters: int,
+    graph_mode: bool,
+    result_path: str,
 ) -> None:
     _dist_setup(rank, world_size)
     op = None
@@ -316,29 +372,47 @@ def _bench_worker(
         # Combine's expert-output input must be in combine dtype (bf16); its numeric content does not matter for a
         # bandwidth/latency benchmark.
         combine_input = torch.randn(
-            _BENCH_TOKENS_PER_RANK * _NUM_EXPERTS_PER_TOKEN, _HIDDEN_DIM,
-            device=device, dtype=torch.bfloat16,
+            _BENCH_TOKENS_PER_RANK * _NUM_EXPERTS_PER_TOKEN,
+            _HIDDEN_DIM,
+            device=device,
+            dtype=torch.bfloat16,
         )
 
         # dispatch's actual recv count is data-dependent (depends on this iteration's random routing) and only known
         # device-side until a host sync -- but x_fp8/weights/indices are fixed for the whole run (generated once
         # above, not re-randomized per round), so recv_n is IDENTICAL on every round for a given rank.
         _ds0, dispatch_weights0, _dsc0, _di0, recv_n0 = op.dispatch(
-            x_fp8, weights, None, indices,
-            block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+            x_fp8,
+            weights,
+            None,
+            indices,
+            block_num=cfg["dispatch_block_num"],
+            warp_per_block=cfg["dispatch_warp_per_block"],
         )
         n_recv = int(recv_n0.sum().item()) if hasattr(recv_n0, "sum") else int(recv_n0)
         n_recv = max(n_recv, 1)
         # Prime the zero-copy registered buffer (a no-op read for the external-buffer path) with this fixed-content
         # slice ONCE; the timed loop below never copies into it again.
         _combine_with_config(
-            op, cfg, combine_input[:n_recv], dispatch_weights0, indices, call_reset=True, prime_buffer=True,
+            op,
+            cfg,
+            combine_input[:n_recv],
+            dispatch_weights0,
+            indices,
+            call_reset=True,
+            prime_buffer=True,
         )
         torch.cuda.synchronize()
 
         if graph_mode:
             dispatch_graph, combine_graph = _capture_bench_graphs(
-                op, cfg, x_fp8, weights, indices, combine_input, n_recv,
+                op,
+                cfg,
+                x_fp8,
+                weights,
+                indices,
+                combine_input,
+                n_recv,
             )
 
             def one_round_local_ms() -> float:
@@ -359,15 +433,24 @@ def _bench_worker(
                 dist.barrier()
                 start.record()
                 _do, dispatch_weights, _dsc, _di, _rn = op.dispatch(
-                    x_fp8, weights, None, indices,
-                    block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+                    x_fp8,
+                    weights,
+                    None,
+                    indices,
+                    block_num=cfg["dispatch_block_num"],
+                    warp_per_block=cfg["dispatch_warp_per_block"],
                 )
                 # call_reset=True: mori's own docs require reset() "between iterations" for repeated eager (non-graph)
                 # calls -- a real eager-mode production serving loop pays this same cost every round, so it belongs
                 # inside the timed region, not around it.
                 _combine_with_config(
-                    op, cfg, combine_input[:n_recv], dispatch_weights, indices,
-                    call_reset=True, prime_buffer=False,
+                    op,
+                    cfg,
+                    combine_input[:n_recv],
+                    dispatch_weights,
+                    indices,
+                    call_reset=True,
+                    prime_buffer=False,
                 )
                 end.record()
                 torch.cuda.synchronize()
@@ -403,18 +486,29 @@ def _profile_worker(rank: int, world_size: int) -> None:
         x_fp8, weights, indices = _make_routing(_BENCH_TOKENS_PER_RANK, world_size, rank, device, 1.0)
         x_fp8 = x_fp8.to(torch.float8_e4m3fnuz)
         combine_input = torch.randn(
-            _BENCH_TOKENS_PER_RANK * _NUM_EXPERTS_PER_TOKEN, _HIDDEN_DIM,
-            device=device, dtype=torch.bfloat16,
+            _BENCH_TOKENS_PER_RANK * _NUM_EXPERTS_PER_TOKEN,
+            _HIDDEN_DIM,
+            device=device,
+            dtype=torch.bfloat16,
         )
         for _ in range(3):
             dispatch_output, dispatch_weights, _ds, _di, recv_n = op.dispatch(
-                x_fp8, weights, None, indices,
-                block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+                x_fp8,
+                weights,
+                None,
+                indices,
+                block_num=cfg["dispatch_block_num"],
+                warp_per_block=cfg["dispatch_warp_per_block"],
             )
             n_recv = int(recv_n.sum().item()) if hasattr(recv_n, "sum") else int(recv_n)
             # call_reset=True between iterations -- see _bench_worker.
             _combine_with_config(
-                op, cfg, combine_input[: max(n_recv, 1)], dispatch_weights, indices, call_reset=True,
+                op,
+                cfg,
+                combine_input[: max(n_recv, 1)],
+                dispatch_weights,
+                indices,
+                call_reset=True,
             )
         torch.cuda.synchronize()
         healthy = True
@@ -423,8 +517,13 @@ def _profile_worker(rank: int, world_size: int) -> None:
 
 
 def _run_correctness(mode: str) -> int:
-    n_tokens = _BENCH_TOKENS_PER_RANK if mode == "bench" else _CORRECTNESS_TOKENS.get(
-        mode, _CORRECTNESS_TOKENS["full"],
+    n_tokens = (
+        _BENCH_TOKENS_PER_RANK
+        if mode == "bench"
+        else _CORRECTNESS_TOKENS.get(
+            mode,
+            _CORRECTNESS_TOKENS["full"],
+        )
     )
     dtype, combine_dtype = _CORRECTNESS_DTYPES.get(mode, _CORRECTNESS_DTYPES["full"])
     scale = 1000.0 if mode == "stability" else 1.0
@@ -501,12 +600,13 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=5)
     parser.add_argument(
-        "--graph-mode", action="store_true",
+        "--graph-mode",
+        action="store_true",
         help="bench-mode only: replay each rank's dispatch/combine from a "
-             "per-rank CUDA graph instead of eager calls (closer to a "
-             "production graph-captured serving loop; see driver.py's "
-             "module docstring). Off by default -- the default eager path "
-             "is what forge-loop scores every candidate config against.",
+        "per-rank CUDA graph instead of eager calls (closer to a "
+        "production graph-captured serving loop; see driver.py's "
+        "module docstring). Off by default -- the default eager path "
+        "is what forge-loop scores every candidate config against.",
     )
     args, _unknown = parser.parse_known_args()
 

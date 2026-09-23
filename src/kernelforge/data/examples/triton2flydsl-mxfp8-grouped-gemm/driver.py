@@ -31,13 +31,9 @@ def _configure_sglang() -> None:
         return
     except ImportError:
         pass
-    sglang_python = Path(
-        os.environ.get("SGLANG_PYTHON", "/sgl-workspace/sglang/python")
-    )
+    sglang_python = Path(os.environ.get("SGLANG_PYTHON", "/sgl-workspace/sglang/python"))
     if not (sglang_python / "sglang").is_dir():
-        raise RuntimeError(
-            "SGLang is not importable; set SGLANG_PYTHON to its python directory"
-        )
+        raise RuntimeError("SGLang is not importable; set SGLANG_PYTHON to its python directory")
     sys.path.insert(0, str(sglang_python))
 
 
@@ -153,36 +149,36 @@ def _make_case(case: dict, *, correctness: bool) -> tuple[dict, dict]:
     )
 
     params = case["params"]
-    tokens = (
-        min(params["tokens"], CORRECTNESS_MAX_TOKENS)
-        if correctness
-        else params["tokens"]
-    )
+    tokens = min(params["tokens"], CORRECTNESS_MAX_TOKENS) if correctness else params["tokens"]
     hidden_size = params["hidden"]
     inter_size = params["inter"]
     experts = params["experts"]
     top_k = params["top_k"]
     torch.manual_seed(case.get("seed", 0))
 
-    hidden = torch.randn(
-        tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-    ) * 0.5
-    w13_bf16 = torch.randn(
-        experts,
-        2 * inter_size,
-        hidden_size,
-        device="cuda",
-        dtype=torch.bfloat16,
-    ) * 0.1
+    hidden = torch.randn(tokens, hidden_size, device="cuda", dtype=torch.bfloat16) * 0.5
+    w13_bf16 = (
+        torch.randn(
+            experts,
+            2 * inter_size,
+            hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        * 0.1
+    )
     w13_fp8, w13_scale = _mxfp8_e4m3_quantize_torch(w13_bf16)
     del w13_bf16
-    w2_bf16 = torch.randn(
-        experts,
-        hidden_size,
-        inter_size,
-        device="cuda",
-        dtype=torch.bfloat16,
-    ) * 0.1
+    w2_bf16 = (
+        torch.randn(
+            experts,
+            hidden_size,
+            inter_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        * 0.1
+    )
     w2_fp8, w2_scale = _mxfp8_e4m3_quantize_torch(w2_bf16)
     del w2_bf16
 
@@ -191,9 +187,7 @@ def _make_case(case: dict, *, correctness: bool) -> tuple[dict, dict]:
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
     routed_tokens = tokens * top_k
-    sorted_ids, expert_ids, num_post = moe_align_block_size(
-        topk_ids, BLOCK_M, experts
-    )
+    sorted_ids, expert_ids, num_post = moe_align_block_size(topk_ids, BLOCK_M, experts)
     a_q, a_scale = mxfp8_e4m3_quantize(hidden)
 
     gemm1 = _make_stage(
@@ -238,9 +232,7 @@ def _make_case(case: dict, *, correctness: bool) -> tuple[dict, dict]:
 def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
     actual_f32 = actual.float()
     expected_f32 = expected.float()
-    return float(
-        ((actual_f32 - expected_f32).norm() / (expected_f32.norm() + 1e-8)).item()
-    )
+    return float(((actual_f32 - expected_f32).norm() / (expected_f32.norm() + 1e-8)).item())
 
 
 def _outputs_match(
@@ -248,10 +240,7 @@ def _outputs_match(
     references: tuple[torch.Tensor, torch.Tensor],
     tolerance: float,
 ) -> bool:
-    errors = [
-        _relative_error(actual, expected)
-        for actual, expected in zip(outputs, references)
-    ]
+    errors = [_relative_error(actual, expected) for actual, expected in zip(outputs, references)]
     return all(math.isfinite(error) and error < tolerance for error in errors)
 
 
@@ -264,17 +253,11 @@ def _run_correctness() -> int:
             stage["candidate_out"].fill_(float("nan"))
         outputs = tuple(_run_candidate_stage(stage) for stage in stages)
         torch.cuda.synchronize()
-        errors = [
-            _relative_error(actual, expected)
-            for actual, expected in zip(outputs, references)
-        ]
+        errors = [_relative_error(actual, expected) for actual, expected in zip(outputs, references)]
         tolerance = float(case["params"].get("max_relerr", 0.08))
         ok = all(math.isfinite(error) and error < tolerance for error in errors)
         all_ok = all_ok and ok
-        print(
-            f"# case {case['id']}: gemm1_relerr={errors[0]:.6f} "
-            f"gemm2_relerr={errors[1]:.6f} tol={tolerance} ok={ok}"
-        )
+        print(f"# case {case['id']}: gemm1_relerr={errors[0]:.6f} gemm2_relerr={errors[1]:.6f} tol={tolerance} ok={ok}")
     print(f"allclose: {all_ok}")
     return 0 if all_ok else 1
 
