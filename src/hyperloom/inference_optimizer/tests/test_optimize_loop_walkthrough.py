@@ -77,9 +77,16 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 
 @pytest.mark.asyncio
-async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
+async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
     """With nothing left to try, the run reaches CLOSE through every phase."""
+    from hyperloom.orchestrator.kernel import request_handlers
     from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
+
+    def _no_geak_runner(tool_name: str) -> Path:
+        raise FileNotFoundError(tool_name)
+
+    # KERNEL entry runs out of band; a real GEAK subprocess would decide how long the phase is held.
+    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _no_geak_runner)
 
     coord = _coordinator(session_dir)
     try:
@@ -110,6 +117,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
             await coord.tick(tick)
 
         assert state.phase == ps.PHASE_CLOSE
+        assert state.geak_result["error_class"] == "runner_not_found"
         visited = [to_phase for _, to_phase, _ in _chain(state)]
         assert visited[:2] == [ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT]
         assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]
