@@ -17,16 +17,17 @@ import yaml
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
     observed_sglang_server_identity_from_log,
-    split_launch_flags,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
 
 #: Framework-agnostic snapshot of the baseline server's launch, written beside
-#: the run's other artifacts and copied forward on import.
+#: the run's other artifacts and copied forward on import. Captured in bash by
+#: ``aiperf_client.sh`` (``_capture_launch_config_from_proc``) so a measurement
+#: never has to spawn a python3 interpreter just to snapshot /proc; this module
+#: only reads the resulting file back (see ``read_launch_config`` below).
 LAUNCH_CONFIG_FILENAME = "launch_config.json"
-_LAUNCH_CONFIG_SCHEMA_VERSION = 1
 
 # Only env keys with a server-affecting prefix participate in the launch
 # snapshot; The set spans frameworks so the same generic capture serves SGLang, vLLM, and Atom.
@@ -55,63 +56,6 @@ def server_env_subset(env: Mapping[str, str]) -> dict[str, str]:
         if norm and norm.startswith(_SERVER_ENV_PREFIXES):
             out[norm] = str(value)
     return out
-
-
-def _flags_from_cmdline_tokens(tokens: list[str]) -> str:
-    """Strip the interpreter/entrypoint prefix, keep the launch flags."""
-    for index, token in enumerate(tokens):
-        if token.startswith("--"):
-            return split_launch_flags(" ".join(tokens[index:]))
-    return ""
-
-
-def capture_launch_config_via_proc(pid: int, framework: str) -> tuple[str, dict[str, str]] | None:
-    """Snapshot ``(launch_flags, server_env)`` from a live server process.
-
-    Reads ``/proc/<pid>/cmdline`` and ``/proc/<pid>/environ`` directly, so it is
-    framework-agnostic and captures env the recipe script exported internally.
-    Returns ``None`` when the process is gone or unreadable.
-    """
-    try:
-        cmdline_raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-        environ_raw = Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return None
-    tokens = [t for t in cmdline_raw.decode("utf-8", errors="replace").split("\x00") if t]
-    flags = _flags_from_cmdline_tokens(tokens)
-    env: dict[str, str] = {}
-    for entry in environ_raw.decode("utf-8", errors="replace").split("\x00"):
-        if "=" not in entry:
-            continue
-        key, _, value = entry.partition("=")
-        env[key] = value
-    return flags, server_env_subset(env)
-
-
-def write_launch_config(
-    out_dir: str | Path,
-    *,
-    framework: str,
-    launch_flags: str,
-    env: Mapping[str, str],
-    source: str,
-) -> str:
-    """Persist a ``launch_config.json`` snapshot; return its path (or ``\"\"``)."""
-    payload = {
-        "schema_version": _LAUNCH_CONFIG_SCHEMA_VERSION,
-        "framework": str(framework or "").strip().lower(),
-        "launch_flags": str(launch_flags or "").strip(),
-        "env": dict(sorted(server_env_subset(env).items())),
-        "source": str(source or ""),
-    }
-    try:
-        path = Path(out_dir) / LAUNCH_CONFIG_FILENAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        return str(path)
-    except OSError:
-        log.debug("could not persist launch_config.json in %s", out_dir, exc_info=True)
-        return ""
 
 
 def read_launch_config(search_dirs: list[str]) -> tuple[str, dict[str, str], str] | None:
