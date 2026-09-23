@@ -945,8 +945,8 @@ def _make_lane_agent_factory(
     "attainment against. 'auto' (default) uses "
     "<workspace>/forge_experiments/roofline_ceiling/performance_ceiling.json "
     "when one has been published, 'compute' estimates one at campaign start "
-    "once the baseline is measured, 'off' disables it, and any other value is "
-    "read as a path to a published report.",
+    "once the baseline is measured (and --resume reads that one back), 'off' "
+    "disables it, and any other value is read as a path to a published report.",
 )
 @click.option(
     "--roofline-target",
