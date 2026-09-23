@@ -1630,20 +1630,17 @@ def materialize_config_with_envs(
             # delay_iterations/max_iterations against a ProfilerConfig that
             # never saw ``profiler=torch`` or a trace dir. vLLM's validator
             # requires both whenever those bounds are present, so the probe
-            # fails an argv that will be valid once Magpie's flags are
-            # prepended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Asserting the flags
-            # here keeps the probed fragment self-consistent, and because
-            # EXTRA_VLLM_ARGS comes last, this ``torch_profiler_dir`` is the
-            # one vLLM keeps -- it decides where the trace lands. Magpie reads
-            # the same directory from VLLM_TORCH_PROFILER_DIR below, so both
-            # sides agree no matter which flag wins. An operator-set flag is
-            # left untouched either way.
-            envs.setdefault("VLLM_TORCH_PROFILER_DIR", str(output_dir))
+            # appended, and this layer's profiler bounds get treated as
+            # invalid and dropped instead of launched. Assert ``profiler=torch``
+            # here so the probed fragment is self-consistent; do not append a
+            # ``torch_profiler_dir`` pointed at the task root -- Magpie's
+            # launcher already emits ``<workspace>/torch_trace`` after
+            # EXTRA_VLLM_ARGS and vLLM's last-wins merge keeps that directory.
+            # ``baseline.py`` injects a probe-only dir for argv preflight;
+            # ``bypass_engine`` appends the real dir after extra args. An
+            # operator-set flag is left untouched either way.
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
-            if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
-                profiler_flags.append(("torch_profiler_dir", f"--profiler-config.torch_profiler_dir {output_dir}"))
             if tracelens_patch_ok:
                 profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
