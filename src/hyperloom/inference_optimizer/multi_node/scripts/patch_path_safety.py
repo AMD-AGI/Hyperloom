@@ -7,10 +7,18 @@ Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import tempfile
 from pathlib import Path
+
+try:
+    import aiter_jit_cache as _jit_cache
+except ModuleNotFoundError as exc:
+    if exc.name != "aiter_jit_cache":
+        raise
+    from hyperloom.common import aiter_jit_cache as _jit_cache
 
 _DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
 
@@ -71,15 +79,20 @@ def assert_backup_path_allowed(backup: Path) -> None:
 
 
 def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
-    """Validate an AITER ``jit/build`` path before recursive mutation."""
-    resolved = jit_build.resolve()
-    if (
-        resolved.name != "build"
-        or resolved.parent.name != "jit"
-        or resolved.parent.parent.name != "aiter"
-        or not (resolved.parent / "__init__.py").is_file()
-        or not (resolved.parent.parent / "__init__.py").is_file()
+    """Validate the pod's runtime AITER destination before recursive mutation."""
+    package = jit_build.parent.parent
+    if "AITER_JIT_DIR" not in os.environ and not (
+        package.name == "aiter"
+        and jit_build.parent.name == "jit"
+        and (package / "__init__.py").is_file()
+        and (jit_build.parent / "__init__.py").is_file()
     ):
+        spec = importlib.util.find_spec("aiter")
+        if spec is None or not spec.submodule_search_locations:
+            raise ValueError(f"invalid AITER jit/build path: {jit_build}")
+        package = Path(next(iter(spec.submodule_search_locations)))
+    expected = _jit_cache.resolve_jit_build_dir(package)
+    if expected is None or not _jit_cache.trusted_jit_build_dir(jit_build, expected):
         raise ValueError(f"invalid AITER jit/build path: {jit_build}")
 
 
@@ -88,46 +101,37 @@ def invalidate_aiter_jit_build(
     backup_dir: Path,
     backup_name: str,
 ) -> dict:
-    """Move one pod's stale AITER JIT cache aside before patched serving."""
+    """Invalidate build and all serving modules through the shared transaction."""
     if jit_build is None:
         return {"status": "skipped", "reason": "no jit_build_dir supplied"}
     assert_aiter_jit_build_allowed(jit_build)
     assert_backup_dir_allowed(backup_dir)
-    resolved = jit_build.resolve()
-    if not resolved.exists() or not any(resolved.iterdir()):
-        return {"status": "clean", "src": str(resolved)}
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / f"{backup_name}_jit_build"
-    assert_backup_path_allowed(backup)
-    if backup.exists():
-        raise ValueError(f"JIT backup already exists: {backup}")
-    shutil.move(str(resolved), str(backup))
-    return {
-        "status": "ok",
-        "src": str(resolved),
-        "backup_path": str(backup),
-    }
+    transaction_dir = backup_dir / backup_name
+    assert_backup_dir_allowed(transaction_dir)
+    result = _jit_cache.invalidate_jit_cache(jit_build.resolve(), transaction_dir)
+    if result.get("status") == "failed":
+        raise OSError(result["error"])
+    return result
 
 
 def restore_aiter_jit_build(record: dict) -> dict:
-    """Remove candidate JIT output and restore a pod's baseline cache."""
+    """Adapt shared restoration to the pod's exception and status contract."""
     if not isinstance(record, dict) or record.get("status") not in {"ok", "clean"}:
         return {"status": "skipped", "reason": "no JIT invalidation record"}
     src = Path(str(record.get("src") or ""))
     assert_aiter_jit_build_allowed(src)
-    if record.get("status") == "clean":
-        if src.exists():
-            shutil.rmtree(src)
-        return {"status": "restored_clean", "restored_to": str(src)}
-    backup = Path(str(record.get("backup_path") or ""))
-    assert_backup_path_allowed(backup)
-    if not backup.exists():
-        raise FileNotFoundError(f"JIT backup does not exist: {backup}")
-    if src.exists():
-        shutil.rmtree(src)
-    src.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(backup), str(src))
-    return {"status": "restored", "restored_to": str(src)}
+    for key in ("backup_path", "modules_backup_path"):
+        if record.get(key):
+            backup = Path(record[key])
+            assert_backup_path_allowed(backup)
+            if not backup.exists():
+                raise FileNotFoundError(f"JIT backup does not exist: {backup}")
+    result = _jit_cache.restore_jit_cache(record, src, resolve_kernel_backup_root())
+    if result.get("status") == "failed":
+        raise OSError(result["error"])
+    if result.get("status") == "ok":
+        result["status"] = "restored_clean" if record["status"] == "clean" else "restored"
+    return result
 
 
 def finalize_patch_records(records: list[dict]) -> dict:
@@ -144,9 +148,10 @@ def finalize_patch_records(records: list[dict]) -> dict:
                 deleted.append(str(backup))
         jit_record = record.get("jit_backup")
         if isinstance(jit_record, dict):
-            jit_backup = str(jit_record.get("backup_path") or "").strip()
-            if jit_backup:
-                jit_backups.add(jit_backup)
+            for key in ("backup_path", "modules_backup_path"):
+                jit_backup = str(jit_record.get(key) or "").strip()
+                if jit_backup:
+                    jit_backups.add(jit_backup)
     for backup_raw in sorted(jit_backups):
         backup = Path(backup_raw)
         assert_backup_path_allowed(backup)

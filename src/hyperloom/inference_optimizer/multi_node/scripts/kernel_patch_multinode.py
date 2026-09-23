@@ -211,7 +211,11 @@ def _do_apply(args: argparse.Namespace) -> int:
     Returns:
         int: ``0`` if every node applied successfully, otherwise ``1``.
     """
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    ray.init(
+        ignore_reinit_error=True,
+        log_to_driver=True,
+        runtime_env={"working_dir": str(_SCRIPT_DIR)},
+    )
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
     if not nodes:
@@ -311,7 +315,11 @@ def _do_revert(args: argparse.Namespace) -> int:
         int: ``0`` if every reachable host reverted successfully, otherwise
         ``1`` (including when ``backup_map_json`` is empty).
     """
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    ray.init(
+        ignore_reinit_error=True,
+        log_to_driver=True,
+        runtime_env={"working_dir": str(_SCRIPT_DIR)},
+    )
     try:
         records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
         backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
@@ -420,7 +428,11 @@ def _do_finalize(args: argparse.Namespace) -> int:
             + "\n"
         )
         return 1
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    ray.init(
+        ignore_reinit_error=True,
+        log_to_driver=True,
+        runtime_env={"working_dir": str(_SCRIPT_DIR)},
+    )
     by_host = {
         str(node.get("NodeManagerHostname") or ""): node["NodeID"]
         for node in _alive_nodes()
