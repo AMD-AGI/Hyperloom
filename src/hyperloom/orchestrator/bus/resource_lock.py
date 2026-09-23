@@ -300,7 +300,7 @@ class SqliteLeaseBackend:
             task_id=task_id,
             action=action,
             lanes=tuple(expanded),
-            acquired_at=now_iso,
+            acquired_at=stamp,
             expires_at=expires_iso,
         )
 
