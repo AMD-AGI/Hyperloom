@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,8 +22,6 @@ __all__ = [
 # Anthropic protocol, so the native x-api-key form leads and the gateway bearer token follows -- matching Hyperloom's
 # Claude paths, which order it the same way.
 _ANTHROPIC_KEY_ENVS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-
-log = logging.getLogger("kernelforge.llm")
 
 
 @dataclass
