@@ -441,7 +441,22 @@ class VllmMoeTritonTuner(BaseTuner):
             return "Model is not MoE"
         if self.ctx.profile.num_experts < 1:
             return "num_experts < 1"
+        # The sweep builds bf16 tensors and calls the unquantized fused_experts, and vLLM picks a tuned config by
+        # the dtype in its filename -- so a quantized model can only ever be served tile sizes measured on weights
+        # it does not run.
+        unmeasurable = self._unmeasurable_precision()
+        if unmeasurable:
+            return f"MoE Triton sweep measures bf16 only; {unmeasurable} is not tuned"
         return None
+
+    def _unmeasurable_precision(self) -> str:
+        """Name the requested quantization the bf16 sweep cannot stand in for, or an empty string."""
+        if self.ctx.precision == "fp8":
+            return "fp8"
+        for quant in ("awq", "gptq"):
+            if quant in self.ctx.quant_type:
+                return quant
+        return ""
 
     def run(self) -> TuneResult:
         profile = self.ctx.profile
@@ -532,14 +547,8 @@ class VllmMoeTritonTuner(BaseTuner):
         elif "mi355" in gpu_name.lower():
             gpu_name = "AMD_Instinct_MI355X"
 
-        # Determine dtype string
-        dtype_str = "bfloat16"
-        if self.ctx.precision == "fp8":
-            dtype_str = "fp8_w8a8"
-        elif "awq" in self.ctx.quant_type or "gptq" in self.ctx.quant_type:
-            dtype_str = "int8_w8a16"
-
-        config_filename = f"E={E},N={N},device_name={gpu_name},dtype={dtype_str}.json"
+        # The dtype in the name is what vLLM matches against, so it states the dtype the sweep benchmarked.
+        config_filename = f"E={E},N={N},device_name={gpu_name},dtype=bfloat16.json"
         config_path = tuned_configs_dir / config_filename
         config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
 
