@@ -254,6 +254,54 @@ def test_driver_preparation_options_are_forwarded(monkeypatch, tmp_path):
     assert captured["max_applyback_attempts"] == 3
 
 
+@pytest.mark.parametrize(("flags", "expected"), [([], False), (["--roofline-ceiling", "on"], True)])
+def test_the_roofline_ceiling_is_off_unless_asked_for_and_reaches_the_rewrite(monkeypatch, tmp_path, flags, expected):
+    """An estimate costs the OPTIMIZE budget a profiler pass and an analyst session, so it is opt-in here too."""
+    captured: dict = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", capture)
+    source = tmp_path / "softmax.py"
+    source.write_text("def softmax(x):\n    return x\n")
+    result = CliRunner().invoke(
+        main,
+        [
+            "forge-rewrite-by-flydsl",
+            "--source-kernel",
+            str(source),
+            "--driver",
+            str(tmp_path / "driver.py"),
+            "--logical-op-name",
+            "softmax",
+            "--workspace",
+            str(tmp_path),
+            "--experiments-dir",
+            str(tmp_path / "exp"),
+            *flags,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["roofline_ceiling"] is expected
+
+
+def test_the_rewrite_offers_the_same_roofline_switch_as_forge_loop():
+    """One switch, one vocabulary: a caller that knows forge-loop's knows this one."""
+
+    def switch(command):
+        return next(param for param in command.params if param.name == "roofline_ceiling")
+
+    rewrite = switch(main.commands["forge-rewrite-by-flydsl"])
+    loop = switch(main.commands["forge-loop"])
+
+    assert rewrite.opts == loop.opts == ["--roofline-ceiling"]
+    assert rewrite.default == loop.default == "off"
+    assert list(rewrite.type.choices) == list(loop.type.choices) == ["on", "off"]
+
+
 def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
     source = tmp_path / "softmax.py"
     source.write_text("def softmax(x):\n    return x\n")

@@ -200,6 +200,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline for PORT, OPTIMIZE and apply-back finalization. |
 | `--max-port-attempts <n>` | `3` | Correctness-only port sessions before giving up. |
 | `--profile-timeout-sec <s>` | `3600` | OPTIMIZE: ceiling for the complete Analysis Agent workflow. |
+| `--roofline-ceiling <on\|off>` | `off` | OPTIMIZE: passed unchanged to the nested `forge-loop`, where it means what `forge-loop --roofline-ceiling` means. `on` estimates the kernel's per-shape theoretical achievable latency once the loop's baseline is measured and steers its planner by the attainment against it; the estimate's profiler pass and analyst session are paid out of the OPTIMIZE budget. |
 | `--snr-threshold <dB>` | `30.0` | Correctness gate for the ported kernel. |
 
 ### Apply-back
