@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskNotFound
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -716,7 +716,10 @@ class ClosePhase(PhaseHandler):
         """Build + enqueue a Coordinator-internal ``report`` task (idempotency_key internal-report-<reason>)."""
         existing_id = (self.shared_state.closing_report_task_id or "").strip()
         if existing_id:
-            task = await self.tasks.get(existing_id)
+            try:
+                task = await self.tasks.get(existing_id)
+            except TaskNotFound:
+                task = None
             if task is not None and not _task_is_dead(task):
                 log.info(
                     "internal-report task already enqueued by wall-clock "
@@ -796,7 +799,11 @@ class ClosePhase(PhaseHandler):
         )
         state = _TASK_STATE_RUNNING
         while True:
-            state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
+            try:
+                state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
+            except TaskNotFound:
+                log.warning("CLOSE step %s: task_id=%s vanished while the sequencer waited for it", step, task.task_id)
+                return state
             if state != _TASK_STATE_RUNNING:
                 log.info(
                     "CLOSE step %s: task_id=%s finished as %s while the sequencer waited",
@@ -1016,8 +1023,6 @@ class ClosePhase(PhaseHandler):
         if not task_id:
             log.warning("closing_phase: no report task was enqueued; closing without waiting on one")
             return True
-        from ..state.task_registry import TaskNotFound
-
         try:
             task = await self.tasks.get(task_id)
         except TaskNotFound:

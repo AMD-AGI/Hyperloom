@@ -15,6 +15,7 @@ from hyperloom.common.coerce import to_float
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.attempt_ledger import record_patch_attempt
+from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
@@ -963,7 +964,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             # Look up original audit from the specialist task params if available.
             audit: dict[str, Any] = {}
             if specialist_task_id:
-                spec_task = await self.tasks.get(specialist_task_id)
+                try:
+                    spec_task = await self.tasks.get(specialist_task_id)
+                except TaskNotFound:
+                    spec_task = None
                 spec_params = dict(getattr(spec_task, "params", None) or {})
                 raw_audit = spec_params.get("framework_audit")
                 if isinstance(raw_audit, dict):
@@ -993,7 +997,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         gap_symptom = ""
         framework_name = str(getattr(state, "framework", "") or "").strip().lower()
         if specialist_task_id:
-            spec_task = await self.tasks.get(specialist_task_id)
+            try:
+                spec_task = await self.tasks.get(specialist_task_id)
+            except TaskNotFound:
+                spec_task = None
             spec_params = dict(getattr(spec_task, "params", None) or {})
             gap_cid = str(spec_params.get("gap_canonical_id") or "").strip()
             gap_symptom = str(spec_params.get("gap_symptom") or "").strip()
@@ -1851,7 +1858,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             old_sid = sid
             spec_params: dict[str, Any] = {}
             if sid:
-                spec_task = await self.tasks.get(sid)
+                try:
+                    spec_task = await self.tasks.get(sid)
+                except TaskNotFound:
+                    spec_task = None
                 spec_params = dict(getattr(spec_task, "params", None) or {})
             candidate = {
                 "candidate_id": str(
@@ -2117,7 +2127,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             task_id = str(payload.get("task_id") or "")
             if not task_id:
                 continue
-            integrate_task = await self.tasks.get(task_id)
+            try:
+                integrate_task = await self.tasks.get(task_id)
+            except TaskNotFound:
+                continue
             integrate_params = getattr(integrate_task, "params", None) or {}
             if str(integrate_params.get("specialist_task_id") or "") != specialist_task_id or not bool(
                 integrate_params.get("framework_agent_authoring")

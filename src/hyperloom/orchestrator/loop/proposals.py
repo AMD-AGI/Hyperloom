@@ -190,12 +190,15 @@ class ProposalsCollaborator:
         cache = getattr(self, "_local_recipe_cache", None)
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        row = (
-            self.recipe_kb.get_authoritative_recipe(
-                canonical_id=self._workload_canonical_id(),
+        try:
+            row = (
+                self.recipe_kb.get_authoritative_recipe(
+                    canonical_id=self._workload_canonical_id(),
+                )
+                or {}
             )
-            or {}
-        )
+        except Exception:  # noqa: BLE001 - the recipe store may be remote
+            row = {}
         self._coord._local_recipe_cache = (tick, row)
         return row
 

@@ -45,7 +45,7 @@ from ..state.optimization_journal import (
     JournalEntry,
 )
 from ..state.shared_state import resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES
+from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
@@ -2357,8 +2357,12 @@ class KernelPhase(PhaseHandler):
         tuner_name: str,
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
-        """Report whether the validated aiter CSV was reachable by the server."""
-        return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
+        """Report whether the validated aiter CSV was reachable by the server, or ``None`` when undetermined."""
+        try:
+            return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
+        except Exception:  # parses server logs and tuner CSVs whose format varies by aiter version
+            log.warning("tuned-config coverage failed for %s; treating it as undetermined", tuner_name, exc_info=True)
+            return None
 
     def _gemm_tuned_config_coverage_impl(
         self,
@@ -4113,7 +4117,10 @@ class KernelPhase(PhaseHandler):
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
             return
-        task = await self.tasks.get(pending)
+        try:
+            task = await self.tasks.get(pending)
+        except TaskNotFound:
+            task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
             return
         self.shared_state.auto_roofline_pending_task_id = ""

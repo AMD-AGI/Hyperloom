@@ -1281,8 +1281,10 @@ class IntentRouter:
             return
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
-        task = await self.tasks.get(task_id)
-        started = _parse_iso_unix(task.updated_at)
+        try:
+            started = _parse_iso_unix((await self.tasks.get(task_id)).updated_at)
+        except TaskNotFound:
+            started = 0.0
         if started > 0:
             running_sec = max(0.0, time.time() - started)
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.

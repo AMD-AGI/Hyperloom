@@ -50,7 +50,7 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskNotFound
 from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -1156,7 +1156,10 @@ class DispatcherCollaborator:
             if task_id in self._dead_holder_accounted:
                 continue
             self._dead_holder_accounted.add(task_id)
-            task = await self.tasks.get(task_id)
+            try:
+                task = await self.tasks.get(task_id)
+            except TaskNotFound:
+                continue
             await self._handle_unpromotable_result(
                 task,
                 {

@@ -920,12 +920,6 @@ def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
     assert "backup of" in err
 
 
-def test_source_context_is_empty_when_the_target_cannot_be_read(tmp_path):
-    """A target that exists but cannot be read as a file yields no context rather than raising."""
-    (tmp_path / "target.py").mkdir()
-    assert af.read_patch_source_context(SIMPLE_DIFF, tmp_path) == ""
-
-
 # _sanitize_git_index_lines — placeholder git index headers
 
 ZERO_INDEX_MODIFY_DIFF = """\

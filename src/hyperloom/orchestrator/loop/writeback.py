@@ -2709,7 +2709,10 @@ class WritebackCollaborator:
             if self.recipe_kb is not None:
                 cid = self._workload_canonical_id()
                 # Read exactly the local store's authority row.
-                existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+                try:
+                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+                except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
+                    log.info("recipe read failed (%s); finalize appends the current session only", exc)
                 existing_sessions: list[dict[str, Any]] = []
                 for row in existing_row.get("sessions") or []:
                     if not isinstance(row, dict):
@@ -2866,7 +2869,7 @@ class WritebackCollaborator:
                     "error": "; ".join(str(d) for d in ungrounded[:4]),
                 },
             )
-        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
+        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
             scores = await _scorer.score(

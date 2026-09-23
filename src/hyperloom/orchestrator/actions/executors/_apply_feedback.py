@@ -132,18 +132,10 @@ def source_context_for_file(
     window: int = 12,
     search_roots: "list[Path] | None" = None,
 ) -> str:
-    """Extract a source window centred on the first occurrence of *symbol*."""
-    return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
+    """Extract a source window centred on the first occurrence of *symbol*.
 
-
-def _source_context_for_file_impl(
-    filepath: str,
-    *,
-    symbol: str,
-    window: int,
-    search_roots: "list[Path] | None",
-) -> str:
-    """Implementation of :func:`source_context_for_file` (may raise)."""
+    Returns ``""`` when the file cannot be found or read.
+    """
     offending_file = filepath.strip()
     if not offending_file:
         return ""
@@ -163,7 +155,10 @@ def _source_context_for_file_impl(
     if target is None:
         return ""
 
-    file_lines = target.read_text(errors="replace").splitlines()
+    try:
+        file_lines = target.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
     hit = next((idx for idx, ln in enumerate(file_lines) if symbol in ln), 0) if symbol else 0
     return _numbered_window(target, file_lines, hit, window)
 
