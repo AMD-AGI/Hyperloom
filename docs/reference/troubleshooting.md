@@ -260,6 +260,60 @@ The installer is idempotent and re-installs only what's missing.
 
 ---
 
+## Codex turns stall or TraceLens roofline times out on network storage
+
+**Symptom**: With the OpenAI Codex backend (TraceLens roofline analysis, GEAK on
+Codex, or other multi-agent Codex turns), one or more of:
+
+* A roofline or TraceLens Codex stage hits its phase budget with no
+  `analysis.md` (or similar declared output).
+* Individual Codex turns take minutes even when the upstream LLM responds in
+  seconds.
+* Codex internal logs under the runtime tree report
+  `pool timed out while waiting for an open connection` or
+  `state db update_thread_metadata failed`.
+
+**Cause**: Codex persists rollout state in SQLite (WAL mode) under a private
+`CODEX_HOME` directory. Hyperloom places that tree under
+`$HYPERLOOM_RUNTIME_DIR` when set, otherwise under
+`$USER_DATA_PATH/runtime` by default. Many Slurm and dev containers keep
+`USER_DATA_PATH` on NFS or another network filesystem. NFS v3 mounts with
+`local_lock=none` (and some other network stores) do not provide the byte-range
+locking SQLite expects, so concurrent writers from the main agent and spawned
+sub-agents queue for minutes on the critical path (`persist_rollout_items`,
+stream handling, and turn teardown).
+
+**Fix**: Keep large session artifacts on the shared mount, but point runtime
+state at **node-local** fast disk before launching the optimizer:
+
+```bash
+export USER_DATA_PATH=/path/on/shared/storage/hyperloom-sessions
+export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime   # local SSD on the compute node
+mkdir -p "$HYPERLOOM_RUNTIME_DIR"
+chmod 700 "$HYPERLOOM_RUNTIME_DIR"
+# launch hyperloom.inference_optimizer.cli as usual
+```
+
+Use a per-session or per-job subdirectory under the local root when several
+runs can share one node concurrently (for example,
+`/var/lib/hyperloom/runtime-$SLURM_JOB_ID`).
+
+**Verify**:
+
+1. Confirm the runtime directory is not on NFS:
+   ```bash
+   df -T "$HYPERLOOM_RUNTIME_DIR"
+   ```
+2. After a Codex-heavy stage, check that Codex home was created under that path
+   (for example, `$HYPERLOOM_RUNTIME_DIR/.hyperloom-codex-home-*`) and that new
+   pool-timeout warnings no longer appear in the corresponding `logs_*.sqlite`
+   tables.
+
+See [Environment variables](environment-variables.md) for how
+`HYPERLOOM_RUNTIME_DIR` interacts with `USER_DATA_PATH`.
+
+---
+
 ## TraceLens root or CLI check fails
 
 **Symptom.** `trace_analyze` returns `TraceLens root not found`,

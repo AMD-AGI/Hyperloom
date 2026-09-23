@@ -84,6 +84,13 @@ If you only need long-term observability, the only file you must
 preserve is `session_breakdown.json` (1–10 MB; see
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md)).
 
+When `USER_DATA_PATH` must stay on a cluster-wide NFS or similar mount, keep
+session directories there but set `HYPERLOOM_RUNTIME_DIR` to node-local fast
+disk before launch if the OpenAI Codex backend is in use. Codex stores SQLite
+state under the runtime tree; network filesystems without reliable byte-range
+locking can stall multi-agent turns for minutes. See
+[Codex turns stall on network storage](troubleshooting.md#codex-turns-stall-or-tracelens-roofline-times-out-on-network-storage).
+
 ---
 
 ## Kubernetes layout
@@ -119,6 +126,9 @@ Notes:
   GPU labels; Ray currently expects all GPUs visible to the head.
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick state.json reads.
+  If session outputs must use shared storage and Codex is enabled, also mount
+  node-local disk for `HYPERLOOM_RUNTIME_DIR` (see the split-layout note under
+  [Storage for `USER_DATA_PATH`](#storage-for-user_data_path)).
   (`RWO` = ReadWriteOnce, a persistent volume (PV) access mode.)
 * LLM calls go directly to the configured upstream gateway; no in-pod
   auth-proxy Service or NetworkPolicy is required.
