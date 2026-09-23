@@ -8,11 +8,13 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import re
 import shutil
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -132,38 +134,56 @@ def _row_err_ratio(row: dict[str, str]) -> float | None:
     for col in _ERR_RATIO_COLUMNS:
         if col in row:
             try:
-                return float(row[col] or 0.0)
+                ratio = float(row[col])
             except (TypeError, ValueError):
                 return None
+            # NaN compares false against the limit, so an unrecorded figure would read as an accurate row.
+            return ratio if math.isfinite(ratio) else None
     return None
 
 
-def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class AccuracyFilter:
+    """Whether aiter's accuracy figures were applied to the artifact, and which rows they removed."""
+
+    completed: bool
+    dropped: list[dict[str, str]] = field(default_factory=list)
+    reason: str = ""
+
+
+def drop_inaccurate_rows(tuned_csv: Path) -> AccuracyFilter:
     """Remove rows aiter measured as numerically wrong, in place."""
     try:
         if not tuned_csv.is_file():
-            return []
+            return AccuracyFilter(completed=False, reason=f"{tuned_csv} does not exist")
         with tuned_csv.open("r", encoding="utf-8", errors="replace", newline="") as fh:
             rows = [r for r in csv.DictReader(fh) if r]
     except (OSError, csv.Error) as exc:
-        log.warning("accuracy filter could not read %s: %s", tuned_csv, exc)
-        return []
+        return AccuracyFilter(completed=False, reason=f"{tuned_csv} could not be read: {exc}")
     if not rows:
-        return []
+        return AccuracyFilter(completed=True)
     if not any(c in rows[0] for c in _ERR_RATIO_COLUMNS):
-        log.warning(
-            "%s has no accuracy column; deploying without the numerical filter (aiter schema drift?)",
-            tuned_csv,
+        return AccuracyFilter(
+            completed=False,
+            reason=f"{tuned_csv} carries no accuracy column (aiter schema drift?)",
         )
-        return []
 
     keep: list[dict[str, str]] = []
     dropped: list[dict[str, str]] = []
+    unmeasured: list[dict[str, str]] = []
     for row in rows:
         er = _row_err_ratio(row)
+        if er is None:
+            unmeasured.append(row)
         (dropped if er is not None and er > _MAX_ERR_RATIO else keep).append(row)
+    if unmeasured:
+        return AccuracyFilter(
+            completed=False,
+            dropped=dropped,
+            reason=f"{len(unmeasured)} row(s) in {tuned_csv} carry no readable accuracy figure",
+        )
     if not dropped:
-        return []
+        return AccuracyFilter(completed=True)
 
     # Write beside the artifact and rename over it.
     tmp = tuned_csv.with_name(tuned_csv.name + ".filtered.tmp")
@@ -174,18 +194,15 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
             writer.writerows(keep)
         os.replace(tmp, tuned_csv)
     except (OSError, csv.Error) as exc:
-        log.error(
-            "%d inaccurate row(s) could not be removed from %s (%s); the original "
-            "artifact is untouched and is NOT filtered",
-            len(dropped),
-            tuned_csv,
-            exc,
-        )
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             log.warning("could not remove the partial file %s", tmp)
-        return []
+        return AccuracyFilter(
+            completed=False,
+            dropped=dropped,
+            reason=f"{len(dropped)} inaccurate row(s) could not be removed from {tuned_csv}: {exc}",
+        )
 
     for row in dropped:
         log.error(
@@ -201,7 +218,7 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
             _row_err_ratio(row),
             _MAX_ERR_RATIO,
         )
-    return dropped
+    return AccuracyFilter(completed=True, dropped=dropped)
 
 
 def _demand_budget(ctx: TuneContext) -> int:
@@ -1053,7 +1070,16 @@ def run_aiter_dense_tuner(
 
     # improved=False carries two different meanings: "compared against a baseline and did not win", and "never had a
     # baseline to compare against".
-    dropped_inaccurate = drop_inaccurate_rows(Path(artifact))
+    accuracy = drop_inaccurate_rows(Path(artifact))
+    if not accuracy.completed:
+        # An unfiltered table is a table whose wrong rows are still in it, and this artifact is what gets deployed.
+        return TuneResult(
+            tuner_name=tuner_name,
+            status="failed",
+            error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
+            error_class="accuracy_filter_incomplete",
+        )
+    dropped_inaccurate = accuracy.dropped
     if dropped_inaccurate:
         shape_results = _forget_shapes_that_lost_their_row(shape_results, dropped_inaccurate)
 

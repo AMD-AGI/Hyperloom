@@ -307,16 +307,14 @@ def _create_tensors(M, dtype=torch.bfloat16):
 
 
 def benchmark_baseline(M, dtype=torch.bfloat16):
-    """Benchmark with vLLM default config (no override) as baseline."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for vLLM's default config, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts_default(hidden_states, w1, w2, topk_weights, topk_ids)
         except Exception as e:
             print(f"  [baseline warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -326,16 +324,14 @@ def benchmark_baseline(M, dtype=torch.bfloat16):
 
 
 def benchmark_config(M, config, dtype=torch.bfloat16):
-    """Benchmark a single Triton config for fused MoE at batch size M."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for one Triton config at batch size M, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, config)
         except Exception as e:
             print(f"  [warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -358,24 +354,31 @@ def main():
 
     for M in BATCH_SIZES:
         baseline_time = benchmark_baseline(M)
+        if baseline_time is None:
+            # Without the default config's own time there is nothing to be faster than, and dividing by a stand-in
+            # would report this shape as an unbounded win.
+            errors.append(f"M={{M}}: the default config did not benchmark")
+            print(f"M={{M}}: baseline did not benchmark; no config can be judged", file=sys.stderr)
+            torch.cuda.empty_cache()
+            continue
         print(f"M={{M}}: baseline={{baseline_time:.1f}}us", file=sys.stderr)
 
-        best_time = float("inf")
+        best_time = None
         best_config = None
 
         for config in CONFIGS:
             try:
                 elapsed = benchmark_config(M, config)
-                if elapsed < best_time:
-                    best_time = elapsed
-                    best_config = dict(config)
             except Exception as e:
                 if not errors:
                     errors.append(f"M={{M}}: {{type(e).__name__}}: {{e}}")
                 continue
+            if elapsed is not None and (best_time is None or elapsed < best_time):
+                best_time = elapsed
+                best_config = dict(config)
 
-        if best_config is not None:
-            speedup = baseline_time / best_time if best_time > 0 else 1.0
+        if best_config is not None and best_time > 0:
+            speedup = baseline_time / best_time
             shape_details.append({{
                 "M": M,
                 "baseline_us": round(baseline_time, 2),
@@ -389,7 +392,7 @@ def main():
                 print(f"M={{M}}: best={{best_time:.1f}}us speedup={{speedup:.3f}}x SKIP (not faster than default)", file=sys.stderr)
         else:
             if not errors:
-                errors.append(f"M={{M}}: all configs returned inf")
+                errors.append(f"M={{M}}: no config benchmarked")
 
         torch.cuda.empty_cache()
 
