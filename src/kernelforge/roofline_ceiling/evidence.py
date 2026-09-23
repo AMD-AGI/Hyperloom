@@ -10,10 +10,9 @@ the analyst session starts.
 The roofs are deliberately *not* settled here. The analyst measures them itself
 during its session, because getting a profiler onto an arbitrary image is
 open-ended work that code cannot enumerate, and because no measured figure is
-then written to any artifact this module owns. What it reports is validated
-against the vendor's published peaks in
-:func:`~kernelforge.roofline_ceiling.contract.build_hardware`, which rejects a
-roof no card could reach.
+then written to any artifact this module owns. Nothing checks the figures it
+reports: the contract reads the shape of the report and no more, so the
+derivation it publishes is the only place a misread profiler column is caught.
 
 Whether the roofs were measured or recalled is recorded by the analyst in the
 derivation it publishes. The gap between the two is not a fixed discount -- it
@@ -35,8 +34,9 @@ from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
-#: ``observed_ms`` was timed by this module, with a profiler attached.
-OBSERVED_PROFILED = "profiled"
+#: ``observed_ms`` came from one run of the performance command, made here
+#: with no profiler attached: a single sample per case, not a median.
+OBSERVED_SINGLE_RUN = "single_run"
 #: ``observed_ms`` was handed in by a caller that had already measured it
 #: without a profiler -- a campaign's own per-case medians.
 OBSERVED_CAMPAIGN = "campaign_median"
@@ -46,17 +46,15 @@ OBSERVED_CAMPAIGN = "campaign_median"
 class EvidenceBundle:
     """Everything the deterministic side settled for one ceiling run."""
 
-    #: Which machine this is, so the analyst measures and names the right one
-    #: and the contract can check its roofs against the right published peaks.
+    #: Which machine this is, so the analyst measures and names the right one.
     identity: DeviceIdentity
     artifacts_dir: Path
-    #: ``case_id -> latency`` the kernel was seen reaching, a sanity reference
-    #: for the analyst and the divisor of the report's overshoot check.
+    #: ``case_id -> latency`` the kernel was seen reaching: the analyst's
+    #: sanity reference, which no ceiling may exceed. Nothing here enforces it.
     observed_ms: dict[str, float] = field(default_factory=dict)
-    #: Which clock produced ``observed_ms``. A profiled figure is inflated by
-    #: the profiler and a campaign median is not, and the analyst is told which
-    #: it holds rather than left to assume.
-    observed_origin: str = OBSERVED_PROFILED
+    #: Which clock produced ``observed_ms``, so the analyst is told what it
+    #: holds rather than left to assume.
+    observed_origin: str = OBSERVED_SINGLE_RUN
     notes: tuple[str, ...] = ()
 
     def artifact_paths(self) -> list[str]:
@@ -222,8 +220,7 @@ def collect_evidence(
     ``known_case_ids`` and ``known_case_ms`` let a caller that has already
     benched the kernel skip the discovery run. A campaign has: it measured its
     pristine anchor over repeated runs before this is called, which is both a
-    better clock than one profiled pass and one fewer driver execution to pay
-    for.
+    better clock than a single run and one fewer driver execution to pay for.
     """
     artifacts = Path(artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -242,7 +239,7 @@ def collect_evidence(
             timeout_sec=run_timeout_sec,
             env=env,
         )
-        observed_origin = OBSERVED_PROFILED
+        observed_origin = OBSERVED_SINGLE_RUN
 
     trace_provenance = capture_kernel_trace(
         command=performance_command,
@@ -269,7 +266,7 @@ def collect_evidence(
 
 __all__ = [
     "OBSERVED_CAMPAIGN",
-    "OBSERVED_PROFILED",
+    "OBSERVED_SINGLE_RUN",
     "EvidenceBundle",
     "capture_kernel_trace",
     "collect_evidence",

@@ -179,7 +179,7 @@ def roofline_ceiling_command(
 
     The answer is an optimistic lower bound under hardware limits and legal
     algorithm constraints. It reports no attainment ratio: the only latency this
-    command has to divide by is one it timed under a profiler, and a campaign
+    command has to divide by is a single run of the benchmark, and a campaign
     measures attainment against its own per-case medians instead.
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)

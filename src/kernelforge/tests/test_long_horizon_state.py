@@ -247,6 +247,22 @@ def test_load_v19_migrates_without_a_recorded_search_start_score(tmp_path):
     assert migrated.search_start_mean_case_speedup is None
 
 
+def test_load_v20_migrates_without_a_recorded_ceiling(tmp_path):
+    """A v20 checkpoint recorded no ceiling, so a campaign resumed from it has none to read back."""
+    store = LoopStateStore(str(tmp_path))
+    payload = RunState().to_dict()
+    payload["schema_version"] = 20
+    payload.pop("ceiling_report_path")
+    root = tmp_path / "forge_experiments"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run_state.json").write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    assert migrated.schema_version == SCHEMA_VERSION
+    assert migrated.ceiling_report_path == ""
+
+
 def test_a_keep_clears_both_stall_counters():
     """One measured improvement ends the stall episode outright."""
     state = RunState()

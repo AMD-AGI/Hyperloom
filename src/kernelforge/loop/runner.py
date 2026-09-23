@@ -2530,17 +2530,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         return self.best_wall_ms <= self.ic.target_wall_ms
 
     async def _establish_ceiling(self) -> None:
-        """Estimate this kernel's per-shape ceiling once, before the first round.
+        """Estimate this kernel's per-shape ceiling once per campaign, before its first round.
 
-        Runs only when the caller supplied an estimator and no report is already
-        published: the estimate costs a profiler pass and an analyst session, it
-        does not change as the kernel is optimized -- the ceiling is a property
-        of the operator and the box, not of the current implementation -- and a
-        campaign that resumes has one on disk already.
+        Runs only when the caller supplied an estimator and named no report of
+        its own. The estimate costs a profiler pass and an analyst session, and
+        it must not change for the life of the campaign: the ceiling is a
+        property of the operator and the box, not of the current implementation,
+        and the stop rule divides by it, so a second estimate would move the
+        target between segments of one campaign. A resumed campaign therefore
+        reads back the ceiling its run state records instead of estimating.
 
         The case set and per-case latencies come from the baseline measured just
-        above, which is both a better clock than one profiled pass and one
-        driver run the estimator no longer has to pay for.
+        above, which is both a better clock than a single run and one driver run
+        the estimator no longer has to pay for.
 
         A failure here is reported and dropped. Without a ceiling the campaign
         simply has no attainment target and runs to its time budget, which is
@@ -2550,6 +2552,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             return
         scored = self._scored_case_ids()
         if not scored:
+            return
+        if self.resume and self._adopt_recorded_ceiling(scored):
             return
         anchor = self._best_case_times or self._baseline_case_times
         print("Estimating the roofline ceiling for this kernel...")
@@ -2565,6 +2569,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         self.ic.ceiling_report_path = str(outcome.report_path)
         self._ceiling_report = outcome.report
+        self._record_ceiling()
         for note in outcome.notes:
             print(f"  [roofline] {note}")
         standing = self._roofline_attainment()
@@ -2577,6 +2582,44 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [roofline] ceiling published ({outcome.source}); no attainment figure yet")
         for case_id, reason in sorted((standing.excluded if standing else {}).items()):
             print(f"  [roofline] {case_id}: {reason}")
+
+    def _adopt_recorded_ceiling(self, scored: list[str]) -> bool:
+        """Take back the ceiling this campaign estimated in an earlier session.
+
+        Returns whether one was adopted. A recorded report that can no longer be
+        read, or that has no figure for a scored case, is reported and estimated
+        again: the alternative is a campaign with no target for the rest of its
+        run, and the gate would refuse to rule on a partial one anyway.
+        """
+        path = str(self.run_state.ceiling_report_path or "").strip()
+        if not path:
+            return False
+        self.ic.ceiling_report_path = path
+        self._ceiling_report = _CEILING_UNLOADED
+        report = self._ceiling()
+        if report is None:
+            reason = "cannot be read back"
+        else:
+            missing = sorted(set(scored) - set(report.ideal_ms()))
+            reason = f"has no figure for {', '.join(missing)}" if missing else ""
+        if reason:
+            self.ic.ceiling_report_path = ""
+            self._ceiling_report = _CEILING_UNLOADED
+            print(f"  [roofline] the ceiling this campaign published at {path} {reason}, so estimating again")
+            return False
+        print(f"  [roofline] resumed with the ceiling this campaign published: {path}")
+        return True
+
+    def _record_ceiling(self) -> None:
+        """Checkpoint where this campaign's ceiling was published, for a resume to read back."""
+        try:
+            self.run_state.ceiling_report_path = str(self.ic.ceiling_report_path)
+            self.state_store.save(self.run_state)
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            self.persistence_degraded = True
+            self.persistence_errors.append("persist roofline ceiling path")
+            self.persistence_errors = self.persistence_errors[-10:]
+            log.warning("run_state: failed to persist the roofline ceiling path", exc_info=True)
 
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""

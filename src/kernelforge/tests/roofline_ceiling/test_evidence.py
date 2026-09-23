@@ -74,7 +74,7 @@ def test_a_driver_emitting_nothing_says_so_rather_than_returning_an_empty_succes
 
 
 def test_a_caller_that_already_benched_pays_for_no_discovery_run(tmp_path, monkeypatch):
-    """A campaign has better numbers than one profiled pass, and already has them."""
+    """A campaign has better numbers than a single run, and already has them."""
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("the driver was run to discover cases the caller already knew")
@@ -99,6 +99,27 @@ def test_a_caller_that_already_benched_pays_for_no_discovery_run(tmp_path, monke
     assert scored == ["a", "b"]
     assert bundle.observed_ms == {"a": 1.0, "b": 2.0}
     assert bundle.observed_origin == evidence_module.OBSERVED_CAMPAIGN
+
+
+def test_a_discovered_latency_is_labelled_as_the_single_unprofiled_run_it_is(tmp_path, monkeypatch):
+    """The trace run is the profiled one, and its timings are discarded; discovery runs bare."""
+    monkeypatch.setattr(evidence_module, "_run", lambda *a, **k: (0, "case_ms: a 1.0\n"))
+    monkeypatch.setattr(evidence_module, "capture_kernel_trace", lambda **_k: {"captured": False, "detail": "stub"})
+    monkeypatch.setattr(
+        evidence_module,
+        "resolve_identity",
+        lambda _arch="": DeviceIdentity(arch="gfx950", device_name="AMD Instinct MI355X"),
+    )
+
+    bundle, scored = evidence_module.collect_evidence(
+        performance_command=["true"],
+        workdir=tmp_path,
+        artifacts_dir=tmp_path / "ev",
+        arch="gfx950",
+    )
+
+    assert scored == ["a"]
+    assert bundle.observed_origin == evidence_module.OBSERVED_SINGLE_RUN
 
 
 def test_the_bundle_carries_no_roofs_because_the_analyst_measures_them(tmp_path, monkeypatch):

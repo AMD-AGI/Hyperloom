@@ -17,6 +17,7 @@ from kernelforge import cli as cli_module
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
+from kernelforge.loop.run_state import RunState
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
@@ -42,6 +43,8 @@ def _loop(
     target: float = 0.0,
     case_times: dict[str, float] | None = None,
     estimator=None,
+    resume: bool = False,
+    run_state: RunState | None = None,
 ) -> IterationLoop:
     loop = IterationLoop(
         IterationConfig(
@@ -52,10 +55,15 @@ def _loop(
         ),
         tracker=object(),
         config=object(),
+        resume=resume,
         ceiling_estimator=estimator,
     )
     loop._baseline_case_times = dict(case_times or {"decode-t1": 40.0})
     loop._best_case_times = dict(loop._baseline_case_times)
+    # ``_run_locked`` loads both before it reaches the ceiling; these stand in for it.
+    loop.run_state = run_state or RunState()
+    loop.saved_states = []
+    loop.state_store = SimpleNamespace(save=lambda state: loop.saved_states.append(state.ceiling_report_path))
     return loop
 
 
@@ -288,18 +296,76 @@ def test_the_campaign_estimates_its_ceiling_from_the_baseline_it_measured(tmp_pa
     assert seen["case_ms"] == {"decode-t1": 40.0}
     assert loop.ic.ceiling_report_path == str(published)
     assert loop._roofline_attainment().mean == pytest.approx(0.32)
+    # Checkpointed, so a resume of this campaign reads it back instead of estimating.
+    assert loop.run_state.ceiling_report_path == str(published)
+    assert loop.saved_states == [str(published)]
 
 
-def test_a_ceiling_already_published_is_not_estimated_again(tmp_path):
+def _estimator_that_counts(published, calls):
+    async def estimator(**_kwargs):
+        calls.append(1)
+        return SimpleNamespace(report=_report(), report_path=published, source="analyst", notes=())
+
+    return estimator
+
+
+def test_a_resumed_campaign_reads_back_the_ceiling_it_recorded(tmp_path):
+    """``compute`` on ``--resume``: the path the CLI hands over is empty, so the run state is what decides."""
     path = _publish(_report(), tmp_path)
 
     async def estimator(**_kwargs):
-        raise AssertionError("an estimate was paid for twice")
+        raise AssertionError("a resumed campaign paid for a second estimate")
 
-    loop = _loop(str(path), estimator=estimator)
+    loop = _loop(estimator=estimator, resume=True, run_state=RunState(ceiling_report_path=str(path)))
     asyncio.run(loop._establish_ceiling())
 
     assert loop.ic.ceiling_report_path == str(path)
+    assert loop._roofline_attainment().mean == pytest.approx(0.32)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_a_report_this_campaign_did_not_record_is_never_adopted(tmp_path, resume):
+    """A report sitting in the workspace may belong to another run, on another box."""
+    leftover = _publish(_report((("decode-t1", 1.0),)), tmp_path / "leftover")
+    published = _publish(_report(), tmp_path / "fresh")
+    calls = []
+
+    loop = _loop(estimator=_estimator_that_counts(published, calls), resume=resume)
+    asyncio.run(loop._establish_ceiling())
+
+    assert calls == [1]
+    assert loop.ic.ceiling_report_path == str(published) != str(leftover)
+
+
+def test_a_recorded_ceiling_without_every_scored_case_is_estimated_again(tmp_path):
+    partial = _publish(_report((("prefill-t16", 3.0),)), tmp_path / "partial")
+    published = _publish(_report(), tmp_path / "fresh")
+    calls = []
+
+    loop = _loop(
+        estimator=_estimator_that_counts(published, calls),
+        resume=True,
+        run_state=RunState(ceiling_report_path=str(partial)),
+    )
+    asyncio.run(loop._establish_ceiling())
+
+    assert calls == [1]
+    assert loop.run_state.ceiling_report_path == str(published)
+
+
+def test_a_recorded_ceiling_that_cannot_be_read_is_estimated_again(tmp_path, capsys):
+    published = _publish(_report(), tmp_path / "fresh")
+    calls = []
+
+    loop = _loop(
+        estimator=_estimator_that_counts(published, calls),
+        resume=True,
+        run_state=RunState(ceiling_report_path=str(tmp_path / "gone.json")),
+    )
+    asyncio.run(loop._establish_ceiling())
+
+    assert calls == [1]
+    assert "cannot be read back" in capsys.readouterr().out
 
 
 def test_an_estimate_that_fails_costs_the_target_not_the_campaign(tmp_path, capsys):

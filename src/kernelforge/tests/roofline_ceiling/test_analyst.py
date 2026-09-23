@@ -170,6 +170,9 @@ def test_the_request_hands_over_the_evidence_it_collected(tmp_path):
     assert request["observed_ms"] == {"c0": 40.0}
     assert "back-solved" in request["observed_ms_meaning"]
     assert "none may exceed it" in request["observed_ms_meaning"]
+    # Told it is inflated, the analyst would loosen the one bound it has, toward a kernel that reads as done.
+    assert "no profiler attached" in request["observed_ms_meaning"]
+    assert "inflated by" not in request["observed_ms_meaning"]
 
 
 # --- the session ---------------------------------------------------------------

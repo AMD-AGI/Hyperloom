@@ -398,13 +398,13 @@ A campaign can also estimate its own, with `forge-loop --roofline-ceiling
 compute`. That path is the cheaper one: the ceiling is derived once the baseline
 has already fixed the scored case set and measured each case over repeated runs,
 so it needs no discovery pass of its own and its sanity reference is the
-campaign's clock rather than a profiled one. Run this command standalone when
+campaign's median rather than a single run. Run this command standalone when
 you want the ceiling before committing a campaign's budget to the kernel.
 
 This command reports no attainment ratio. It has no baseline to divide by
-except the pass it timed under a profiler, and that figure is inflated by the
-profiler; a campaign measures its own attainment against its own per-case
-medians instead. See `--roofline-target` under `forge-loop`.
+except a single run of the benchmark; a campaign measures its own attainment
+against its own per-case medians, taken over repeated runs of the kernel it is
+currently keeping. See `--roofline-target` under `forge-loop`.
 
 The estimate is an agent's, composition included, because no table covers MoE
 routing, paged attention, fusion legality or occupancy derating for an arbitrary
