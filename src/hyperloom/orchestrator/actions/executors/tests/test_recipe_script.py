@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._recipe_script import (
+    RecipeLeverUnavailableError,
     recipe_launch_contract,
     resolve_launch_server_script,
 )
@@ -96,3 +100,52 @@ def test_an_unresolvable_recipe_constrains_nothing(tmp_path):
 
     assert reads_extra_args is True
     assert overwritten == frozenset()
+
+
+def _variant_yaml(tmp_path: Path, root: Path, variant) -> dict:
+    """Materialize one grid variant against the sink-less recipe."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _grid_runner
+
+    bench = {
+        "benchmark_script": "dsv41flash.sh",
+        "framework": "vllm",
+        "model": "/m",
+        "inferencex_path": str(root),
+        "envs": {},
+    }
+    base = tmp_path / "base.yaml"
+    base.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+    out = _grid_runner._build_variant_yaml(
+        base, "", variant, output_subdir=tmp_path / "out", model_path="/m", benchmark_script="dsv41flash.sh"
+    )
+    return yaml.safe_load(Path(out).read_text(encoding="utf-8"))["benchmark"]["envs"]
+
+
+def test_a_variant_arg_the_recipe_cannot_carry_is_refused(tmp_path):
+    """The grid path composes its own args, so the base-config guard never sees them."""
+    root = _checkout(tmp_path, "dsv41flash.sh", _AGENTIC_RECIPE)
+    variant = GridVariant(name="v1", extra_server_args="--enable-torch-compile")
+
+    with pytest.raises(RecipeLeverUnavailableError):
+        _variant_yaml(tmp_path, root, variant)
+
+
+def test_a_variant_env_the_recipe_overwrites_is_dropped(tmp_path):
+    root = _checkout(tmp_path, "dsv41flash.sh", _AGENTIC_RECIPE)
+    variant = GridVariant(name="v1", extra_envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_SOMETHING_ELSE": "1"})
+
+    envs = _variant_yaml(tmp_path, root, variant)
+
+    assert "VLLM_ROCM_USE_AITER" not in envs
+    assert envs["VLLM_SOMETHING_ELSE"] == "1"
+
+
+def test_the_refusal_is_graded_as_an_integration_fault():
+    """A patch that was never benchmarked must not burn the gate's verdict quota."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    result = {"status": "reverted", "error_class": "recipe_lever_unavailable"}
+
+    assert SharedState._is_integrate_fault(result) is True

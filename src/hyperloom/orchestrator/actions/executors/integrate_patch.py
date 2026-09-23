@@ -109,9 +109,9 @@ from ._grid_variant_filter import (
     apply_user_skip_list,
     resolve_skip_spec,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
-    RecipeLeverUnavailableError,
     default_baseline_config,
     materialize_config_with_envs,
 )

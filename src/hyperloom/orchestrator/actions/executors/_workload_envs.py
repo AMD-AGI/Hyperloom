@@ -69,7 +69,7 @@ from ._grid_server_args import (
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import recipe_launch_contract
+from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -909,15 +909,6 @@ class FrameworkScriptMismatchError(ValueError):
 
     Subclasses ValueError so callers can catch it specifically and turn it
     into a structured action failure instead of an uncaught exception.
-    """
-
-
-class RecipeLeverUnavailableError(ValueError):
-    """Raised when the recipe cannot carry a lever the variant depends on.
-
-    Measuring such a variant produces a precise re-run of the baseline under
-    the variant's name, which no downstream reader can tell apart from a
-    change that simply had no effect.
     """
 
 

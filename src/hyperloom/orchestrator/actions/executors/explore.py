@@ -86,9 +86,9 @@ from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
-    RecipeLeverUnavailableError,
     default_baseline_config,
     materialize_config_with_envs,
 )

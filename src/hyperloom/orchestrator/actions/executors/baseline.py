@@ -92,11 +92,11 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
-    RecipeLeverUnavailableError,
     agentx_active,
     default_baseline_config,
     materialize_config_with_envs,

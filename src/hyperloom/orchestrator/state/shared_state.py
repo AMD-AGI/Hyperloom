@@ -299,6 +299,8 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
         "framework_script_mismatch",
+        # The recipe cannot carry the lever, so the patch was never benchmarked.
+        "recipe_lever_unavailable",
         "bench_exception",
         "subtask_exception",
         "handler_exception",

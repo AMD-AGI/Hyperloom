@@ -29,6 +29,15 @@ _POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
 _AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 
 
+class RecipeLeverUnavailableError(ValueError):
+    """Raised when the recipe cannot carry a lever the variant depends on.
+
+    Measuring such a variant produces a precise re-run of the baseline under
+    the variant's name, which no downstream reader can tell apart from a
+    change that simply had no effect.
+    """
+
+
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
@@ -103,4 +112,4 @@ def recipe_launch_contract(bench: Mapping[str, Any]) -> tuple[bool, frozenset[st
     return reads_extra_args, frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
 
 
-__all__ = ["recipe_launch_contract", "resolve_launch_server_script"]
+__all__ = ["RecipeLeverUnavailableError", "recipe_launch_contract", "resolve_launch_server_script"]
