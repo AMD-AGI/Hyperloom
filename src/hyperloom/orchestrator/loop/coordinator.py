@@ -78,6 +78,7 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from ..trace.trajectory_trace import (
     EVENT_LLM_CALL,
     EVENT_SESSION,
@@ -675,6 +676,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
@@ -1895,6 +1897,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 call_id=call_id,
                 attributes={"name": agent_name, "model": getattr(backend, "model", None)},
             ) as call_span:
+                record_prompt_snapshot(
+                    self._prompt_snapshots.observe(agent_name, prompt=prompt, system_prompt=sys_prompt, tools=tools)
+                )
                 result: BackendTurnResult = await backend.run(
                     prompt=prompt,
                     system_prompt=sys_prompt,

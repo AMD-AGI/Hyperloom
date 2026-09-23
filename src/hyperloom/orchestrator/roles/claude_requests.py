@@ -18,8 +18,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..trace.context_events import COMPACT_BOUNDARY, compaction_attributes
 from ..trace.tool_events import tool_attributes, tool_status
 from ..trace.trajectory_trace import (
+    EVENT_CONTEXT_COMPACTION,
     EVENT_LLM_REQUEST,
     EVENT_TOOL,
     STATUS_COMPLETED,
@@ -45,6 +47,10 @@ def _usage_counts(usage: Any) -> dict[str, int]:
     if not isinstance(usage, dict):
         return {}
     return {key: safe_int(usage.get(key)) for key in _USAGE_KEYS if usage.get(key) is not None}
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _iso(epoch_s: float) -> str:
@@ -97,6 +103,7 @@ class ClaudeRequestTracker:
         self._requests: list[_Request] = []
         self._by_id: dict[str, _Request] = {}
         self._tools: dict[str, _Tool] = {}
+        self._compactions: list[tuple[float, Any]] = []
 
     def observe(self, message: Any) -> None:
         """Account one SDK message."""
@@ -109,6 +116,8 @@ class ClaudeRequestTracker:
         elif kind == "UserMessage":
             self._boundary = self._clock()
             self._on_tool_results(message, self._boundary)
+        elif kind == "SystemMessage" and getattr(message, "subtype", None) == COMPACT_BOUNDARY:
+            self._compactions.append((self._clock(), getattr(message, "data", None)))
 
     def _on_tool_uses(self, message: Any) -> None:
         blocks = _blocks(message, "ToolUseBlock")
@@ -150,16 +159,16 @@ class ClaudeRequestTracker:
         event_type = event.get("type")
         now = self._clock()
         if event_type == "message_start":
-            message = event.get("message") if isinstance(event.get("message"), dict) else {}
-            request = _Request(
+            message = _mapping(event.get("message"))
+            started = _Request(
                 message_id=message.get("id"),
                 model=message.get("model"),
                 start=self._boundary,
                 timing_source=TIMING_STREAM,
             )
-            request.usage.update(_usage_counts(message.get("usage")))
-            self._open[parent] = request
-            self._remember(request)
+            started.usage.update(_usage_counts(message.get("usage")))
+            self._open[parent] = started
+            self._remember(started)
             return
         request = self._open.get(parent)
         if request is None:
@@ -168,8 +177,7 @@ class ClaudeRequestTracker:
             request.first_token = now
         elif event_type == "message_delta":
             request.usage.update(_usage_counts(event.get("usage")))
-            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
-            request.stop_reason = delta.get("stop_reason") or request.stop_reason
+            request.stop_reason = _mapping(event.get("delta")).get("stop_reason") or request.stop_reason
         elif event_type == "message_stop":
             request.end = now
             self._open.pop(parent, None)
@@ -217,7 +225,7 @@ class ClaudeRequestTracker:
         return out
 
     def record_trajectory(self, *, attempt: int, fallback_model: str | None) -> None:
-        """Append one ``llm.request`` row per request and one ``tool`` row per tool call under it.
+        """Append one ``llm.request`` row per request, one ``tool`` row per tool call, and each context compaction.
 
         A no-op outside a trajectory scope; a tool whose result never arrived closes ``cancelled`` at the attempt end.
         """
@@ -252,6 +260,12 @@ class ClaudeRequestTracker:
                     attempt=attempt,
                 ),
                 **context,
+            )
+        for at, data in self._compactions:
+            record_event(
+                EVENT_CONTEXT_COMPACTION,
+                ts=_iso(at),
+                attributes={**compaction_attributes(data), "attempt": attempt},
             )
 
 

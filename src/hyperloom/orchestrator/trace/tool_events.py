@@ -101,7 +101,9 @@ def stream_json_tool_events(log_path: str | Path) -> list[dict[str, Any]]:
                 if not isinstance(obj, dict) or obj.get("type") not in ("assistant", "user"):
                     continue
                 message = obj.get("message")
-                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
                 if not isinstance(content, list):
                     continue
                 for block in content:

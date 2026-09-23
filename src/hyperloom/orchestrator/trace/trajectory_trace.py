@@ -58,6 +58,8 @@ EVENT_PROPOSAL = "proposal"
 EVENT_TASK = "task"
 EVENT_TASK_RETRY = "task.retry"
 EVENT_TOOL = "tool"
+EVENT_PROMPT_SNAPSHOT = "prompt.snapshot"
+EVENT_CONTEXT_COMPACTION = "context.compaction"
 VALID_EVENT_TYPES: frozenset[str] = frozenset(
     {
         EVENT_SESSION,
@@ -69,6 +71,8 @@ VALID_EVENT_TYPES: frozenset[str] = frozenset(
         EVENT_TASK,
         EVENT_TASK_RETRY,
         EVENT_TOOL,
+        EVENT_PROMPT_SNAPSHOT,
+        EVENT_CONTEXT_COMPACTION,
     }
 )
 
@@ -182,7 +186,8 @@ def _jsonable_attributes(attributes: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     if not isinstance(attributes, dict):
         raise TrajectoryRowError(f"trajectory attributes must be a dict; got {type(attributes).__name__}")
-    return json.loads(json.dumps(attributes, default=str, sort_keys=True))
+    roundtrip: dict[str, Any] = json.loads(json.dumps(attributes, default=str, sort_keys=True))
+    return roundtrip
 
 
 def _resolved_phase_tick(ctx: TrajectoryContext) -> tuple[str | None, int | None]:
@@ -396,10 +401,12 @@ def load_events(session_dir: Path) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "EVENT_CONTEXT_COMPACTION",
     "EVENT_INTENT",
     "EVENT_LLM_CALL",
     "EVENT_LLM_REQUEST",
     "EVENT_PHASE",
+    "EVENT_PROMPT_SNAPSHOT",
     "EVENT_PROPOSAL",
     "EVENT_SESSION",
     "EVENT_TASK",

@@ -60,8 +60,7 @@ def span_openings(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, dict[st
 def span_name(row: dict[str, Any]) -> str:
     """``<event_type>`` or ``<event_type>:<attributes.name>`` when the event names itself."""
     event_type = str(row.get("event_type") or "event")
-    attributes = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
-    label = str(attributes.get("name") or "").strip()
+    label = str(_attributes_of(row).get("name") or "").strip()
     return f"{event_type}:{label}" if label else event_type
 
 
