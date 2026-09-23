@@ -11,10 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors.baseline import (
+    restore_warm_kernel_snapshots,
+    revert_warm_kernel_patches,
+)
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
+from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 
 
@@ -25,7 +30,6 @@ class _StubPrelude:
     _parse_diff_target = staticmethod(PreludePhase._parse_diff_target)
     _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
-    _revert_warm_kernel_patches = staticmethod(PreludePhase._revert_warm_kernel_patches)
     _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
@@ -326,7 +330,7 @@ def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     assert (live / "pkg/a.py").read_text(encoding="utf-8") == "new-a\n"
     assert (live / "pkg/b.py").read_text(encoding="utf-8") == "new-b\n"
 
-    rollback = PreludePhase._revert_warm_kernel_patches(
+    rollback = revert_warm_kernel_patches(
         [applied],
         [snapshot],
     )
@@ -376,6 +380,7 @@ async def test_one_shot_save_failure_stops_before_kernel_apply(
 @pytest.mark.asyncio
 async def test_prepared_state_save_failure_rolls_back_kernel_set(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "serving/kernel.py"
     target.parent.mkdir(parents=True)
@@ -396,10 +401,12 @@ async def test_prepared_state_save_failure_rolls_back_kernel_set(
             raise OSError("state unavailable")
 
     stub.shared_state.save = _save
-    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda applied, snapshots=None: (
             rollbacks.append((list(applied), list(snapshots or []))) or {"ok": True, "errors": []}
-        )
+        ),
     )
 
     outcome = await stub._prepare_warm_kernel_kb()
@@ -493,7 +500,10 @@ async def test_set_is_staged_without_a_separate_rebaseline(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
+async def test_prepared_set_waits_for_combined_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     target = tmp_path / "serving" / "kernel.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("old", encoding="utf-8")
@@ -504,11 +514,13 @@ async def test_prepared_set_waits_for_combined_verdict(tmp_path: Path) -> None:
     )
     stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     reverted: list[list[dict]] = []
-    stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {
             "ok": not bool(reverted.append(applied)),
             "errors": [],
-        }
+        },
     )
 
     outcome = await stub._prepare_warm_kernel_kb()
@@ -543,7 +555,7 @@ async def test_kernel_snapshot_is_durable_before_first_mutation(
     with pytest.raises(SystemExit, match="crash window"):
         await stub._prepare_warm_kernel_kb()
 
-    restored = PreludePhase._restore_warm_kernel_snapshots(stub.shared_state.warm_replay_pending["kernel_snapshots"])
+    restored = restore_warm_kernel_snapshots(stub.shared_state.warm_replay_pending["kernel_snapshots"])
     assert restored["ok"] is True
     assert target.read_text() == "old"
 

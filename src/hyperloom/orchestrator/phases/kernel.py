@@ -3337,7 +3337,7 @@ class KernelPhase(PhaseHandler):
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..kernel.request_handlers import integrate_handler
-        from ..loop.writeback import _integrate_measurement_fields
+        from ..measurement.integrate_performance import integrate_measurement_fields
         from hyperloom.common.model_paths import resolve_session_model_path
 
         backend = str(result.get("backend") or "geak").strip().lower()
@@ -3652,7 +3652,7 @@ class KernelPhase(PhaseHandler):
                         "candidate_extra_server_args": extra_server_args,
                         "extra_envs": dict(env),
                         "source_phase": "KERNEL_AGENT",
-                        **_integrate_measurement_fields(measurement),
+                        **integrate_measurement_fields(measurement),
                     },
                     entry_extra={
                         "tuned_file": tuned_file,

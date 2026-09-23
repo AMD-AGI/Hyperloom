@@ -13,7 +13,9 @@ import subprocess
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
+from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 
 
@@ -1387,7 +1389,7 @@ def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
     existing.write_text("patched\n", encoding="utf-8")
     created.write_text("new\n", encoding="utf-8")
 
-    result = coord.phase_prelude._restore_warm_kernel_snapshots(snapshots)
+    result = restore_warm_kernel_snapshots(snapshots)
 
     assert result == {"ok": True, "errors": []}
     assert existing.read_text(encoding="utf-8") == "original\n"
@@ -1880,7 +1882,7 @@ async def test_dirty_kernel_preparation_stops_recipe_enqueue(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
+async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     applied = [{"manifest_path": "/tmp/m"}]
     snapshots = [{"target": "/tmp/kernel.py"}]
@@ -1902,10 +1904,12 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda got_applied, got_snapshots=None: (
             rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
-        )
+        ),
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
 
@@ -1920,6 +1924,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
 @pytest.mark.asyncio
 async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
     tmp_path,
+    monkeypatch,
 ):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_pending = {
@@ -1939,8 +1944,10 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
         raise RuntimeError("registry unavailable")
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda *_args: {"ok": False, "errors": ["restore failed"]}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
 
@@ -1968,8 +1975,10 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
     coord.shared_state.warm_replay_pending = {
         "recipe_patch_target": "/repo",
@@ -2224,8 +2233,10 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
 
@@ -2414,19 +2425,19 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
 
 def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     """A pip-installed framework has no manifest; its backups are the way back."""
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-
     restored: list[list] = []
     monkeypatch.setattr(
-        baseline_module,
+        prelude_mod,
         "_revert_warm_patch_state",
         lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
             restored.append(nogit_backups) or {"ok": True, "errors": []}
         ),
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
     backups = [{"target": "vllm/fp8.py", "backup": "/tmp/0000.bin"}]
 
@@ -2449,11 +2460,13 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     assert restored == [backups]
 
 
-def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path):
+def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path, monkeypatch):
     """An overlay already present is applied as a no-op, so there is nothing to undo."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
 
     outcome = coord.phase_prelude._rollback_combined_warm(
@@ -2517,8 +2530,10 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
 
     outcome = coord.phase_prelude._rollback_combined_warm(

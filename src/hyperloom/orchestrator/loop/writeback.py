@@ -97,6 +97,7 @@ from ..actions.executors._accuracy_gate import (
 )
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
+from ..measurement.integrate_performance import integrate_measurement_fields
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -198,31 +199,6 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     not read back out what the caller already resolved.
     """
     return {**measurement, "output_throughput": float(output_tput)}
-
-
-def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
-
-    return {
-        **graded_axes_of(measurement),
-        **{
-            key: measurement[key]
-            for key in (
-                "ttft_mean_ms",
-                "e2el_mean_ms",
-                "tpot_mean_ms",
-                "workspace",
-                "raw_result_path",
-                "report_path",
-                "materialized_config",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            )
-            if key in measurement
-        },
-    }
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -1007,7 +983,7 @@ class WritebackCollaborator:
             "candidate_extra_server_args": result.get("extra_server_args"),
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
             "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-            **_integrate_measurement_fields(measurement),
+            **integrate_measurement_fields(measurement),
         }
         if is_fusion:
             variant["provenance"] = "forge_fusion"
@@ -4780,7 +4756,7 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(new_tput),
-                **_integrate_measurement_fields(measurement),
+                **integrate_measurement_fields(measurement),
                 "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
                 # Durable source-layer handles so current_best stays relaunchable
