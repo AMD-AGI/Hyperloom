@@ -536,15 +536,25 @@ def run(
             emit_result_json(report_dict)
             raise SystemExit(2)
 
-    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. 0 means
-    # no ceiling was supplied.
-    if max_tuners > 0 and len(tuner_specs) > max_tuners:
-        log.info(
-            "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
-            max_tuners,
-            ", ".join(spec.name for spec in tuner_specs[max_tuners:]),
-        )
-        tuner_specs = tuner_specs[:max_tuners]
+    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. A
+    # tuner the router skipped books no time, so it is not what the share buys: it keeps its place in the plan for
+    # its skip reason but never displaces a tuner that could have run. 0 means no ceiling was supplied.
+    if max_tuners > 0:
+        kept = []
+        dropped = []
+        runnable_so_far = 0
+        for spec in tuner_specs:
+            if spec.should_run:
+                runnable_so_far += 1
+            over_ceiling = spec.should_run and runnable_so_far > max_tuners
+            (dropped if over_ceiling else kept).append(spec)
+        if dropped:
+            log.info(
+                "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
+                max_tuners,
+                ", ".join(spec.name for spec in dropped),
+            )
+        tuner_specs = kept
 
     # Write plan
     plan = {

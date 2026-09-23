@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Triton MoE search space and the precisions it may claim to have tuned."""
+"""Tests for the Triton MoE search space and the precision its written config claims to have tuned."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.tuners import vllm_moe_triton as mt
@@ -84,7 +82,7 @@ class TestBlockSizeK256:
         assert any(c["BLOCK_SIZE_K"] == 256 for c in grid_only)
 
 
-def _moe_ctx(tmp_path, **overrides) -> TuneContext:
+def _moe_ctx(tmp_path) -> TuneContext:
     profile = ModelProfile(
         model_path="/fake",
         hidden_size=4096,
@@ -96,7 +94,7 @@ def _moe_ctx(tmp_path, **overrides) -> TuneContext:
         num_experts=128,
         num_experts_per_tok=8,
     )
-    base = dict(
+    return TuneContext(
         profile=profile,
         framework="vllm",
         precision="bf16",
@@ -112,27 +110,14 @@ def _moe_ctx(tmp_path, **overrides) -> TuneContext:
         min_improvement_pct=1.0,
         timeout_s=60,
     )
-    base.update(overrides)
-    return TuneContext(**base)
 
 
-class TestOnlyTheMeasuredPrecisionIsTuned:
-    """vLLM loads a tuned config by the dtype in its filename, so the name is a claim about the measurement."""
+class TestTheConfigNameStatesTheMeasuredDtype:
+    """vLLM loads a tuned config by the dtype in its filename, so the name is a claim about the measurement.
 
-    def test_an_unquantized_moe_is_tuned(self, tmp_path):
-        assert mt.VllmMoeTritonTuner(_moe_ctx(tmp_path)).validate() is None
-
-    @pytest.mark.parametrize(
-        ("overrides", "named"),
-        [
-            ({"precision": "fp8"}, "fp8"),
-            ({"quant_type": "awq"}, "awq"),
-            ({"quant_type": "gptq_marlin"}, "gptq"),
-        ],
-    )
-    def test_a_quantized_moe_is_refused_rather_than_tuned_in_bf16(self, tmp_path, overrides, named):
-        error = mt.VllmMoeTritonTuner(_moe_ctx(tmp_path, **overrides)).validate()
-        assert error and named in error
+    Which precisions may be swept at all is the router's decision (see
+    ``test_router.TestOnlyTheMeasuredPrecisionIsTuned``); the tuner only has to name what it measured.
+    """
 
     def test_the_written_config_is_named_for_the_dtype_that_was_benchmarked(self, tmp_path, monkeypatch):
         tuner = mt.VllmMoeTritonTuner(_moe_ctx(tmp_path))

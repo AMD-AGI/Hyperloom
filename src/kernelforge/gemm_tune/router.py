@@ -527,6 +527,22 @@ def _dense_bf16_is_dispatched(
     return precision in ("bf16", "fp16") and quant_type == "none"
 
 
+def _unmeasurable_moe_triton_precision(precision: str, quant_type: str) -> str:
+    """Name the quantization the bf16-only vLLM Triton MoE sweep cannot stand in for, or an empty string.
+
+    The sweep builds bf16 tensors and calls the unquantized fused_experts, and vLLM picks a tuned config by the dtype
+    in its filename -- so a quantized deployment would only ever be offered tile sizes measured on weights it does not
+    run. ``quant_type`` is the resolved one, so a model whose checkpoint declares AWQ/GPTQ is caught even when the
+    caller passed ``--quant-type auto``.
+    """
+    if precision == "fp8":
+        return "fp8"
+    for quant in ("awq", "gptq"):
+        if quant in quant_type:
+            return quant
+    return ""
+
+
 def _select_vllm_tuners(
     profile: ModelProfile,
     precision: str,
@@ -538,7 +554,18 @@ def _select_vllm_tuners(
     tuners: list[TunerSpec] = []
 
     if profile.is_moe:
-        tuners.append(TunerSpec("vllm_moe_triton", priority=10, estimated_minutes=30))
+        unmeasurable = _unmeasurable_moe_triton_precision(precision, quant_type)
+        if unmeasurable:
+            tuners.append(
+                TunerSpec(
+                    "vllm_moe_triton",
+                    skip_reason=f"MoE Triton sweep measures bf16 only; {unmeasurable} is not tuned",
+                    priority=10,
+                    estimated_minutes=0,
+                )
+            )
+        else:
+            tuners.append(TunerSpec("vllm_moe_triton", priority=10, estimated_minutes=30))
 
     # Dense GEMM via TunableOp
     if has_tunableop_input or has_shapes_json:

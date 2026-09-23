@@ -441,22 +441,7 @@ class VllmMoeTritonTuner(BaseTuner):
             return "Model is not MoE"
         if self.ctx.profile.num_experts < 1:
             return "num_experts < 1"
-        # The sweep builds bf16 tensors and calls the unquantized fused_experts, and vLLM picks a tuned config by
-        # the dtype in its filename -- so a quantized model can only ever be served tile sizes measured on weights
-        # it does not run.
-        unmeasurable = self._unmeasurable_precision()
-        if unmeasurable:
-            return f"MoE Triton sweep measures bf16 only; {unmeasurable} is not tuned"
         return None
-
-    def _unmeasurable_precision(self) -> str:
-        """Name the requested quantization the bf16 sweep cannot stand in for, or an empty string."""
-        if self.ctx.precision == "fp8":
-            return "fp8"
-        for quant in ("awq", "gptq"):
-            if quant in self.ctx.quant_type:
-                return quant
-        return ""
 
     def run(self) -> TuneResult:
         profile = self.ctx.profile
