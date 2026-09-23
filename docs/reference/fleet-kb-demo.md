@@ -26,6 +26,13 @@ The process also needs `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
 
 ## Worker launch
 
+Install the matching Hyperloom-KB demo branch in the worker environment:
+
+```bash
+python3 -m pip install \
+  "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
+```
+
 When Slack starts Hyperloom over SSH, inject:
 
 ```bash
