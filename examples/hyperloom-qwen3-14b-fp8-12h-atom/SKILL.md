@@ -5,8 +5,9 @@ description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM 
 
 # Hyperloom Qwen3-14B-FP8 12h Run (ATOM Framework)
 
-Read `.env` and resolve `HYPERLOOM_SKILL_PATH`. Follow `@${HYPERLOOM_SKILL_PATH}`;
-if unset, use `@hyperloom/inference_optimizer/SKILL.md` (wheel installation) or
+Load `.env` with the execution-shell preamble below and resolve
+`HYPERLOOM_SKILL_PATH`. Follow `@${HYPERLOOM_SKILL_PATH}`; if unset, use
+`@hyperloom/inference_optimizer/SKILL.md` (wheel installation) or
 `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This ATOM variant
 uses the same workload and phase budgets as the
 [12h SGLang/vLLM example](../hyperloom-qwen3-14b-fp8-12h/SKILL.md).
@@ -29,46 +30,23 @@ matching entry below; both entries use the same Environment and Launch steps.
 
 ### Execution shell
 
-Keep `USER_DATA_PATH` unchanged. If the parent shell marks it `readonly`, export
-it and run all subsequent environment/setup/runtime/launch blocks together in a
-new non-login Bash process:
+In the chosen Hyperloom workspace, use the shared loader with caller exports
+taking precedence. Repeat this preamble in each new execution shell, including
+inside Docker, with the selected `HYPERLOOM_RUN_MODE` exported. Keep
+`USER_DATA_PATH` unchanged; the loader handles readonly roots and Docker's host
+Python isolation without a new shell.
 
 ```bash
-export USER_DATA_PATH
-bash --noprofile --norc
-```
-
-For non-interactive execution, feed those blocks to this process as a script or
-heredoc. A `( ... )` subshell retains readonly attributes and is not a substitute.
-Do not unset the isolation root or copy the child's environment back to the parent.
-
-In the chosen workspace, load `.env` with caller exports taking precedence.
-Repeat this preamble in each new execution shell, before both setup and runtime
-loading, with the selected `HYPERLOOM_RUN_MODE` exported. In Docker, a mounted
-`.env` may contain the host's `PYTHON`, `VIRTUAL_ENV`, and
-`INFERENCE_OPTIMIZER_FORCE_PYTHON`: keep only values already set in this shell,
-including empty values, rather than filling those gaps from `.env`. An explicit
-Python pin remains authoritative even if invalid; otherwise activate the existing
-container environment or use its `python3` from PATH. Baremetal still fills gaps
-from `.env` as usual.
-
-```bash
+set -e
 export REPO_ROOT="$(pwd -P)"
-# .env fills gaps; existing non-empty exports remain authoritative.
-_dotenv_prev="$(export -p | grep -v -e '=\"\"$' -e "=''\$")"
-if [ "${HYPERLOOM_RUN_MODE:-}" = docker ]; then
-  for _atom_name in PYTHON VIRTUAL_ENV INFERENCE_OPTIMIZER_FORCE_PYTHON; do
-    if [ "${!_atom_name+x}" = x ]; then
-      _dotenv_prev+=$'\n'"$(declare -p "$_atom_name")"
-    else
-      _dotenv_prev+=$'\n'"unset $_atom_name"
-    fi
-  done
-  unset _atom_name
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
 fi
-set -a; [ ! -f "${REPO_ROOT}/.env" ] || . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export FRAMEWORK=atom
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 ```
 
 ### Baremetal
@@ -89,8 +67,8 @@ Only after the user selects `HYPERLOOM_RUN_MODE=docker`: use the approved
 create containers or run setup/optimize on a login host. Reuse completed setup
 only in the actual execution environment, not a different host Python.
 
-The recorded MI355X environment used `docker.io/rocm/atom-dev:v0.1.7-rc0`; preserve
-an explicit `HYPERLOOM_IMAGE`. Other GPU/build combinations need validation.
+Suggested MI355X image: `docker.io/rocm/atom-dev:v0.1.7-rc0`; preserve an explicit
+`HYPERLOOM_IMAGE`. Choose an image compatible with the target GPU.
 After approval, mount the workspace at the same absolute path. Add matching
 mounts for `USER_DATA_PATH` and any model directory outside the workspace:
 
@@ -133,9 +111,9 @@ docker exec -i -w "$REPO_ROOT" "${_atom_container_env[@]}" \
 ```
 
 Inside that shell, repeat the [execution-shell preamble](#execution-shell), then
-run Environment, Runtime Install, and Launch Requirements below. A new
-`docker exec` shell needs those selections and runtime loading again. Stop this
-session's container only with approval after the run finishes.
+run Environment, Runtime Install, and Launch Requirements below. Repeat the
+preamble and Python selection for each new `docker exec` shell. Stop this session's
+container only with approval after the run finishes.
 
 ### Prior workload cleanup (required)
 
@@ -176,62 +154,22 @@ GEAK's unproven ATOM rewrite-seam support and obtain the operator's choice befor
 continuing; do not silently clear or replace it. There is no backend CLI flag.
 
 Forge is included in Hyperloom; do not clone it or set `FORGE_PATH`. Preserve the
-selected agent provider and `FORGE_AGENT_CLI`; verify the executable after loading
-runtime. Persist `FRAMEWORK=atom` in `.env` only when requested, and never add a
-backend key merely to reproduce the CLI default.
+selected agent provider and `FORGE_AGENT_CLI`; startup preflight validates the
+selected Claude CLI when applicable. Persist `FRAMEWORK=atom` in `.env` only when
+requested, and never add a backend key merely to reproduce the CLI default.
 
 ### Selected Python and Setup
 
-Use the existing ATOM venv or an explicit `PYTHON`; do not create a fresh venv or
-require `/opt/venv`. Run this check before setup and repeat it after loading runtime:
+Activate the existing ATOM venv or select an explicit `PYTHON`; otherwise use
+`python3` from PATH. Do not create a fresh venv or require `/opt/venv`.
 
 ```bash
-set -e
-PYTHON="${PYTHON:-$(command -v python3)}"
-PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
-export PYTHON
+export PYTHON="${PYTHON:-$(command -v python3)}"
 export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-_atom_venv="$("$PYTHON" -c 'import sys; print(sys.prefix if sys.prefix != sys.base_prefix else "")')"
-if [ -n "$_atom_venv" ]; then
-  export VIRTUAL_ENV="$_atom_venv"
-elif [ -n "${VIRTUAL_ENV:-}" ]; then
-  printf '%s\n' 'Deactivate the unrelated venv before selecting a non-venv Python.' >&2
-  exit 1
-fi
-unset _atom_venv
-export PATH="$(dirname "$PYTHON"):$PATH"
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
-"$PYTHON" - <<'PY'
-import os
-import sys
-from pathlib import Path
-
-import atom
-import torch
-
-vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
-if vllm_root and Path(vllm_root).resolve() != Path(sys.prefix).resolve():
-    raise SystemExit(
-        f"VLLM_VENV_ROOT={vllm_root} conflicts with the selected ATOM Python prefix {sys.prefix}. "
-        "Preflight would prepend its bin directory; ask the operator to reconcile this setting."
-    )
-print(f"Python: {sys.executable}")
-print(f"ATOM: {atom.__file__}")
-print(f"torch: {torch.__version__}; HIP: {torch.version.hip}")
-if not torch.version.hip:
-    raise SystemExit("ATOM requires a ROCm torch build in the selected Python environment")
-PY
-# Magpie launches the server with python3 from PATH.
-[ "$(python3 -c 'import sys; print(sys.prefix)')" = "$("$PYTHON" -c 'import sys; print(sys.prefix)')" ]
-"$PYTHON" -m atom.entrypoints.openai_server --help > /dev/null
 ```
 
-Stop on failed imports, prefix conflicts or CLI help; do not bypass checks or
-silently switch environments. The recorded ATOM build needed a fix for `%` in
-argparse help text. If affected, obtain approval to repair it or select a corrected
-build; vendor repair is not an automatic example step.
-
-Verify even when setup previously completed:
+Setup checks the selected Python, ROCm torch and ATOM import/server readiness.
+Run its read-only check even when setup previously completed:
 
 ```bash
 "$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
@@ -290,99 +228,30 @@ dependencies and may start services. If shell and setup-written `.env` disagree
 on `USER_DATA_PATH`, reconcile the selected root first: the installer treats
 setup's `.env` as authoritative. Never silently replace the artifact root.
 
+Use the execution-shell preamble and selected Python above, then run:
+
 ```bash
-set -e
-: "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+: "${USER_DATA_PATH:?USER_DATA_PATH missing}" "${PYTHON:?Select the existing ATOM Python first}"
 export USER_DATA_PATH
-export PYTHON="${PYTHON:?Select the existing ATOM Python first}"
-export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-export PATH="$(dirname "$PYTHON"):$PATH"
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
-if [ ! -f "$INSTALL_SH" ]; then
-  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
-fi
 bash "$INSTALL_SH"
 ```
 
-### Load runtime environment
-
-Run this before every launch, including an approved resume. In a new shell,
-repeat the execution-shell preamble and Selected Python steps first. Keep all
-steps in that shell; do not source generated env files in a readonly parent.
-
-```bash
-set -e
-_atom_python="${PYTHON:?Select the existing ATOM Python first}"
-_atom_user_data="${USER_DATA_PATH:?USER_DATA_PATH missing}"
-_atom_backend="${KERNEL_OPT_BACKEND_ORDER:-}"
-. "$_atom_user_data/runtime/kernel-agent.env.sh"
-export PYTHON="$_atom_python" USER_DATA_PATH="$_atom_user_data"
-export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-export PATH="$(dirname "$PYTHON"):$PATH"
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
-export FRAMEWORK=atom
-export KERNEL_OPT_BACKEND_ORDER="$_atom_backend"
-unset _atom_python _atom_user_data _atom_backend
-printf 'framework: %s  kernel backend: %s\n' "$FRAMEWORK" "${KERNEL_OPT_BACKEND_ORDER:-<CLI default: forge>}"
-```
-
-Repeat the full [Selected Python](#selected-python-and-setup) check now, including
-`VLLM_VENV_ROOT`, PATH and server help, then check Forge CLI readiness below.
-
-### Forge CLI readiness
-
-Use Forge's actual provider/executable resolvers. This checks the local CLI only,
-not API credentials or gateway availability; it never starts an agent.
-
-```bash
-set -e
-"$PYTHON" - <<'PY'
-import subprocess
-
-from hyperloom.common.env import env_str
-from kernelforge.config import Config
-
-if env_str("KERNEL_OPT_BACKEND_ORDER").lower() in {"", "forge"}:
-    runtime = Config.from_env().agent_runtime()
-    if runtime.provider == "claude":
-        from kernelforge.agent_backends.claude import resolve_claude_cli
-
-        executable = resolve_claude_cli(runtime.executable)
-        try:
-            result = subprocess.run(
-                [executable, "--version"], capture_output=True, text=True,
-                timeout=10, check=True,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise SystemExit(
-                f"Forge Claude CLI is not ready: {executable}: {exc}. "
-                "Request approval to repair it or set FORGE_AGENT_CLI to a working executable."
-            ) from exc
-        version = (result.stdout + "\n" + result.stderr).strip()
-        if "claude" not in version.lower():
-            raise SystemExit(f"Forge Claude CLI returned an unexpected version: {executable}")
-        print(f"Forge Claude CLI ready: {executable}")
-    else:
-        print(f"Forge agent backend: {runtime.provider}; Claude CLI check not applicable")
-PY
-```
-
-Stop on failure; obtain approval to repair a CLI or change providers. Installing
-`claude_agent_sdk` or finding its bundled CLI alone is not a successful check.
+For every launch, including resume, the optimizer loads `kernel-agent.env.sh`
+in process. Startup preflight checks the selected framework and validates the
+selected Claude CLI when applicable. Do not source the generated runtime file in
+the shell. Readiness failures require diagnosis and approval for repairs, not a provider switch.
 
 ## Launch Requirements
 
 Use the packaged optimizer skill's **Launch a New Optimization** instructions to
 prepare `RUN_LOG`, `PID_FILE`, `LAUNCH_INFO_FILE` and run-scoped metadata in this
-execution environment. Reuse the ATOM environment loaded above; do not replay a
-generic dotenv/runtime block that would replace those selections.
+execution environment. Keep the selected ATOM Python and backend for launch.
 
 ### First launch
 
-After setup, runtime loading and readiness checks, use this complete command for
-both modes. Do not replace workload flags with environment-only settings or add
+After setup and runtime preparation, use this complete command for both modes.
+Do not replace workload flags with environment-only settings or add
 `--no-framework-agent` / `--no-kernel`:
 
 ```bash
@@ -411,8 +280,8 @@ second launcher or watchdog for baremetal.
 
 After the first launch, never start another fresh `optimize` to recover a failed
 run. Diagnose it, obtain explicit approval, and pass `--resume-from "$SESSION_DIR"`
-for that same session instead of a new model launch. Reload the selected ATOM
-runtime and readiness checks, retain phase fractions `.43/.42`, and follow IR-1
+for that same session instead of a new model launch. Repeat the execution-shell
+preamble and Python selection, retain phase fractions `.43/.42`, and follow IR-1
 for any remaining ATOM workers before relaunching. Do not assume resume rewrites
 launch-info: verify the current process and session state rather than using an old
 PID. A final `stop_reason` ends the run; do not automatically restart it.
@@ -435,15 +304,5 @@ Expect `atom` and the approved backend (`forge` by default). Report mismatches
 without silently replacing the session. On requested checks report process state,
 phase, accepted throughput/gain and the latest business outcome, not just heartbeats.
 
-At completion, verify and report:
-
-- throughput and full accuracy evidence, distinguishing warmup from measurement;
-- Profile's actual serving configuration/trace, not a stale path or declared flag;
-- actual kernel application/loading and finite outputs, not an unchecked PASS label;
-- sweep point/pair coverage and what its baseline arm compares;
-- CLOSE/report status, skipped or failed substeps, and this session's process/GPU release.
-
-An exit code of zero, task `succeeded`, or a report file alone does not establish
-all of these. Recorded direct-run evidence included an approved resume and manual
-repairs to generated numerical checks, with final profiling/reporting gaps; it is
-not an unattended-run guarantee or a Docker-versus-baremetal performance claim.
+At completion, report final throughput/gain and accuracy evidence, the final
+report path, stop reason, incomplete phases, and this session's process/GPU state.
