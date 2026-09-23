@@ -501,7 +501,8 @@ def test_shared_state_phase_fields_default_to_empty():
 
 def test_record_phase_transition_writes_row_and_updates_phase():
     s = SharedState()
-    row = s.record_phase_transition(
+    row = phase_state.record_phase_transition(
+        s,
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={"trigger": "fresh_session"},
@@ -514,7 +515,8 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
     # History is append-only.
-    row2 = s.record_phase_transition(
+    row2 = phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={"baseline_tput": 100.0},
@@ -529,14 +531,16 @@ def test_record_phase_transition_writes_row_and_updates_phase():
 
 def test_explore_elapsed_accumulates_completed_and_live_segments():
     s = SharedState()
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="phase_entered",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=100.0,
     )
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase="KERNEL_AGENT",
         reason="optimize_no_more_leverage",
         evidence={},
@@ -546,7 +550,8 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
     assert s.explore_elapsed_accum_s == 120.0
     assert phase_state.explore_elapsed_seconds(s, now_unix=300.0) == 120.0
 
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="sweep_reloop",
         evidence={},
@@ -592,7 +597,8 @@ def test_legacy_resume_keeps_explore_runtime_unknown():
     assert "explore_elapsed_s" not in summary
     assert "explore_ratio" not in summary
 
-    s.record_phase_transition(
+    phase_state.record_phase_transition(
+        s,
         to_phase="KERNEL_AGENT",
         reason="optimize_no_more_leverage",
         evidence={},
@@ -622,7 +628,8 @@ def _make_role_registry():
 
 def test_policy_gate_phase_strict_allows_in_phase_action():
     state = SharedState()
-    state.record_phase_transition(
+    phase_state.record_phase_transition(
+        state,
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={},

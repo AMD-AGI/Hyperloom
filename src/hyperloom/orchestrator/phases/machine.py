@@ -71,7 +71,8 @@ class MachinePhase(PhaseHandler):
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
         # Fresh start; pre-phase-machine resume state is treated as fresh.
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "fresh_session"},
@@ -89,7 +90,8 @@ class MachinePhase(PhaseHandler):
             "reopening at PRELUDE so the new budget can be spent on the work "
             "the earlier leg stopped short of."
         )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "resumed_from_close"},
@@ -295,14 +297,16 @@ class MachinePhase(PhaseHandler):
                     "detail": f"kind not allowed in {target}; re-dispatch if still needed",
                 },
             )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=target,
             reason=reason,
             evidence=evidence,
         )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
-        state.record_lifecycle_event(
+        _phase_state.record_lifecycle_event(
+            state,
             step=target,
             status=_phase_state.LIFECYCLE_STATUS_ENTER,
             phase=target,

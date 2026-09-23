@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -1178,7 +1179,8 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
-    coord.shared_state.record_phase_transition(
+    machine_state.record_phase_transition(
+        coord.shared_state,
         to_phase="SWEEP",
         reason="plateau_kernel",
         evidence={"trigger": "test_e2e"},

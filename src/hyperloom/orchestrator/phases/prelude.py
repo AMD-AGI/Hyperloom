@@ -203,7 +203,8 @@ class PreludePhase(PhaseHandler):
         appended to it afterwards reaches ``state`` and never the breakdown --
         where a refused arm then reads identically to one never considered.
         """
-        self.shared_state.append_phase_history_event(
+        _phase_state.append_phase_history_event(
+            self.shared_state,
             reason=PRELUDE_ARM_DROPPED,
             evidence={"arm": arm, **evidence},
         )

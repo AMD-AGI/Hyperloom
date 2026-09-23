@@ -43,10 +43,26 @@ def _as_float(value: Any) -> float:
 
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ...policy import gate as _m
+        """Render the most recent PolicyGate denials for prompt injection.
 
-        return _m.to_policy_denial_summary(self, top_k=top_k)
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
+        if not self.policy_denial_history:
+            return ""
+        rows = list(self.policy_denial_history)[-top_k:]
+        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
+        for r in rows:
+            lines.append(
+                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
+                f"rule={r.get('rule')!r} streak={r.get('streak')} "
+                f"hint={str(r.get('hint') or '')[:140]!r}"
+            )
+        return "\n".join(lines)
 
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""

@@ -498,18 +498,20 @@ def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tm
 
 def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close(tmp_path):
     """A resume clears the reason in state, but the old CLOSE row stays in ``phase_history``."""
+    from hyperloom.orchestrator.phases import machine_state
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     now = datetime.now(timezone.utc)
     state = SharedState.load_or_init(tmp_path)
     state.session_id = "sess-1178"
-    state.record_phase_transition(
+    machine_state.record_phase_transition(
+        state,
         to_phase="CLOSE",
         reason="time_exhausted",
         ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
     )
     state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
-    state.record_phase_transition(to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)

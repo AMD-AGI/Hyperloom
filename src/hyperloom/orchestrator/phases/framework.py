@@ -1457,7 +1457,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             if advisory:
                 log.warning("FRAMEWORK advisory: %s", advisory)
 
-            state.append_phase_history_event(
+            _phase_state.append_phase_history_event(
+                state,
                 reason=reason,
                 evidence={
                     "event": "framework_agent_phase_done",

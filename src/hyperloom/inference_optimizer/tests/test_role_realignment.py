@@ -144,7 +144,8 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     # both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     phase = _ps.PHASE_FRAMEWORK_AGENT
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
@@ -163,8 +164,11 @@ def test_shared_state_phase_status_summary_renders_compact_block():
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
+    from hyperloom.orchestrator.phases import machine_state as _ps
+
     s = SharedState(max_minutes=0)
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},

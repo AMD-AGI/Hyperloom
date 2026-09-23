@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
+from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
@@ -547,7 +548,8 @@ class RooflineExecutor:
         # Emit a paired START so the auto-roofline path (which bypasses Coordinator._handle_request) does not show a
         # lone END.
         try:
-            self.shared_state.record_lifecycle_event(
+            record_lifecycle_event(
+                self.shared_state,
                 step="roofline",
                 status="START",
                 detail="auto-roofline: profile + TraceLens",
@@ -1448,7 +1450,8 @@ class RooflineExecutor:
         # The auto-roofline TraceLens run does NOT pass through Coordinator._handle_request, so emit its lifecycle
         # event here.
         try:
-            self.shared_state.record_lifecycle_event(
+            record_lifecycle_event(
+                self.shared_state,
                 step="roofline",
                 status="END",
                 artifacts={

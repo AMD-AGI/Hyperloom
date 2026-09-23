@@ -1419,24 +1419,63 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ..policy import gate as _m
+        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
 
-        return _m.record_policy_denial(
-            self,
-            action_name=action_name,
-            rule=rule,
-            hint=hint,
-            intent_type=intent_type,
-            tick=tick,
-            intent_payload=intent_payload,
-        )
+        Records a capped rolling history entry and increments the
+        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
+
+        Args:
+            action_name (str): The action the denied intent targeted (empty
+                is normalized to ``"*"`` in the streak key).
+            rule (str): The PolicyGate rule id that fired.
+            hint (str): Human-readable remediation hint surfaced to the LLM.
+            intent_type (str): The denied intent's type.
+            tick (int): The Coordinator tick at which the denial occurred.
+            intent_payload (dict[str, Any] | None): Optional intent payload;
+                when present, its sorted keys are recorded for context.
+
+        Returns:
+            int: The new consecutive-denial streak value for this
+                (action, rule) pair.
+        """
+        key = f"{action_name or '*'}:{rule}"
+        streak = int(self.policy_denial_streak.get(key, 0)) + 1
+        self.policy_denial_streak[key] = streak
+        entry = {
+            "tick": int(tick),
+            "action_name": action_name or "",
+            "rule": rule,
+            "hint": hint or "",
+            "intent_type": intent_type,
+            "streak": streak,
+            "ts": now_iso(),
+        }
+        if intent_payload:
+            entry["intent_payload_keys"] = sorted(intent_payload.keys())
+        history = list(self.policy_denial_history or [])
+        history.append(entry)
+        if len(history) > self._POLICY_DENIAL_HISTORY_CAP:
+            history = history[-self._POLICY_DENIAL_HISTORY_CAP :]
+        self.policy_denial_history = history
+        return streak
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ..policy import gate as _m
+        """Clear all consecutive-denial streaks for a given action.
 
-        return _m.reset_policy_denial_streak(self, action_name)
+        Drops every ``policy_denial_streak`` entry whose key begins with
+        ``"<action_name>:"`` — called when the action finally succeeds so a
+        later denial starts a fresh streak.
+
+        Args:
+            action_name (str): The action whose streaks should be reset; a
+                falsy value is a no-op.
+        """
+        if not action_name:
+            return
+        prefix = f"{action_name}:"
+        self.policy_denial_streak = {
+            k: v for k, v in (self.policy_denial_streak or {}).items() if not k.startswith(prefix)
+        }
 
     # stop_reason ENUM validator
     def set_stop_reason(
@@ -1508,42 +1547,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_discarded_escalate_hint_ts = now_iso()
         return hint
 
-    # phase machine writer (Coordinator-only, single writer)
-    def record_phase_transition(
-        self,
-        *,
-        to_phase: str,
-        reason: str,
-        evidence: dict[str, Any] | None = None,
-        ts: str | None = None,
-        ts_unix: float | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.record_phase_transition(
-            self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix
-        )
-
-    def append_phase_history_event(
-        self,
-        *,
-        reason: str,
-        evidence: dict[str, Any] | None = None,
-        ts: str | None = None,
-        ts_unix: float | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.append_phase_history_event(
-            self,
-            reason=reason,
-            evidence=evidence,
-            ts=ts,
-            ts_unix=ts_unix,
-        )
-
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` (\"\" when none)."""
         snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
@@ -1588,33 +1591,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             self.clear_bottleneck_switch()
             return True
         return False
-
-    def record_lifecycle_event(
-        self,
-        *,
-        step: str,
-        status: str,
-        phase: str | None = None,
-        label: str | None = None,
-        artifacts: dict[str, str] | None = None,
-        detail: str = "",
-        duration_s: float | None = None,
-        ts: str | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.record_lifecycle_event(
-            self,
-            step=step,
-            status=status,
-            phase=phase,
-            label=label,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
-            ts=ts,
-        )
 
     def merge_lifecycle_events(self, incoming: Any) -> None:
         """Union ``incoming`` lifecycle rows into this state, ordered by timestamp."""

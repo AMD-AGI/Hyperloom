@@ -48,7 +48,8 @@ def _kernel_state() -> SharedState:
 
 
 def _enter(state: SharedState, phase: str, at_unix: float) -> None:
-    state.record_phase_transition(
+    ps.record_phase_transition(
+        state,
         to_phase=phase,
         reason="phase_entered",
         evidence={},

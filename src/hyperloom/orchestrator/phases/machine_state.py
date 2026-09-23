@@ -1825,7 +1825,6 @@ def compute_next_phase(
     return None
 
 
-# phase_history helper (shape used by SharedState.record_phase_transition)
 def make_history_row(
     *,
     from_phase: str,
