@@ -17,10 +17,7 @@ from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuil
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
-from hyperloom.orchestrator.enablement.build import (
-    _derive_gpu_arch,
-    _repo_matches_targeted_build_component,
-)
+from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -64,29 +61,6 @@ def coord(build_coord):
     )
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
-
-
-# _derive_gpu_arch
-
-
-def test_derive_gpu_arch_mi355x():
-    assert _derive_gpu_arch("mi355x") == "gfx950"
-
-
-def test_derive_gpu_arch_mi300x():
-    assert _derive_gpu_arch("mi300x") == "gfx942"
-
-
-def test_derive_gpu_arch_unknown():
-    assert _derive_gpu_arch("unknown_gpu") == ""
-
-
-def test_derive_gpu_arch_empty():
-    assert _derive_gpu_arch("") == ""
-
-
-def test_derive_gpu_arch_case_insensitive():
-    assert _derive_gpu_arch("MI355X") == "gfx950"
 
 
 def test_targeted_build_repo_match_ignores_origin():

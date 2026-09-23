@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+import pytest
+
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES, gfx_arch_for_gpu_type
 from hyperloom.inference_optimizer.gpu_types import (
     _AMD_GPU_TYPES,
     _PRODUCT_TAGS,
@@ -66,3 +68,24 @@ def test_a_tag_never_precedes_one_it_is_a_prefix_of():
     for i, tag in enumerate(_PRODUCT_TAGS):
         for later in _PRODUCT_TAGS[i + 1 :]:
             assert not later.startswith(tag), f"{tag} shadows {later}"
+
+
+def test_the_gfx_arch_of_a_board_comes_from_the_identities_table():
+    for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        assert gfx_arch_for_gpu_type(board) == arch
+        assert gfx_arch_for_gpu_type(board.upper()) == arch
+
+
+@pytest.mark.parametrize("gpu_type", [None, "", "   ", "unknown_gpu", "mi250x"])
+def test_a_board_without_an_identity_has_no_arch(gpu_type):
+    """A board the CLI does not accept must not acquire an arch from a side table."""
+    assert gfx_arch_for_gpu_type(gpu_type) is None
+
+
+def test_the_arch_consumers_read_the_table_rather_than_their_own_copy():
+    """Each copy deleted here had drifted: one lacked mi325x, one still named gfx90a boards."""
+    from hyperloom.agents.kernel.tools import tracelens_analysis
+    from hyperloom.orchestrator.enablement import build
+
+    assert build.gfx_arch_for_gpu_type is gfx_arch_for_gpu_type
+    assert tracelens_analysis.gfx_arch_for_gpu_type is gfx_arch_for_gpu_type

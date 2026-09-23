@@ -154,6 +154,13 @@ except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
 
 try:
+    from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+except ImportError:  # pragma: no cover - standalone invocation
+    # Without the board table there is no arch to name, which is the same
+    # outcome this tool already produces for an unrecognised platform.
+    gfx_arch_for_gpu_type = lambda _gpu_type: None  # noqa: E731
+
+try:
     from hyperloom.common.kernel_shape_contract import (
         REVIEW_DERIVED_PROVENANCE as _REVIEW_DERIVED_PROVENANCE,
     )
@@ -6084,12 +6091,6 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
-_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
 _FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
 _FLYDSL_BUFFER_LOAD_MARKERS = (
     "make_buffer_tensor",
@@ -6141,9 +6142,7 @@ def _flydsl_kernel_params(
         The FlyDSL kernel-params dict (possibly partial).
     """
     params: dict[str, Any] = {}
-    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
-        (target_platform or "").strip().lower(),
-    )
+    arch = gfx_arch_for_gpu_type(target_platform)
     if arch:
         params["FLYDSL_TARGET_ARCH"] = arch
     cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
