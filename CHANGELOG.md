@@ -13,8 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   references follow proposals into SBD V6 and the measured Experience write,
   while remote reads fail open and completed writes use the SDK's durable
   worker spool. Reads now capture the actual pre-proposal identity, workload,
-  baseline, current-best, observations, and recent outcomes; identical
-  decision context is reused without weakening the original Recipe baseline.
+  baseline, current-best, observations, and recent outcomes; retries within one
+  decision are reused while later decisions see the current shared corpus,
+  without weakening the original Recipe baseline.
 
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,
