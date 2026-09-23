@@ -83,12 +83,38 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
     [task] = calls
     assert task.idempotency_key == "close-stack-revalidate-g1"
     assert task.params["source"] == "resume_stack_revalidate"
+    assert task.params["recipe_generation"] == 1
     assert "geak_fallback" not in task.params
     state = c.shared_state
     assert not state.optimization_stack_has_unvalidated_keeps()
     assert state.cumulative_gain_validated == pytest.approx(12.0)
     assert state.optimization_stack[-1]["variant_name"] == "page16" and len(state.optimization_stack) == 1
     assert c.finalize_recipe_and_journal()["reason"] != "unvalidated_recipe_stack"
+
+
+@pytest.mark.asyncio
+async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validation(coordinator) -> None:
+    c = coordinator
+    state = c.shared_state
+    summary = await c._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench", include_geak=False)
+    task = await c.tasks.get(summary["task_id"])
+    assert task.params["recipe_generation"] == 1
+    assert c._lift_to_current_best(
+        "explore",
+        1300.0,
+        {"name": "page32", "extra_server_args": "--page-size 32", "candidate_extra_server_args": "--page-size 32"},
+    )
+    assert c._update_cumulative_gain_validated(1300.0, {"output_throughput": 1300.0})
+
+    await c._promote_to_shared_state(
+        "explore",
+        {"status": "succeeded", "output_throughput": 1100.0, "winners": []},
+        task=task,
+    )
+
+    assert state.cumulative_gain_validated == pytest.approx(30.0)
+    assert state.validated_recipe_generation == state.working_recipe_generation == 2
+    assert not state.optimization_stack_has_unvalidated_keeps()
 
 
 @pytest.mark.asyncio

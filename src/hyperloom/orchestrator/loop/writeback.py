@@ -4301,6 +4301,33 @@ class WritebackCollaborator:
         if is_revalidation_task:
             measured = result.get("output_throughput")
             measured_ok = isinstance(measured, (int, float)) and measured > 0
+            # A lift since enqueue means the grid ran an older ``current_best``;
+            # crediting it to the newer one is the mismatch CLOSE refuses to
+            # publish. Rows enqueued before generations existed carry no stamp.
+            measured_generation = (task.params or {}).get("recipe_generation")
+            working_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
+            stale_measurement = measured_generation is not None and int(measured_generation) != working_generation
+            if stale_measurement:
+                log.warning(
+                    "stack revalidation %s measured recipe generation %s; current_best is now %s -- not validating",
+                    task.task_id,
+                    measured_generation,
+                    working_generation,
+                )
+                try:
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "stale_stack_revalidation",
+                            "task_id": task.task_id,
+                            "measured_recipe_generation": int(measured_generation),
+                            "working_recipe_generation": working_generation,
+                            "geak_fallback": bool((task.params or {}).get("geak_fallback")),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - observation is best-effort
+                    log.exception("stale stack revalidation: observation emit failed")
             # A GEAK revalidation (2b) must assert config identity + that the
             # optimization engaged before stamping validated, else replay via
             # the GEAK harness (2a). Native revalidations keep the
@@ -4490,6 +4517,21 @@ class WritebackCollaborator:
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak orphan rebench: observation emit failed")
                     decision = "ignored"
+                elif decision == "validated" and stale_measurement:
+                    # The candidate was measured on a stack that has since moved,
+                    # so lifting it would stack GEAK's config onto a base the
+                    # measurement never saw. Settle the slot as a drop.
+                    pending = dict(pending) if isinstance(pending, dict) else {}
+                    pending["status"] = "rebench_unavailable"
+                    pending["revalidation_error"] = "stale_recipe_generation"
+                    pending.pop("revalidation_task_id", None)
+                    self.shared_state.geak_pending = pending
+                    self._record_geak_rebench_conclusion(
+                        final_status="rebench_unavailable",
+                        final_error_class="stale_recipe_generation",
+                    )
+                    result[PROMOTION_REFUSED_KEY] = True
+                    decision = "stale"
                 elif decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
@@ -4691,7 +4733,7 @@ class WritebackCollaborator:
                 outcome.changed = True
                 return
             else:
-                if measured_ok and self.shared_state.baseline_tput > 0:
+                if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
                     if self._update_cumulative_gain_validated(measured, result):
                         self.shared_state.resume_pending_revalidation = False
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
@@ -6098,6 +6140,9 @@ class WritebackCollaborator:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
         benchmark_script = baseline_benchmark_script(self.shared_state)
+        # The grid below is frozen from ``current_best`` now; a lift before the
+        # result lands makes it a measurement of an older Recipe.
+        recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
         # GEAK's explicit launch controls distinguish complete flags from legacy
         # deltas. Both retain the current stack's environment removal controls.
         ps = (
@@ -6187,6 +6232,7 @@ class WritebackCollaborator:
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
                     "reason": reason,
+                    "recipe_generation": recipe_generation,
                     "geak_fallback": True,
                     "expected_cfg_hash": expected_cfg_hash,
                     "expected_overlay": ps_overlay,
@@ -6250,6 +6296,7 @@ class WritebackCollaborator:
         params: dict[str, Any] = {
             "source": "resume_stack_revalidate",
             "reason": reason,
+            "recipe_generation": recipe_generation,
             "grid": [
                 {
                     "name": "resume_stack_revalidate",
