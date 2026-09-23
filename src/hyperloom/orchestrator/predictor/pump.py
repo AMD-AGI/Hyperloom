@@ -478,6 +478,48 @@ def _sample_key(server_args: Any, envs: Any, source_change: Any) -> tuple:
     )
 
 
+#: Chars of a failed completion kept per sample. The service echoes up to 2000;
+#: this is what survives into the session file, which is read far more often
+#: than the service's own log and should not become a transcript dump.
+UNPARSED_TAIL_CHARS = 600
+
+
+def _unparsed_evidence(answer: Prediction) -> list[dict[str, Any]]:
+    """Why samples that produced no action produced none.
+
+    Reads ``meta["candidates"]``, where the service marks each sample
+    ``parsed`` and attaches ``completion_tail`` to the ones that failed. Two
+    causes look identical in a vote count and need telling apart: a sample that
+    ran out of tokens mid-reasoning (``finish_reason`` of ``length``, no closing
+    ``</think>``, so nothing after it to parse) and one that finished cleanly
+    but never wrote a ``Server args:`` / ``Env:`` / ``Patch:`` line.
+
+    Args:
+        answer (Prediction): The predictor's answer.
+
+    Returns:
+        list[dict[str, Any]]: One row per unparsed sample, empty when all
+            parsed or when the service sent no candidates.
+    """
+    candidates = answer.meta.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for index, row in enumerate(candidates):
+        if not isinstance(row, dict) or row.get("parsed"):
+            continue
+        tail = str(row.get("completion_tail") or "")
+        out.append(
+            {
+                "sample_index": index,
+                "finish_reason": row.get("finish_reason"),
+                "dropped_flags": row.get("dropped_flags") or [],
+                "completion_tail": tail[-UNPARSED_TAIL_CHARS:],
+            }
+        )
+    return out
+
+
 def _vote_counts(answer: Prediction) -> dict[tuple, int]:
     """How many raw samples voted for each distinct proposal.
 
@@ -969,6 +1011,15 @@ async def pump(phase: Any, *, caller: str) -> None:
                 "prompt_chars": answer.meta.get("prompt_chars"),
                 "samples": answer.meta.get("samples"),
                 "actions_returned": len(answer.actions),
+                # Samples that produced no action at all. Without these the
+                # arithmetic does not close: eight samples arrive, four
+                # proposals are queued, and the difference is unattributable
+                # from the session alone -- a reader cannot tell a predictor
+                # that answered badly from one that answered well and got
+                # filtered. The service already attaches the offending text as
+                # `completion_tail`; this carries it through instead of
+                # dropping it with the rest of `meta`.
+                "unparsed": _unparsed_evidence(answer),
             },
         )
         log.info(

@@ -841,6 +841,52 @@ class TestPatchMandate:
         assert _rounds(phase)[0]["mandate"] == "first idea"
 
 
+class TestUnparsedEvidence:
+    """Samples that produced no action are accounted for in the session file."""
+
+    @staticmethod
+    def _answer_with(candidates: list) -> Prediction:
+        answer = _answer(server_args={"--kv-cache-dtype": "fp8"})
+        return Prediction(
+            parsed=True,
+            actions=answer.actions,
+            meta={"candidates": candidates, "samples": len(candidates)},
+        )
+
+    def test_each_unparsed_sample_is_recorded_with_its_tail(self, active, monkeypatch):
+        tail = "x" * (pp.UNPARSED_TAIL_CHARS + 50) + "END"
+        _stub(
+            monkeypatch,
+            self._answer_with(
+                [
+                    {"server_args": {"--kv-cache-dtype": "fp8"}, "envs": {}, "source_change": "", "parsed": True},
+                    {"parsed": False, "finish_reason": "length", "completion_tail": tail},
+                    {"parsed": False, "finish_reason": "stop", "dropped_flags": ["--bogus"], "completion_tail": "no args"},
+                ]
+            ),
+        )
+        phase = _Phase()
+        _run(phase)
+        unparsed = _rounds(phase)[0]["predict_meta"]["unparsed"]
+        assert [u["sample_index"] for u in unparsed] == [1, 2]
+        assert unparsed[0]["finish_reason"] == "length"
+        assert len(unparsed[0]["completion_tail"]) == pp.UNPARSED_TAIL_CHARS
+        assert unparsed[0]["completion_tail"].endswith("END")
+        assert unparsed[1]["dropped_flags"] == ["--bogus"]
+
+    def test_nothing_is_recorded_when_every_sample_parsed(self, active, monkeypatch):
+        _stub(monkeypatch, _sampled(({"--kv-cache-dtype": "fp8"}, {}, 3)))
+        phase = _Phase()
+        _run(phase)
+        assert _rounds(phase)[0]["predict_meta"]["unparsed"] == []
+
+    def test_an_answer_without_candidates_records_nothing(self, active, monkeypatch):
+        _stub(monkeypatch, _answer(server_args={"--kv-cache-dtype": "fp8"}))
+        phase = _Phase()
+        _run(phase)
+        assert _rounds(phase)[0]["predict_meta"]["unparsed"] == []
+
+
 class TestFailureHandling:
     @pytest.mark.parametrize(
         "answer",
