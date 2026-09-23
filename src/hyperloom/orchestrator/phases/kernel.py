@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_KERNEL,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+from ..actions.executors._recipe_script import resolve_launch_server_script
 from ..actions.executors._workload_envs import geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
@@ -893,46 +894,11 @@ class KernelPhase(PhaseHandler):
         try:
             from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
 
-            envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-
             # Only the AgentX client misleads the inference; anything else in
             # this field is the launcher GEAK should keep deriving for itself.
             if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
                 return ""
-
-            builtin = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
-            if not builtin:
-                framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
-                if not framework:
-                    return ""
-                gpu = (
-                    str(
-                        envs.get("GPU_TYPE")
-                        or envs.get("RUNNER_TYPE")
-                        or bench.get("runner_type")
-                        or os.environ.get("GPU_TYPE")
-                        or os.environ.get("RUNNER_TYPE")
-                        or "mi300x"
-                    )
-                    .strip()
-                    .lower()
-                )
-                builtin = f"{framework}_{gpu}.sh"
-
-            for root in (
-                str(bench.get("inferencex_path") or "").strip(),
-                os.environ.get("INFERENCEX_PATH", "").strip(),
-            ):
-                if not root:
-                    continue
-                benchmarks = Path(root) / "benchmarks"
-                candidate = benchmarks / builtin
-                # The builtin sources benchmark_lib.sh from its own directory and
-                # dies without it, so a half-populated checkout has to degrade to
-                # GEAK's existing derivation instead of pinning a dead path.
-                if candidate.is_file() and (benchmarks / "benchmark_lib.sh").is_file():
-                    return str(candidate)
-            return ""
+            return resolve_launch_server_script(bench)
         except Exception:  # noqa: BLE001
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""

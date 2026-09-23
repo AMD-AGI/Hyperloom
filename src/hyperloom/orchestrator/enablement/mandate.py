@@ -309,28 +309,6 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 )
 
 
-# Loader-path and other blocked environment names: the benchmark env layer
-# drops them, and a round that needs one asks for that exact name/value pair.
-ENABLEMENT_ENV_GRANT_GUIDANCE: tuple[str, ...] = (
-    "A small set of environment names is BLOCKED from your ordinary `extra_envs` "
-    "layer because setting one redirects what the server process loads or makes "
-    "it execute a script before its own entrypoint. `PYTHONPATH` and "
-    "`LD_LIBRARY_PATH` are blocked but GRANTABLE; `LD_PRELOAD`, `LD_AUDIT`, "
-    "`PATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `BASH_ENV` and their kin are never "
-    "granted at all — find another fix.",
-    "To ask for one, add an `env_grant_requests` array to your final "
-    '`specialist_done`, each entry `{"name": ..., "value": ..., '
-    '"reason": ...}`. The grant covers that exact NAME AND VALUE pair for '
-    "THIS round only: a different value is not covered, and the next round starts "
-    "with no grant.",
-    "Ask for the narrowest value that works — for a loader search path, the ONE "
-    "directory that has to be searched, not a rebuilt whole path. It is "
-    "PREPENDED to what the launch config already carries, so the framework's own "
-    "search order survives; a value that tries to replace the path will still "
-    "only be prepended.",
-)
-
-
 # Targeted-build request contract. A pure source patch (a unified diff against
 # the installed tree) cannot deliver a *compiled* component (a new AITER
 # FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
@@ -471,10 +449,6 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
-    lines.append("BLOCKED ENVIRONMENT NAMES (ask for a grant; a loader path is prepended, never replaced):")
-    for g in ENABLEMENT_ENV_GRANT_GUIDANCE:
-        lines.append(f"  - {g}")
-    lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
     for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
@@ -610,7 +584,6 @@ def build_mandate(
 
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
-    "ENABLEMENT_ENV_GRANT_GUIDANCE",
     "ENABLEMENT_HEURISTICS",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",

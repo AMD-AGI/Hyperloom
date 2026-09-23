@@ -92,6 +92,7 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
@@ -2723,6 +2724,13 @@ class BaselineExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }

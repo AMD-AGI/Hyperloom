@@ -606,7 +606,7 @@ def collect_v6_outcome(
         dict[str, Any]: The ``outcome`` block.
     """
     stop_reason = str(session.get("stop_reason") or "").strip()
-    outcome_status = _outcome_status(stop_reason)
+    outcome_status = _outcome_status(stop_reason, _optional_float(state.get("baseline_tput")) or 0.0)
     for event in reversed(timeline):
         if not isinstance(event, dict) or str(event.get("type") or "") not in {"install", "model_gate"}:
             continue
