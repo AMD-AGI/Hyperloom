@@ -55,7 +55,13 @@ from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, reco
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.attempt_ledger import record_config_attempt
-from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
+from ..state.shared_state import (
+    _AUDIT_ACTIONS,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
+    SharedState,
+    resolve_graded_comparison,
+    stack_base_params,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -6401,10 +6407,7 @@ class WritebackCollaborator:
         No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
         backend selected.
         """
-        from ..phases.machine_state import (
-            ESCALATE_HINT_SKIP_TO_SWEEP,
-            PHASE_KERNEL_AGENT,
-        )
+        from ..phases.machine_state import PHASE_KERNEL_AGENT
 
         if not self._resumed_from.get("is_resume"):
             return

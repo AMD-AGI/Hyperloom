@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import effectiv
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.phases import geak_rebench as gr
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 @pytest.fixture
@@ -60,7 +61,7 @@ def _arm_kernel_to_sweep(st) -> None:
     st.kernel_optimizer = "geak"
     st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
     st.geak_pending = {}
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
 
 def test_geak_revalidate_idempotency_key_scopes_by_macro_cycle() -> None:

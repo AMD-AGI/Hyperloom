@@ -44,7 +44,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
-from ..state.shared_state import resolve_graded_comparison
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
@@ -1052,7 +1052,7 @@ class KernelPhase(PhaseHandler):
                 }
             )
             # Persist the wind-down hint durably.
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
         cb = state.current_best or {}
@@ -1337,7 +1337,7 @@ class KernelPhase(PhaseHandler):
                 evidence["runner_timeout_s"] = runner_timeout_s
             self._record_phase_entry_evidence(geak=evidence)
             # Set the wind-down hint BEFORE the durable save (it is in-memory only).
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
             return True
 
@@ -1793,7 +1793,7 @@ class KernelPhase(PhaseHandler):
             )
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
-        state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
@@ -3945,7 +3945,7 @@ class KernelPhase(PhaseHandler):
                     },
                 )
         self.shared_state.set_pending_escalate_hint(
-            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
+            ESCALATE_HINT_SKIP_TO_SWEEP,
         )
         self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(

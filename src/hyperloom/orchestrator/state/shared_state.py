@@ -44,6 +44,29 @@ _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_A
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_sweep`` is the
+# non-terminal "exhausted the current lever" signal: from FRAMEWORK_AGENT it advances to KERNEL, from KERNEL it
+# winds down to SWEEP → CLOSE.
+ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
+ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
+ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
+ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
+ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
+    {
+        ESCALATE_HINT_SKIP_TO_KERNEL,
+        ESCALATE_HINT_SKIP_TO_SWEEP,
+        ESCALATE_HINT_SKIP_TO_CLOSE,
+        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    }
+)
+
+
+def is_valid_escalate_hint(hint: str) -> bool:
+    """Return True for any hint Coordinator should act on (closed vocab)."""
+    return (hint or "").strip() in ESCALATE_HINT_VOCAB
+
 
 def first_positive_tput(d: Any) -> float:
     """Return the first positive ``tput``/``output_throughput`` from a dict."""
@@ -1519,8 +1542,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # escalate hint plumbing
     def set_pending_escalate_hint(self, hint: str) -> str:
         """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
-        from ..phases.machine_state import is_valid_escalate_hint
-
         text = str(hint or "").strip()
         if text and not is_valid_escalate_hint(text):
             return ""

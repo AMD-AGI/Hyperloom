@@ -15,6 +15,7 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -218,8 +219,7 @@ class MachinePhase(PhaseHandler):
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
-            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()

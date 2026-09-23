@@ -21,6 +21,12 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_r
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..state.shared_state import (
+    ESCALATE_HINT_SKIP_TO_CLOSE,
+    ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
+    is_valid_escalate_hint,
+)
 
 
 log = logging.getLogger(__name__)
@@ -384,12 +390,6 @@ def should_reloop_to_explore(
     return True, evidence
 
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored).
-ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
-ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-
-
 def _kernel_idle_max_ticks() -> int:
     """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP."""
     raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
@@ -437,29 +437,9 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
 
 
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
-
-# ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal: from FRAMEWORK_AGENT it advances to
-# KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
-ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
-    {
-        ESCALATE_HINT_SKIP_TO_KERNEL,
-        ESCALATE_HINT_SKIP_TO_SWEEP,
-        ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-    }
-)
-
 # ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
 ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
-
-
-def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab)."""
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def apply_escalate_budget_bump(
@@ -2128,12 +2108,6 @@ __all__ = [
     "DEFAULT_PLATEAU_KERNEL_REVERT_STREAK",
     "ESCALATE_HINT_BUDGET_BUMP_CAP",
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
-    "ESCALATE_HINT_EXTEND_EXPLORE_BUDGET",
-    "ESCALATE_HINT_EXTEND_KERNEL_BUDGET",
-    "ESCALATE_HINT_SKIP_TO_CLOSE",
-    "ESCALATE_HINT_SKIP_TO_KERNEL",
-    "ESCALATE_HINT_SKIP_TO_SWEEP",
-    "ESCALATE_HINT_VOCAB",
     "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
     "LIFECYCLE_STATUS_ERROR",
@@ -2187,7 +2161,6 @@ __all__ = [
     "prelude_exit_viability",
     "session_usable_seconds",
     "render_phase_action_bullets",
-    "is_valid_escalate_hint",
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",

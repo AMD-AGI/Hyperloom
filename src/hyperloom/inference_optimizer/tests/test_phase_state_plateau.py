@@ -16,10 +16,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     ESCALATE_HINT_BUDGET_BUMP_CAP,
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    ESCALATE_HINT_SKIP_TO_CLOSE,
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    ESCALATE_HINT_SKIP_TO_SWEEP,
-    ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
@@ -29,11 +25,17 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_plateau_kernel,
     exit_normal_optimize,
     exit_normal_kernel,
-    is_valid_escalate_hint,
     kernel_work_pending,
 )
 from hyperloom.orchestrator.state import shared_state
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import (
+    ESCALATE_HINT_SKIP_TO_CLOSE,
+    ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
+    ESCALATE_HINT_VOCAB,
+    SharedState,
+    is_valid_escalate_hint,
+)
 
 
 def test_escalate_hint_vocab_closed():

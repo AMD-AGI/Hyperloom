@@ -11,8 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_SKIP_TO_SWEEP
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 

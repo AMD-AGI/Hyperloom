@@ -475,7 +475,7 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     )
 
@@ -488,7 +488,7 @@ async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     )
 

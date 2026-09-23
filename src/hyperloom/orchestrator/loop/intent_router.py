@@ -40,7 +40,12 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from ..state.shared_state import inject_stack_base_params
+from ..state.shared_state import (
+    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    inject_stack_base_params,
+    is_valid_escalate_hint,
+)
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
@@ -1388,12 +1393,9 @@ class IntentRouter:
             )
         )
         from ..phases.machine_state import (
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_valid_escalate_hint,
         )
 
         hint = str(payload.get("next_action_hint") or "").strip()
