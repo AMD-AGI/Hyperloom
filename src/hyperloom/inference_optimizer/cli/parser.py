@@ -942,6 +942,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Integration toggles.
     opt.add_argument(
+        "--maidas-projection-path",
+        dest="maidas_projection_path",
+        default="",
+        help="Path to a MAIDAS projection .xlsx (or a directory of them). When "
+        "set and a row matches the run's (soc, precision, TP, concurrency, "
+        "ISL, OSL), the roofline ceiling is sourced from MAIDAS's predicted "
+        "throughput instead of the built-in estimate. Unset => native ceiling.",
+    )
+    opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,

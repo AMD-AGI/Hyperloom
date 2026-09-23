@@ -180,17 +180,34 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         rt = resolve_runtime_dtype(state, meta, arm=arm)
         meta = apply_runtime_dtype(meta, rt)
         compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            gpu_type=runtime.gpu_type,
-            concurrency=runtime.concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=runtime.tp,
-            precision_tag=compute_precision_tag,
-        )
+        # Prefer a MAIDAS-sourced L2 (Verbose_Data) when a projection is provided
+        # and its per-op breakdown reconciles with the L1 ceiling; otherwise the
+        # native PerfModel. This keeps L1 and L2 from the same source (and fixes
+        # the provenance label) whenever MAIDAS applies.
+        maidas_path = str(getattr(state, "maidas_projection_path", "") or "")
+        pm_bd = None
+        formula = "perfmodel"
+        if maidas_path:
+            from .maidas_excel_ceiling import maidas_perfmodel_from_excel
+
+            pm_bd = maidas_perfmodel_from_excel(
+                maidas_path, runtime, num_layers=meta.num_layers
+            )
+            if pm_bd is not None:
+                formula = "maidas"
+        if pm_bd is None:
+            pm_bd = compute_roofline_from_perfmodel(
+                meta=meta,
+                gpu_type=runtime.gpu_type,
+                concurrency=runtime.concurrency,
+                isl=runtime.isl,
+                osl=runtime.osl,
+                num_gpus=runtime.tp,
+                precision_tag=compute_precision_tag,
+            )
+            formula = "perfmodel" if pm_bd is not None else "legacy"
         snapshot["roofline_provenance"] = {
-            "formula": "perfmodel" if pm_bd is not None else "legacy",
+            "formula": formula,
             **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
             "runtime_weight_dtype": rt.weight_dtype_tag,
             "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,

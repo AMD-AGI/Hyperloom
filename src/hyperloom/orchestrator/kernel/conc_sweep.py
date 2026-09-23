@@ -280,10 +280,20 @@ def _build_roofline_ceiling(
     if not gpu_type or num_gpus <= 0:
         return None
 
+    # Rescale weights to the dtype the run actually serves, matching the main
+    # ceiling (compute_roofline_breakdown_from_state) so the native sweep curve
+    # and the headroom gate agree for quantized runs. No-op when serving at the
+    # checkpoint dtype. ``precision`` (reported) stays the run's precision.
+    from .roofline_ceiling import apply_runtime_dtype, resolve_runtime_dtype
+
+    rt = resolve_runtime_dtype(state, meta)
+    meta = apply_runtime_dtype(meta, rt)
+    precision_tag = rt.compute_precision_tag or precision
+
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
-        precision_tag=precision,
+        precision_tag=precision_tag,
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
@@ -292,25 +302,50 @@ def _build_roofline_ceiling(
     by_conc_b = {p["conc"]: p for p in baseline_points}
     by_conc_o = {p["conc"]: p for p in optimized_points}
 
+    # When a MAIDAS projection is provided, price each rung from it (reusing the
+    # same Excel adapter as the main ceiling); otherwise use the native
+    # analytical ceiling below, unchanged. MAIDAS rows are keyed by nbs == conc.
+    maidas_path = str(getattr(state, "maidas_projection_path", "") or "")
+
     rows: list[dict[str, Any]] = []
     for c in concs:
-        t_mem = compute_theoretical_peak_output_tok_per_sec(
-            gpu_type=gpu_type,
-            num_gpus=num_gpus,
-            weight_bytes=meta.weight_bytes,
-            active_weight_bytes=meta.active_weight_bytes,
-            num_experts=meta.num_experts,
-            experts_per_tok=meta.experts_per_tok,
-            expert_weight_bytes=meta.expert_weight_bytes,
-            num_layers=meta.num_layers,
-            num_kv_heads=meta.num_kv_heads,
-            head_dim=meta.head_dim,
-            kv_dtype_bytes=meta.weight_dtype_bytes,
-            isl=isl,
-            osl=osl,
-            concurrency=c,
-        )
-        t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
+        t_cmp_c = t_cmp
+        maidas_bd = None
+        if maidas_path:
+            from types import SimpleNamespace
+
+            from .maidas_excel_ceiling import maidas_breakdown_from_excel
+
+            rt_c = SimpleNamespace(
+                gpu_type=gpu_type, precision=precision, tp=num_gpus,
+                concurrency=c, isl=isl, osl=osl,
+            )
+            maidas_bd = maidas_breakdown_from_excel(maidas_path, rt_c)
+        if maidas_bd is not None and maidas_bd.peak_tok_per_sec > 0:
+            t_mem = maidas_bd.mem_tok_per_sec
+            t_cmp_c = maidas_bd.cmp_tok_per_sec
+            t_peak = maidas_bd.peak_tok_per_sec
+            bound_kind = maidas_bd.bound_kind
+            ceiling_source = "maidas"
+        else:
+            t_mem = compute_theoretical_peak_output_tok_per_sec(
+                gpu_type=gpu_type,
+                num_gpus=num_gpus,
+                weight_bytes=meta.weight_bytes,
+                active_weight_bytes=meta.active_weight_bytes,
+                num_experts=meta.num_experts,
+                experts_per_tok=meta.experts_per_tok,
+                expert_weight_bytes=meta.expert_weight_bytes,
+                num_layers=meta.num_layers,
+                num_kv_heads=meta.num_kv_heads,
+                head_dim=meta.head_dim,
+                kv_dtype_bytes=meta.weight_dtype_bytes,
+                isl=isl,
+                osl=osl,
+                concurrency=c,
+            )
+            t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
+            ceiling_source = "native"
         # Local import avoids a module-level import cycle.
         from .roofline_snapshot import within_roofline_pct
 
@@ -329,14 +364,16 @@ def _build_roofline_ceiling(
             {
                 "conc": c,
                 "t_mem_tok_s": round(t_mem, 2),
-                "t_cmp_tok_s": round(t_cmp, 2),
+                "t_cmp_tok_s": round(t_cmp_c, 2),
                 "t_peak_tok_s": round(t_peak, 2),
                 "bound_kind": bound_kind,
+                "ceiling_source": ceiling_source,
                 "mbu_baseline_pct": _mbu_pct(bt),
                 "mbu_optimized_pct": _mbu_pct(ot),
             }
         )
 
+    maidas_rungs = sum(1 for r in rows if r.get("ceiling_source") == "maidas")
     return {
         "schema_version": 1,
         "source": "roofline_ceiling.py",
@@ -345,6 +382,11 @@ def _build_roofline_ceiling(
         "tp": num_gpus,
         "isl": isl,
         "osl": osl,
+        # Observability: where each rung's ceiling came from. maidas_rungs>0
+        # means the MAIDAS projection priced at least one rung of this sweep.
+        "maidas_projection_path": maidas_path or "",
+        "maidas_rungs": maidas_rungs,
+        "rungs_total": len(rows),
         "model_meta": {
             "weight_bytes": meta.weight_bytes,
             "active_weight_bytes": meta.active_weight_bytes,
