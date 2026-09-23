@@ -614,12 +614,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
-    # Recipe identity at the current materialized state and at the last
-    # baseline-relative validation. A KEEP advances both only in one promotion.
+    # Bumped by every lift into ``current_best``; stamped onto ``validated_recipe_generation`` by every validation.
+    # Unequal => ``current_best`` is not the Recipe the validated gain was measured on, even at the same stack depth.
     working_recipe_generation: int = 0
     validated_recipe_generation: int = 0
-    validated_recipe_fingerprint: str = ""
-    validated_recipe_snapshot: dict[str, Any] = field(default_factory=dict)
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False
@@ -2829,8 +2827,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``)."""
-        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
+        """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""
+        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
+            self.working_recipe_generation
+        ) != int(self.validated_recipe_generation)
 
 
 __all__ = ["SharedState", "render_model_arch_compact", "timed_teardown_step"]

@@ -10,7 +10,6 @@ import json
 import os
 import shlex
 import time
-from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,8 +115,6 @@ _REMOTE_RESULT_TYPES: dict[str, str] = {
     "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
     "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
     "invalid_recipe_scope": _close_out.RESULT_INVALID_SCOPE,
-    "unvalidated_recipe_stack": _close_out.RESULT_UNVALIDATED_RECIPE,
-    "validated_snapshot_remote_material_unavailable": _close_out.RESULT_UNVALIDATED_RECIPE,
     "empty_replay_material": _close_out.RESULT_EMPTY_REPLAY_MATERIAL,
     "not_better_than_champion": _close_out.RESULT_NOT_BETTER,
     "champion_not_promoted": _close_out.RESULT_CHAMPION_NOT_PROMOTED,
@@ -143,62 +140,6 @@ def _remote_result_type(status: str, reason: str) -> str:
     if verdict in {"skipped", "disabled"}:
         return _close_out.RESULT_SKIPPED_OTHER
     return _close_out.RESULT_TRANSPORT_FAILED
-
-
-def _unvalidated_recipe_outcome(state: Any) -> dict[str, Any] | None:
-    """Return a fail-closed outcome when working state is newer than validation."""
-    stack = list(getattr(state, "optimization_stack", []) or [])
-    validated_stack_len = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
-    working_generation = int(getattr(state, "working_recipe_generation", 0) or 0)
-    validated_generation = int(getattr(state, "validated_recipe_generation", 0) or 0)
-    current_best = getattr(state, "current_best", {}) or {}
-    working_fingerprint = str(current_best.get("fingerprint") or "") if isinstance(current_best, Mapping) else ""
-    validated_fingerprint = str(getattr(state, "validated_recipe_fingerprint", "") or "")
-    checker = getattr(state, "optimization_stack_has_unvalidated_keeps", None)
-    stack_unvalidated = bool(checker()) if callable(checker) else len(stack) > validated_stack_len
-    identity_unvalidated = working_generation != validated_generation or (
-        bool(working_fingerprint) and bool(validated_fingerprint) and working_fingerprint != validated_fingerprint
-    )
-    unvalidated = stack_unvalidated or identity_unvalidated
-    if not unvalidated:
-        return None
-    return {
-        "status": "skipped",
-        "reason": "unvalidated_recipe_stack",
-        "backend": "none",
-        "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
-        "optimization_stack_len": len(stack),
-        "validated_stack_len": validated_stack_len,
-        "working_recipe_generation": working_generation,
-        "validated_recipe_generation": validated_generation,
-        "working_recipe_fingerprint": working_fingerprint,
-        "validated_recipe_fingerprint": validated_fingerprint,
-    }
-
-
-def _validated_publication_state(state: Any) -> Any | None:
-    """Return state aligned to its validated Recipe, or None if unavailable."""
-    if _unvalidated_recipe_outcome(state) is None:
-        return state
-    snapshot = getattr(state, "validated_recipe_snapshot", {}) or {}
-    if not isinstance(snapshot, Mapping):
-        return None
-    current_best = snapshot.get("current_best")
-    optimization_stack = snapshot.get("optimization_stack")
-    if not isinstance(current_best, Mapping) or not isinstance(optimization_stack, list):
-        return None
-    publication = deepcopy(state)
-    publication.current_best = deepcopy(dict(current_best))
-    publication.optimization_stack = deepcopy(optimization_stack)
-    publication.gain_per_stack_entry = deepcopy(list(snapshot.get("gain_per_stack_entry") or []))
-    publication.cumulative_gain_validated = float(snapshot.get("gain_pct") or 0.0)
-    publication.cumulative_gain_validated_ts = str(snapshot.get("validated_at") or "")
-    publication.cumulative_gain_validated_stack_len = int(snapshot.get("stack_len") or 0)
-    publication.working_recipe_generation = int(snapshot.get("generation") or 0)
-    publication.validated_recipe_generation = publication.working_recipe_generation
-    publication.validated_recipe_fingerprint = str(snapshot.get("recipe_fingerprint") or "")
-    publication._using_validated_recipe_snapshot = True
-    return publication
 
 
 # Upstream-PR KEEPs are stacked under the ``framework`` attribution family
@@ -968,31 +909,6 @@ class WritebackCollaborator:
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
             return False
-        from hyperloom.common.perf_metric import (
-            VERDICT_KEEP,
-            output_tput_of,
-            perf_snapshot_from_mapping,
-        )
-
-        if graded.verdict != VERDICT_KEEP:
-            log.info("cumulative gain held: baseline-relative verdict is %s", graded.verdict)
-            return False
-        previous_snapshot = getattr(self.shared_state, "validated_recipe_snapshot", {}) or {}
-        previous_best = previous_snapshot.get("current_best") if isinstance(previous_snapshot, Mapping) else None
-        if isinstance(previous_best, Mapping) and previous_best:
-            prior_grade = resolve_graded_comparison(
-                self.shared_state,
-                graded_source,
-                anchor_perf=perf_snapshot_from_mapping(previous_best),
-                anchor_tput=output_tput_of(previous_best),
-            )
-            if not prior_grade.comparable or prior_grade.verdict != VERDICT_KEEP:
-                log.info(
-                    "cumulative gain held: candidate did not beat validated Recipe (%s, %s)",
-                    prior_grade.verdict,
-                    prior_grade.degrade_reason,
-                )
-                return False
         validated_gain = (
             (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
         )
@@ -1003,27 +919,6 @@ class WritebackCollaborator:
         self.shared_state.validated_recipe_generation = int(
             getattr(self.shared_state, "working_recipe_generation", 0) or 0
         )
-        current_best = getattr(self.shared_state, "current_best", {}) or {}
-        self.shared_state.validated_recipe_fingerprint = (
-            str(current_best.get("fingerprint") or "") if isinstance(current_best, Mapping) else ""
-        )
-        self.shared_state.validated_recipe_snapshot = {
-            "generation": self.shared_state.validated_recipe_generation,
-            "recipe_fingerprint": self.shared_state.validated_recipe_fingerprint,
-            "current_best": deepcopy(dict(current_best)) if isinstance(current_best, Mapping) else {},
-            "optimization_stack": deepcopy(list(getattr(self.shared_state, "optimization_stack", []) or [])),
-            "gain_per_stack_entry": deepcopy(list(getattr(self.shared_state, "gain_per_stack_entry", []) or [])),
-            "gain_pct": float(validated_gain),
-            "objective": graded.objective,
-            "candidate": graded.candidate,
-            "reference": graded.reference,
-            "total_throughput": graded.tput_candidate,
-            "baseline_total_throughput": graded.tput_reference,
-            "stack_len": self.shared_state.cumulative_gain_validated_stack_len,
-            "measurement_basis": measurement_basis,
-            "source": source,
-            "validated_at": ts,
-        }
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
@@ -2612,13 +2507,11 @@ class WritebackCollaborator:
         state = self.shared_state
         current_best = getattr(state, "current_best", {}) or {}
         tput = current_best.get("tput") if isinstance(current_best, dict) else None
-        if "published_throughput" in outcome:
-            tput = outcome.get("published_throughput")
         validated_gain = getattr(state, "cumulative_gain_validated", None)
-        if "published_gain_pct" in outcome:
-            validated_gain = outcome.get("published_gain_pct")
         result_type = str(outcome.get("result_type") or "")
-        publish_validated_metrics = result_type != _close_out.RESULT_UNVALIDATED_RECIPE
+        if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
+            # The throughput and the gain belong to different Recipes here.
+            tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
             attempt=attempt,
@@ -2631,8 +2524,8 @@ class WritebackCollaborator:
             canonical_id=str(outcome.get("canonical_id") or ""),
             session_id=str(outcome.get("session_id") or ""),
             scope=self._write_back_scope(),
-            optimized_throughput=to_float(tput, None) if publish_validated_metrics else None,
-            validated_gain_pct=to_float(validated_gain, None) if publish_validated_metrics else None,
+            optimized_throughput=to_float(tput, None),
+            validated_gain_pct=to_float(validated_gain, None),
             ts=str(outcome.get("updated_at") or ""),
         )
 
@@ -2655,62 +2548,39 @@ class WritebackCollaborator:
         *,
         source: str = "close",
     ) -> dict[str, Any]:
-        """Publish the validated Recipe snapshot while preserving working state."""
-        original_state = self.shared_state
-        publication_state = _validated_publication_state(original_state)
-        if publication_state is None or publication_state is original_state:
-            return self._finalize_recipe_and_journal_impl(source=source)
-
-        self._coord.shared_state = publication_state
-        try:
-            outcome = self._finalize_recipe_and_journal_impl(source=source)
-        finally:
-            self._coord.shared_state = original_state
-        return {
-            **outcome,
-            "published_recipe_generation": int(getattr(publication_state, "validated_recipe_generation", 0) or 0),
-            "published_recipe_fingerprint": str(getattr(publication_state, "validated_recipe_fingerprint", "") or ""),
-            "published_throughput": to_float(
-                getattr(publication_state, "current_best", {}).get("tput"),
-                None,
-            ),
-            "published_gain_pct": to_float(
-                getattr(publication_state, "cumulative_gain_validated", None),
-                None,
-            ),
-        }
-
-    def _finalize_recipe_and_journal_impl(
-        self,
-        *,
-        source: str = "close",
-    ) -> dict[str, Any]:
         """Finalize Recipe state and return a secret-free observable outcome."""
-        unvalidated = _unvalidated_recipe_outcome(self.shared_state)
-        if unvalidated is None:
-            try:
-                journal = self._ensure_journal()
-                ss = self.shared_state
-                cb = getattr(ss, "current_best", {}) or {}
-                final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
-                total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-                journal.finalize(
-                    final_throughput=final_tput if final_tput > 0 else None,
-                    total_gain_pct=total_gain,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("optimization_journal.finalize failed")
-        else:
+        # ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
+        # figures when nothing was lifted since the last validation. Otherwise
+        # every sink below -- journal, local KB, remote KB -- would pair the
+        # newer config with the older gain, so none of them runs.
+        has_unvalidated_keeps = getattr(self.shared_state, "optimization_stack_has_unvalidated_keeps", None)
+        if callable(has_unvalidated_keeps) and has_unvalidated_keeps():
+            ss = self.shared_state
             log.warning(
-                "Recipe finalize skipped: working recipe is not validated "
-                "(stack=%s/%s generation=%s/%s fingerprint=%s/%s)",
-                unvalidated["optimization_stack_len"],
-                unvalidated["validated_stack_len"],
-                unvalidated["working_recipe_generation"],
-                unvalidated["validated_recipe_generation"],
-                unvalidated["working_recipe_fingerprint"],
-                unvalidated["validated_recipe_fingerprint"],
+                "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
+                len(getattr(ss, "optimization_stack", None) or []),
+                getattr(ss, "cumulative_gain_validated_stack_len", 0),
+                getattr(ss, "working_recipe_generation", 0),
+                getattr(ss, "validated_recipe_generation", 0),
             )
+            return {
+                "status": "skipped",
+                "reason": "unvalidated_recipe_stack",
+                "backend": "none",
+                "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
+            }
+        try:
+            journal = self._ensure_journal()
+            ss = self.shared_state
+            cb = getattr(ss, "current_best", {}) or {}
+            final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
+            total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
+            journal.finalize(
+                final_throughput=final_tput if final_tput > 0 else None,
+                total_gain_pct=total_gain,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("optimization_journal.finalize failed")
 
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
@@ -2759,20 +2629,6 @@ class WritebackCollaborator:
                 "reason": "agentx",
                 "backend": str(getattr(config, "mode", "") or "unknown"),
                 "result_type": _close_out.RESULT_AGENTX_BLOCKED,
-            }
-        if unvalidated is not None:
-            return {
-                **unvalidated,
-                "backend": config.mode.value,
-            }
-        if config.mode is KnowledgeStoreMode.REMOTE and bool(
-            getattr(self.shared_state, "_using_validated_recipe_snapshot", False)
-        ):
-            return {
-                "status": "skipped",
-                "reason": "validated_snapshot_remote_material_unavailable",
-                "backend": config.mode.value,
-                "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
             }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
@@ -3336,7 +3192,6 @@ class WritebackCollaborator:
         *,
         gap_canonical_id: str = "",
         entry_extra: Mapping[str, Any] | None = None,
-        allow_equal: bool = False,
     ) -> bool:
         """Accept prebaseline enablement config or lift an improving measured winner.
 
@@ -3364,7 +3219,7 @@ class WritebackCollaborator:
                 provenance resolves by gap id rather than name.
             entry_extra: Per-action metadata for the stack entry only;
                 ``current_best`` stays a pure config record.
-            allow_equal: Accept equality when the caller's own KEEP gate allows it.
+
         Returns:
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
@@ -3402,9 +3257,7 @@ class WritebackCollaborator:
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and (
-                graded.candidate < graded.reference or (graded.candidate == graded.reference and not allow_equal)
-            ):
+            if graded.reference > 0 and graded.candidate <= graded.reference:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -3634,15 +3487,6 @@ class WritebackCollaborator:
         for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
             _merged_envs.pop(_key, None)
         _merged_envs.update(_new_envs)
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
-
-        recipe_fingerprint = canonical_fingerprint(
-            full_args,
-            _merged_envs,
-            remove_args=(bv.get("remove_args") if isinstance(bv, dict) else None),
-            unset_envs=(bv.get("unset_envs") if isinstance(bv, dict) else None),
-            args_mode=str((bv.get("args_mode") if isinstance(bv, dict) else "") or "append"),
-        )
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
@@ -3655,7 +3499,6 @@ class WritebackCollaborator:
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
-            "fingerprint": recipe_fingerprint,
         }
         # The axes of the measurement this KEEP was graded on. Without them the
         # next round's anchor has no snapshot, and the session degrades to
@@ -3671,10 +3514,10 @@ class WritebackCollaborator:
                 )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
+        self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = (
             int(getattr(self.shared_state, "working_recipe_generation", 0) or 0) + 1
         )
-        self.shared_state.current_best = current_best
         self._stamp_current_best_measurement(bv)
         return True
 
@@ -5695,13 +5538,15 @@ class WritebackCollaborator:
         # measured tput when that rebench promotes (see _promote_to_shared_state).
         stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
         vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
-        if vlen < len(stack):
+        if state.optimization_stack_has_unvalidated_keeps():
             state.resume_pending_revalidation = True
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
                     "validated_stack_len": vlen,
                     "stack_len": len(stack),
+                    "working_recipe_generation": state.working_recipe_generation,
+                    "validated_recipe_generation": state.validated_recipe_generation,
                 }
             )
             try:
@@ -6227,7 +6072,13 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
-    async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
+    async def _enqueue_internal_stack_rebench(
+        self,
+        *,
+        reason: str,
+        idempotency_key: str = "resume-stack-revalidate",
+        include_geak: bool = True,
+    ) -> dict[str, Any]:
         """Enqueue one full-stack end-to-end rebench of the cumulative config.
 
         Builds a single-variant ``explore`` task from ``current_best``'s launch
@@ -6241,6 +6092,10 @@ class WritebackCollaborator:
 
         Args:
             reason: Human-readable reason stamped on the task params.
+            idempotency_key: Key for the native stack rebench; GEAK 2b keeps
+                its per-macro-cycle key.
+            include_geak: Whether a pending GEAK result is folded into the
+                rebench. ``False`` measures ``current_best`` exactly as stacked.
 
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
@@ -6248,7 +6103,11 @@ class WritebackCollaborator:
         benchmark_script = baseline_benchmark_script(self.shared_state)
         # GEAK's explicit launch controls distinguish complete flags from legacy
         # deltas. Both retain the current stack's environment removal controls.
-        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps = (
+            self.shared_state.geak_result
+            if include_geak and isinstance(getattr(self.shared_state, "geak_result", None), dict)
+            else {}
+        )
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
@@ -6424,7 +6283,7 @@ class WritebackCollaborator:
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key="resume-stack-revalidate",
+            idempotency_key=idempotency_key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )

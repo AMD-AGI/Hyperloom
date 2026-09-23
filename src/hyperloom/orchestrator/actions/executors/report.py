@@ -437,7 +437,9 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
         or summary["cumulative_gain_validated"]
     ):
         return "unavailable"
-    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"]:
+    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"] or summary.get(
+        "has_unvalidated_keeps"
+    ):
         return "stale"
     from hyperloom.common.perf_metric import VERDICT_KEEP
 
@@ -590,13 +592,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
     stack_len = summary.get("optimization_stack_len", 0) or 0
+    changed_since_validation = stack_len > val_len or bool(summary.get("has_unvalidated_keeps"))
     if val_ts:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
     elif val_gain or val_len:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )

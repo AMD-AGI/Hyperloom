@@ -481,163 +481,67 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
 
 
-def test_close_skips_working_recipe_newer_than_validation(tmp_path: Path) -> None:
-    coord = _make_coordinator(tmp_path)
-    state = coord.shared_state
-    state.current_best = {
-        "name": "pending",
-        "extra_server_args": "--page-size 32",
-        "tput": 2200.0,
-    }
-    state.optimization_stack = [
-        {
-            "action": "explore",
-            "variant_name": "page32",
-            "extra_server_args": "--page-size 32",
-        }
-    ]
+def _stack_one_keep(state) -> None:
+    state.current_best = {"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "page32", "extra_server_args": "--page-size 32"}]
     state.cumulative_gain_validated = 10.0
-    state.cumulative_gain_validated_stack_len = 0
+
+
+def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _stack_one_keep(coord.shared_state)
 
     def _must_not_finalize_journal():
-        raise AssertionError("unvalidated working recipe reached journal finalization")
+        raise AssertionError("an unvalidated working recipe reached journal finalization")
 
     coord._ensure_journal = _must_not_finalize_journal
+
     outcome = coord.finalize_recipe_and_journal()
 
     assert outcome == {
         "status": "skipped",
         "reason": "unvalidated_recipe_stack",
-        "backend": "local",
+        "backend": "none",
         "result_type": "unvalidated_recipe",
-        "optimization_stack_len": 1,
-        "validated_stack_len": 0,
-        "working_recipe_generation": 0,
-        "validated_recipe_generation": 0,
-        "working_recipe_fingerprint": "",
-        "validated_recipe_fingerprint": "",
     }
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
 
 
-def test_close_skips_same_length_recipe_identity_mismatch(tmp_path: Path) -> None:
+def test_close_skips_a_same_length_lift_the_watermark_cannot_see(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     state = coord.shared_state
-    state.current_best = {
-        "name": "replacement",
-        "tput": 2200.0,
-        "fingerprint": "working-fingerprint",
-    }
-    state.optimization_stack = [{"action": "explore", "variant_name": "replacement"}]
+    _stack_one_keep(state)
     state.cumulative_gain_validated_stack_len = 1
     state.working_recipe_generation = 2
     state.validated_recipe_generation = 1
-    state.validated_recipe_fingerprint = "validated-fingerprint"
 
     outcome = coord.finalize_recipe_and_journal()
 
-    assert outcome["status"] == "skipped"
     assert outcome["reason"] == "unvalidated_recipe_stack"
-    assert outcome["optimization_stack_len"] == outcome["validated_stack_len"] == 1
-    assert outcome["working_recipe_generation"] == 2
-    assert outcome["validated_recipe_generation"] == 1
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
 
 
-def test_close_publishes_last_validated_snapshot_not_newer_working_recipe(tmp_path: Path) -> None:
-    coord = _make_coordinator(tmp_path)
-    state = coord.shared_state
-    validated_best = {
-        "action": "explore",
-        "name": "validated-a",
-        "variant_name": "validated-a",
-        "extra_server_args": "--page-size 16",
-        "extra_envs": {},
-        "tput": 2000.0,
-        "fingerprint": "fingerprint-a",
-    }
-    validated_stack = [
-        {
-            "action": "explore",
-            "variant_name": "validated-a",
-            "extra_server_args": "--page-size 16",
-            "tput": 2000.0,
-        }
-    ]
-    state.current_best = {
-        **validated_best,
-        "name": "working-b",
-        "variant_name": "working-b",
-        "extra_server_args": "--page-size 32",
-        "tput": 2200.0,
-        "fingerprint": "fingerprint-b",
-    }
-    state.optimization_stack = [
-        *validated_stack,
-        {
-            "action": "explore",
-            "variant_name": "working-b",
-            "extra_server_args": "--page-size 32",
-            "tput": 2200.0,
-        },
-    ]
-    state.working_recipe_generation = 2
-    state.validated_recipe_generation = 1
-    state.validated_recipe_fingerprint = "fingerprint-a"
-    state.cumulative_gain_validated = 10.0
-    state.cumulative_gain_validated_stack_len = 1
-    state.validated_recipe_snapshot = {
-        "generation": 1,
-        "recipe_fingerprint": "fingerprint-a",
-        "current_best": validated_best,
-        "optimization_stack": validated_stack,
-        "gain_per_stack_entry": [10.0],
-        "gain_pct": 10.0,
-        "stack_len": 1,
-        "validated_at": "2026-09-22T00:00:00+00:00",
-    }
-    state.last_action_failures = [{"action": "explore", "name": "later-crash", "reason": "oom"}]
-
-    outcome = coord.finalize_recipe_and_journal()
-
-    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
-    assert row["best_throughput"] == 2000.0
-    assert row["best_config"]["extra_server_args"] == "--page-size 16"
-    assert len(row["what_worked"]) == 1
-    assert "oom" in [f.get("reason") for f in row["what_failed"]]
-    assert outcome["published_recipe_generation"] == 1
-    assert outcome["published_recipe_fingerprint"] == "fingerprint-a"
-    assert state.current_best["tput"] == 2200.0
-    assert len(state.optimization_stack) == 2
-
-
-def test_close_publishes_evidence_recorded_after_the_last_validation(tmp_path: Path) -> None:
+def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     state = coord.shared_state
     state.baseline_tput = 1000.0
     state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
     assert coord._lift_to_current_best(
         "explore",
         1100.0,
-        {"name": "validated-a", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+        {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
     )
-    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
+    assert state.optimization_stack_has_unvalidated_keeps()
 
-    state.last_action_failures = [{"action": "explore", "name": "later-crash", "reason": "oom"}]
-    state.gaps = [
-        {
-            "canonical_id": "gap-later",
-            "provenance": "https://pr/later",
-            "attempts": [{"variant_name": "later-revert", "outcome": "REVERT", "gain_pct": -3.0}],
-        }
-    ]
-    assert state.working_recipe_generation == state.validated_recipe_generation
+    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert state.validated_recipe_generation == state.working_recipe_generation == 1
 
     outcome = coord.finalize_recipe_and_journal()
 
     assert outcome["result_type"] == "written"
-    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
-    assert row["best_config"]["extra_server_args"] == "--page-size 16"
-    assert [f.get("reason") for f in row["what_failed"]] == ["oom", "reverted"]
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.

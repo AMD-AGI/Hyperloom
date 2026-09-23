@@ -362,8 +362,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated_stack_len",
         "working_recipe_generation",
         "validated_recipe_generation",
-        "validated_recipe_fingerprint",
-        "validated_recipe_snapshot",
         "pending_integrate",
         "resume_pending_revalidation",
         "baseline_tput",

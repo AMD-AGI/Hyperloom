@@ -2514,7 +2514,7 @@ class PreludePhase(PhaseHandler):
                 params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
             recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            lifted = self._lift_to_current_best(
+            self._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
@@ -2535,31 +2535,21 @@ class PreludePhase(PhaseHandler):
                     "workspace": str(result.get("workspace") or ""),
                 },
                 entry_extra=entry_extra,
-                allow_equal=combined_current_contract and keep_threshold <= 0,
             )
-            if not lifted:
-                outcome["status"] = "drift"
-                outcome["reason"] = "baseline_validation_failed"
-                state.warm_replay_pending = {}
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
             if recorder is not None:
                 recorder.record_promotion(
                     promoted_checkout=promoted_checkout,
                     replayed_patch_refs=replayed_patch_refs,
                     stack_entry=entry_extra,
                 )
-            # Publish the reproduced verdict only after the lift atomically
-            # committed the working Recipe state.
+            # Publish the reproduced verdict now that the stack entry exists but
+            # before the cumulative update (the one step below that can raise and
+            # is swallowed by the caller). Placed after the lift on purpose --
+            # if the lift raises, the outcome stays in_flight and both the stack
+            # and the post-ruling mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
-                self._update_cumulative_gain_validated(
-                    single_round_tput,
-                    result,
-                    source="warm_replay",
-                    measurement_basis="e2e_rebench",
-                )
+                self._update_cumulative_gain_validated(single_round_tput, result)
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
                 "min_required=+%.2f%%); pushed warm_replay onto stack",

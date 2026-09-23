@@ -82,11 +82,6 @@ def test_a_real_lift_records_the_anchor_it_beat(session_dir):
         assert rows[0]["contribution_pct"] == 10.0
         assert rows[0]["stack_index"] == 0
         assert rows[0]["source"] == stack_event.SOURCE_EXPLORE
-        state = coord.shared_state
-        assert state.working_recipe_generation == 1
-        assert state.validated_recipe_generation == 0
-        assert state.validated_recipe_fingerprint == ""
-        assert state.validated_recipe_snapshot == {}
 
 
 def test_the_row_index_matches_the_stack_the_lift_appended_to(session_dir):
@@ -191,11 +186,6 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert settled["stack_len"] == 1
         assert settled["validated_gain_pct"] == pytest.approx(10.0)
         assert ext["validations"]["at_head"] is True
-        state = coord.shared_state
-        assert state.validated_recipe_generation == state.working_recipe_generation == 1
-        assert state.validated_recipe_snapshot["current_best"] == state.current_best
-        assert state.validated_recipe_snapshot["optimization_stack"] == state.optimization_stack
-        assert "recipe_attrs" not in state.validated_recipe_snapshot
         # The whole-stack figure and the ledger were measured independently.
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 

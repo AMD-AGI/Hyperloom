@@ -1349,6 +1349,41 @@ def test_remote_close_transport_failure_is_nonfatal(
     assert row["error"]["type"] == "OSError"
 
 
+def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(
+        current_best={"tput": 120.0},
+        optimization_stack=[{"action": "explore", "variant_name": "a"}, {"action": "explore", "variant_name": "b"}],
+        cumulative_gain_validated=10.0,
+        cumulative_gain_validated_stack_len=1,
+        working_recipe_generation=2,
+        validated_recipe_generation=1,
+    )
+    coordinator = SimpleNamespace(
+        shared_state=state,
+        session_dir=tmp_path,
+        recipe_kb=None,
+        knowledge_plane=None,
+        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
+        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
+    )
+
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert outcome["result_type"] == "unvalidated_recipe"
+
+
 def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
     collaborator = WritebackCollaborator(
@@ -1383,65 +1418,6 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
 
     assert captured["optimized_throughput"] is None
     assert captured["validated_gain_pct"] is None
-
-
-def test_remote_close_skips_when_only_local_validated_snapshot_is_available(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
-    validated_best = {"tput": 100.0, "fingerprint": "validated"}
-    validated_stack = [{"action": "explore", "variant_name": "validated"}]
-    state = SimpleNamespace(
-        current_best={"tput": 120.0, "fingerprint": "working"},
-        optimization_stack=[*validated_stack, {"action": "explore", "variant_name": "working"}],
-        gain_per_stack_entry=[10.0, 5.0],
-        cumulative_gain_validated=10.0,
-        cumulative_gain_validated_ts="2026-09-22T00:00:00+00:00",
-        cumulative_gain_validated_stack_len=1,
-        working_recipe_generation=2,
-        validated_recipe_generation=1,
-        validated_recipe_fingerprint="validated",
-        validated_recipe_snapshot={
-            "generation": 1,
-            "recipe_fingerprint": "validated",
-            "current_best": validated_best,
-            "optimization_stack": validated_stack,
-            "gain_per_stack_entry": [10.0],
-            "gain_pct": 10.0,
-            "stack_len": 1,
-            "validated_at": "2026-09-22T00:00:00+00:00",
-        },
-        kernel_optimizer="forge",
-        tp=8,
-        conc=64,
-        isl=1024,
-        osl=256,
-    )
-    coordinator = SimpleNamespace(
-        shared_state=state,
-        session_dir=tmp_path,
-        recipe_kb=None,
-        knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
-    )
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
-    monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not receive working state"))),
-    )
-
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
-
-    assert outcome["status"] == "skipped"
-    assert outcome["reason"] == "validated_snapshot_remote_material_unavailable"
-    assert state.current_best["fingerprint"] == "working"
 
 
 class _FakeStore:
@@ -2848,9 +2824,7 @@ def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
             fromlist=["_bootstrap_recipe_kb"],
         )._bootstrap_recipe_kb
     )
-    close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal) + inspect.getsource(
-        WritebackCollaborator._finalize_recipe_and_journal_impl
-    )
+    close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal)
     assert "RemoteWarmRecipeAdapter" in bootstrap_source
     assert "HyperloomRemoteKB.from_env().write" in close_source
     assert "write_final_remote_recipe" not in close_source

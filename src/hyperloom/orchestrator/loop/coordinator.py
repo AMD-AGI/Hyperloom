@@ -778,6 +778,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_revalidate_stack_for_close": "phase_close",
         "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
@@ -1412,6 +1413,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+
+    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
+    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
+    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
