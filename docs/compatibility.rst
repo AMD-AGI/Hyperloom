@@ -49,7 +49,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
-| ROCm Version        | 7.2.x                                                  |
+| ROCm Version        | 7.2.x, 10.0                                            |
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
@@ -226,11 +226,11 @@ overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
 ``VLLM_ROCM_VARIANT``, ``VLLM_INSTALL_METHOD``, ``VLLM_REPO``, ``VLLM_SOURCE_REF``,
 ``VLLM_ROOT``) for hosts that need a different pinned stack.
 
-The table above is the validated combination, and ROCm 7.2.x under a single
-``/opt/rocm`` prefix is the layout to prefer. A host where ROCm arrives as
-TheRock's pip wheels instead, split across the ``_rocm_sdk_*`` namespace
-packages, is handled rather than validated: the bare-metal installer probes
-those packages for library resolution and, before a framework source build,
-supplies the devel headers and toolchain root from them, so setup does not fail
-on that layout. Only ROCm 7.0.x and 7.2.x have a published ``amd-sglang`` wheel;
-any other stack falls back to a source install. See :doc:`/install/install`.
+The table above is the validated combination. ROCm 7.2.x is validated under a
+single ``/opt/rocm`` prefix. ROCm 10.0 arrives as TheRock's pip wheels, split
+across the ``_rocm_sdk_*`` namespace packages, which is the layout the ``rocm10``
+images are built from and the one the ROCm 10 routes are validated on: the
+bare-metal installer probes those packages for library resolution and, before a
+framework source build, supplies the devel headers and toolchain root from them.
+Only ROCm 7.0.x and 7.2.x have a published ``amd-sglang`` wheel; any other stack
+falls back to a source install. See :doc:`/install/install`.
