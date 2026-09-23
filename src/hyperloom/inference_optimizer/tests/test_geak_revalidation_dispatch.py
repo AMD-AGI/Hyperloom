@@ -668,7 +668,7 @@ async def test_structured_environment_alone_dispatches_geak_rebench(coordinator)
     ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
     assert row.params["geak_fallback"] is True
     assert ran.extra_envs == {"SGLANG_USE_AITER": "1"}
-    assert row.params["expected_cfg_hash"] == ran.fingerprint
+    assert row.params["expected_cfg_hash"] == effective_fingerprint(ran.extra_server_args, ran.extra_envs)
 
 
 @pytest.mark.asyncio

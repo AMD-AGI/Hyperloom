@@ -324,7 +324,7 @@ class TestVariantResultToDict:
         encoded = result.to_dict()
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
-        assert encoded == {**expected, "fingerprint": result.fingerprint}
+        assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
@@ -484,7 +484,6 @@ class TestCoerceExtraEnvs:
             "SGLANG_USE_AITER": "1",
             "VLLM_ROCM_USE_AITER_MHA": "0",
         }
-        assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(
