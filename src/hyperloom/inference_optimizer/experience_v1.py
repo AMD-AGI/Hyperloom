@@ -86,6 +86,8 @@ class ProjectedAttempt:
     baseline_value: float
     reasoning: str
     reasoning_origin: str
+    fleet_kb_read_id: str
+    rendered_refs: tuple[dict[str, str], ...]
     change_family: str
     change_fingerprint: str
     change_summary: str
@@ -108,6 +110,8 @@ class ProjectedAttempt:
             "baseline_configuration": dict(self.baseline_configuration),
             "baseline_value": self.baseline_value,
             "reasoning_origin": self.reasoning_origin,
+            "fleet_kb_read_id": self.fleet_kb_read_id,
+            "rendered_refs": [dict(item) for item in self.rendered_refs],
             "change_identity": {
                 "change_family": self.change_family,
                 "change_fingerprint": self.change_fingerprint,
@@ -263,6 +267,31 @@ def _reasoning(attempt: Mapping[str, Any], proposal: Mapping[str, Any]) -> tuple
     if not any(origin.startswith(prefix) for prefix in _ACTION_TIME_REASONING_PREFIXES):
         raise ProjectionError("decision reasoning is not traceable to the action-time proposal")
     return normalized, origin
+
+
+def _fleet_exposure(
+    proposal: Mapping[str, Any],
+) -> tuple[str, tuple[dict[str, str], ...]]:
+    read_id = _text(proposal.get("fleet_kb_read_id"))
+    refs: list[dict[str, str]] = []
+    raw_refs = proposal.get("rendered_refs")
+    if isinstance(raw_refs, list):
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                continue
+            experience_id = _text(item.get("id"))
+            if not experience_id:
+                continue
+            refs.append(
+                {
+                    "id": _token(experience_id, name="rendered_ref.id"),
+                    "purpose": _token(
+                        item.get("purpose") or "representative",
+                        name="rendered_ref.purpose",
+                    ),
+                }
+            )
+    return read_id, tuple(refs)
 
 
 def _canonical_json(value: Any) -> str:
@@ -525,6 +554,7 @@ def _project(
         raise ProjectionError("attempt has no valid measured baseline")
     baseline_configuration = _baseline_configuration(attempt)
     reasoning, reasoning_origin = _reasoning(attempt, proposal)
+    fleet_kb_read_id, rendered_refs = _fleet_exposure(proposal)
     family, fingerprint, summary, content, resource_refs = _change(
         attempt,
         proposal,
@@ -555,6 +585,8 @@ def _project(
         baseline_value=baseline,
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
+        fleet_kb_read_id=fleet_kb_read_id,
+        rendered_refs=rendered_refs,
         change_family=family,
         change_fingerprint=fingerprint,
         change_summary=summary,
@@ -573,6 +605,7 @@ def _project(
             "proposal_ref": _text(attempt.get("proposal_ref")),
             "action_ref": _text(attempt.get("proposal_ref") or attempt.get("task_id")),
             "reasoning_origin": reasoning_origin,
+            "fleet_kb_read_id": fleet_kb_read_id,
             "round_id": _text(attempt.get("round_id")),
             "variant_name": _text(attempt.get("variant_name")),
             "validation_basis": _text(attempt.get("validation_basis")),
@@ -694,7 +727,7 @@ def _publish_one(module: Any, kb: Any, projected: ProjectedAttempt) -> tuple[str
         session.decide(
             reasoning=projected.reasoning,
             change=change,
-            rendered_refs=(),
+            rendered_refs=tuple(module.RenderedRef.from_dict(item) for item in projected.rendered_refs),
         )
     elif session.record.change != change:
         raise RuntimeError("existing in-progress Experience has a different change")
@@ -709,8 +742,9 @@ def _publish_one(module: Any, kb: Any, projected: ProjectedAttempt) -> tuple[str
         reflection=projected.reflection,
         completed_at=projected.completed_at,
     )
-    session.publish()
-    return session.record.id, "complete"
+    publish_result = session.publish()
+    publish_status = str(getattr(publish_result, "status", "") or "")
+    return session.record.id, publish_status if publish_status == "spooled" else "complete"
 
 
 def _write_receipt(path: Path, value: Mapping[str, Any]) -> None:
@@ -744,6 +778,7 @@ def publish_framework_experiences(
             "enabled": False,
             "selected": 0,
             "published": 0,
+            "spooled": 0,
             "errors": [],
         }
     root = Path(session_dir).resolve()
@@ -756,6 +791,7 @@ def publish_framework_experiences(
             "blocked_reason": blocked,
             "selected": 0,
             "published": 0,
+            "spooled": 0,
             "errors": [],
             "experiences": [],
             "skipped": review["skipped"],
@@ -797,7 +833,8 @@ def publish_framework_experiences(
         "blocked_reason": "",
         "source": "session_breakdown.timeline[type=framework_agent].ext.attempts",
         "selected": len(projected),
-        "published": len(rows),
+        "published": sum(item["status"] != "spooled" for item in rows),
+        "spooled": sum(item["status"] == "spooled" for item in rows),
         "errors": errors,
         "experiences": rows,
         "skipped": skipped,

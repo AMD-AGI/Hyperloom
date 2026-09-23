@@ -47,8 +47,18 @@ class FakeProvenance:
     extra: dict
 
 
+@dataclass(frozen=True)
+class FakeRenderedRef:
+    id: str
+    purpose: str
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(str(value["id"]), str(value.get("purpose") or ""))
+
+
 class FakeSession:
-    def __init__(self, experience_id: str) -> None:
+    def __init__(self, experience_id: str, publish_status: str = "") -> None:
         self.record = SimpleNamespace(
             id=experience_id,
             status=SimpleNamespace(value="in_progress"),
@@ -56,6 +66,7 @@ class FakeSession:
         )
         self.decisions: list[dict] = []
         self.completions: list[dict] = []
+        self.publish_status = publish_status
 
     def decide(self, **kwargs):
         self.decisions.append(kwargs)
@@ -74,19 +85,23 @@ class FakeSession:
         )
 
     def publish(self):
-        return None
+        return SimpleNamespace(status=self.publish_status)
 
 
 class FakeKB:
     enabled = True
 
-    def __init__(self) -> None:
+    def __init__(self, publish_status: str = "") -> None:
         self.sessions: dict[int, FakeSession] = {}
         self.begin_calls: list[dict] = []
+        self.publish_status = publish_status
 
     def begin(self, **kwargs):
         self.begin_calls.append(kwargs)
-        return self.sessions.setdefault(kwargs["seq"], FakeSession(f"exp-{kwargs['seq']:032x}"))
+        return self.sessions.setdefault(
+            kwargs["seq"],
+            FakeSession(f"exp-{kwargs['seq']:032x}", self.publish_status),
+        )
 
 
 def fake_module(kb: FakeKB):
@@ -95,6 +110,7 @@ def fake_module(kb: FakeKB):
         ConstraintResult=FakeConstraint,
         Outcome=FakeOutcome,
         Provenance=FakeProvenance,
+        RenderedRef=FakeRenderedRef,
         experience_kb_from_env=lambda *_args, **_kwargs: kb,
     )
 
@@ -440,6 +456,52 @@ def test_publish_maps_ready_attempts_and_writes_receipt(
     assert keep.completions[0]["outcome"].constraints == (FakeConstraint("accuracy", True, 0.82),)
     report = json.loads((tmp_path / "reports" / "experience_v1_publish.json").read_text())
     assert report["source"] == "session_breakdown.timeline[type=framework_agent].ext.attempts"
+
+
+def test_publish_preserves_fleet_kb_exposure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = breakdown()
+    proposal = value["timeline"][0]["ext"]["proposals"][0]
+    proposal["fleet_kb_read_id"] = "read-1"
+    proposal["rendered_refs"] = [
+        {
+            "id": "exp-00000000000000000000000000000001",
+            "purpose": "representative",
+        }
+    ]
+    kb = FakeKB()
+    monkeypatch.setenv("HYPERLOOM_KB_ENABLE", "true")
+    monkeypatch.setattr(experience_v1, "import_module", lambda _name: fake_module(kb))
+
+    experience_v1.publish_framework_experiences(tmp_path, value)
+
+    keep = next(session for session in kb.sessions.values() if session.completions[0]["outcome"].decision == "keep")
+    assert keep.decisions[0]["rendered_refs"] == (
+        FakeRenderedRef(
+            "exp-00000000000000000000000000000001",
+            "representative",
+        ),
+    )
+    keep_begin = next(call for call in kb.begin_calls if call["baseline_value"] == 800.0)
+    assert keep_begin["provenance"].extra["fleet_kb_read_id"] == "read-1"
+
+
+def test_publish_receipt_distinguishes_remote_spool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = FakeKB("spooled")
+    monkeypatch.setenv("HYPERLOOM_KB_ENABLE", "true")
+    monkeypatch.setattr(experience_v1, "import_module", lambda _name: fake_module(kb))
+
+    receipt = experience_v1.publish_framework_experiences(tmp_path, breakdown())
+
+    assert receipt["selected"] == 2
+    assert receipt["published"] == 0
+    assert receipt["spooled"] == 2
+    assert {item["status"] for item in receipt["experiences"]} == {"spooled"}
 
 
 def test_baseline_fingerprint_ignores_unordered_map_and_set_order(
