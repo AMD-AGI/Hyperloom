@@ -1054,11 +1054,11 @@ def _target_uses_aiter_jit(target_file: Path) -> bool:
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Locate the importable aiter package's ``jit/build`` directory.
+    """Resolve AITER's build directory through the shared runtime resolver.
 
     Returns:
-        The ``<aiter>/jit/build`` path, or ``None`` when aiter is not
-        importable.
+        The build path under ``AITER_JIT_DIR``, the package JIT directory, or
+        the initialized user cache; ``None`` when the package/cache is unavailable.
     """
     return aiter_jit_cache.resolve_jit_build_dir(_aiter_package_root())
 
@@ -1069,18 +1069,17 @@ def _invalidate_aiter_jit_build(
     *,
     jit_build_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs.
+    """Back up AITER's build tree and all serving modules for a source patch.
 
     Args:
         target_file: The file being patched (gates the operation).
-        backup_dir: Directory to move the ``jit/build`` tree into.
+        backup_dir: Parent of the build-tree and serving-module backups.
         jit_build_dir: Authoritative JIT build path from the apply strategy.
             Falls back to runtime discovery for non-runtime-JIT strategies.
 
     Returns:
-        A status dict with ``status`` of ``ok`` (cache moved), ``clean``
-        (authoritative cache absent/empty), ``skipped``, or ``failed`` and
-        supporting fields.
+        The shared transaction record: ``ok`` when cache state was moved,
+        ``clean`` when neither build nor modules existed, ``skipped``, or ``failed``.
     """
     if jit_build_dir is None and not _target_is_in_aiter_csrc(target_file):
         return {
@@ -1123,9 +1122,10 @@ def _restore_aiter_jit_build(
     expected_jit_build_dir: str | Path | None = None,
     backup_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Restore an aiter ``jit/build`` backup, reversing the invalidation.
+    """Restore AITER build and serving-module state within the recorded scope.
 
-    Any regenerated ``jit/build`` directory is removed first.
+    The shared transaction validates backups before removing candidate artifacts.
+    Legacy build-only records leave serving modules untouched.
 
     Args:
         jit_build_backup: The backup record returned by
@@ -1527,9 +1527,8 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         deploy_roots = _installed_kernel_deploy_roots(installed_aiter_root)
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
         jit_build_dir = str(aiter_jit_cache.resolve_jit_build_dir(installed_aiter_root / "aiter") or "")
-        # Runtime-JIT artifacts live under jit/build and are moved aside as one
-        # tree below. Recursively copying wheel .so/.co files here is redundant
-        # and can consume gigabytes per integration attempt.
+        # The shared JIT transaction backs up build/ and sibling serving .so files.
+        # Recursively copying package artifacts here would duplicate that work.
         artifact_roots = []
     elif checkout_root is not None:
         root = checkout_root
