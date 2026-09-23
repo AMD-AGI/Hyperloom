@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
+from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
 from .executors import (
     _build_specialist_executor,
@@ -600,17 +601,8 @@ def _catalog_probe_has_no_credential() -> bool:
 
 
 def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _custom_orch_model_explicitly_disabled() -> bool:
-    """Whether the operator explicitly requested strict AMD model allowlisting."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
+    return is_truthy(os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "").strip() or None, default=True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
@@ -626,8 +618,6 @@ def _validate_and_resolve_claude_model(
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    if not _custom_orch_model_explicitly_disabled():
-        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
