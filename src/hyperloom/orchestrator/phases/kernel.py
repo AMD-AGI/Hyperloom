@@ -1554,12 +1554,8 @@ class KernelPhase(PhaseHandler):
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
-        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
-        # graded on total token throughput, so leaving this pinned to output aims
-        # GEAK's search at a number the session does not score -- on the AgentX
-        # corpus the two run ~140x apart, and a kernel that helps the decode-side
-        # output figure need not help the prefill-dominated total by the same
-        # margin. Synthetic runs resolve to "output" and are unaffected.
+        # GEAK must search and gate on the axis this session is graded on: a kernel accepted on another axis need
+        # not move the graded one. geak_metric_axis owns the mapping and its rationale.
         _geak_e2e_metric, _ = geak_metric_axis(
             benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
             grading=getattr(state, "grading", None),

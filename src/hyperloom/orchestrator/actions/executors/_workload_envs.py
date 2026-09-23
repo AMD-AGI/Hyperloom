@@ -282,7 +282,7 @@ def _agentx_default_corpus(model: str) -> str:
     return AGENTX_CORPUS_256K
 
 
-# GEAK's own names for the two throughput axes it can measure: ``E2E_METRIC``
+# GEAK's own names for the axes it can measure: ``E2E_METRIC``
 # selects one and ``bench_summary.json`` records the matching ``metric_basis``.
 # Spelled in GEAK's vocabulary, not Hyperloom's curve-row names, so the handoff
 # and GEAK's summary can be compared as strings on both sides.
@@ -296,7 +296,7 @@ def geak_metric_axis(
     benchmark_mode: str = "",
     grading: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
+    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's graded axis.
 
     The handoff must name the axis this session actually reads. An agentic
     replay is graded on interactivity and guarded on total token throughput, so
