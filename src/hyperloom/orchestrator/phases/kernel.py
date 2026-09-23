@@ -45,7 +45,7 @@ from ..state.optimization_journal import (
     JournalEntry,
 )
 from ..state.shared_state import resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES
+from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
@@ -175,24 +175,21 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     """
     if not kernel_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
-        record_integrate_verdict(
-            macro_cycle=macro_cycle,
-            integration_id=f"geak-{kernel_id}",
-            kernel_id=kernel_id,
-            decision=str(entry.get("last_decision") or ""),
-            status=str(entry.get("last_status") or ""),
-            attempt_count=entry.get("attempt_count"),
-            gain_pct=entry.get("best_gain_pct"),
-            basis=str(entry.get("basis") or ""),
-            alignment_status=str(entry.get("alignment_status") or ""),
-            gain_attributed=bool(entry.get("validated", True)),
-            settled_at=str(entry.get("updated_at") or ""),
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-        log.debug("kernel timeline: geak integration record failed", exc_info=True)
+    record_integrate_verdict(
+        macro_cycle=macro_cycle,
+        integration_id=f"geak-{kernel_id}",
+        kernel_id=kernel_id,
+        decision=str(entry.get("last_decision") or ""),
+        status=str(entry.get("last_status") or ""),
+        attempt_count=entry.get("attempt_count"),
+        gain_pct=entry.get("best_gain_pct"),
+        basis=str(entry.get("basis") or ""),
+        alignment_status=str(entry.get("alignment_status") or ""),
+        gain_attributed=bool(entry.get("validated", True)),
+        settled_at=str(entry.get("updated_at") or ""),
+    )
 
 
 class KernelPhase(PhaseHandler):
@@ -265,10 +262,7 @@ class KernelPhase(PhaseHandler):
         def _note_reprofile(**fields: Any) -> None:
             if recorder is None:
                 return
-            try:
-                recorder.record_reprofile(**fields)
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: reprofile record failed", exc_info=True)
+            recorder.record_reprofile(**fields)
 
         if cur <= 0:
             _note_reprofile(ran=False, skipped_reason="no_projected_tput")
@@ -335,7 +329,7 @@ class KernelPhase(PhaseHandler):
                 )
                 return
             await self.run_task_registered(reprofile_task)
-        except Exception:  # noqa: BLE001 — never block the phase on a reprofile failure
+        except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
                 ran=True,
@@ -405,18 +399,14 @@ class KernelPhase(PhaseHandler):
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = getattr(state, "last_trace_analyze", None) or {}
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
-        try:
-            recorder.begin(
-                stack_depth_in=getattr(state, "cumulative_gain_validated_stack_len", None),
-                tput_before=current_best.get("tput"),
-                session_baseline_tput=getattr(state, "baseline_tput", None),
-                snapshot=cached,
-                snapshot_staleness="absent" if not cached else "fresh",
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: begin failed", exc_info=True)
-        else:
-            self._record_kernel_discovered_from_cache(provenance="entry_snapshot")
+        recorder.begin(
+            stack_depth_in=getattr(state, "cumulative_gain_validated_stack_len", None),
+            tput_before=current_best.get("tput"),
+            session_baseline_tput=getattr(state, "baseline_tput", None),
+            snapshot=cached,
+            snapshot_staleness="absent" if not cached else "fresh",
+        )
+        self._record_kernel_discovered_from_cache(provenance="entry_snapshot")
 
     def _record_kernel_discovered_from_cache(self, *, provenance: str) -> None:
         """Record the profiling table the visit inherited or just produced."""
@@ -424,10 +414,7 @@ class KernelPhase(PhaseHandler):
         if recorder is None:
             return
         cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
-        try:
-            recorder.record_discovered_kernels(cached, provenance=provenance)
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: discovered kernels record failed", exc_info=True)
+        recorder.record_discovered_kernels(cached, provenance=provenance)
 
     def _record_kernel_rewrite_controller_timeline(self, result: dict[str, Any]) -> None:
         """Record settled Controller integrations as Forge kernel rewrites."""
@@ -435,69 +422,66 @@ class KernelPhase(PhaseHandler):
         rows = integration.get("results") if isinstance(integration, dict) else None
         if not isinstance(rows, list):
             return
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
-                record_backend_versions_and_timeline,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
+            record_backend_versions_and_timeline,
+        )
 
-            cycle = int(result.get("macro_cycle") or getattr(self.shared_state, "macro_cycle", 0) or 0)
-            for index, row in enumerate(rows):
-                if not isinstance(row, dict):
-                    continue
-                kernel_id = str(row.get("operator_id") or "")
-                if not kernel_id:
-                    continue
-                status = str(row.get("status") or "unknown").lower()
-                if status == "kept":
-                    decision = "KEEP"
-                elif status.startswith("reverted"):
-                    decision = "REVERT"
-                elif status.startswith("skipped"):
-                    decision = "SKIPPED"
-                else:
-                    decision = "FAILED"
-                attempt_id = f"controller-c{cycle}-{index}"
-                gain_pct = row.get("gain_pct")
-                speedup = (
-                    1.0 + float(gain_pct) / 100.0
-                    if isinstance(gain_pct, (int, float)) and not isinstance(gain_pct, bool)
-                    else None
-                )
-                record_backend_versions_and_timeline(
-                    self.session_dir,
-                    {
-                        "kernel_id": kernel_id,
-                        "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
-                        "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
-                        "status": status,
-                        "attempts": [
-                            {
-                                "attempt_id": attempt_id,
-                                "backend": "forge",
-                                "status": status,
-                                "decision": decision,
-                                "micro_speedup": speedup,
-                                # The integration status *is* this route's failure
-                                # taxonomy -- ``reverted_apply_conflict``,
-                                # ``skipped_dirty_worktree`` -- and an integration
-                                # row carries no separate class. Stamping it here
-                                # is what makes ``error_class`` answerable on this
-                                # route: the GEAK and fusion lanes both fill it, so
-                                # a reader asking why a candidate did not land had
-                                # one field that was empty only for forge.
-                                "error_class": "" if status == "kept" else status,
-                                "error": str(row.get("reason") or ""),
-                            }
-                        ],
-                        "verification": {
-                            "best_attempt_id": attempt_id if decision == "KEEP" else "",
+        cycle = int(result.get("macro_cycle") or getattr(self.shared_state, "macro_cycle", 0) or 0)
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            kernel_id = str(row.get("operator_id") or "")
+            if not kernel_id:
+                continue
+            status = str(row.get("status") or "unknown").lower()
+            if status == "kept":
+                decision = "KEEP"
+            elif status.startswith("reverted"):
+                decision = "REVERT"
+            elif status.startswith("skipped"):
+                decision = "SKIPPED"
+            else:
+                decision = "FAILED"
+            attempt_id = f"controller-c{cycle}-{index}"
+            gain_pct = row.get("gain_pct")
+            speedup = (
+                1.0 + float(gain_pct) / 100.0
+                if isinstance(gain_pct, (int, float)) and not isinstance(gain_pct, bool)
+                else None
+            )
+            record_backend_versions_and_timeline(
+                self.session_dir,
+                {
+                    "kernel_id": kernel_id,
+                    "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
+                    "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
+                    "status": status,
+                    "attempts": [
+                        {
+                            "attempt_id": attempt_id,
+                            "backend": "forge",
+                            "status": status,
+                            "decision": decision,
                             "micro_speedup": speedup,
-                        },
-                        "proposal": {"decision": decision},
+                            # The integration status *is* this route's failure
+                            # taxonomy -- ``reverted_apply_conflict``,
+                            # ``skipped_dirty_worktree`` -- and an integration
+                            # row carries no separate class. Stamping it here
+                            # is what makes ``error_class`` answerable on this
+                            # route: the GEAK and fusion lanes both fill it, so
+                            # a reader asking why a candidate did not land had
+                            # one field that was empty only for forge.
+                            "error_class": "" if status == "kept" else status,
+                            "error": str(row.get("reason") or ""),
+                        }
+                    ],
+                    "verification": {
+                        "best_attempt_id": attempt_id if decision == "KEEP" else "",
+                        "micro_speedup": speedup,
                     },
-                )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: Controller rewrite record failed", exc_info=True)
+                    "proposal": {"decision": decision},
+                },
+            )
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled GEMM campaign in the Forge lane."""
@@ -529,60 +513,54 @@ class KernelPhase(PhaseHandler):
         tuner = str(result.get("tuner") or "")
         if not tuner and tuner_rows:
             tuner = ",".join(str(row.get("tuner") or "") for row in tuner_rows if row.get("tuner"))
-        try:
-            recorder.record_gemm_tuning_run(
-                run_id=run_id,
-                status=str(result.get("status") or "unknown"),
-                shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
-                shapes_tuned=shapes_tuned,
-                config_path=str(result.get("tuned_file") or result.get("config_path") or ""),
-                gain_pct=gain_pct,
-                # Set by the e2e validation above, and only when a KEEP was
-                # actually graded; an unvalidated run has no axis to name.
-                graded_objective=str(result.get("graded_objective") or ""),
-                tuner=tuner,
-                micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                integrate_ref=str(result.get("integration_id") or ""),
-                started_at=str(result.get("started_at") or ""),
-                ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                duration_sec=result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
-            )
-            backend = str(result.get("backend") or result.get("engine") or "").lower()
-            if backend:
-                tool_versions.record_tool_version(self.session_dir, tool=backend)
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
+        recorder.record_gemm_tuning_run(
+            run_id=run_id,
+            status=str(result.get("status") or "unknown"),
+            shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
+            shapes_tuned=shapes_tuned,
+            config_path=str(result.get("tuned_file") or result.get("config_path") or ""),
+            gain_pct=gain_pct,
+            # Set by the e2e validation above, and only when a KEEP was
+            # actually graded; an unvalidated run has no axis to name.
+            graded_objective=str(result.get("graded_objective") or ""),
+            tuner=tuner,
+            micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+            integrate_ref=str(result.get("integration_id") or ""),
+            started_at=str(result.get("started_at") or ""),
+            ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+            duration_sec=result.get("duration_sec"),
+            error_class=str(result.get("error_class") or ""),
+            failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+        )
+        backend = str(result.get("backend") or result.get("engine") or "").lower()
+        if backend:
+            tool_versions.record_tool_version(self.session_dir, tool=backend)
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
         recorder = self._kernel_timeline()
         if recorder is None or not isinstance(result, dict):
             return
-        try:
-            recorder.record_fusion_run(
-                run_id=str(result.get("fusion_run_id") or ""),
-                status=str(result.get("status") or "unknown"),
-                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
-                applied=bool(result.get("kept")),
-                gain_pct=result.get("gain_pct"),
-                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
-                micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                integrate_ref=str(result.get("integration_id") or ""),
-                started_at=str(result.get("started_at") or ""),
-                ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                duration_sec=result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
-            )
-            tool_versions.record_tool_version(self.session_dir, tool="forge")
-            agent_backend = str(result.get("agent_backend") or "").lower()
-            if agent_backend:
-                tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: fusion record failed", exc_info=True)
+        recorder.record_fusion_run(
+            run_id=str(result.get("fusion_run_id") or ""),
+            status=str(result.get("status") or "unknown"),
+            pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
+            target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+            applied=bool(result.get("kept")),
+            gain_pct=result.get("gain_pct"),
+            patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+            micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+            integrate_ref=str(result.get("integration_id") or ""),
+            started_at=str(result.get("started_at") or ""),
+            ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+            duration_sec=result.get("duration_sec"),
+            error_class=str(result.get("error_class") or ""),
+            failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+        )
+        tool_versions.record_tool_version(self.session_dir, tool="forge")
+        agent_backend = str(result.get("agent_backend") or "").lower()
+        if agent_backend:
+            tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
     def _close_kernel_timeline(self, *, exit_reason: str = "") -> None:
         """Close the kernel timeline event when the phase is left."""
@@ -600,17 +578,14 @@ class KernelPhase(PhaseHandler):
         else:
             stack_added = [item for item in stack_after if item not in stack_before]
             stack_removed = [item for item in stack_before if item not in stack_after]
-        try:
-            recorder.finish(
-                exit_reason=exit_reason,
-                tput_after=current_best.get("tput"),
-                cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
-                stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
-                stack_added=stack_added,
-                stack_removed=stack_removed,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: finish failed", exc_info=True)
+        recorder.finish(
+            exit_reason=exit_reason,
+            tput_after=current_best.get("tput"),
+            cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
+            stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+            stack_added=stack_added,
+            stack_removed=stack_removed,
+        )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry optimization and re-profile gates."""
@@ -657,7 +632,7 @@ class KernelPhase(PhaseHandler):
                 },
                 session_dir=self.session_dir,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
                 "status": "failed",
@@ -703,7 +678,7 @@ class KernelPhase(PhaseHandler):
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
                 envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
                 return dict(envs) if isinstance(envs, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
         return {}
 
@@ -768,7 +743,7 @@ class KernelPhase(PhaseHandler):
                 return {}
             bench = cfg.get("benchmark") or {}
             return bench if isinstance(bench, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("recipe: could not read %r", recipe_path, exc_info=True)
             return {}
 
@@ -859,7 +834,7 @@ class KernelPhase(PhaseHandler):
                 # best available replay result rather than a confirmed same-run one.
                 "observed_tput_match_err": round(err, 6),
             }
-        except Exception:  # noqa: BLE001 — shape enrichment is strictly additive
+        except Exception:
             log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
             return {}
 
@@ -900,7 +875,7 @@ class KernelPhase(PhaseHandler):
             if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
                 return ""
             return resolve_launch_server_script(bench)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""
 
@@ -1228,11 +1203,8 @@ class KernelPhase(PhaseHandler):
 
         recorder = self._kernel_timeline()
         if recorder is not None:
-            try:
-                recorder.enter_stage("geak_delegation")
-                recorder.record_geak_handoff(handoff)
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: geak handoff record failed", exc_info=True)
+            recorder.enter_stage("geak_delegation")
+            recorder.record_geak_handoff(handoff)
 
         from ..kernel.request_handlers import _kernel_agent_tool_path
 
@@ -1322,7 +1294,7 @@ class KernelPhase(PhaseHandler):
                         task=settled_task,
                     )
                     return True
-            except Exception:  # noqa: BLE001 - recovery is best-effort
+            except Exception:
                 log.exception(
                     "geak: failed to replay delegated result for succeeded rebench %s",
                     task_id,
@@ -1358,7 +1330,7 @@ class KernelPhase(PhaseHandler):
 
             try:
                 summary = await self._enqueue_internal_stack_rebench(reason=reason)
-            except Exception as exc:  # noqa: BLE001 - defensive
+            except Exception as exc:
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
@@ -1381,7 +1353,7 @@ class KernelPhase(PhaseHandler):
                 )
                 try:
                     fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
-                except Exception as exc:  # noqa: BLE001 - defensive
+                except Exception as exc:
                     log.exception("geak: GEAK-harness validation failed")
                     fb = {"validated": False, "reason": repr(exc)}
                 if bool(fb.get("validated")):
@@ -1480,7 +1452,7 @@ class KernelPhase(PhaseHandler):
 
         try:
             runner = _kernel_agent_tool_path("backends/geak_runner.py")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("GEAK runner not resolvable; skipping KERNEL")
             _finish_skip({"status": "error", "error_class": "runner_not_found", "error": repr(exc)})
             return
@@ -1629,7 +1601,7 @@ class KernelPhase(PhaseHandler):
                 kill_timeout_s=kill_timeout,
             )
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("GEAK runner crashed")
             _finish_skip(
                 {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
@@ -1833,22 +1805,19 @@ class KernelPhase(PhaseHandler):
         }
         recorder = self._kernel_timeline()
         if recorder is not None:
-            try:
-                recorder.record_geak_claim(
-                    self.shared_state.geak_pending,
-                    specs=self._geak_acceptance_specs(result),
-                )
-                recorder.record_geak_product(
-                    accepted_flags=accepted_flags,
-                    accepted_envs=dict(parsed_envs),
-                    accepted_config=result.get("accepted_config"),
-                    final_overlay=result.get("final_overlay") or "",
-                    final_launch_script=result.get("final_launch_script") or "",
-                    bench_script=result.get("bench_script") or "",
-                    final_patch=result.get("final_patch") or "",
-                )
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: geak claim record failed", exc_info=True)
+            recorder.record_geak_claim(
+                self.shared_state.geak_pending,
+                specs=self._geak_acceptance_specs(result),
+            )
+            recorder.record_geak_product(
+                accepted_flags=accepted_flags,
+                accepted_envs=dict(parsed_envs),
+                accepted_config=result.get("accepted_config"),
+                final_overlay=result.get("final_overlay") or "",
+                final_launch_script=result.get("final_launch_script") or "",
+                bench_script=result.get("bench_script") or "",
+                final_patch=result.get("final_patch") or "",
+            )
         # Surface a large cross-harness measurement divergence as a warning only.
         bb = result.get("baseline_basis") or {}
         mdiv = bb.get("measurement_divergence_pct")
@@ -2273,18 +2242,13 @@ class KernelPhase(PhaseHandler):
         Called where ``geak_result`` is set rather than beside the candidate
         record, because a run that measured a latency but accepted nothing
         never reaches the candidate path and would otherwise report none of it.
-
-        Best-effort: a failed record never breaks the phase.
         """
         if not isinstance(result, dict) or not result:
             return
         recorder = self._kernel_timeline()
         if recorder is None:
             return
-        try:
-            recorder.record_geak_measurement(result)
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: geak measurement record failed", exc_info=True)
+        recorder.record_geak_measurement(result)
 
     def _record_geak_delegation_timeline(
         self,
@@ -2303,28 +2267,25 @@ class KernelPhase(PhaseHandler):
             return
         versions = result.get("versions")
         versions = versions if isinstance(versions, dict) else {}
-        try:
-            recorder.record_geak_delegation(
-                runner_status=str(result.get("status") or "unknown"),
-                started_at=started_at or str(result.get("started_at") or ""),
-                ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-                duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                error=str(result.get("error") or ""),
-                returncode=result.get("returncode"),
-                runner_timeout_sec=(
-                    runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
-                ),
-                kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
-                exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-                report_path=str(result.get("report_path") or ""),
-                versions=versions,
-                recovered_from_disk=recovered_from_disk,
-                stages_reached=result.get("stages_reached"),
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: GEAK delegation record failed", exc_info=True)
+        recorder.record_geak_delegation(
+            runner_status=str(result.get("status") or "unknown"),
+            started_at=started_at or str(result.get("started_at") or ""),
+            ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
+            duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
+            error_class=str(result.get("error_class") or ""),
+            error=str(result.get("error") or ""),
+            returncode=result.get("returncode"),
+            runner_timeout_sec=(
+                runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+            ),
+            kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
+            exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
+            eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
+            report_path=str(result.get("report_path") or ""),
+            versions=versions,
+            recovered_from_disk=recovered_from_disk,
+            stages_reached=result.get("stages_reached"),
+        )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Record what GEAK-e2e's ``kernel_journey.json`` says about its run.
@@ -2335,35 +2296,28 @@ class KernelPhase(PhaseHandler):
         through, and this journey is the only place they reach the optimizer at
         all, so they are recorded even though nothing else in the file is.
 
-        Best-effort: a missing or partial file never breaks the phase.
+        A missing or unreadable journey file records nothing and returns.
         """
         journey = self._load_geak_journey(result)
         if not journey:
             return
 
-        try:
-            record_geak_attempts(
-                event=str(
-                    result.get("kernel_event_id")
-                    or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
-                ),
-                journey=journey,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-            log.debug("kernel timeline: geak attempts record failed", exc_info=True)
+        record_geak_attempts(
+            event=str(
+                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+            ),
+            journey=journey,
+        )
 
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
                 continue
-            try:
-                tool_versions.record_tool_version(
-                    self.session_dir,
-                    tool=str(tool),
-                    root=str(meta.get("root_dir") or "") or None,
-                    version=str(meta.get("version") or meta.get("commit") or "") or None,
-                )
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: geak tool version record failed", exc_info=True)
+            tool_versions.record_tool_version(
+                self.session_dir,
+                tool=str(tool),
+                root=str(meta.get("root_dir") or "") or None,
+                version=str(meta.get("version") or meta.get("commit") or "") or None,
+            )
 
     def _reject_geak_kernel_journey(
         self,
@@ -2389,10 +2343,7 @@ class KernelPhase(PhaseHandler):
         """Return whether the served model dispatches MoE through aiter."""
         from ..kernel.request_handlers import _resolve_forge_server_log
 
-        try:
-            log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
-        except Exception:  # noqa: BLE001 - detection is best-effort
-            return False
+        log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
             return False
         try:
@@ -2406,15 +2357,11 @@ class KernelPhase(PhaseHandler):
         tuner_name: str,
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
-        """Report whether the validated aiter CSV was reachable by the server."""
+        """Report whether the validated aiter CSV was reachable by the server, or ``None`` when undetermined."""
         try:
             return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
-        except Exception:  # noqa: BLE001
-            log.warning(
-                "tuned-config coverage failed for %s; treating it as undetermined",
-                tuner_name,
-                exc_info=True,
-            )
+        except Exception:  # parses server logs and tuner CSVs whose format varies by aiter version
+            log.warning("tuned-config coverage failed for %s; treating it as undetermined", tuner_name, exc_info=True)
             return None
 
     def _gemm_tuned_config_coverage_impl(
@@ -2584,31 +2531,27 @@ class KernelPhase(PhaseHandler):
             overlay = str(recipe.get("final_overlay") or "")
             if overlay and overlay not in str(envs.get("PYTHONPATH") or "").split(":"):
                 envs["PYTHONPATH"] = ":".join(filter(None, (overlay, envs.get("PYTHONPATH"))))
-            try:
-                res = await integrate_handler(
-                    {
-                        "task_id": f"gemm_paired_{side}{idx}",
-                        "kernel_id": f"gemm_paired_{side}{idx}",
-                        "source": "forge_gemm_paired",
-                        "base_tput": reference["tput"],
-                        "config_path": config_path,
-                        "paired_reference": reference,
-                        "extra_server_args": str(recipe.get("extra_server_args") or ""),
-                        "extra_envs": envs,
-                        "remove_args": recipe.get("remove_args", []),
-                        "unset_envs": recipe.get("unset_envs", []),
-                        "args_mode": recipe.get("args_mode", "append"),
-                        # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
-                        # would be noise promoted to a decision.
-                        "keep_threshold_pct": 100.0,
-                        "budget_minutes": budget_minutes,
-                        "mode": "env_only",
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("forge gemm paired confirmation aborted at %s%d: %s", side, idx, exc)
-                break
+            res = await integrate_handler(
+                {
+                    "task_id": f"gemm_paired_{side}{idx}",
+                    "kernel_id": f"gemm_paired_{side}{idx}",
+                    "source": "forge_gemm_paired",
+                    "base_tput": reference["tput"],
+                    "config_path": config_path,
+                    "paired_reference": reference,
+                    "extra_server_args": str(recipe.get("extra_server_args") or ""),
+                    "extra_envs": envs,
+                    "remove_args": recipe.get("remove_args", []),
+                    "unset_envs": recipe.get("unset_envs", []),
+                    "args_mode": recipe.get("args_mode", "append"),
+                    # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
+                    # would be noise promoted to a decision.
+                    "keep_threshold_pct": 100.0,
+                    "budget_minutes": budget_minutes,
+                    "mode": "env_only",
+                },
+                session_dir=self.session_dir,
+            )
             tput = float(res.get("new_tput") or 0.0)
             if tput <= 0:
                 log.warning("forge gemm paired confirmation: %s%d produced no throughput", side, idx)
@@ -2660,16 +2603,12 @@ class KernelPhase(PhaseHandler):
         # value in the candidate env wins, and then a zero-hit result means nothing.
         hit_logging = aiter_log_tuned_config_enabled(envs)
 
-        try:
-            return verify_applied(
-                logs[-1],
-                csv_paths,
-                hit_logging=hit_logging,
-                runtime_table_names=table_names,
-            ).to_dict()
-        except Exception:  # noqa: BLE001 - verification must never fail the run
-            log.warning("apply verification failed for %s", tuner_name, exc_info=True)
-            return None
+        return verify_applied(
+            logs[-1],
+            csv_paths,
+            hit_logging=hit_logging,
+            runtime_table_names=table_names,
+        ).to_dict()
 
     def _fmoe_apply_verdict(
         self,
@@ -3107,7 +3046,7 @@ class KernelPhase(PhaseHandler):
         self.shared_state.record_gemm_tuning(result)
         try:
             await self._validate_gemm_tuning_e2e(result)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Validation spans server restarts, log parsing and CSV merges, and is reached from two entrypoints that
             # only guard the tuning call itself.
             log.exception("gemm E2E validation raised; recording it as a fault")
@@ -3177,7 +3116,7 @@ class KernelPhase(PhaseHandler):
                     metrics=metrics,
                 )
             )
-        except Exception:  # noqa: BLE001 — journaling is best-effort
+        except Exception:
             log.exception("gemm_tuning journal append failed")
 
     def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
@@ -3784,16 +3723,12 @@ class KernelPhase(PhaseHandler):
                     "KERNEL entry: sealed campaign baselines %s",
                     {repo: baseline.commit for repo, baseline in baselines.items()},
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
-            try:
-                env_spec = self.build_env_spec()
-            except Exception:  # noqa: BLE001
-                log.exception("KERNEL entry: could not build Forge serving environment")
-                env_spec = {}
+            env_spec = self.build_env_spec()
             handoff_dir = write_forge_handoff(
                 self.session_dir,
                 self.shared_state,
@@ -3802,7 +3737,7 @@ class KernelPhase(PhaseHandler):
                 baselines=baselines,
             )
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("KERNEL entry: Forge handoff generation failed")
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
@@ -3852,7 +3787,7 @@ class KernelPhase(PhaseHandler):
                         budget_minutes=controller_budget_sec / 60.0,
                         hard_timeout_sec=hard_timeout_sec,
                     )
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     log.exception("KERNEL entry: kernel rewrite controller failed")
                     result = {
                         "status": "failed",
@@ -3883,7 +3818,7 @@ class KernelPhase(PhaseHandler):
                 reclaimed = reclaim_campaign_repositories(baselines or {})
                 if reclaimed:
                     result["reclaimed_repositories"] = reclaimed
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("KERNEL entry: reclaiming the campaign repositories failed")
             if int(result.get("patch_count") or 0) > 0:
                 try:
@@ -3898,7 +3833,7 @@ class KernelPhase(PhaseHandler):
                         record_keep=self._record_integrate_keep,
                     )
                     result["integration"] = integration.to_dict()
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     log.exception("KERNEL entry: Controller patch integration failed")
                     result["integration"] = {
                         "status": "failed",
@@ -4000,7 +3935,7 @@ class KernelPhase(PhaseHandler):
                 {"task_id": "kernel_entry_fusion", "reason": "kernel_entry_auto"},
                 session_dir=self.session_dir,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("KERNEL entry forge-fusion failed")
             result = {
                 "status": "failed",
@@ -4031,17 +3966,11 @@ class KernelPhase(PhaseHandler):
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
             spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
-            try:
-                self.shared_state.fusion_infra_aborts = spent + 1
-            except Exception:  # noqa: BLE001 - state shape tolerant, as below
-                pass
+            self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
-            try:
-                self.shared_state.fusion_withheld_retries = withheld_spent + 1
-            except Exception:  # noqa: BLE001 - state shape tolerant, as below
-                pass
+            self.shared_state.fusion_withheld_retries = withheld_spent + 1
         try:
             if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
                 cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
@@ -4067,7 +3996,7 @@ class KernelPhase(PhaseHandler):
                     },
                 )
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to post run_fusion_done bus message")
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
@@ -4190,7 +4119,7 @@ class KernelPhase(PhaseHandler):
             return
         try:
             task = await self.tasks.get(pending)
-        except Exception:  # noqa: BLE001 — a missing row is itself finished
+        except TaskNotFound:
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
             return
@@ -4211,7 +4140,7 @@ class KernelPhase(PhaseHandler):
             return False
         try:
             task = await self._enqueue_internal_analysis_task(reason=reason)
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",
                 reason,

@@ -701,7 +701,7 @@ def _contribute_findings_to_kb(
             source=finding.source,
             session_id=finding.session_id,
         )
-    except OSError as exc:  # noqa: BLE001 - any disk error must not fail explore
+    except OSError as exc:
         return {"status": "failed", "reason": str(exc)}
     return {
         "status": "appended",

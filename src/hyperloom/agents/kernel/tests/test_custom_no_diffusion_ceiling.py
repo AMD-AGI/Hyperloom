@@ -17,10 +17,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import bypass_trace_analysis as bta  # noqa: E402
-import tracelens_analysis as tl  # noqa: E402
+import bypass_trace_analysis as bta
+import tracelens_analysis as tl
 
-from hyperloom.inference_optimizer import framework_registry as fr  # noqa: E402
+from hyperloom.inference_optimizer import framework_registry as fr
 
 
 #: A minimal two-kernel trace, enough for the bypass route to produce candidates.

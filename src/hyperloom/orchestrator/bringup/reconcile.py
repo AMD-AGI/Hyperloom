@@ -178,7 +178,7 @@ class Reconciler:
         ):
             try:
                 await rule(now_unix, report)
-            except Exception:  # noqa: BLE001 — independent repairs; one failing must not skip the rest
+            except Exception:
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report

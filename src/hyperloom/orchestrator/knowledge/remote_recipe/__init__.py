@@ -51,7 +51,7 @@ def read_remote_recipe(
     if document is not None:
         try:
             knowledge_to_warm_recipe(document)
-        except Exception:  # noqa: BLE001 — cleanup then preserve original error
+        except Exception:
             _deactivate_destination(Path(destination))
             raise
     return document
@@ -236,7 +236,7 @@ class RemoteWarmRecipeAdapter:
                     self._destination,
                     self._scope,
                 )
-            except Exception:  # noqa: BLE001 — deactivate before propagating
+            except Exception:
                 self._deactivate_path(self._destination)
                 raise
             if document is None:
@@ -443,7 +443,7 @@ class RemoteWarmRecipeAdapter:
                 self._deactivate_path(self._destination)
                 return False
             selected = knowledge_to_warm_recipe(document)
-        except Exception:  # noqa: BLE001 — deactivate before rejecting donor
+        except Exception:
             self._deactivate_path(self._destination)
             raise
         selected.update(

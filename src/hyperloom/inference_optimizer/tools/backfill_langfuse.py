@@ -369,7 +369,7 @@ def ingest(plan: dict[str, Any]) -> int:
                         comment=score.get("comment") or "",
                         metadata=meta,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("create_score failed for decision %d", i)
 
     _end_obs(root, last_end)

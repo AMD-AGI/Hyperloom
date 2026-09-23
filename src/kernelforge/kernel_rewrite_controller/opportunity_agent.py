@@ -550,7 +550,7 @@ class OpportunityAnalysisAgent:
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
                     status = ANALYSIS_STATUS_FAILED
                     reason = f"opportunity analysis failed: {error}"
         finally:
@@ -621,7 +621,7 @@ def run_opportunity_analysis(
             max_turns=config.max_turns if config is not None else 500,
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

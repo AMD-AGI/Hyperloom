@@ -203,9 +203,9 @@ def test_json_serializable():
 
 
 # --- probe/marker branch coverage (WP-0) -----------------------------------
-from types import SimpleNamespace  # noqa: E402
+from types import SimpleNamespace
 
-import hyperloom.common.provenance as _prov  # noqa: E402
+import hyperloom.common.provenance as _prov
 
 
 def test_gfx_arch_probe_via_rocminfo(monkeypatch):

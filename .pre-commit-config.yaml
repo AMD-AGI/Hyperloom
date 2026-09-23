@@ -94,6 +94,16 @@ repos:
           - --skip=*.json,*.jsonl,*.svg,*.lock,docs/_build,.venv,_audit_artifacts
         exclude: ^(LICENSES/|docs/_build/)
 
+  # --- contextlib.suppress(Exception): the blind spot BLE001 cannot see ---
+  - repo: local
+    hooks:
+      - id: check-broad-suppress
+        name: check for unjustified contextlib.suppress(Exception)
+        entry: python scripts/check_broad_suppress.py src scripts
+        language: system
+        pass_filenames: false
+        types: [python]
+
   # Enable once the mypy backlog is manageable (config in pyproject.toml):
   # - repo: local
   #   hooks:

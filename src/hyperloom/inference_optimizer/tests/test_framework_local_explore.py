@@ -15,6 +15,7 @@ import pytest
 from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import FakeCoordinator, optimize_state
 
@@ -77,6 +78,12 @@ class _Tasks:
         self._queued.append(task)
         self._by_idem[key] = task
         return task, False
+
+    async def get(self, task_id: str) -> Any:
+        for task in self._by_idem.values():
+            if task.task_id == task_id:
+                return task
+        raise TaskNotFound(task_id)
 
 
 class _Bus:

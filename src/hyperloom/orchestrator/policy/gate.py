@@ -529,7 +529,7 @@ class PolicyGate:
     # attempt goes straight to its acquire.
     resources: ResourceFacts = field(default_factory=ResourceFacts)
 
-    def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+    def __post_init__(self) -> None:
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
         if not self.strict_paths and env_bool("INFERENCE_OPTIMIZER_STRICT_PATHS"):
             self.strict_paths = True

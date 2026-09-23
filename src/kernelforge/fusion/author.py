@@ -1239,7 +1239,7 @@ def _run_registered_author_once(
             log.warning("could not write registered author log %s", log_path)
         log.error("%s", reason)
         return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
-    except Exception as exc:  # noqa: BLE001 - fail closed on guard defects
+    except Exception as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
         try:
             _write_registered_author_log(

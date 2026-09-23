@@ -90,7 +90,7 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
             materialized=True,
             task_id=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — observability cannot break the loop
+    except Exception:
         log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
 
 
@@ -104,19 +104,12 @@ def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
 
-    try:
-        recorder.record_proposal_step(
-            pending.proposal_msg_id,
-            step=STEP_ROUTED,
-            outcome="materialized",
-            reason=str(task_id or ""),
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config routed step failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(
+        pending.proposal_msg_id,
+        step=STEP_ROUTED,
+        outcome="materialized",
+        reason=str(task_id or ""),
+    )
 
 
 def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
@@ -135,19 +128,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
         STEP_DROPPED,
     )
 
-    try:
-        recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
-        recorder.settle_proposal(
-            pending.proposal_msg_id,
-            disposition=DISPOSITION_DROPPED,
-            reason=reason,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config drop row failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
+    recorder.settle_proposal(
+        pending.proposal_msg_id,
+        disposition=DISPOSITION_DROPPED,
+        reason=reason,
+    )
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
@@ -211,7 +197,7 @@ class ProposalsCollaborator:
                 )
                 or {}
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
         self._coord._local_recipe_cache = (tick, row)
         return row
@@ -298,11 +284,7 @@ class ProposalsCollaborator:
 
         if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
-        try:
-            cid = self._workload_canonical_id()
-        except Exception:  # noqa: BLE001
-            log.exception("_kb_amend_recipe: cid derivation failed")
-            return
+        cid = self._workload_canonical_id()
 
         ss = self.shared_state
         framework = str(getattr(ss, "framework", "") or "")
@@ -421,7 +403,7 @@ class ProposalsCollaborator:
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
             self._coord._local_recipe_cache = None
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
@@ -511,7 +493,7 @@ class ProposalsCollaborator:
                     )
                     try:
                         self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception(
                             "failed to persist terminal owner-missing verdict for specialist=%s",
                             specialist_task_id,
@@ -621,7 +603,7 @@ class ProposalsCollaborator:
                 "task_id": str(task_id),
             }
             append_jsonl(path, row, make_parents=True, sort_keys=True)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,

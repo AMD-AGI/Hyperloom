@@ -460,7 +460,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         if int(disk_state.crash_count or 0) < live:
             disk_state.crash_count = live
             disk_state.save(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
     # reports/final.json: patch the single field in place if present.
@@ -476,7 +476,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
                     json.dumps(data, indent=2, sort_keys=True),
                     encoding="utf-8",
                 )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 

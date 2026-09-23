@@ -776,7 +776,7 @@ def _server_env(
 
 def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
     """Launch the server in its own session, redirecting logs to server.log."""
-    log_fh = open(server_log, "w", encoding="utf-8")  # noqa: SIM115 - closed on terminate
+    log_fh = open(server_log, "w", encoding="utf-8")
     proc = subprocess.Popen(
         cmd,
         env=env,

@@ -520,7 +520,7 @@ def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
     try:
         out = run("rocm-smi --showmemuse").stdout
-    except Exception:  # noqa: BLE001 -- a probe must never end the run
+    except (OSError, subprocess.SubprocessError):
         return None
     used = re.findall(r"\(VRAM%\):\s*(\d+)", out)
     if not used:

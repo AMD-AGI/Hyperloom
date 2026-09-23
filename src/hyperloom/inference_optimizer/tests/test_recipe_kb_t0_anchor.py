@@ -74,7 +74,7 @@ class _FakeSharedState:
     baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
     compute_partition: dict[str, Any] = field(default_factory=dict)
 
-    def save(self, _path: Path) -> None:  # noqa: D401
+    def save(self, _path: Path) -> None:
         """No-op save — tests don't care about disk persistence here."""
 
 

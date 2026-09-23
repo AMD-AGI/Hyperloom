@@ -1730,16 +1730,12 @@ def _export_salvage_patch(
         return False
     # This output directory may be reused.
     _clear_kernel_keep_checkpoint(out)
-    try:
-        artifacts = export_artifacts(
-            repo_root,
-            source_file,
-            out,
-            pristine_dir=pristine_dir or None,
-        )
-    except Exception as exc:  # noqa: BLE001 — export must never fail the gate.
-        log.warning("fusion patch export failed: %s: %s", type(exc).__name__, exc)
-        return False
+    artifacts = export_artifacts(
+        repo_root,
+        source_file,
+        out,
+        pristine_dir=pristine_dir or None,
+    )
     if not artifacts.patch:
         return False
     patch = Path(artifacts.patch)

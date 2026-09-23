@@ -51,7 +51,7 @@ def _maybe_build_runtime_candidate(
         if action is None:
             return None
         return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+    except Exception:
         log.debug("enablement: runtime-candidate construction failed", exc_info=True)
         return None
 
@@ -107,7 +107,7 @@ def _maybe_build_localization_candidate(
         if action is None:
             return None
         return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+    except Exception:
         log.debug("enablement: localization-candidate construction failed", exc_info=True)
         return None
 
@@ -515,7 +515,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:  # noqa: BLE001 — auto-facts are best-effort grounding
+        except Exception:
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
@@ -593,7 +593,7 @@ class EnablementParams(CoordinatorCollaborator):
                     }
                 )
                 collected.extend(enumerate_candidates(explore_req))
-            except Exception:  # noqa: BLE001 — discovery is best-effort
+            except Exception:
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,
