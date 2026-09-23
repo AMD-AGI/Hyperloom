@@ -614,6 +614,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
+    # Recipe identity at the current materialized state and at the last
+    # baseline-relative validation. A KEEP advances both only in one promotion.
+    working_recipe_generation: int = 0
+    validated_recipe_generation: int = 0
+    validated_recipe_fingerprint: str = ""
+    validated_recipe_snapshot: dict[str, Any] = field(default_factory=dict)
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False

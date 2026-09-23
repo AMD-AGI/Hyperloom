@@ -59,6 +59,13 @@ def test_save_load_round_trip(tmp_path):
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         baseline_tput=1840.0,
         cumulative_gain_validated=12.5,
+        working_recipe_generation=3,
+        validated_recipe_generation=3,
+        validated_recipe_fingerprint="recipe-fingerprint",
+        validated_recipe_snapshot={
+            "generation": 3,
+            "recipe_fingerprint": "recipe-fingerprint",
+        },
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
         last_fusion={"status": "complete", "kept": False},
@@ -70,6 +77,13 @@ def test_save_load_round_trip(tmp_path):
     assert s2.model_name == "meta-llama/Llama-3.1-8B-Instruct"
     assert s2.baseline_tput == 1840.0
     assert s2.cumulative_gain_validated == 12.5
+    assert s2.working_recipe_generation == 3
+    assert s2.validated_recipe_generation == 3
+    assert s2.validated_recipe_fingerprint == "recipe-fingerprint"
+    assert s2.validated_recipe_snapshot == {
+        "generation": 3,
+        "recipe_fingerprint": "recipe-fingerprint",
+    }
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
     assert s2.last_fusion == {"status": "complete", "kept": False}

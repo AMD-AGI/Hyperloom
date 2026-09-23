@@ -1964,7 +1964,7 @@ class TestWritebackRequiredAxes:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("lane", ["integrate", "integrate_patch", "explore"])
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
-    async def test_complete_local_winner_with_missing_baseline_axes_skips_validation(
+    async def test_complete_local_winner_with_missing_baseline_axes_is_not_recorded(
         self, coord, monkeypatch, lane, axis
     ):
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
@@ -1973,7 +1973,8 @@ class TestWritebackRequiredAxes:
         state.baseline_perf.pop(axis)
         prior_validation = self._validation_state(state)
         prior_measurement = deepcopy(state.current_best_measurement)
-        prior_entry = deepcopy(state.optimization_stack[0])
+        prior_stack = deepcopy(state.optimization_stack)
+        prior_snapshot = deepcopy(state.validated_recipe_snapshot)
         record = Mock()
         watermark = AsyncMock()
         monkeypatch.setattr(stack_event, "record_validation", record)
@@ -2023,16 +2024,12 @@ class TestWritebackRequiredAxes:
         assert state.current_best["e2e_norm_intvty_p90"] == 150.0
         assert state.current_best["extra_server_args"] == "--page-size 32"
         assert state.current_best["extra_envs"]["NEXT_ENV"] == "1"
-        assert len(state.optimization_stack) == 2
-        assert state.optimization_stack[0] == prior_entry
+        assert len(state.optimization_stack) == len(prior_stack) + 1
+        assert state.optimization_stack[: len(prior_stack)] == prior_stack
         assert state.optimization_stack[-1]["variant_name"] == "next"
         assert state.current_best_measurement != prior_measurement
-        assert state.current_best_measurement["benchmark_workspace"] == candidate["workspace"]
-        assert state.current_best_measurement["observed_server_identity"] == {
-            "model_path": "/models/next",
-            "tp_size": 2,
-        }
         assert self._validation_state(state) == prior_validation
+        assert state.validated_recipe_snapshot == prior_snapshot
         record.assert_not_called()
         watermark.assert_not_called()
 
@@ -2085,7 +2082,9 @@ class TestWritebackRequiredAxes:
         assert state.current_best["tput"] == 150.0
         assert state.current_best["extra_envs"] == {"NEXT_ENV": "1"}
         assert len(state.optimization_stack) == 2
-        assert self._validation_state(state) == (50.0, "2026-01-02T00:00:00+00:00", 2)
+        assert state.cumulative_gain_validated == pytest.approx(50.0)
+        assert state.cumulative_gain_validated_ts == "2026-01-02T00:00:00+00:00"
+        assert state.cumulative_gain_validated_stack_len == 2
         record.assert_called_once()
         assert record.call_args.kwargs["baseline_tput"] == 100.0
         assert record.call_args.kwargs["validated_tput"] == 150.0

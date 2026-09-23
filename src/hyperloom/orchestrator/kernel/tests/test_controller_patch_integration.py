@@ -1348,6 +1348,12 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "e2e_norm_intvty_p90": 30.0,
         "ttft_mean_ms": 90.0,
     }
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 30.0,
+    }
 
     summary = await _integrate(
         patches_root=patches,
