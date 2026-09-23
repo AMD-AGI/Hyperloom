@@ -1027,7 +1027,17 @@ def _tail(text: str, n: int = 400) -> str:
     return " ".join((text or "").split())[-n:]
 
 
-def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class WiringEvidence:
+    """What a static read of the framework edit proved about the fused call site."""
+
+    verdict: str
+    """``"wired"``, ``"not_wired"``, or ``"unchecked"`` when the gate could not judge."""
+
+    reason: str
+
+
+def fused_symbol_invocation_evidence(source_file: str) -> WiringEvidence:
     """Whether the framework edit CALLS the fused module, or only imports it.
 
     A fusion is delivered as two edits: a new fused-kernel module, and a wiring
@@ -1043,22 +1053,19 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
     This is the missing wiring check, and it is deliberately static: an import
     bound by a name that appears nowhere else in the file (the ``# noqa: F401``
     shape an agent produces when it authors the kernel but forgets the call site)
-    cannot execute, whatever the runtime does. Everything else fails OPEN --
-    an unreadable or unparseable source, and equally a source that imports no
-    fused module at all, which is what an INLINE fusion (the fused call written
-    straight into the framework file) legitimately looks like. The gate exists
-    to catch one provable defect, not to demote a KEEP it could not inspect.
-
-    Returns:
-        ``(True, reason)`` when the fused module is referenced somewhere other
-        than its own import statement, or when the check could not run.
+    cannot execute, whatever the runtime does. Everything else is ``unchecked``,
+    which does not block a KEEP -- an unreadable or unparseable source, and
+    equally a source that imports no fused module at all, which is what an INLINE
+    fusion (the fused call written straight into the framework file) legitimately
+    looks like. The gate exists to catch one provable defect, not to demote a KEEP
+    it could not inspect, and equally not to claim it inspected one it did not.
     """
     from .emit import _is_fused_module_name
 
     try:
         tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
     except (OSError, SyntaxError, ValueError) as exc:
-        return True, f"unchecked ({type(exc).__name__}: {exc})"
+        return WiringEvidence("unchecked", f"{type(exc).__name__}: {exc}")
 
     # Names the wiring edit binds from a fused-kernel module, at any nesting
     # depth: a lazy import inside ``forward`` is a legitimate wiring style.
@@ -1073,10 +1080,10 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
                 if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
                     bound.add(alias.asname or alias.name.split(".")[0])
     if not bound:
-        # A fusion authored INLINE in the framework file imports nothing, and is
-        # wired by construction. Only a bound-but-unused import is provable, so
-        # this branch fails open like the unreadable-source one above.
-        return True, f"unchecked ({Path(source_file).name} imports no fused-kernel module)"
+        # A fusion authored INLINE in the framework file imports nothing, so
+        # there is no import to prove unused -- indistinguishable here from a
+        # wiring edit that was never made.
+        return WiringEvidence("unchecked", f"{Path(source_file).name} imports no fused-kernel module")
 
     # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
     # load of a bound identifier is by construction a use outside the import.
@@ -1088,10 +1095,11 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
         }
     )
     if used:
-        return True, f"{Path(source_file).name} references {', '.join(used)}"
-    return False, (
+        return WiringEvidence("wired", f"{Path(source_file).name} references {', '.join(used)}")
+    return WiringEvidence(
+        "not_wired",
         f"{Path(source_file).name} imports {', '.join(sorted(bound))} from a fused-kernel "
-        f"module and never references it -- the fused kernel is dead code in the served model"
+        f"module and never references it -- the fused kernel is dead code in the served model",
     )
 
 

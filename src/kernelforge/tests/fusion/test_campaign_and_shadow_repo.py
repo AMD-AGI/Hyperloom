@@ -546,6 +546,28 @@ class TestDriverShim:
         # microbench actually means.
         assert "case_ms: decode 0.130000" in proc.stdout
 
+    def test_a_microbench_that_ran_and_timed_nothing_fails_the_iteration(self, tmp_path):
+        """No skip, no fused time: the harness claims it benchmarked and has no number to show."""
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": True,
+                "is_triton": True,
+                "error": "",
+                "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "T16"}],
+                "eager_us": 130.0,
+                "fused_us": None,
+                "skipped": False,
+                "skip_reason": "",
+            },
+        )
+
+        assert proc.returncode == 1
+        assert "BENCH MISSING" in proc.stdout
+        # The eager time standing in for the fused arm is exactly what made this look like a clean 1.0x run.
+        assert "case_ms" not in proc.stdout
+        assert "SKIPPED" not in proc.stdout
+
 
 class TestFusedModulePath:
     def test_the_path_is_derived_from_the_recipe(self):

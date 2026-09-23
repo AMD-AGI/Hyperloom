@@ -1639,11 +1639,11 @@ def _run_serving_smoke(
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Cheapest gate first, and the only one that catches a fusion nothing calls: the smoke would boot, decode and
     # PASS, because stock code is what ran.
-    wired, wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
-    if not wired:
-        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
+    wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
+    if wiring.verdict == "not_wired":
+        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
         note = (
-            f"KERNEL OK but NOT WIRED IN: {wiring}. The microbench measured the fused "
+            f"KERNEL OK but NOT WIRED IN: {wiring.reason}. The microbench measured the fused "
             f"entry point directly, so its speedup says nothing about the served model, "
             f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
             f"is half the deliverable -- replace the ORIGINAL call site in the framework's "
@@ -1651,7 +1651,12 @@ def _run_serving_smoke(
             f"and leave the unfused code as the fallback branch."
         )
         return "not_wired", note, "not_wired"
-    log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring)
+    if wiring.verdict == "wired":
+        log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = ""
+    else:
+        log.info("fusion wiring NOT CHECKED for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = f" | WIRING UNCHECKED: {wiring.reason}"
     verdict = serving_smoke_verdict(
         model_path,
         flags,
@@ -1668,7 +1673,7 @@ def _run_serving_smoke(
     reason = verdict.reason
     if verdict.ok:
         log.info("serving smoke OK for %s", recipe.pattern_id)
-        return "ok", f"{base_note} | SERVING SMOKE OK", ""
+        return "ok", f"{base_note} | SERVING SMOKE OK{wiring_note}", ""
     if verdict.blames_kernel:
         log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
         note = (
@@ -1688,7 +1693,7 @@ def _run_serving_smoke(
     )
     note = (
         f"{base_note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
-        f"(defer e2e): {reason} | LESSON: the GPU did not fault, so nothing here "
+        f"(defer e2e): {reason}{wiring_note} | LESSON: the GPU did not fault, so nothing here "
         f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
         f"e2e is the KEEP/REVERT gate."
     )
