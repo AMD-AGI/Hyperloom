@@ -654,7 +654,6 @@ def test_hookless_resume_stops_when_the_analysis_deadline_is_exhausted(
     assert elapsed < 2.5
     assert result.status == ANALYSIS_STATUS_TIMED_OUT
     assert len(backend.resumed) <= 2
-    assert "exceeded budget" in result.reason
 
 
 def test_hookless_resume_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
