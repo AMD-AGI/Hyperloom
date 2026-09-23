@@ -630,6 +630,69 @@ async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
+    """Reproduces a real session: a forge-loop kernel_rewrite_controller KEEP lands on
+    optimization_stack via _record_integrate_keep, which never went through the generic
+    _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
+    optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
+    naming a KEEP its own entries list never records."""
+    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 140.0,
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "integration_id": "int-forge-1",
+            "gain_pct": 7.72,
+            "backend": "forge",
+            "engine": "kernel_rewrite_controller",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "integrate"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-forge-1"]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry.outcome == OUTCOME_KEEP
+    assert entry.gain_pct == 7.72
+    assert entry.throughput_after == 140.0
+    assert entry.variant_name == "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x"
+    assert entry.lever_kind == "kernel"
+
+
+@pytest.mark.asyncio
+async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
+    """The fusion sibling of the same lane must land a journal entry too."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "kernel_id": "fuse-rmsnorm-silu",
+            "integration_id": "int-fusion-1",
+            "gain_pct": 2.0,
+            "source": "forge_fusion",
+            "action_label": "fusion",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "fusion"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-fusion-1"]
+    assert len(matches) == 1
+    assert matches[0].variant_name == "fuse-rmsnorm-silu"
+
+
+@pytest.mark.asyncio
 async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
     session_dir,
 ):
