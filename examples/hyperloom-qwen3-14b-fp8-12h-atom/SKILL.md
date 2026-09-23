@@ -43,12 +43,29 @@ heredoc. A `( ... )` subshell retains readonly attributes and is not a substitut
 Do not unset the isolation root or copy the child's environment back to the parent.
 
 In the chosen workspace, load `.env` with caller exports taking precedence.
-Repeat this preamble in each new execution shell, including inside Docker:
+Repeat this preamble in each new execution shell, before both setup and runtime
+loading, with the selected `HYPERLOOM_RUN_MODE` exported. In Docker, a mounted
+`.env` may contain the host's `PYTHON`, `VIRTUAL_ENV`, and
+`INFERENCE_OPTIMIZER_FORCE_PYTHON`: keep only values already set in this shell,
+including empty values, rather than filling those gaps from `.env`. An explicit
+Python pin remains authoritative even if invalid; otherwise activate the existing
+container environment or use its `python3` from PATH. Baremetal still fills gaps
+from `.env` as usual.
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
 # .env fills gaps; existing non-empty exports remain authoritative.
 _dotenv_prev="$(export -p | grep -v -e '=\"\"$' -e "=''\$")"
+if [ "${HYPERLOOM_RUN_MODE:-}" = docker ]; then
+  for _atom_name in PYTHON VIRTUAL_ENV INFERENCE_OPTIMIZER_FORCE_PYTHON; do
+    if [ "${!_atom_name+x}" = x ]; then
+      _dotenv_prev+=$'\n'"$(declare -p "$_atom_name")"
+    else
+      _dotenv_prev+=$'\n'"unset $_atom_name"
+    fi
+  done
+  unset _atom_name
+fi
 set -a; [ ! -f "${REPO_ROOT}/.env" ] || . "${REPO_ROOT}/.env"; set +a
 eval "$_dotenv_prev"
 unset _dotenv_prev

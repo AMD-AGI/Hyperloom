@@ -69,6 +69,8 @@ def _extract_dotenv_load(doc: Path) -> str:
     for block in _bash_blocks(doc.read_text(encoding="utf-8")):
         if not any("/.env" in line for line in block):
             continue
+        if doc == ATOM_DOC:
+            return "\n".join(block)
         kept: list[str] = []
         for line in block:
             if not any(pattern.search(line) for pattern in _LOAD_LINE):
@@ -197,6 +199,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         PYTHON="/host-only/python",
         PATH="/host-only/bin:/usr/bin:/bin",
         VIRTUAL_ENV="/host-only/venv",
+        INFERENCE_OPTIMIZER_FORCE_PYTHON="1",
         REAL_PYTHON=Path(sys.executable).as_posix(),
         ATOM_CONTEXT="baremetal",
         CLAW_SESSION_ID="test-harness-session",
@@ -224,7 +227,8 @@ docker() {
 """
     payload = "set -e\n"
     if mode == "docker":
-        payload += '[ -z "${PYTHON:-}" ]\n[ -z "${VIRTUAL_ENV:-}" ]\n[[ "$PATH" != /host-only/bin:* ]]\n'
+        payload += '[ -z "${PYTHON:-}" ]\n[ -z "${VIRTUAL_ENV:-}" ]\n'
+        payload += '[ -z "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ]\n[[ "$PATH" != /host-only/bin:* ]]\n'
     payload += _extract_dotenv_load(ATOM_DOC) + "\n"
     for key, value in {"PYTHON": selected, "RUN_LOG": run_log, "LAUNCH_INFO_FILE": launch_info}.items():
         payload += f"export {key}={shlex.quote(value.as_posix())}\n"
@@ -370,6 +374,143 @@ def _write_atom_probe_modules(tmp_path: Path, help_exit: int = 0) -> None:
         'from types import SimpleNamespace\nversion = SimpleNamespace(hip="test-rocm")\n__version__ = "test"\n',
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("mode", ["docker", "baremetal"])
+@pytest.mark.parametrize("caller", ["unset", "empty", "explicit"])
+def test_atom_dotenv_interpreter_settings_follow_source(tmp_path: Path, mode: str, caller: str) -> None:
+    """Only Docker excludes interpreter settings originating in the mounted dotenv."""
+    host = {
+        "PYTHON": "/host-only/venv/bin/python3",
+        "VIRTUAL_ENV": "/host-only/venv",
+        "INFERENCE_OPTIMIZER_FORCE_PYTHON": "1",
+    }
+    current = {
+        "PYTHON": "/selected env/python 'with quotes'",
+        "VIRTUAL_ENV": "/selected env",
+        "INFERENCE_OPTIMIZER_FORCE_PYTHON": "0",
+    }
+    exported = {"HYPERLOOM_RUN_MODE": mode, "USER_DATA_PATH": "/selected/data"}
+    if caller != "unset":
+        exported.update(current if caller == "explicit" else dict.fromkeys(host, ""))
+    dotenv = "".join(f"export {key}={shlex.quote(value)}\n" for key, value in host.items())
+    dotenv += f"HYPERLOOM_RUN_MODE={'baremetal' if mode == 'docker' else 'docker'}\n"
+    dotenv += "PATH=/host-only/bin\n"
+    fragment = "set -e\n" + _extract_dotenv_load(ATOM_DOC)
+    fragment += '\nPYTHON_SET="${PYTHON+x}"\nVENV_SET="${VIRTUAL_ENV+x}"\n'
+    fragment += 'FORCE_SET="${INFERENCE_OPTIMIZER_FORCE_PYTHON+x}"\n'
+    result = _run_recipe(
+        fragment,
+        tmp_path,
+        exported,
+        dotenv_extra=dotenv,
+        observed=(
+            *host,
+            "PATH",
+            "HYPERLOOM_RUN_MODE",
+            "USER_DATA_PATH",
+            "ONLY_IN_DOTENV",
+            "PYTHON_SET",
+            "VENV_SET",
+            "FORCE_SET",
+        ),
+    )
+    expected = current if caller == "explicit" else dict.fromkeys(host, "") if mode == "docker" else host
+    assert {key: result[key] for key in host} == expected
+    assert result["PATH"] == "/usr/bin:/bin"
+    assert result["HYPERLOOM_RUN_MODE"] == mode
+    assert result["USER_DATA_PATH"] == "/selected/data"
+    assert result["ONLY_IN_DOTENV"] == "filled"
+    expected_set = "" if mode == "docker" and caller == "unset" else "x"
+    assert [result[key] for key in ("PYTHON_SET", "VENV_SET", "FORCE_SET")] == [expected_set] * 3
+
+
+def _write_atom_interpreter_probe(tmp_path: Path, *, venv: bool) -> Path:
+    """Stand in for an existing container Python; activation never assigns PYTHON."""
+    bin_dir = tmp_path / "container env" / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python3"
+    python.write_text(
+        '#!/usr/bin/env bash\n_probe_bin="$(cd "$(dirname "$0")" && pwd -P)"\n'
+        '_probe_prefix="$(cd "$_probe_bin/.." && pwd -P)"\n'
+        'case "$*" in\n'
+        "  *'print(sys.executable)'*) printf '%s\\n' \"$_probe_bin/python3\" ;;\n"
+        "  *'print(sys.prefix if'*) printf '%s\\n' " + ('"$_probe_prefix"' if venv else "''") + " ;;\n"
+        "  *'print(sys.prefix)'*) printf '%s\\n' \"$_probe_prefix\" ;;\n"
+        "  '-m atom.entrypoints.openai_server --help') : > help-called ;;\n"
+        "  '-m hyperloom.inference_optimizer.setup --check-only '*) : > setup-called ;;\n"
+        "  -) : > imports-called ;;\n"
+        "  *) exit 91 ;;\nesac\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    (bin_dir / "activate").write_text(
+        f'_activated_bin="$(cd {shlex.quote(bin_dir.as_posix())} && pwd -P)"\n'
+        'export VIRTUAL_ENV="$(cd "$_activated_bin/.." && pwd -P)"\n'
+        'export PATH="$_activated_bin:$PATH"\nunset _activated_bin\n',
+        encoding="utf-8",
+    )
+    return bin_dir
+
+
+@pytest.mark.parametrize("phase", ["setup", "runtime"])
+@pytest.mark.parametrize("selection", ["activate-before", "activate-after", "default", "valid-pin", "invalid-pin"])
+def test_atom_docker_dotenv_uses_container_python(tmp_path: Path, phase: str, selection: str) -> None:
+    """Run the actual preamble and checks without a fixture reselecting Python after dotenv."""
+    bin_dir = _write_atom_interpreter_probe(tmp_path, venv=selection != "default")
+    activation = f". {shlex.quote((bin_dir / 'activate').as_posix())}\n"
+    blocks = _atom_section_blocks("Selected Python and Setup")
+    selected_python, setup_check = "\n".join(blocks[0]), "\n".join(blocks[1])
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "kernel-agent.env.sh").write_text(
+        "export PYTHON=/stale/runtime/python USER_DATA_PATH=/stale/runtime/data\n"
+        "export FRAMEWORK=vllm KERNEL_OPT_BACKEND_ORDER=stale RUNTIME_SENTINEL=loaded\n",
+        encoding="utf-8",
+    )
+    fragment = 'set -e\n[ -z "${PYTHON+x}" ]\n'
+    fragment += f'EXPECTED_BIN="$(cd {shlex.quote(bin_dir.as_posix())} && pwd -P)"\n'
+    if selection == "default":
+        fragment += 'export PATH="$EXPECTED_BIN:$PATH"\n'
+    elif selection != "activate-after":
+        fragment += activation
+    if selection in {"valid-pin", "invalid-pin"}:
+        pin = "$EXPECTED_BIN/python3" if selection == "valid-pin" else "/explicit-missing/python3"
+        fragment += f'export PYTHON="{pin}" INFERENCE_OPTIMIZER_FORCE_PYTHON=0\n'
+    fragment += _extract_dotenv_load(ATOM_DOC) + "\n"
+    if selection == "activate-after":
+        fragment += activation
+    fragment += selected_python + "\n: > selection-reached\n"
+    if phase == "runtime":
+        fragment += _atom_runtime_load() + "\n" + selected_python + "\n"
+    else:
+        fragment += setup_check + "\n"
+    fragment += '[ "$PYTHON" = "$EXPECTED_BIN/python3" ]\n: > phase-reached\n'
+    exported = {"HYPERLOOM_RUN_MODE": "docker", "USER_DATA_PATH": tmp_path.as_posix()}
+    kwargs = {
+        "dotenv_extra": "PYTHON=/host-only/venv/bin/python3\nVIRTUAL_ENV=/host-only/venv\n"
+        "INFERENCE_OPTIMIZER_FORCE_PYTHON=1\nPATH=/host-only/bin\n",
+        "observed": ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON", "RUNTIME_SENTINEL"),
+    }
+    if selection == "invalid-pin":
+        with pytest.raises(subprocess.CalledProcessError) as exc:
+            _run_recipe(fragment, tmp_path, exported, **kwargs)
+        assert exc.value.returncode == 127
+        assert "/explicit-missing/python3" in exc.value.stderr
+        assert not (tmp_path / "selection-reached").exists()
+        assert not (tmp_path / "help-called").exists()
+    else:
+        result = _run_recipe(fragment, tmp_path, exported, **kwargs)
+        assert (tmp_path / "phase-reached").exists()
+        assert (tmp_path / "imports-called").exists()
+        assert (tmp_path / "help-called").exists()
+        assert result["INFERENCE_OPTIMIZER_FORCE_PYTHON"] == "1"
+        expected_venv = Path(result["PYTHON"]).parent.parent.as_posix() if selection != "default" else ""
+        assert result["VIRTUAL_ENV"] == expected_venv
+        if phase == "runtime":
+            assert result["RUNTIME_SENTINEL"] == "loaded"
+        else:
+            assert (tmp_path / "setup-called").exists()
 
 
 @pytest.mark.parametrize("help_exit", [0, 7], ids=["help-succeeds", "help-fails"])
