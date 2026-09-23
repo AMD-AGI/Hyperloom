@@ -46,14 +46,11 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when absent or raising."""
+    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 — report must never crash on annotations
-        return default
+    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still

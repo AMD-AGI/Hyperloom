@@ -1250,25 +1250,19 @@ class CriticAgentBackend:
         call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a critic reasoning loop."""
-        try:
-            prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                call_id=call_id,
-                model=self._review_model,
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: critic conversation append failed",
-                exc_info=True,
-            )
+        prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="critic",
+            role="critic",
+            call_id=call_id,
+            model=self._review_model,
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     def _load_skill_preamble(self) -> str:
         """Load and cache the critic-agent skill/action markdown preamble."""

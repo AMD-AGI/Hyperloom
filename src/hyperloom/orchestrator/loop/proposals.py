@@ -190,15 +190,12 @@ class ProposalsCollaborator:
         cache = getattr(self, "_local_recipe_cache", None)
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        try:
-            row = (
-                self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self._workload_canonical_id(),
-                )
-                or {}
+        row = (
+            self.recipe_kb.get_authoritative_recipe(
+                canonical_id=self._workload_canonical_id(),
             )
-        except Exception:  # noqa: BLE001
-            row = {}
+            or {}
+        )
         self._coord._local_recipe_cache = (tick, row)
         return row
 
@@ -284,11 +281,7 @@ class ProposalsCollaborator:
 
         if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
-        try:
-            cid = self._workload_canonical_id()
-        except Exception:
-            log.exception("_kb_amend_recipe: cid derivation failed")
-            return
+        cid = self._workload_canonical_id()
 
         ss = self.shared_state
         framework = str(getattr(ss, "framework", "") or "")

@@ -62,10 +62,7 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         Used when the memory capture produced no ``next_cycle_directive``; keeps
         every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
         """
-        try:
-            planned = self._plan_cycle_focus()
-        except Exception:  # noqa: BLE001 — fallback must never raise
-            return ""
+        planned = self._plan_cycle_focus()
         focus = str(planned.get("focus") or "").strip()
         if not focus:
             return ""

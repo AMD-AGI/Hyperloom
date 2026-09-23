@@ -244,16 +244,13 @@ class MachinePhase(PhaseHandler):
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
-            try:
-                state.mark_bottleneck_switch(
-                    prev_bottleneck=state.current_top_bottleneck(),
-                )
-                log.info(
-                    "plateau → bottleneck switch flagged (off %r)",
-                    state.last_cycle_bottleneck,
-                )
-            except Exception:
-                log.exception("mark_bottleneck_switch failed")
+            state.mark_bottleneck_switch(
+                prev_bottleneck=state.current_top_bottleneck(),
+            )
+            log.info(
+                "plateau → bottleneck switch flagged (off %r)",
+                state.last_cycle_bottleneck,
+            )
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
         if is_loopback:
             prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -303,15 +300,12 @@ class MachinePhase(PhaseHandler):
         )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
-        try:
-            state.record_lifecycle_event(
-                step=target,
-                status=_phase_state.LIFECYCLE_STATUS_ENTER,
-                phase=target,
-                detail=f"reason={reason}" if reason else "",
-            )
-        except Exception:
-            log.debug("Coordinator: lifecycle phase emit failed", exc_info=True)
+        state.record_lifecycle_event(
+            step=target,
+            status=_phase_state.LIFECYCLE_STATUS_ENTER,
+            phase=target,
+            detail=f"reason={reason}" if reason else "",
+        )
         try:
             state.save(self.session_dir)
         except Exception:
@@ -395,10 +389,7 @@ class MachinePhase(PhaseHandler):
                 a phase that recomputed them at close would report counts over
                 a history that kept growing after the decision.
         """
-        try:
-            self._reseed_orch_prompt_for_phase(to_phase)
-        except Exception:
-            log.exception("Coordinator: phase-boundary prompt reseed failed")
+        self._reseed_orch_prompt_for_phase(to_phase)
 
         # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
         # a hook of its own.

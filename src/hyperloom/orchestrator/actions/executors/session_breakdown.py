@@ -41,10 +41,7 @@ class SessionBreakdownExecutor:
             }
 
         # Surface warnings + size to the bus event.
-        try:
-            warnings = (build(session_dir).get("metadata") or {}).get("warnings") or []
-        except Exception:  # noqa: BLE001
-            warnings = []
+        warnings = (build(session_dir).get("metadata") or {}).get("warnings") or []
 
         log.info(
             "session_breakdown_executor: wrote %s (%d warnings)",

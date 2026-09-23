@@ -205,12 +205,9 @@ class ConversationCollaborator:
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text."""
-        try:
-            blob = self.shared_state._format_analysis_md_full()
-            if blob and blob.strip():
-                return blob
-        except Exception:
-            log.exception("Coordinator: _format_analysis_md_full failed")
+        blob = self.shared_state._format_analysis_md_full()
+        if blob and blob.strip():
+            return blob
         # Fallback: read the path recorded on last_trace_analyze.
         lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
         path = str(lta.get("analysis_md_path") or "")
@@ -229,32 +226,25 @@ class ConversationCollaborator:
         result: BackendTurnResult,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn."""
-        try:
-            metadata = result.metadata or {}
-            prompt = metadata.get("prompt")
-            response = metadata.get("response")
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component=agent_name,
-                # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
-                # stamped one.
-                call_id=metadata.get("call_id"),
-                role=agent_name,
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                model=metadata.get("model"),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: reactor conversation append failed for %s",
-                agent_name,
-                exc_info=True,
-            )
+        metadata = result.metadata or {}
+        prompt = metadata.get("prompt")
+        response = metadata.get("response")
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component=agent_name,
+            # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
+            # stamped one.
+            call_id=metadata.get("call_id"),
+            role=agent_name,
+            tick=int(self.shared_state.tick or 0),
+            phase=(self.shared_state.phase or "") or None,
+            model=metadata.get("model"),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     async def _compose_prompt(self, agent_name: str) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
@@ -264,13 +254,9 @@ class ConversationCollaborator:
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        try:
-            phase_block = self.shared_state.to_phase_status_summary(
-                budget_pct=self._phase_budget_pct,
-            )
-        except Exception:
-            log.exception("Coordinator: phase status summary failed")
-            phase_block = ""
+        phase_block = self.shared_state.to_phase_status_summary(
+            budget_pct=self._phase_budget_pct,
+        )
         if phase_block:
             sections.append("=== Phase ===")
             sections.append(phase_block)
@@ -281,11 +267,7 @@ class ConversationCollaborator:
             self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            try:
-                cycle_strategy_block = self._cycle_strategy_block()
-            except Exception:
-                log.exception("Coordinator: cycle strategy render failed")
-                cycle_strategy_block = ""
+            cycle_strategy_block = self._cycle_strategy_block()
             if cycle_strategy_block:
                 sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
@@ -321,71 +303,39 @@ class ConversationCollaborator:
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration":
-            try:
-                warm_block = self.shared_state.to_warm_start_summary()
-            except Exception:
-                log.exception("Coordinator: warm_start_summary failed")
-                warm_block = ""
+            warm_block = self.shared_state.to_warm_start_summary()
             if warm_block:
                 sections.append("=== Warm start (Recipe KB T0) ===")
                 sections.append(warm_block)
-            try:
-                gaps_block = self.shared_state.to_gaps_summary()
-            except Exception:
-                log.exception("Coordinator: gaps_summary failed")
-                gaps_block = ""
+            gaps_block = self.shared_state.to_gaps_summary()
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
-            try:
-                research_block = self._specialist_findings_block()
-            except Exception:
-                log.exception("Coordinator: specialist findings render failed")
-                research_block = ""
+            research_block = self._specialist_findings_block()
             if research_block:
                 sections.append(research_block)
-            try:
-                gap_block = self._target_gap_advisory_block()
-            except Exception:
-                log.exception("Coordinator: target gap advisory failed")
-                gap_block = ""
+            gap_block = self._target_gap_advisory_block()
             if gap_block:
                 sections.append("=== External target gap (advisory) ===")
                 sections.append(gap_block)
             # Advisory multi-model proposal scores (ProposalScorer); not a ranking directive.
-            try:
-                scores_block = self.shared_state.to_proposal_scores_summary()
-            except Exception:
-                log.exception("Coordinator: proposal_scores_summary failed")
-                scores_block = ""
+            scores_block = self.shared_state.to_proposal_scores_summary()
             if scores_block:
                 sections.append("=== Specialist proposal scores (advisory) ===")
                 sections.append(scores_block)
             # Priors-match: recently proposed variants aligning with research hints/external gap (advisory only).
-            try:
-                priors_block = self._priors_match_advisory_block()
-            except Exception:
-                log.exception("Coordinator: priors-match advisory failed")
-                priors_block = ""
+            priors_block = self._priors_match_advisory_block()
             if priors_block:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
             # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
-            try:
-                mix_block = self.shared_state.to_intervention_mix_summary()
-            except Exception:
-                log.exception("Coordinator: intervention_mix_summary failed")
-                mix_block = ""
+            mix_block = self.shared_state.to_intervention_mix_summary()
             if mix_block:
                 sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
 
-            try:
-                plateau_block = self._plateau_advisory_block()
-            except Exception:
-                log.exception("Coordinator: plateau advisory failed")
-                plateau_block = ""
+            plateau_block = self._plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
@@ -407,21 +357,13 @@ class ConversationCollaborator:
                     sections.append(trajectory_block)
 
             # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
-            try:
-                redirect_block = self._bottleneck_redirect_advisory_block()
-            except Exception:
-                log.exception("Coordinator: bottleneck redirect advisory failed")
-                redirect_block = ""
+            redirect_block = self._bottleneck_redirect_advisory_block()
             if redirect_block:
                 sections.append("=== Bottleneck redirect (advisory) ===")
                 sections.append(redirect_block)
 
             # Decaying acceptance bar + prior variants now re-testable under it.
-            try:
-                accept_block = self._acceptance_threshold_advisory_block()
-            except Exception:
-                log.exception("Coordinator: acceptance threshold advisory failed")
-                accept_block = ""
+            accept_block = self._acceptance_threshold_advisory_block()
             if accept_block:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
@@ -464,10 +406,7 @@ class ConversationCollaborator:
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
-        try:
-            pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
-        except Exception:  # noqa: BLE001 — never break prompt composition
-            return rendered
+        pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
         if not pending:
             return rendered
         seen = {getattr(m, "msg_id", None) for m in rendered}

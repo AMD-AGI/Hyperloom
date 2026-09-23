@@ -716,11 +716,7 @@ class ClosePhase(PhaseHandler):
         """Build + enqueue a Coordinator-internal ``report`` task (idempotency_key internal-report-<reason>)."""
         existing_id = (self.shared_state.closing_report_task_id or "").strip()
         if existing_id:
-            task = None
-            try:
-                task = await self.tasks.get(existing_id)
-            except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                pass  # Stale id; fall through to fresh enqueue.
+            task = await self.tasks.get(existing_id)
             if task is not None and not _task_is_dead(task):
                 log.info(
                     "internal-report task already enqueued by wall-clock "
@@ -800,15 +796,7 @@ class ClosePhase(PhaseHandler):
         )
         state = _TASK_STATE_RUNNING
         while True:
-            try:
-                state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
-            except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                log.warning(
-                    "CLOSE step %s: task_id=%s vanished while the sequencer waited for it",
-                    step,
-                    task.task_id,
-                )
-                return state
+            state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
             if state != _TASK_STATE_RUNNING:
                 log.info(
                     "CLOSE step %s: task_id=%s finished as %s while the sequencer waited",
@@ -962,23 +950,18 @@ class ClosePhase(PhaseHandler):
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
-        try:
-            task, _existing = await self.tasks.create_or_return_existing(
-                kind="report",
-                params={
-                    "session_dir": str(self.session_dir),
-                    "max_highlights": 50,
-                },
-                idempotency_key=idempotency_key,
-                requires_lanes=[],
-                side_effects=["writes_results"],
-                lease_ttl_sec=120,
-            )
-            task_id = task.task_id
-        except Exception:
-            # A blank id is the honest record of a failed enqueue, and the
-            # closing check reads it as "nothing to wait for".
-            log.exception("closing_phase: enqueueing the report task failed; the close sequence will write it")
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params={
+                "session_dir": str(self.session_dir),
+                "max_highlights": 50,
+            },
+            idempotency_key=idempotency_key,
+            requires_lanes=[],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id
         self.shared_state.save(self.session_dir)
 

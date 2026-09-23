@@ -677,67 +677,63 @@ def build_profiler_digest(
     top_n: int = 3,
 ) -> str:
     """Render a compact, bottleneck-focused profiler block for prompt injection."""
-    try:
-        snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
-        ta = trace_analyze if isinstance(trace_analyze, dict) else {}
-        if not snaps and not ta:
-            return ""
-        latest = snaps[-1] if snaps else {}
-
-        def _pct(v: Any) -> str:
-            """Format a value as a one-decimal percentage, or ``—`` when not numeric."""
-            return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
-
-        bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
-        lines: list[str] = [
-            f"bound_kind={bound_kind}  "
-            f"compute={_pct(latest.get('compute_pct'))}  "
-            f"idle={_pct(latest.get('idle_pct'))}  "
-            f"comm={_pct(latest.get('comm_pct'))}"
-        ]
-
-        if len(snaps) >= 2:
-            prev = snaps[-2]
-            parts: list[str] = []
-            for label, key in (
-                ("compute", "compute_pct"),
-                ("idle", "idle_pct"),
-                ("comm", "comm_pct"),
-            ):
-                d = _num_delta(latest.get(key), prev.get(key))
-                if d is not None:
-                    parts.append(f"{label} {_fmt_delta(d)}pp")
-            if parts:
-                lines.append("delta_vs_prev: " + "  ".join(parts))
-
-        rows: list[str] = []
-        hot = ta.get("hot_kernels_top15") or []
-        if isinstance(hot, list):
-            for entry in hot[:top_n]:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or entry.get("kernel_id") or "?")
-                seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
-                eff = entry.get("efficiency_percent")
-                if isinstance(eff, (int, float)):
-                    seg += f"  (eff {float(eff):.1f}%)"
-                rows.append(seg)
-        if not rows and latest.get("top_bottleneck"):
-            rows.append(f"  {latest.get('top_bottleneck')}")
-        if rows:
-            lines.append("top_bottlenecks:")
-            lines.extend(rows)
-
-        direction, _pct_val = dominant_direction(latest)
-        lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
-        if lever:
-            lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
-
-        reusable = ta.get("reusable_native_kernel_ids") or []
-        if isinstance(reusable, list) and reusable:
-            lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
-
-        return "\n".join(lines)
-    except Exception:
-        log.debug("build_profiler_digest failed", exc_info=True)
+    snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
+    ta = trace_analyze if isinstance(trace_analyze, dict) else {}
+    if not snaps and not ta:
         return ""
+    latest = snaps[-1] if snaps else {}
+
+    def _pct(v: Any) -> str:
+        """Format a value as a one-decimal percentage, or ``—`` when not numeric."""
+        return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
+
+    bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
+    lines: list[str] = [
+        f"bound_kind={bound_kind}  "
+        f"compute={_pct(latest.get('compute_pct'))}  "
+        f"idle={_pct(latest.get('idle_pct'))}  "
+        f"comm={_pct(latest.get('comm_pct'))}"
+    ]
+
+    if len(snaps) >= 2:
+        prev = snaps[-2]
+        parts: list[str] = []
+        for label, key in (
+            ("compute", "compute_pct"),
+            ("idle", "idle_pct"),
+            ("comm", "comm_pct"),
+        ):
+            d = _num_delta(latest.get(key), prev.get(key))
+            if d is not None:
+                parts.append(f"{label} {_fmt_delta(d)}pp")
+        if parts:
+            lines.append("delta_vs_prev: " + "  ".join(parts))
+
+    rows: list[str] = []
+    hot = ta.get("hot_kernels_top15") or []
+    if isinstance(hot, list):
+        for entry in hot[:top_n]:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or entry.get("kernel_id") or "?")
+            seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
+            eff = entry.get("efficiency_percent")
+            if isinstance(eff, (int, float)):
+                seg += f"  (eff {float(eff):.1f}%)"
+            rows.append(seg)
+    if not rows and latest.get("top_bottleneck"):
+        rows.append(f"  {latest.get('top_bottleneck')}")
+    if rows:
+        lines.append("top_bottlenecks:")
+        lines.extend(rows)
+
+    direction, _pct_val = dominant_direction(latest)
+    lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
+    if lever:
+        lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
+
+    reusable = ta.get("reusable_native_kernel_ids") or []
+    if isinstance(reusable, list) and reusable:
+        lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
+
+    return "\n".join(lines)

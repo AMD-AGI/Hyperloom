@@ -2312,15 +2312,12 @@ class KernelPhase(PhaseHandler):
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
                 continue
-            try:
-                tool_versions.record_tool_version(
-                    self.session_dir,
-                    tool=str(tool),
-                    root=str(meta.get("root_dir") or "") or None,
-                    version=str(meta.get("version") or meta.get("commit") or "") or None,
-                )
-            except Exception:
-                log.debug("kernel timeline: geak tool version record failed", exc_info=True)
+            tool_versions.record_tool_version(
+                self.session_dir,
+                tool=str(tool),
+                root=str(meta.get("root_dir") or "") or None,
+                version=str(meta.get("version") or meta.get("commit") or "") or None,
+            )
 
     def _reject_geak_kernel_journey(
         self,
@@ -2346,10 +2343,7 @@ class KernelPhase(PhaseHandler):
         """Return whether the served model dispatches MoE through aiter."""
         from ..kernel.request_handlers import _resolve_forge_server_log
 
-        try:
-            log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
-        except Exception:  # noqa: BLE001 - detection is best-effort
-            return False
+        log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
             return False
         try:
@@ -2364,15 +2358,7 @@ class KernelPhase(PhaseHandler):
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
         """Report whether the validated aiter CSV was reachable by the server."""
-        try:
-            return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
-        except Exception:
-            log.warning(
-                "tuned-config coverage failed for %s; treating it as undetermined",
-                tuner_name,
-                exc_info=True,
-            )
-            return None
+        return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
 
     def _gemm_tuned_config_coverage_impl(
         self,
@@ -2541,31 +2527,27 @@ class KernelPhase(PhaseHandler):
             overlay = str(recipe.get("final_overlay") or "")
             if overlay and overlay not in str(envs.get("PYTHONPATH") or "").split(":"):
                 envs["PYTHONPATH"] = ":".join(filter(None, (overlay, envs.get("PYTHONPATH"))))
-            try:
-                res = await integrate_handler(
-                    {
-                        "task_id": f"gemm_paired_{side}{idx}",
-                        "kernel_id": f"gemm_paired_{side}{idx}",
-                        "source": "forge_gemm_paired",
-                        "base_tput": reference["tput"],
-                        "config_path": config_path,
-                        "paired_reference": reference,
-                        "extra_server_args": str(recipe.get("extra_server_args") or ""),
-                        "extra_envs": envs,
-                        "remove_args": recipe.get("remove_args", []),
-                        "unset_envs": recipe.get("unset_envs", []),
-                        "args_mode": recipe.get("args_mode", "append"),
-                        # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
-                        # would be noise promoted to a decision.
-                        "keep_threshold_pct": 100.0,
-                        "budget_minutes": budget_minutes,
-                        "mode": "env_only",
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("forge gemm paired confirmation aborted at %s%d: %s", side, idx, exc)
-                break
+            res = await integrate_handler(
+                {
+                    "task_id": f"gemm_paired_{side}{idx}",
+                    "kernel_id": f"gemm_paired_{side}{idx}",
+                    "source": "forge_gemm_paired",
+                    "base_tput": reference["tput"],
+                    "config_path": config_path,
+                    "paired_reference": reference,
+                    "extra_server_args": str(recipe.get("extra_server_args") or ""),
+                    "extra_envs": envs,
+                    "remove_args": recipe.get("remove_args", []),
+                    "unset_envs": recipe.get("unset_envs", []),
+                    "args_mode": recipe.get("args_mode", "append"),
+                    # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
+                    # would be noise promoted to a decision.
+                    "keep_threshold_pct": 100.0,
+                    "budget_minutes": budget_minutes,
+                    "mode": "env_only",
+                },
+                session_dir=self.session_dir,
+            )
             tput = float(res.get("new_tput") or 0.0)
             if tput <= 0:
                 log.warning("forge gemm paired confirmation: %s%d produced no throughput", side, idx)
@@ -2617,16 +2599,12 @@ class KernelPhase(PhaseHandler):
         # value in the candidate env wins, and then a zero-hit result means nothing.
         hit_logging = aiter_log_tuned_config_enabled(envs)
 
-        try:
-            return verify_applied(
-                logs[-1],
-                csv_paths,
-                hit_logging=hit_logging,
-                runtime_table_names=table_names,
-            ).to_dict()
-        except Exception:
-            log.warning("apply verification failed for %s", tuner_name, exc_info=True)
-            return None
+        return verify_applied(
+            logs[-1],
+            csv_paths,
+            hit_logging=hit_logging,
+            runtime_table_names=table_names,
+        ).to_dict()
 
     def _fmoe_apply_verdict(
         self,
@@ -3746,11 +3724,7 @@ class KernelPhase(PhaseHandler):
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
-            try:
-                env_spec = self.build_env_spec()
-            except Exception:
-                log.exception("KERNEL entry: could not build Forge serving environment")
-                env_spec = {}
+            env_spec = self.build_env_spec()
             handoff_dir = write_forge_handoff(
                 self.session_dir,
                 self.shared_state,
@@ -3988,17 +3962,11 @@ class KernelPhase(PhaseHandler):
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
             spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
-            try:
-                self.shared_state.fusion_infra_aborts = spent + 1
-            except Exception:  # noqa: BLE001 - state shape tolerant, as below
-                pass
+            self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
-            try:
-                self.shared_state.fusion_withheld_retries = withheld_spent + 1
-            except Exception:  # noqa: BLE001 - state shape tolerant, as below
-                pass
+            self.shared_state.fusion_withheld_retries = withheld_spent + 1
         try:
             if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
                 cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
@@ -4145,10 +4113,7 @@ class KernelPhase(PhaseHandler):
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
             return
-        try:
-            task = await self.tasks.get(pending)
-        except Exception:  # noqa: BLE001 — a missing row is itself finished
-            task = None
+        task = await self.tasks.get(pending)
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
             return
         self.shared_state.auto_roofline_pending_task_id = ""

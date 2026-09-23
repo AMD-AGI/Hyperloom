@@ -86,14 +86,12 @@ def _git_describe(root: Path) -> str:
 
 def _dist_version(names: tuple[str, ...]) -> str:
     """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
-    try:
-        from importlib.metadata import version as _dist_ver
-    except Exception:  # noqa: BLE001
-        return ""
+    from importlib.metadata import PackageNotFoundError, version
+
     for name in names:
         try:
-            v = str(_dist_ver(name) or "").strip()
-        except Exception:  # noqa: BLE001
+            v = str(version(name) or "").strip()
+        except PackageNotFoundError:
             continue
         # Reject a stale 0.0.0 masquerade.
         if v and v != "0.0.0":

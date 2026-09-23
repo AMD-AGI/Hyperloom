@@ -2170,13 +2170,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         achieved = self._resolve_baseline_achieved_tput()
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-        try:
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm="baseline",
-            )
-        except Exception:  # noqa: BLE001 — ceiling is best-effort
-            pass
+        breakdown = compute_roofline_breakdown_from_state(
+            self,
+            arm="baseline",
+        )
         peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
         if peak_tput <= 0:
             return {}
@@ -2482,13 +2479,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 achieved_tput = self._resolve_baseline_achieved_tput()
             # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(
-                    self,
-                    arm=snapshot_arm,
-                )
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
+            breakdown = compute_roofline_breakdown_from_state(
+                self,
+                arm=snapshot_arm,
+            )
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).

@@ -70,13 +70,10 @@ def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None
     except (TypeError, ValueError):
         return None
     commit = str(manifest.get("commit_hash") or "").strip()
-    try:
-        complete = publisher.describes_current_best(
-            iteration=iteration,
-            commit_hash=commit,
-        )
-    except Exception:  # noqa: BLE001 - publisher shape varies by backend
-        complete = False
+    complete = publisher.describes_current_best(
+        iteration=iteration,
+        commit_hash=commit,
+    )
     if (
         not commit
         or manifest.get("correctness_passed") is not True

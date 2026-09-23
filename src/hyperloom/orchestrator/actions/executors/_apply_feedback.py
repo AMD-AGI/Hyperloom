@@ -70,21 +70,10 @@ def read_patch_source_context(
     *,
     radius: int = 25,
 ) -> str:
-    """Extract a source-code window near the first failing hunk in a patch."""
-    try:
-        return _read_source_context_impl(patch_text, framework_root, radius=radius)
-    except Exception:
-        log.debug("apply_feedback: source-context extraction failed", exc_info=True)
-        return ""
+    """Extract a source-code window near the first failing hunk in a patch.
 
-
-def _read_source_context_impl(
-    patch_text: str,
-    framework_root: Path,
-    *,
-    radius: int,
-) -> str:
-    """Implementation of :func:`read_patch_source_context` (may raise)."""
+    Returns ``""`` when the patch names no target or the target cannot be read.
+    """
     import re
 
     # The first target file, preferring the +++ (new) side over a deletion's --- side.
@@ -99,7 +88,10 @@ def _read_source_context_impl(
     if target_path is None:
         return ""
 
-    file_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        file_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
     return _numbered_window(target_path, file_lines, hunk_start, radius)
 
 
@@ -141,11 +133,7 @@ def source_context_for_file(
     search_roots: "list[Path] | None" = None,
 ) -> str:
     """Extract a source window centred on the first occurrence of *symbol*."""
-    try:
-        return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
-    except Exception:
-        log.debug("apply_feedback: source-context-for-file failed for %s", filepath, exc_info=True)
-        return ""
+    return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
 
 
 def _source_context_for_file_impl(
@@ -195,9 +183,9 @@ def build_apply_feedback(
     if framework_root is not None:
         try:
             patch_text = Path(patch_str).read_text(encoding="utf-8", errors="replace")
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            pass
+        except OSError:
+            patch_text = ""
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
 
     return ApplyFeedback(
         patch=patch_str,

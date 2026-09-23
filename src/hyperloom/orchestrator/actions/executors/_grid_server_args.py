@@ -210,11 +210,8 @@ def _json_flag_values(args: str) -> dict[str, list[str]]:
 
 def _warn_on_damaged_json_values(before: str, after: str) -> None:
     """Log loudly when composition turned a parseable JSON flag value unparseable."""
-    try:
-        was = _json_flag_values(before)
-        now = _json_flag_values(after)
-    except Exception:  # noqa: BLE001 - never let a diagnostic break composition
-        return
+    was = _json_flag_values(before)
+    now = _json_flag_values(after)
     for flag, values in now.items():
         healthy_before = any(_parses_as_json(v) for v in was.get(flag, []))
         if healthy_before and not any(_parses_as_json(v) for v in values):

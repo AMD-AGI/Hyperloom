@@ -157,29 +157,21 @@ def platform_fingerprint(
             **plat.as_dict(),
         }
         # Each block below degrades on its own: one unreadable file must not take the whole platform record with it.
-        try:
-            record["gpu"] = {
-                # PCI devices bound to amdgpu: what the host has, not what the run could see. *_VISIBLE_DEVICES
-                # masking does not change this number, so it is named for the host to keep it from being read as the
-                # run's device count.
-                "host_count": amdgpu_device_count(),
-                # probe=False: gpu_type already answers this, and report generation runs in-process under unit tests
-                # that must not spawn rocminfo.
-                "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False) or "unknown",
-                "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
-            }
-            # The card's compute-partition shape, when this session established one.
-            partition = published_shape()
-            if partition:
-                record["gpu"]["compute_partition"] = partition
-        except Exception:
-            log.warning("platform fingerprint: GPU block unreadable", exc_info=True)
-            record["gpu"] = {"status": "error"}
-        try:
-            record["stack"] = detect_stack_fingerprint(os.environ)
-        except Exception:
-            log.warning("platform fingerprint: stack block unreadable", exc_info=True)
-            record["stack"] = {"status": "error"}
+        record["gpu"] = {
+            # PCI devices bound to amdgpu: what the host has, not what the run could see. *_VISIBLE_DEVICES
+            # masking does not change this number, so it is named for the host to keep it from being read as the
+            # run's device count.
+            "host_count": amdgpu_device_count(),
+            # probe=False: gpu_type already answers this, and report generation runs in-process under unit tests
+            # that must not spawn rocminfo.
+            "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False) or "unknown",
+            "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
+        }
+        # The card's compute-partition shape, when this session established one.
+        partition = published_shape()
+        if partition:
+            record["gpu"]["compute_partition"] = partition
+        record["stack"] = detect_stack_fingerprint(os.environ)
         return record
     except Exception as exc:
         # Warning, not debug: this record is provenance, and a silent hole in it is only discovered when someone needs

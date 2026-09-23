@@ -1333,18 +1333,13 @@ def _cheap_summary(archive: Any) -> dict:
     """Build a non-LLM experience summary from the on-disk candidate archive."""
     strategy = ""
     if archive is not None:
-        try:
-            index = archive.load_index()
-            keeps = [
-                entry
-                for entry in index
-                if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
-            ]
-            if keeps:
-                best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
-                strategy = (best.get("plan") or "").strip()
-        except Exception:  # noqa: BLE001 - best-effort; empty summary is acceptable
-            pass
+        index = archive.load_index()
+        keeps = [
+            entry for entry in index if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
+        ]
+        if keeps:
+            best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
+            strategy = (best.get("plan") or "").strip()
     return {"category": "", "strategy": strategy, "recipe": "", "lessons": ""}
 
 

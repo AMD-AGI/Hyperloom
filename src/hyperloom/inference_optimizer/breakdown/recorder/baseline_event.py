@@ -915,11 +915,13 @@ def make_baseline_recorder(
     """Build a recorder, or ``None`` when one cannot be constructed.
 
     Baseline behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating -- as does an absent
+    failures that are not recorder bugs degrade to "no event" -- as does an absent
     sink, which is what a caller with no session bound has.
     """
     if sink is None:
         return None
+    from .recorder_warnings import RECORDING_ERRORS
+
     try:
         recorder = BaselineEventRecorder(
             sink,
@@ -933,7 +935,7 @@ def make_baseline_recorder(
             total_failures_before=total_failures_before,
             owns_event=owns_event,
         )
-    except Exception:
+    except RECORDING_ERRORS:
         log.warning(
             "baseline timeline: recorder construction failed; this measurement's facts will be missing from the event",
             exc_info=True,

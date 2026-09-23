@@ -1354,17 +1354,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "disabled",
         }:
             return
-        try:
-            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-            if config.mode is KnowledgeStoreMode.LOCAL:
-                if self.recipe_kb is None:
-                    return
-                sid = (self.shared_state.recipe_kb_session_id or "").strip()
-                if not sid:
-                    return
-            self.ensure_recipe_finalized(source="t4_fallback")
-        except Exception:
-            log.exception("recipe KB T4 fact_finalize fallback failed")
+        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        if config.mode is KnowledgeStoreMode.LOCAL:
+            if self.recipe_kb is None:
+                return
+            sid = (self.shared_state.recipe_kb_session_id or "").strip()
+            if not sid:
+                return
+        self.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
@@ -1665,13 +1662,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             tick=tick_n,
                         )
                     # Periodic reaper + DB retention; time-gated.
-                    try:
-                        now = time.monotonic()
-                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                            await self._run_maintenance(tick=tick_n)
-                            self._last_maintenance_ts = now
-                    except Exception:
-                        log.exception("maintenance tick raised")
+                    now = time.monotonic()
+                    if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+                        await self._run_maintenance(tick=tick_n)
+                        self._last_maintenance_ts = now
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:
@@ -1807,14 +1801,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         backend_self_traces = callable(_set_trace_ctx)
         if backend_self_traces:
-            try:
-                _set_trace_ctx(
-                    tick=int(self.shared_state.tick or 0),
-                    phase=(self.shared_state.phase or "") or None,
-                    macro_cycle=int(self.shared_state.macro_cycle or 0),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         try:

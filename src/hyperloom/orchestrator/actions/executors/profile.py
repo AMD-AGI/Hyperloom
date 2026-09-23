@@ -889,10 +889,7 @@ class ProfileExecutor(BaselineExecutor):
 
         from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
+        roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(
             probe_dir=probe_dir,
             source_roots=roots,

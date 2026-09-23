@@ -1942,12 +1942,11 @@ def forge_loop(
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
-                result["iteration_count"] = len(completed_experiment.iterations)
-                result["checkpoint"] = completed_experiment.checkpoint
-            except Exception:  # noqa: BLE001
-                # Tracker metadata is optional on incomplete runs; final result emission must remain available so
-                # callers can reject it cleanly.
-                pass
+            except FileNotFoundError:
+                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+                return result
+            result["iteration_count"] = len(completed_experiment.iterations)
+            result["checkpoint"] = completed_experiment.checkpoint
         return result
 
     def _write_result_json(result: dict) -> None:

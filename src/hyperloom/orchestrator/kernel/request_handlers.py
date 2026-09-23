@@ -3306,10 +3306,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
             'an incomplete install; reinstall with pip install -e ".[forge]"'
         )
         return
-    try:
-        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
-        return
+    moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
     if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
         log.warning(
             "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
@@ -5974,16 +5971,13 @@ def _grade_integrate_accuracy(
     metric = str(bench_result.get("accuracy_metric") or "")
     source_file = str(bench_result.get("accuracy_source") or "")
     if new_accuracy is None:
-        try:
-            eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-            parsed = eval_out.get("accuracy")
-            if isinstance(parsed, (int, float)):
-                new_accuracy = float(parsed)
-                task = str(eval_out.get("task") or "")
-                metric = str(eval_out.get("metric") or "")
-                source_file = str(eval_out.get("source_file") or "")
-        except Exception:
-            log.debug("integrate_handler: accuracy re-parse failed", exc_info=True)
+        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            new_accuracy = float(parsed)
+            task = str(eval_out.get("task") or "")
+            metric = str(eval_out.get("metric") or "")
+            source_file = str(eval_out.get("source_file") or "")
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:

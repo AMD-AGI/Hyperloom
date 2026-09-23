@@ -40,10 +40,5 @@ class GpuLanes(CoordinatorCollaborator):
         ttl = int(base_ttl_sec or 0)
         if is_truthy(params.get("needs_gpu")):
             lanes.append("gpu_research_lane")
-            try:
-                ttl = self._gpu_lease_ttl_sec(ttl, params=params)
-            except Exception:
-                log.exception(
-                    "framework GPU: gpu_research_lane TTL re-source failed; using base TTL",
-                )
+            ttl = self._gpu_lease_ttl_sec(ttl, params=params)
         return lanes, ttl

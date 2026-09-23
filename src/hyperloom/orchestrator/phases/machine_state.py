@@ -1390,10 +1390,7 @@ def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting."""
     getter = getattr(state, "session_budget_usable_sec", None)
     if callable(getter):
-        try:
-            return getter()
-        except Exception:  # noqa: BLE001 — fall back to the attribute path
-            pass
+        return getter()
     return session_remaining_seconds(state)
 
 

@@ -226,13 +226,10 @@ class DispatcherCollaborator:
         phase = (getattr(state, "phase", "") or "").upper()
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
-        try:
-            remaining = _phase_state.phase_budget_remaining_seconds(
-                state,
-                budget_pct=self._phase_budget_pct,
-            )
-        except Exception:  # noqa: BLE001 — never let the guard wedge dispatch
-            return False
+        remaining = _phase_state.phase_budget_remaining_seconds(
+            state,
+            budget_pct=self._phase_budget_pct,
+        )
         return remaining is not None and remaining <= 0.0
 
     async def cancel_inflight_actions(
@@ -671,10 +668,7 @@ class DispatcherCollaborator:
                     # any probe failure is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
-                        try:
-                            _immediate_pause = _serving_slot_busy_fn()
-                        except Exception:  # noqa: BLE001 — never block dispatch
-                            _immediate_pause = False
+                        _immediate_pause = _serving_slot_busy_fn()
                     if _immediate_pause:
                         # Serving is active — defer this GPU specialist to a
                         # later pass (keep it queued) rather than piling onto the
@@ -802,23 +796,20 @@ class DispatcherCollaborator:
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            try:
-                _coord = object.__getattribute__(self, "_coord")
-                _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
-                if (
-                    isinstance(_execs, dict)
-                    and _execs
-                    and task.kind not in _execs
-                    and task.kind != "specialist"
-                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
-                ):
-                    log.warning(
-                        "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
-                        task.task_id,
-                        task.kind,
-                    )
-            except Exception:  # noqa: BLE001 - audit must never affect dispatch
-                pass
+            _coord = object.__getattribute__(self, "_coord")
+            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            if (
+                isinstance(_execs, dict)
+                and _execs
+                and task.kind not in _execs
+                and task.kind != "specialist"
+                and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+            ):
+                log.warning(
+                    "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
+                    task.task_id,
+                    task.kind,
+                )
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
                 self.run_task_registered(
@@ -1165,14 +1156,7 @@ class DispatcherCollaborator:
             if task_id in self._dead_holder_accounted:
                 continue
             self._dead_holder_accounted.add(task_id)
-            try:
-                task = await self.tasks.get(task_id)
-            except Exception:
-                log.exception(
-                    "dispatcher: dead-holder accounting could not load task=%s",
-                    task_id,
-                )
-                continue
+            task = await self.tasks.get(task_id)
             await self._handle_unpromotable_result(
                 task,
                 {
@@ -1231,14 +1215,8 @@ class DispatcherCollaborator:
             # task and skip this attempt's bookkeeping. Semantic empties fall
             # through and are recorded.
             if task.kind == "specialist" and result.state != "cancelled":
-                try:
-                    if await self._maybe_auto_retry_specialist(task, result):
-                        continue
-                except Exception:
-                    log.exception(
-                        "specialist auto-retry hook failed for task=%s",
-                        task.task_id,
-                    )
+                if await self._maybe_auto_retry_specialist(task, result):
+                    continue
             if isinstance(result.result, dict):
                 reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
                 if reauthor_attempt not in (None, ""):
@@ -1273,87 +1251,45 @@ class DispatcherCollaborator:
                 result_dict = result.result if isinstance(result.result, dict) else {}
                 done_payload = result_dict.get("specialist_done") or {}
                 if isinstance(done_payload, dict):
-                    try:
-                        await self._record_specialist_result(
-                            task=task,
-                            done_payload=done_payload,
-                            source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:
-                        log.exception(
-                            "specialist bookkeeping hook failed for task=%s",
-                            task.task_id,
-                        )
+                    await self._record_specialist_result(
+                        task=task,
+                        done_payload=done_payload,
+                        source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                        run_error=str(result.error or ""),
+                    )
                     # FRAMEWORK authoring bridge for an EMPTY deliverable: a
                     # specialist that authored no patch never spawns an
                     # integrate_patch; stamp the terminal progress row here to
                     # avoid a pump livelock.
-                    try:
-                        self._record_framework_agent_authoring_empty_outcome(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:
-                        log.exception(
-                            "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
+                    self._record_framework_agent_authoring_empty_outcome(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
                     # Harvest a discovery specialist's candidates into the
                     # source arm's batch.
-                    try:
-                        self._ingest_candidate_discovery(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:
-                        log.exception(
-                            "FRAMEWORK: candidate discovery ingest failed for task=%s",
-                            task.task_id,
-                        )
+                    self._ingest_candidate_discovery(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
-                try:
-                    self._record_intervention_for_task(task, result.result)
-                except Exception:
-                    log.exception(
-                        "intervention ledger update failed for task=%s",
-                        task.task_id,
-                    )
+                self._record_intervention_for_task(task, result.result)
             # integrate_patch completion handling.
             if task.kind == "integrate_patch" and result.state != "cancelled":
                 # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
                 if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
-                    try:
-                        self._record_framework_agent_authored_outcome(
-                            task=task,
-                            result=result,
-                        )
-                    except Exception:
-                        log.exception(
-                            "FRAMEWORK authored-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
+                    self._record_framework_agent_authored_outcome(
+                        task=task,
+                        result=result,
+                    )
                 # Unified rearm: handles enablement and apply_failed perf-lane
                 # results (schedules retry or stamps terminal).
                 res_dict = getattr(result, "result", None)
-                try:
-                    await self._maybe_rearm_authored_lane(res_dict)
-                except Exception:
-                    log.exception(
-                        "AUTHORED_LANE rearm failed for task=%s",
-                        task.task_id,
-                    )
+                await self._maybe_rearm_authored_lane(res_dict)
                 # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
-                try:
-                    await self._drain_apply_fail_retry_pending()
-                except Exception:
-                    log.exception(
-                        "apply_fail retry drain failed for task=%s",
-                        task.task_id,
-                    )
+                await self._drain_apply_fail_retry_pending()
             # Auto-promote succeeded results into CORE_STATE_FIELDS
             # (Coordinator-only writer).  Warm replay is deliberately routed
             # through its promote handler even when dispatch itself failed:
@@ -1435,33 +1371,15 @@ class DispatcherCollaborator:
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
-                try:
-                    self._record_explore_round_gaps(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:
-                    log.exception(
-                        "gaps refresh: explore-round update failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    self._record_explore_variant_failures(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:
-                    log.exception(
-                        "explore: per-variant failure recording failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    await self._refresh_gaps(reason="explore_round")
-                except Exception:
-                    log.exception(
-                        "gaps refresh: _refresh_gaps after explore failed for task=%s",
-                        task.task_id,
-                    )
+                self._record_explore_round_gaps(
+                    task=task,
+                    result=result_dict,
+                )
+                self._record_explore_variant_failures(
+                    task=task,
+                    result=result_dict,
+                )
+                await self._refresh_gaps(reason="explore_round")
 
     @staticmethod
     def _lanes_fit(
@@ -1675,33 +1593,21 @@ class DispatcherCollaborator:
             task.kind,
             denied,
         )
-        try:
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "dispatch_denied_time_budget",
-                    "task_id": task.task_id,
-                    "action": task.kind,
-                    "error": str(denied),
-                    "hint": getattr(denied, "hint", ""),
-                },
-            )
-        except Exception:
-            log.exception(
-                "dispatcher: could not record time-budget denial for task=%s",
-                task.task_id,
-            )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "dispatch_denied_time_budget",
+                "task_id": task.task_id,
+                "action": task.kind,
+                "error": str(denied),
+                "hint": getattr(denied, "hint", ""),
+            },
+        )
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
         # would idle. Stamp the skip here so the phase machine closes on sweep_done.
         if str(task.kind or "") == "conc_sweep":
-            try:
-                self._record_session_budget_conc_sweep_skip(denied=denied)
-            except Exception:
-                log.exception(
-                    "dispatcher: could not record conc_sweep time-budget skip for task=%s",
-                    task.task_id,
-                )
+            self._record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
     def _sequence_denial_for_request(

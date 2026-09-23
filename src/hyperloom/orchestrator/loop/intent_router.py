@@ -619,17 +619,14 @@ class IntentRouter:
         held_by_name: dict[str, str],
     ) -> None:
         """Log when a mixed map still proceeds, for traceability."""
-        try:
-            sub_verdicts = list(held_by_name.values())
-            if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
-                log.warning(
-                    "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
-                    target,
-                    verdict,
-                    sub_verdicts,
-                )
-        except Exception:  # noqa: BLE001 - audit log must never affect flow
-            pass
+        sub_verdicts = list(held_by_name.values())
+        if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
+            log.warning(
+                "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
+                target,
+                verdict,
+                sub_verdicts,
+            )
 
     async def _record_verdict_hold(
         self,
@@ -908,16 +905,11 @@ class IntentRouter:
                 needs_gpu = is_truthy(params.get("needs_gpu"))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
-                    try:
-                        # Shared with the GPU-pool lease so the two TTLs never drift.
-                        ttl = self._coord._gpu_lease_ttl_sec(
-                            int(ttl or 0),
-                            params=params,
-                        )
-                    except Exception:
-                        log.exception(
-                            "failed to re-source gpu_research_lane TTL; using registry default",
-                        )
+                    # Shared with the GPU-pool lease so the two TTLs never drift.
+                    ttl = self._coord._gpu_lease_ttl_sec(
+                        int(ttl or 0),
+                        params=params,
+                    )
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
@@ -1289,13 +1281,10 @@ class IntentRouter:
             return
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
-        try:
-            task = await self.tasks.get(task_id)
-            started = _parse_iso_unix(task.updated_at)
-            if started > 0:
-                running_sec = max(0.0, time.time() - started)
-        except Exception:
-            log.exception("extend_lease: could not read running age for task=%s", task_id)
+        task = await self.tasks.get(task_id)
+        started = _parse_iso_unix(task.updated_at)
+        if started > 0:
+            running_sec = max(0.0, time.time() - started)
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)

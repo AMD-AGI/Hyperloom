@@ -1013,11 +1013,7 @@ async def _wait_for_server_health_async(
                                         health_ok_at,
                                     )
                                 # Worker-readiness probe: tiny completion.
-                                model_id = ""
-                                try:
-                                    model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
-                                except Exception:  # noqa: BLE001 - server response shape is not ours to trust
-                                    model_id = ""
+                                model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
                                 if not model_id:
                                     last_err = "completion_probe: no model id"
                                     consecutive_completion_ok = 0

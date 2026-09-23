@@ -149,26 +149,18 @@ class ConcSweepExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "conc_sweep timeline: no session bound; this sweep's whole event will be "
-                    "missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            event = conc_sweep_event_id(
-                phase=str(getattr(state, "phase", "") or "unphased"),
-                macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
-            )
-            sink = make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:
+        if not session_is_bound():
             log.warning(
-                "conc_sweep timeline: could not resolve an event to record into; this "
-                "sweep's whole event will be missing from the breakdown",
-                exc_info=True,
+                "conc_sweep timeline: no session bound; this sweep's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        event = conc_sweep_event_id(
+            phase=str(getattr(state, "phase", "") or "unphased"),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        )
+        sink = make_sink(event, producer=_RECORDER_PRODUCER)
         return make_conc_sweep_recorder(
             sink,
             task_id=str(getattr(ctx.task, "task_id", "") or ""),

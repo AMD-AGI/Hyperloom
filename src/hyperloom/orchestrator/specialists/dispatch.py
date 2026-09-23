@@ -42,7 +42,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty.
+        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
 
         Args:
             params: The specialist task params dict mutated in place with PR
@@ -155,11 +155,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            try:
-                _gap_notes = self._target_gap_advisory_block()
-            except Exception:
-                log.exception("Coordinator: specialist target gap advisory failed")
-                _gap_notes = ""
+            _gap_notes = self._target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
@@ -330,13 +326,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             needs_gpu = True
         if needs_gpu:
             lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            try:
-                ttl = self._gpu_lease_ttl_sec(
-                    int(ttl or 0),
-                    params=retry_params,
-                )
-            except Exception:
-                log.exception("specialist auto-retry: gpu_research_lane TTL re-source failed; using registry default")
+            ttl = self._gpu_lease_ttl_sec(
+                int(ttl or 0),
+                params=retry_params,
+            )
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -512,14 +505,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return None
         spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
         keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
-        try:
-            stalled = state.stalled_domains(
-                specialist_threshold=spec_thr,
-                keep_threshold=keep_thr,
-            )
-        except Exception:
-            log.exception("stalled-domain force: stalled_domains() failed")
-            return None
+        stalled = state.stalled_domains(
+            specialist_threshold=spec_thr,
+            keep_threshold=keep_thr,
+        )
         if not stalled:
             return None
 
@@ -587,23 +576,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 },
             )
             # Zero the counter up-front so a slow enqueue can't re-fire next tick.
-            try:
-                state.note_specialist_dispatched(anchor)
-            except Exception:
-                log.exception(
-                    "stalled-domain force: counter reset failed for %s",
-                    anchor,
-                )
-            try:
-                await self._handle_intent("orchestration", intent)
-            except Exception:
-                log.exception(
-                    "stalled-domain force: dispatch failed for anchor=%s domain=%s gap=%s",
-                    anchor,
-                    dom.key,
-                    gap_cid,
-                )
-                continue
+            state.note_specialist_dispatched(anchor)
+            await self._handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
             except Exception:

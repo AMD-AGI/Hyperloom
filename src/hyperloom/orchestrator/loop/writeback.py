@@ -1586,7 +1586,7 @@ class WritebackCollaborator:
         result: Any,
         kept: bool,
     ) -> None:
-        """Per-task fact-write entry point (per_variant for explore grids, else per-task); best-effort, never raises.
+        """Per-task fact-write entry point (per_variant for explore grids, else per-task).
 
         Args:
             task: The completed task being recorded.
@@ -1620,30 +1620,18 @@ class WritebackCollaborator:
                         error_class=str(vo.get("error_class") or ""),
                         provenance=str(vo.get("provenance") or ""),
                     )
-                try:
-                    self._record_fact_per_variant(
-                        task=task,
-                        source_session_id=source_session_id,
-                        variant_outcome=vo,
-                    )
-                except Exception:
-                    log.exception(
-                        "fact-write per-variant failed (task=%s)",
-                        task.task_id,
-                    )
-        else:
-            try:
-                self._record_fact_per_task(
+                self._record_fact_per_variant(
                     task=task,
                     source_session_id=source_session_id,
-                    result_dict=result_dict,
-                    kept=kept,
+                    variant_outcome=vo,
                 )
-            except Exception:
-                log.exception(
-                    "fact-write per-task failed (task=%s)",
-                    task.task_id,
-                )
+        else:
+            self._record_fact_per_task(
+                task=task,
+                source_session_id=source_session_id,
+                result_dict=result_dict,
+                kept=kept,
+            )
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
@@ -2573,18 +2561,15 @@ class WritebackCollaborator:
                 "backend": "none",
                 "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
             }
-        try:
-            journal = self._ensure_journal()
-            ss = self.shared_state
-            cb = getattr(ss, "current_best", {}) or {}
-            final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
-            total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-            journal.finalize(
-                final_throughput=final_tput if final_tput > 0 else None,
-                total_gain_pct=total_gain,
-            )
-        except Exception:
-            log.exception("optimization_journal.finalize failed")
+        journal = self._ensure_journal()
+        ss = self.shared_state
+        cb = getattr(ss, "current_best", {}) or {}
+        final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
+        total_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
+        journal.finalize(
+            final_throughput=final_tput if final_tput > 0 else None,
+            total_gain_pct=total_gain,
+        )
 
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
@@ -2722,26 +2707,18 @@ class WritebackCollaborator:
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
             if self.recipe_kb is not None:
-                try:
-                    cid = self._workload_canonical_id()
-                    # Read exactly the local store's authority row.
-                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                    existing_sessions: list[dict[str, Any]] = []
-                    for row in existing_row.get("sessions") or []:
-                        if not isinstance(row, dict):
-                            continue
-                        if str(row.get("session_id") or "") in my_session_ids:
-                            # Resume/retry of the same session — our new entry supersedes the prior one.
-                            continue
-                        existing_sessions.append(dict(row))
-                    merged_sessions = existing_sessions + my_sessions
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.info(
-                        "recipe read failed (%s); finalize will append "
-                        "the current session only; the next finalize "
-                        "will catch up.",
-                        exc,
-                    )
+                cid = self._workload_canonical_id()
+                # Read exactly the local store's authority row.
+                existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+                existing_sessions: list[dict[str, Any]] = []
+                for row in existing_row.get("sessions") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("session_id") or "") in my_session_ids:
+                        # Resume/retry of the same session — our new entry supersedes the prior one.
+                        continue
+                    existing_sessions.append(dict(row))
+                merged_sessions = existing_sessions + my_sessions
 
             # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
             kopts_new = list(attrs.get("kernel_optimizations") or [])
@@ -2892,75 +2869,51 @@ class WritebackCollaborator:
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
-            try:
-                scores = await _scorer.score(
-                    gap={
-                        "domain": domain,
-                        "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                        "gap_symptom": task_params.get("gap_symptom"),
-                        "gap_evidence": task_params.get("gap_evidence"),
-                        "summary": done_payload.get("summary", ""),
-                    },
-                    proposals=proposals,
-                    task_id=task.task_id,
-                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                    phase=(getattr(self.shared_state, "phase", "") or "") or None,
-                )
-                if scores and (scores.get("models") or scores.get("errors")):
-                    round_entry["ensemble_scores"] = scores
-                    input_err = (scores.get("errors") or {}).get("input")
-                    if input_err and not scores.get("models"):
-                        log.warning(
-                            "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
-                            task.task_id,
-                            input_err,
-                        )
-            except Exception:
-                log.exception(
-                    "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
-                    task.task_id,
-                )
-        try:
-            self.shared_state.record_specialist_round(round_entry)
-        except Exception:
-            log.exception(
-                "specialist bookkeeping: record_specialist_round failed for task=%s",
-                task.task_id,
+            scores = await _scorer.score(
+                gap={
+                    "domain": domain,
+                    "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
+                    "gap_symptom": task_params.get("gap_symptom"),
+                    "gap_evidence": task_params.get("gap_evidence"),
+                    "summary": done_payload.get("summary", ""),
+                },
+                proposals=proposals,
+                task_id=task.task_id,
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                phase=(getattr(self.shared_state, "phase", "") or "") or None,
             )
+            if scores and (scores.get("models") or scores.get("errors")):
+                round_entry["ensemble_scores"] = scores
+                input_err = (scores.get("errors") or {}).get("input")
+                if input_err and not scores.get("models"):
+                    log.warning(
+                        "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
+                        task.task_id,
+                        input_err,
+                    )
+        self.shared_state.record_specialist_round(round_entry)
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
-        try:
-            self.shared_state.bump_domain_round_counters()
-            self.shared_state.note_specialist_dispatched(domain)
-        except Exception:
-            log.exception(
-                "specialist bookkeeping: domain round-counter update failed for task=%s",
-                task.task_id,
-            )
+        self.shared_state.bump_domain_round_counters()
+        self.shared_state.note_specialist_dispatched(domain)
 
-        try:
-            self.shared_state.update_last_specialist(
-                {
-                    "task_id": task.task_id,
-                    "domain": domain,
-                    "gap_canonical_id": str(
-                        done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
-                    ),
-                    "proposals_total": len(proposals),
-                    "confidence": done_payload.get("confidence"),
-                    "summary": str(done_payload.get("summary") or "")[:480],
-                    "reason": str(run_error or done_payload.get("reason") or "")[:480],
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-        except Exception:
-            log.exception(
-                "specialist bookkeeping: update_last_specialist failed for task=%s",
-                task.task_id,
-            )
+        self.shared_state.update_last_specialist(
+            {
+                "task_id": task.task_id,
+                "domain": domain,
+                "gap_canonical_id": str(
+                    done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
+                ),
+                "proposals_total": len(proposals),
+                "confidence": done_payload.get("confidence"),
+                "summary": str(done_payload.get("summary") or "")[:480],
+                "reason": str(run_error or done_payload.get("reason") or "")[:480],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
@@ -2975,111 +2928,57 @@ class WritebackCollaborator:
         # benchmarked explore task. No-op single-node (LLM drives explore
         # directly there) and no-op when the proposal_set is empty / has
         # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        try:
-            await self._maybe_materialize_mn_explore(
-                task=task,
-                domain=domain,
-                proposals=proposals,
-            )
-        except Exception:
-            log.exception(
-                "mn_auto_materialize: bridge raised for task=%s (continuing)",
-                task.task_id,
-            )
+        await self._maybe_materialize_mn_explore(
+            task=task,
+            domain=domain,
+            proposals=proposals,
+        )
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain. Fail-soft.
         if done_payload.get("new_findings"):
-            try:
-                await self._coord._harvest_specialist_findings(done_payload)
-            except Exception:
-                log.exception(
-                    "specialist findings harvest failed for task=%s",
-                    task.task_id,
-                )
+            await self._coord._harvest_specialist_findings(done_payload)
 
         # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate. Fail-soft.
         if domain == "static_recon_specialist":
-            try:
-                self._coord._consume_static_recon(done_payload)
-            except Exception:
-                log.exception(
-                    "static-recon consume failed for task=%s",
-                    task.task_id,
-                )
+            self._coord._consume_static_recon(done_payload)
 
         # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above). Fail-soft.
-        try:
-            self._coord._aggregate_research_evidence(done_payload)
-        except Exception:
-            log.exception(
-                "research evidence aggregation failed for task=%s",
-                task.task_id,
-            )
+        self._coord._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
-            try:
-                self.shared_state.append_gap_attempt(
-                    gap_cid,
-                    {
-                        "action": "specialist",
-                        "variant_name": domain,
-                        "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                        "proposals_total": len(proposals),
-                    },
-                )
-            except Exception:
-                log.exception(
-                    "specialist bookkeeping: append_gap_attempt failed for gap=%s",
-                    gap_cid,
-                )
-        try:
-            await self._refresh_gaps(reason="specialist_done")
-        except Exception:
-            log.exception(
-                "specialist bookkeeping: _refresh_gaps failed for task=%s",
-                task.task_id,
+            self.shared_state.append_gap_attempt(
+                gap_cid,
+                {
+                    "action": "specialist",
+                    "variant_name": domain,
+                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                    "proposals_total": len(proposals),
+                },
             )
+        await self._refresh_gaps(reason="specialist_done")
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
-            try:
-                await self._maybe_enqueue_specialist_requested_build(
-                    task_id=str(task.task_id or ""),
-                    payload=done_payload,
-                )
-            except Exception:
-                log.exception(
-                    "specialist build request failed for task=%s",
-                    task.task_id,
-                )
+            await self._maybe_enqueue_specialist_requested_build(
+                task_id=str(task.task_id or ""),
+                payload=done_payload,
+            )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        try:
-            await self._maybe_autosubmit_specialist_patches(
-                task=task,
-                done_payload=done_payload,
-            )
-        except Exception:
-            log.exception(
-                "B3: specialist patch autosubmit failed for task=%s",
-                task.task_id,
-            )
+        await self._maybe_autosubmit_specialist_patches(
+            task=task,
+            done_payload=done_payload,
+        )
         # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
         # but a proposal_set of serving flags / env vars) is routed through the
         # same integrate_patch gate via its config_changes channel.
-        try:
-            await self._maybe_autosubmit_framework_config(
-                task=task,
-                done_payload=done_payload,
-            )
-        except Exception:
-            log.exception(
-                "FRAMEWORK config autosubmit failed for task=%s",
-                task.task_id,
-            )
+        await self._maybe_autosubmit_framework_config(
+            task=task,
+            done_payload=done_payload,
+        )
 
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
         """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
@@ -3087,9 +2986,7 @@ class WritebackCollaborator:
 
         Applies to every domain that self-reports a ``research`` block
         (candidate discovery + research_scout), so FRAMEWORK / explore lanes
-        do not re-fetch the same references. Fail-soft: never raises (the caller
-        also guards, but keep this self-contained so partial payloads degrade
-        gracefully).
+        do not re-fetch the same references.
         """
         block = done_payload.get("research")
         if not isinstance(block, dict):
@@ -3101,13 +2998,7 @@ class WritebackCollaborator:
                 pr_ids.extend(vals)
         if not pr_ids:
             return
-        try:
-            added = self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:
-            log.exception(
-                "depth: register_seen_pr_ids failed during research aggregation",
-            )
-            return
+        added = self.shared_state.register_seen_pr_ids(pr_ids)
         if added:
             log.info(
                 "depth: aggregated %d new research reference(s) into seen-set",
@@ -3130,19 +3021,15 @@ class WritebackCollaborator:
         hints = done_payload.get("new_findings") or []
         if not isinstance(hints, list):
             hints = []
-        try:
-            added, dropped = _research_hints.append_hints(
-                self.session_dir,
-                hints,
+        added, dropped = _research_hints.append_hints(
+            self.session_dir,
+            hints,
+        )
+        if dropped:
+            log.info(
+                "research-scout: dropped %d sourceless hint(s)",
+                dropped,
             )
-            if dropped:
-                log.info(
-                    "research-scout: dropped %d sourceless hint(s)",
-                    dropped,
-                )
-        except Exception:
-            log.exception("research-scout: append_hints failed")
-            added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
         for hint in hints:
@@ -3157,15 +3044,9 @@ class WritebackCollaborator:
                     refs = proposal.get(key)
                     if isinstance(refs, list):
                         pr_ids.extend(refs)
-        try:
-            self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:
-            log.exception("research-scout: register_seen_pr_ids failed")
+        self.shared_state.register_seen_pr_ids(pr_ids)
         # Seed high-priority hints as gaps[] so the config arm tries them early.
-        try:
-            self._seed_gaps_from_research_hints()
-        except Exception:
-            log.exception("specialist findings: gap seeding failed")
+        self._seed_gaps_from_research_hints()
         log.info(
             "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -3736,14 +3617,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_config_path = materialized
                 changed = True
                 # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
-                try:
-                    parsed = _parse_baseline_workload_extra(materialized)
-                except Exception:
-                    log.exception(
-                        "baseline workload extra parsing failed for %s",
-                        materialized,
-                    )
-                    parsed = {}
+                parsed = _parse_baseline_workload_extra(materialized)
                 if parsed:
                     self.shared_state.baseline_workload_extra = parsed
             # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
@@ -3856,35 +3730,17 @@ class WritebackCollaborator:
         from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active
 
         if isinstance(tput, (int, float)) and tput > 0 and not agentx_active(self.shared_state):
-            try:
-                self.shared_state.record_baseline_roofline_ceiling()
-            except Exception as exc:  # noqa: BLE001 — best-effort backup
-                log.warning(
-                    "baseline roofline-ceiling backup failed: %r",
-                    exc,
-                )
+            self.shared_state.record_baseline_roofline_ceiling()
         # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
         # Only the run that first establishes the anchor bootstraps; a later
         # re-baseline must not re-fire replay / scout / recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
             # History injection (fires regardless of --no-warm-replay).
-            try:
-                self._inject_warm_recipe_history_into_ledger()
-            except Exception as exc:
-                log.exception(
-                    "PRELUDE: warm-recipe history injection failed: %r",
-                    exc,
-                )
+            self._inject_warm_recipe_history_into_ledger()
             # Warm-recipe replay, anchored on the hot baseline_tput contract.
-            try:
-                await self._maybe_enqueue_warm_replay(
-                    baseline_tput=float(self.shared_state.baseline_tput or tput),
-                )
-            except Exception as exc:
-                log.exception(
-                    "PRELUDE: failed to enqueue warm-replay task: %r",
-                    exc,
-                )
+            await self._maybe_enqueue_warm_replay(
+                baseline_tput=float(self.shared_state.baseline_tput or tput),
+            )
             # Auto-analysis (roofline / profile); may defer.
             await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
                 baseline_tput=float(tput),
@@ -3943,14 +3799,11 @@ class WritebackCollaborator:
         tracked = str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "").strip()
         if tracked:
             spared.add(tracked)
-        try:
-            for task in await self.tasks.queued():
-                if str(getattr(task, "kind", "") or "") != "baseline":
-                    continue
-                if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
-                    spared.add(str(getattr(task, "task_id", "") or ""))
-        except Exception:
-            log.exception("baseline drain: queued-task scan failed")
+        for task in await self.tasks.queued():
+            if str(getattr(task, "kind", "") or "") != "baseline":
+                continue
+            if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
+                spared.add(str(getattr(task, "task_id", "") or ""))
         return {t for t in spared if t}
 
     async def _promote_replay_warm_recipe(
@@ -3960,10 +3813,7 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
-        try:
-            self._promote_warm_replay(result, task=task)
-        except Exception:
-            log.exception("warm-replay promote failed")
+        self._promote_warm_replay(result, task=task)
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
@@ -4485,22 +4335,19 @@ class WritebackCollaborator:
                         pending_tid or "<unset>",
                         pending_status or "<unset>",
                     )
-                    try:
-                        await self._record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "geak_rebench_result_ignored",
-                                "decision": decision,
-                                "task_id": task.task_id,
-                                "idempotency_key": str(task.idempotency_key or ""),
-                                "pending_task_id": pending_tid,
-                                "pending_status": pending_status,
-                                "measured_tput": (float(measured) if isinstance(measured, (int, float)) else None),
-                            },
-                        )
-                    except Exception:
-                        log.exception("geak orphan rebench: observation emit failed")
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "geak_rebench_result_ignored",
+                            "decision": decision,
+                            "task_id": task.task_id,
+                            "idempotency_key": str(task.idempotency_key or ""),
+                            "pending_task_id": pending_tid,
+                            "pending_status": pending_status,
+                            "measured_tput": (float(measured) if isinstance(measured, (int, float)) else None),
+                        },
+                    )
                     decision = "ignored"
                 elif decision == "validated" and stale_measurement:
                     # The candidate was measured on a stack that has since moved,
@@ -4557,19 +4404,16 @@ class WritebackCollaborator:
                         measured,
                         cb_tput,
                     )
-                    try:
-                        await self._record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "geak_no_material",
-                                "measured_tput": float(measured),
-                                "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
-                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
-                            },
-                        )
-                    except Exception:
-                        log.exception("geak no_material: observation emit failed")
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "geak_no_material",
+                            "measured_tput": float(measured),
+                            "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
+                            "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                        },
+                    )
                     # Stamp the drop on geak_result (always, so an empty {} is
                     # distinguishable from never-populated on resume/debug and
                     # acts as a tombstone against KERNEL crash-recovery
@@ -4581,16 +4425,13 @@ class WritebackCollaborator:
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_material")
-                    try:
-                        self.phase_kernel._reject_geak_kernel_journey(
-                            ps_stamped,
-                            measured_tput=float(measured),
-                            current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
-                            provenance="geak_no_material",
-                            rejection_reason="geak_no_material_product",
-                        )
-                    except Exception:
-                        log.exception("geak no_material: journey rejection failed")
+                    self.phase_kernel._reject_geak_kernel_journey(
+                        ps_stamped,
+                        measured_tput=float(measured),
+                        current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
+                        provenance="geak_no_material",
+                        rejection_reason="geak_no_material_product",
+                    )
                     self.shared_state.geak_pending = {}
                     # ``resume_pending_revalidation`` tracks the accepted stack,
                     # not this candidate, and the watermark is deliberately left
@@ -4609,19 +4450,16 @@ class WritebackCollaborator:
                         measured,
                         cb_tput,
                     )
-                    try:
-                        await self._record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": f"geak_{decision}",
-                                "measured_tput": float(measured) if measured_ok else None,
-                                "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
-                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
-                            },
-                        )
-                    except Exception:
-                        log.exception("geak no_promote: observation emit failed")
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": f"geak_{decision}",
+                            "measured_tput": float(measured) if measured_ok else None,
+                            "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
+                            "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                        },
+                    )
                     # Persist the closed verdict so a later KERNEL entry does
                     # not recover stale result.json and re-enqueue this already
                     # adjudicated candidate (#1240).
@@ -4753,13 +4591,7 @@ class WritebackCollaborator:
                 # A specialist-provenance KEEP zeroes that domain's rounds_since_last_keep counter.
                 prov = str(accepted.get("provenance") or "")
                 if prov.startswith("specialist:"):
-                    try:
-                        self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
-                    except Exception:
-                        log.exception(
-                            "depth: note_domain_keep failed for provenance=%r",
-                            prov,
-                        )
+                    self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
                 changed = True
             # Lift cumulative winners in application order on their own measurements.
             # The graded axis can improve even when output throughput decreases.
@@ -4782,10 +4614,7 @@ class WritebackCollaborator:
                     promoted = True
                     last_lifted_winner = entry
             changed = True
-        try:
-            self.shared_state.note_explore_outcome(promoted=promoted)
-        except Exception:
-            log.exception("depth: note_explore_outcome failed")
+        self.shared_state.note_explore_outcome(promoted=promoted)
         # A round with no measured variant is not a data point for the plateau window.
         if not is_revalidation_task and (winners or result.get("losers")):
             self.shared_state.gain_gated_action_count += 1
@@ -6566,10 +6395,7 @@ class WritebackCollaborator:
             "resume: re-entering KERNEL GEAK delegation (no completion "
             "evidence on the current phase row); recover-from-disk or re-run."
         )
-        try:
-            await self._on_enter_kernel(from_phase="resume")
-        except Exception:
-            log.exception("resume: KERNEL re-entry hook failed")
+        await self._on_enter_kernel(from_phase="resume")
 
     @property
     def resumed_from(self) -> dict[str, Any]:

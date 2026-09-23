@@ -504,27 +504,19 @@ class RooflineExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "roofline timeline: no session bound; this action's whole event will be "
-                    "missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            event = inline or roofline_event_id(
-                str(getattr(self.shared_state, "phase", "") or "unphased"),
-                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:
+        if not session_is_bound():
             log.warning(
-                "roofline timeline: could not resolve an event to record into; this action's "
-                "whole event will be missing from the breakdown",
-                exc_info=True,
+                "roofline timeline: no session bound; this action's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        event = inline or roofline_event_id(
+            str(getattr(self.shared_state, "phase", "") or "unphased"),
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""

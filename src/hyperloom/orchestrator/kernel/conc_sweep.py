@@ -1176,48 +1176,45 @@ def _flush_partial_conc_sweep_report(
     table is recorded on the same beat as this flush, so an event read
     mid-sweep carries the pairs measured so far rather than nothing.
     """
-    try:
-        b_pts: list[dict[str, Any]] = []
-        o_pts: list[dict[str, Any]] = []
-        for v in results:
-            if v.name.startswith("baseline_"):
-                b_pts.append(_point_from_variant(v, arm="baseline"))
-            elif v.name.startswith("optimized_"):
-                o_pts.append(_point_from_variant(v, arm="optimized"))
-        b_pts.sort(key=lambda p: p["conc"])
-        o_pts.sort(key=lambda p: p["conc"])
+    b_pts: list[dict[str, Any]] = []
+    o_pts: list[dict[str, Any]] = []
+    for v in results:
+        if v.name.startswith("baseline_"):
+            b_pts.append(_point_from_variant(v, arm="baseline"))
+        elif v.name.startswith("optimized_"):
+            o_pts.append(_point_from_variant(v, arm="optimized"))
+    b_pts.sort(key=lambda p: p["conc"])
+    o_pts.sort(key=lambda p: p["conc"])
 
-        metric_key, guard_noise_pct = _grading_of(state)
-        comparison, summary = conc_pair_comparison(b_pts, o_pts, metric_key=metric_key, guard_noise_pct=guard_noise_pct)
-        if recorder is not None:
-            recorder.record_progress(comparison=comparison, summary=summary)
-        p: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "status": "in_progress" if partial else "unknown",
-            "session_id": str(getattr(state, "session_id", "") or session_dir.name),
-            "isl": isl,
-            "osl": osl,
-            "tp": int(getattr(state, "tp", 0) or 0),
-            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
-            "concs_requested": concs,
-            "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
-            "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
-            "comparison": comparison,
-            "summary": summary,
-            "workspace": workspace.as_posix(),
-            "elapsed_sec": round(time.time() - started_at, 2),
-            "total_budget_sec": total_budget_sec if has_budget else None,
-            "budget_exhausted": budget_exhausted,
-            "report_json_path": json_path.as_posix(),
-            "report_csv_path": csv_path.as_posix(),
-        }
-        if budget_exhausted:
-            p["budget_skip_reason"] = budget_skip_reason
-            if budget_remaining_sec is not None:
-                p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
-        _flush_conc_sweep_report(p, session_dir)
-    except Exception:
-        log.debug("conc_sweep: _flush_partial_conc_sweep_report failed", exc_info=True)
+    metric_key, guard_noise_pct = _grading_of(state)
+    comparison, summary = conc_pair_comparison(b_pts, o_pts, metric_key=metric_key, guard_noise_pct=guard_noise_pct)
+    if recorder is not None:
+        recorder.record_progress(comparison=comparison, summary=summary)
+    p: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "in_progress" if partial else "unknown",
+        "session_id": str(getattr(state, "session_id", "") or session_dir.name),
+        "isl": isl,
+        "osl": osl,
+        "tp": int(getattr(state, "tp", 0) or 0),
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "concs_requested": concs,
+        "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
+        "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
+        "comparison": comparison,
+        "summary": summary,
+        "workspace": workspace.as_posix(),
+        "elapsed_sec": round(time.time() - started_at, 2),
+        "total_budget_sec": total_budget_sec if has_budget else None,
+        "budget_exhausted": budget_exhausted,
+        "report_json_path": json_path.as_posix(),
+        "report_csv_path": csv_path.as_posix(),
+    }
+    if budget_exhausted:
+        p["budget_skip_reason"] = budget_skip_reason
+        if budget_remaining_sec is not None:
+            p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
+    _flush_conc_sweep_report(p, session_dir)
 
 
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:

@@ -625,10 +625,7 @@ def _run_setup_commands(
             # carry on, so a row handed back through the return value is lost
             # for a command that actually ran -- and the ledger is what says a
             # round installed into the shared venv at all.
-            try:
-                on_execution(row)
-            except Exception:
-                log.debug("integrate_patch: durable setup ledger append failed", exc_info=True)
+            on_execution(row)
 
     with cancel_scope_listener():
         for cmd_index, cmd in enumerate(commands):
@@ -5655,33 +5652,27 @@ class IntegratePatchExecutor:
         # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
         measured_accuracy: float | None = None
         if bench.get("status") == "succeeded":
-            try:
-                measured = parse_eval_results(
-                    eval_search_root,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                ).get("accuracy")
-                if isinstance(measured, (int, float)):
-                    measured_accuracy = float(measured)
-            except Exception:
-                log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
+            measured = parse_eval_results(
+                eval_search_root,
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            ).get("accuracy")
+            if isinstance(measured, (int, float)):
+                measured_accuracy = float(measured)
 
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
         enablement_accuracy_task = ""
         enablement_accuracy_metric = ""
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
-            try:
-                eval_results = parse_eval_results(
-                    eval_search_root,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                )
-                acc = eval_results.get("accuracy")
-                if isinstance(acc, (int, float)):
-                    enablement_accuracy = float(acc)
-                enablement_accuracy_task = str(eval_results.get("task") or "")
-                enablement_accuracy_metric = str(eval_results.get("metric") or "")
-            except Exception:
-                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+            eval_results = parse_eval_results(
+                eval_search_root,
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            )
+            acc = eval_results.get("accuracy")
+            if isinstance(acc, (int, float)):
+                enablement_accuracy = float(acc)
+            enablement_accuracy_task = str(eval_results.get("task") or "")
+            enablement_accuracy_metric = str(eval_results.get("metric") or "")
 
         # Guarded: an empty root would send the recursive scan over the cwd.
         eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
@@ -5784,20 +5775,17 @@ class IntegratePatchExecutor:
             baseline_value = float(baseline_accuracy)
         except (TypeError, ValueError):
             baseline_value = 0.0
-        try:
-            eval_results = parse_eval_results(result_dir, framework=framework)
-            new_accuracy = eval_results.get("accuracy")
-            if new_accuracy is not None and baseline_value > 0:
-                return accuracy_passed(baseline_value, float(new_accuracy))
-            if baseline_value <= 0:
-                log.warning(
-                    "integrate_patch: no baseline accuracy; accuracy gate skipped "
-                    "(throughput-only KEEP). Accuracy regressions will not be caught.",
-                )
-            else:
-                log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
-        except Exception:
-            log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        eval_results = parse_eval_results(result_dir, framework=framework)
+        new_accuracy = eval_results.get("accuracy")
+        if new_accuracy is not None and baseline_value > 0:
+            return accuracy_passed(baseline_value, float(new_accuracy))
+        if baseline_value <= 0:
+            log.warning(
+                "integrate_patch: no baseline accuracy; accuracy gate skipped "
+                "(throughput-only KEEP). Accuracy regressions will not be caught.",
+            )
+        else:
+            log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
         return None
 
 

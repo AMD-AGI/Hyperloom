@@ -243,12 +243,8 @@ class VllmDenseTunableopTuner(BaseTuner):
             load_demand,
         )
 
-        try:
-            report = load_demand(path)
-            entry = demand_for_tuner(report, self.name) if report else None
-        except Exception as exc:  # noqa: BLE001 - a bad demand file is not fatal
-            log.warning("%s: could not read demand from %s: %s", self.name, path, exc)
-            return None
+        report = load_demand(path)
+        entry = demand_for_tuner(report, self.name) if report else None
         if report is None:
             return None
 

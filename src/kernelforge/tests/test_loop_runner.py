@@ -150,7 +150,7 @@ def _make_loop(
     loop = IterationLoop(
         config,
         tracker,
-        config=object(),
+        config=SimpleNamespace(gpu_target="gfx942"),
         resume=resume,
     )
     monkeypatch.setattr(
@@ -4372,6 +4372,9 @@ def test_keep_defers_incremental_analysis_until_next_request(
             analysis_calls.append(context.analysis_commit)
             incrementals.append(incremental)
             return Bundle(context.analysis_commit)
+
+        def apply_checkpoint(self, context):
+            return context
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "keep one candidate"

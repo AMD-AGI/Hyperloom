@@ -199,45 +199,6 @@ def _make_plat():
     )
 
 
-def test_platform_fingerprint_gpu_block_degrades_stack_survives(monkeypatch):
-    """GPU block error must not corrupt the stack block (per-block independence)."""
-    # platform_fingerprint takes no injectable `root`; these error tiers are unreachable through a fake sysfs tree, so
-    # we monkeypatch module globals.
-    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
-
-    def _gpu_boom():
-        raise OSError("gpu sysfs unreadable")
-
-    fake_stack = {"rocm": "6.0.0", "driver": "amdgpu"}
-    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", _gpu_boom)
-    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", lambda _env: fake_stack)
-    got = platform_fingerprint(gpu_type="mi300x", multi_node=False)
-    assert got["status"] == "ok"
-    assert got["cpu"] == "AMD EPYC"
-    assert got["gpu"] == {"status": "error"}
-    # Stack block must carry its real content, not the error sentinel.
-    assert got["stack"] == fake_stack
-
-
-def test_platform_fingerprint_stack_block_degrades_gpu_survives(monkeypatch):
-    """Stack block error must not corrupt the GPU block (per-block independence)."""
-    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
-
-    def _stack_boom(_env):
-        raise RuntimeError("stack probe failed")
-
-    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", lambda: 8)
-    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", _stack_boom)
-    got = platform_fingerprint(gpu_type="mi300x", multi_node=True)
-    assert got["status"] == "ok"
-    assert got["multi_node_session"] is True
-    assert got["stack"] == {"status": "error"}
-    # GPU block must carry real content — presence of gfx_arch confirms the table lookup ran rather than producing the
-    # error sentinel.
-    assert got["gpu"] != {"status": "error"}
-    assert "gfx_arch" in got["gpu"]
-
-
 def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
     """All-healthy ok record: gpu sub-dict keys, host, and None-vs-False multi_node."""
     # Same justification as the degrade cases: no injectable root on this entry.

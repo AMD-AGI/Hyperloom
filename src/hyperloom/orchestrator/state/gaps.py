@@ -117,16 +117,10 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             reason: Tag describing the refresh trigger, used only in logging.
         """
         state = self.shared_state
-        try:
-            for entry in self._extract_gaps_from_baseline():
-                state.upsert_gap(entry)
-        except Exception:
-            log.exception("gaps refresh: baseline extraction failed")
-        try:
-            for entry in self._extract_gaps_from_attempts():
-                state.upsert_gap(entry)
-        except Exception:
-            log.exception("gaps refresh: attempts extraction failed")
+        for entry in self._extract_gaps_from_baseline():
+            state.upsert_gap(entry)
+        for entry in self._extract_gaps_from_attempts():
+            state.upsert_gap(entry)
 
         plane = getattr(self, "knowledge_plane", None)
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
@@ -273,23 +267,17 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             tags = hint.get("domain_tags") or []
             key = f"{what.lower()}::{source.lower()}"
             cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
-            try:
-                self.shared_state.upsert_gap(
-                    {
-                        "canonical_id": cid,
-                        "symptom": what,
-                        "layer": "research_hint",
-                        "severity": "medium",
-                        "domain_hint": str(tags[0]) if tags else "",
-                        "source": "research_scout",
-                        "provenance": str(hint.get("source") or ""),
-                    }
-                )
-            except Exception:
-                log.exception(
-                    "research-scout: upsert_gap failed for %s",
-                    cid,
-                )
+            self.shared_state.upsert_gap(
+                {
+                    "canonical_id": cid,
+                    "symptom": what,
+                    "layer": "research_hint",
+                    "severity": "medium",
+                    "domain_hint": str(tags[0]) if tags else "",
+                    "source": "research_scout",
+                    "provenance": str(hint.get("source") or ""),
+                }
+            )
 
     def _framework_authoring_domain(self) -> str:
         """Return the authoring domain matching this session's framework kind.

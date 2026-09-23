@@ -48,10 +48,7 @@ class RecipeKB:
         hook = self.audit_hook
         if not callable(hook):
             return
-        try:
-            hook(event)
-        except Exception:
-            log.debug("recipe_kb: audit_hook raised", exc_info=True)
+        hook(event)
 
     def _read_event(
         self,

@@ -61,12 +61,9 @@ class MaintenanceCollaborator:
         """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
-        try:
-            disk = self._maybe_prune_runs_for_disk()
-            if disk is not None:
-                summary["disk"] = disk
-        except Exception:
-            log.exception("maintenance: disk monitor failed")
+        disk = self._maybe_prune_runs_for_disk()
+        if disk is not None:
+            summary["disk"] = disk
         log.info("maintenance tick %d: %s", tick, summary)
         return summary
 

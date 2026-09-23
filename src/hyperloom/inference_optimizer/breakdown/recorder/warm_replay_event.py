@@ -601,11 +601,14 @@ def make_warm_replay_recorder(
     """Build a recorder, or ``None`` when one cannot be constructed.
 
     Replay behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event", and an unbound session declines too. A
+    failures that are not recorder bugs degrade to "no event", and an unbound
+    session declines too. A
     false ``open_event_on_timeline`` rebinds to an event a previous tick
     opened, which is how the promote seam records onto the enqueue seam's arc.
     """
     from ...session.session_binding import session_is_bound
+
+    from .recorder_warnings import RECORDING_ERRORS
 
     try:
         if not session_is_bound():
@@ -629,7 +632,7 @@ def make_warm_replay_recorder(
             kernel_count=kernel_count,
             recipe_suppressed=recipe_suppressed,
         )
-    except Exception:
+    except RECORDING_ERRORS:
         log.warning(
             "warm replay timeline: recorder construction failed; this replay's whole event "
             "will be missing from the breakdown",

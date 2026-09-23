@@ -316,11 +316,7 @@ class PreludePhase(PhaseHandler):
         )
         plan: list[dict[str, Any]] = []
         for column, reader, list_key in readers:
-            try:
-                data = reader() or {}
-            except Exception:
-                log.warning("warm-kernel KB: reading %s column failed", column, exc_info=True)
-                continue
+            data = reader() or {}
             rows = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(rows, list):
                 continue

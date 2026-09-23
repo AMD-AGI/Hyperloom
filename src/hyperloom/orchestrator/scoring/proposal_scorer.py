@@ -414,26 +414,19 @@ class ProposalScorer:
             return
         if not prompt and not response:
             return
-        try:
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="proposal_scorer",
-                role="proposal_scorer",
-                call_id=call_id,
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                model=str(model),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:
-            log.debug(
-                "full-trace: proposal_scorer conversation append failed for model=%s",
-                model,
-                exc_info=True,
-            )
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="proposal_scorer",
+            role="proposal_scorer",
+            call_id=call_id,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+            model=str(model),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     async def score(
         self,

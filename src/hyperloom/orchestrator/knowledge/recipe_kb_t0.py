@@ -317,7 +317,7 @@ def _settle_warm_start_event(
     lessons: list[dict[str, Any]],
     pitfalls: list[dict[str, Any]],
 ) -> None:
-    """Close the warm_start event. Best-effort: the anchor outranks its record.
+    """Close the warm_start event.
 
     Args:
         recorder (Any): The open warm-start recorder.
@@ -332,23 +332,20 @@ def _settle_warm_start_event(
         lessons (list[dict[str, Any]]): The record's lessons.
         pitfalls (list[dict[str, Any]]): The record's pitfalls.
     """
-    try:
-        matched = None
-        if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
-            replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
-            matched = _warm_start_event.matched_block(
-                tier=tier,
-                confidence=confidence,
-                source=source,
-                canonical_id=canonical_id,
-                recipe=recipe,
-                expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-                lessons=lessons,
-                pitfalls=pitfalls,
-            )
-        recorder.finish(match_status=match_status, matched=matched)
-    except Exception:
-        log.debug("warm_start event settle failed", exc_info=True)
+    matched = None
+    if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
+        replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
+        matched = _warm_start_event.matched_block(
+            tier=tier,
+            confidence=confidence,
+            source=source,
+            canonical_id=canonical_id,
+            recipe=recipe,
+            expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
+            lessons=lessons,
+            pitfalls=pitfalls,
+        )
+    recorder.finish(match_status=match_status, matched=matched)
 
 
 def _find_config_donor(
@@ -1256,20 +1253,17 @@ def run_t0_anchor(
     else:
         wsc_status = "hit"
     warm_source = _warm_recipe_source(warm_point, kb)
-    try:
-        shared_state.warm_start_context = _build_warm_start_context(
-            config_donor=config_donor,
-            config_donor_tier=config_donor_tier,
-            config_donor_confidence=config_donor_conf,
-            status=wsc_status,
-            tier=warm_tier,
-            confidence=warm_conf,
-            canonical_id=cid,
-            source=warm_source,
-            recipe=warm_point or None,
-        )
-    except Exception:
-        log.exception("warm_start_context build failed")
+    shared_state.warm_start_context = _build_warm_start_context(
+        config_donor=config_donor,
+        config_donor_tier=config_donor_tier,
+        config_donor_confidence=config_donor_conf,
+        status=wsc_status,
+        tier=warm_tier,
+        confidence=warm_conf,
+        canonical_id=cid,
+        source=warm_source,
+        recipe=warm_point or None,
+    )
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     exact_history = warm_point.get("exact_history")

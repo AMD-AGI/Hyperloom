@@ -171,10 +171,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     if obs is None:
         return
     if end_dt is None:
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
         return
     end_time = _to_ns(end_dt) if _end_time_wants_int(obs) else end_dt
     try:
@@ -485,10 +482,7 @@ class LangfuseEmitter:
         """Buffer a conversation row; emit the Generation if its tokens are in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="conv")
-        except Exception:
-            log.debug("langfuse: record_conversation failed", exc_info=True)
+        self._buffer(row, half="conv")
 
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
         """Buffer one half of a generation and emit once both halves arrive."""
@@ -928,16 +922,12 @@ class LangfuseEmitter:
             "cost_calls": (tokens.get("calls") or None),
         }
         md = {k: v for k, v in md.items() if v is not None}
-        try:
-            return _start_obs(
-                parent,
-                name=f"optimization_step:{op_kind}",
-                as_type="span",
-                metadata=md,
-            )
-        except Exception:
-            log.debug("langfuse: open decision span failed", exc_info=True)
-            return None
+        return _start_obs(
+            parent,
+            name=f"optimization_step:{op_kind}",
+            as_type="span",
+            metadata=md,
+        )
 
     def _create_score(
         self,
