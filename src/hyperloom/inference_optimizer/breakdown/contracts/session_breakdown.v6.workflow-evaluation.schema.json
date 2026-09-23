@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v1"
             },
             "contract_digest": {
-              "const": "51edcb99d1c16f83961757ecfd4da87666c186a5b2441a2d3575cec17713f99b"
+              "const": "5fa3dacd0d0bfb3580fa55140285edec9114af58d802bbd7c2744953dfd67e24"
             },
             "run_flags": {
               "type": "object",
@@ -697,6 +697,7 @@
             "patch_recovery_incomplete",
             "prelude_baseline_failed",
             "prelude_cold_anchor_low_budget",
+            "prelude_orchestration_unavailable",
             "robustness_escalated",
             "server_argv_invalid",
             "signal",
