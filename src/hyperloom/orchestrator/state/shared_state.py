@@ -689,6 +689,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
     roofline_failure_streak: int = 0
+    # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
+    # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
+    gpu_trace_unsupported_reason: str = ""
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True

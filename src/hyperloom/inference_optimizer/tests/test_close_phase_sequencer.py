@@ -763,6 +763,35 @@ async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
 
 
 @pytest.mark.asyncio
+async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(coord):
+    """A sweep that spent its budget without a comparable pair did not validate the sweep objective."""
+    coord.shared_state.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "budget_exhausted": True,
+        "skip_reason": "budget_exhausted_no_successful_pairs",
+        "summary": {"successful_pairs": 0},
+    }
+    coord.shared_state.phase_history = [
+        {
+            "to_phase": "CLOSE",
+            "reason": "sweep_done",
+            "evidence": {
+                "sweep_status": "skipped",
+                "sweep_was_skipped": True,
+                "sweep_skip_budget_exhausted": True,
+                "sweep_skip_reason": "budget_exhausted_no_successful_pairs",
+            },
+        },
+    ]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "sweep_failed"
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord,
 ):

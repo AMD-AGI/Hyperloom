@@ -151,6 +151,10 @@ if [ -z "${_user_data_was_set}" ]; then
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
+VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
+VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_IMAGE_SOURCE_ACTIVE=0
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
@@ -381,6 +385,210 @@ git_fetch_pinned() {
     run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
   fi
   return 0
+}
+
+probe_vllm_image_wheel() {
+  "$PYTHON" - <<'PY'
+import re
+from importlib import metadata
+from pathlib import Path
+
+try:
+    dist = metadata.distribution("vllm")
+except metadata.PackageNotFoundError:
+    raise SystemExit(1)
+version = dist.version.lower()
+match = re.search(r"(?:^|[.+])g([0-9a-f]{7,40})(?=$|[.+])", version)
+if match is None:
+    raise SystemExit(2)
+print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}")
+PY
+}
+
+prepare_vllm_image_git_tree() {
+  local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
+  local index_tmp git_dir tree baseline commit_date
+  [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+    { die "VLLM image source commit must be a full SHA"; return 1; }
+  if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    head="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+       { ! git -C "$root" diff --quiet --ignore-submodules=all ||
+         ! git -C "$root" diff --cached --quiet --ignore-submodules=all; }; then
+      die "vLLM image source has tracked or staged user changes: ${root}"; return 1
+    fi
+  else
+    [ ! -e "$root/.git" ] ||
+      { die "vLLM image source has invalid Git metadata: ${root}"; return 1; }
+    git init -q "$root" || { die "failed to initialize Git metadata in ${root}"; return 1; }
+  fi
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$origin" ]; then
+    git -C "$root" remote add origin "$VLLM_IMAGE_REPO" ||
+      { die "failed to add vLLM image source remote"; return 1; }
+  elif [ "$origin" != "$VLLM_IMAGE_REPO" ]; then
+    die "vLLM image source origin mismatch: ${origin}"; return 1
+  fi
+  if [ -n "$head" ]; then
+    parent="$(git -C "$root" rev-parse "${head}^" 2>/dev/null || true)"
+    subject="$(git -C "$root" show -s --format=%s "$head" 2>/dev/null || true)"
+    baseline_ref="$(git -C "$root" rev-parse refs/hyperloom/image-baseline 2>/dev/null || true)"
+    upstream_ref="$(git -C "$root" rev-parse refs/hyperloom/upstream 2>/dev/null || true)"
+    if [ "$parent" != "$VLLM_IMAGE_SOURCE_COMMIT" ] ||
+       [ "$subject" != "Hyperloom prebuilt vLLM image baseline" ] ||
+       [ "$baseline_ref" != "$head" ] ||
+       [ "$upstream_ref" != "$VLLM_IMAGE_SOURCE_COMMIT" ]; then
+      die "vLLM image source HEAD is not the managed synthetic baseline: ${root}"; return 1
+    fi
+    export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+    export VLLM_IMAGE_BASELINE_SHA="$head"
+    return 0
+  fi
+  git -C "$root" fetch --quiet origin "$VLLM_IMAGE_SOURCE_COMMIT" ||
+    { die "failed to fetch vLLM image source commit ${VLLM_IMAGE_SOURCE_COMMIT}"; return 1; }
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$root" read-tree "$VLLM_IMAGE_SOURCE_COMMIT" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
+    rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
+  fi
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
+  baseline="$(
+    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
+  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
+    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
+    { die "failed to pin vLLM image source HEAD"; return 1; }
+  git -C "$root" diff-index --quiet "$baseline" -- ||
+    { die "vLLM image source verification changed after pinning"; return 1; }
+  export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+}
+
+copy_missing_vllm_wheel_artifacts() {
+  local root="$1" wheel_package="$2"
+  "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+source = root / "vllm"
+tracked = set(subprocess.check_output(["git", "-C", str(root), "ls-files"], text=True).splitlines())
+overlay = []
+for path in wheel.rglob("*"):
+    rel = path.relative_to(wheel)
+    native = path.name.endswith((".so", ".pyd", ".dll", ".dylib")) or ".so." in path.name
+    if path.name != "_version.py" and not native:
+        continue
+    destination = source / rel
+    relative = Path("vllm") / rel
+    if os.path.lexists(destination):
+        if relative.as_posix() not in tracked:
+            overlay.append(relative)
+        continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        destination.symlink_to(os.readlink(path))
+    elif path.is_file():
+        shutil.copy2(path, destination)
+    else:
+        continue
+    overlay.append(relative)
+
+info = root / ".git" / "info"
+info.mkdir(parents=True, exist_ok=True)
+exclude = info / "exclude"
+existing = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+entries = [f"/{path.as_posix()}" for path in overlay]
+if entries:
+    with exclude.open("a", encoding="utf-8") as stream:
+        for entry in entries:
+            if entry not in existing:
+                stream.write(entry + "\n")
+    (info / "hyperloom-wheel-overlay").write_text("".join(f"{path.as_posix()}\n" for path in overlay), encoding="utf-8")
+print(len(overlay))
+PY
+}
+
+verify_vllm_image_source_import() {
+  local root="$1" wheel_package="$2"
+  PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import importlib
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+import vllm
+
+loaded = Path(vllm.__file__).resolve()
+expected = (root / "vllm").resolve()
+if expected not in loaded.parents:
+    raise SystemExit(f"vLLM loaded from {loaded}, expected {expected}")
+modules = [name for name in ("_C", "_rocm_C") if (wheel / f"{name}.so").exists() or list(wheel.glob(f"{name}*.so"))]
+if not modules:
+    raise SystemExit("wheel exposes neither vllm._C nor vllm._rocm_C")
+for name in modules:
+    importlib.import_module(f"vllm.{name}")
+PY
+}
+
+activate_vllm_image_source() {
+  local info runtime_version runtime_commit wheel_package
+  [ -d "$VLLM_IMAGE_SOURCE_ROOT/vllm" ] || return 0
+  if ! info="$(probe_vllm_image_wheel 2>/dev/null)"; then
+    log "vLLM image source skipped: installed wheel has no commit-qualified version"
+    return 0
+  fi
+  IFS=$'\t' read -r runtime_version runtime_commit wheel_package <<<"$info"
+  case "$VLLM_IMAGE_SOURCE_COMMIT" in
+    "$runtime_commit"*) ;;
+    *) log "vLLM image source skipped: runtime ${runtime_version} is not ${VLLM_IMAGE_SOURCE_COMMIT}"; return 0 ;;
+  esac
+  if [ "${DRY_RUN:-0}" -eq 1 ] || [ "${CHECK_ONLY:-0}" -eq 1 ]; then
+    log "would activate ${VLLM_IMAGE_SOURCE_ROOT} for runtime ${runtime_version}"
+    return 0
+  fi
+  prepare_vllm_image_git_tree "$VLLM_IMAGE_SOURCE_ROOT" || return 1
+  copy_missing_vllm_wheel_artifacts "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" >/dev/null ||
+    { die "failed to overlay vLLM wheel artifacts"; return 1; }
+  verify_vllm_image_source_import "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" ||
+    { die "vLLM image source import verification failed"; return 1; }
+  export FRAMEWORK_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_DIR="$VLLM_IMAGE_SOURCE_ROOT"
+  export HYPERLOOM_VLLM_IMAGE_SOURCE=1
+  VLLM_IMAGE_SOURCE_ACTIVE=1
+  log "activated exact vLLM image source at ${VLLM_IMAGE_SOURCE_ROOT}"
+}
+
+persist_vllm_image_source_env() {
+  [ "$VLLM_IMAGE_SOURCE_ACTIVE" -eq 1 ] || return 0
+  local pair name value
+  for pair in \
+    "FRAMEWORK_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_DIR=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "HYPERLOOM_VLLM_IMAGE_SOURCE=1" \
+    "VLLM_IMAGE_UPSTREAM_SHA=${VLLM_IMAGE_UPSTREAM_SHA}" \
+    "VLLM_IMAGE_BASELINE_SHA=${VLLM_IMAGE_BASELINE_SHA}"; do
+    name="${pair%%=*}"
+    value="${pair#*=}"
+    if grep -q "^export ${name}=" "$KERNEL_AGENT_ENV" 2>/dev/null; then
+      sed -i "s|^export ${name}=.*|export ${name}='${value}'|" "$KERNEL_AGENT_ENV"
+    else
+      printf "export %s='%s'\n" "$name" "$value" >> "$KERNEL_AGENT_ENV"
+    fi
+  done
 }
 
 # Serialize concurrent installs that share one open-source checkout root
@@ -2031,8 +2239,10 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
 fi
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
+activate_vllm_image_source
 ensure_framework_deps
 chain_kernel_agent
+persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (chain_kernel_agent included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)

@@ -116,7 +116,7 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
 
 
 @pytest.mark.parametrize("ack", [None, False, True])
-def test_specialist_close_requires_positive_worker_cleanup_ack(monkeypatch, ack):
+def test_specialist_close_forces_actor_kill_after_stop_attempt(monkeypatch, ack):
     from types import SimpleNamespace
 
     actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: ack))
@@ -124,10 +124,12 @@ def test_specialist_close_requires_positive_worker_cleanup_ack(monkeypatch, ack)
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
     lease = rs.GpuSpecialistLease(num_gpus=1)
     lease._actor = actor
+    lease._start_ref = object()
     closed = lease.close()
-    assert closed is (ack is True)
-    assert killed == ([actor] if ack is True else [])
-    assert (lease._actor is None) is (ack is True)
+    assert closed is True
+    assert killed == [actor]
+    assert lease._actor is None
+    assert lease._start_ref is None
 
 
 @pytest.mark.parametrize(
@@ -152,7 +154,7 @@ def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, gr
     assert signals == [], "an old PGID does not establish ownership"
 
 
-def test_pending_actor_is_retained_without_cleanup_ack(monkeypatch):
+def test_pending_actor_is_killed_without_cleanup_ack(monkeypatch):
     from types import SimpleNamespace
 
     class RayError(Exception):
@@ -174,46 +176,39 @@ def test_pending_actor_is_retained_without_cleanup_ack(monkeypatch):
     lease._actor = actor
     lease._start_ref = object()
     closed = lease.close()
-    assert closed is False
-    assert killed == []
-    assert lease._actor is actor
-    assert lease._start_ref is not None
+    assert closed is True
+    assert killed == [actor]
+    assert lease._actor is None
+    assert lease._start_ref is None
     assert lease.pid() is None
 
 
-def test_specialist_close_can_confirm_on_same_actor_after_unconfirmed_stop(monkeypatch):
+def test_specialist_close_is_idempotent_after_forced_kill(monkeypatch):
     from types import SimpleNamespace
 
-    replies = iter([False, True])
     stops = []
 
     def stop():
         stops.append(True)
-        return next(replies)
+        return False
 
     actor = SimpleNamespace(stop=SimpleNamespace(remote=stop))
     killed = []
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
     lease = rs.GpuSpecialistLease(num_gpus=1)
     lease._actor = actor
-    lease._start_ref = start_ref = object()
-
-    first_close = lease.close()
-    assert first_close is False
-    assert lease._actor is actor
-    assert lease._start_ref is start_ref
-    assert killed == []
-    assert len(stops) == 1
+    lease._start_ref = object()
 
     confirmed_close = lease.close()
     assert confirmed_close is True
     assert lease._actor is None
     assert lease._start_ref is None
     assert killed == [actor]
-    assert len(stops) == 2
+    assert len(stops) == 1
     repeated_close = lease.close()
     assert repeated_close is True
-    assert len(stops) == 2
+    assert killed == [actor]
+    assert len(stops) == 1
 
 
 @pytest.mark.parametrize("confirmed", [False, True])
@@ -648,6 +643,7 @@ class _FakeMethod:
 class _FakeActor:
     def __init__(self, ret):
         self.run_blocking = _FakeMethod(ret)
+        self.pid = _FakeMethod(None)
 
 
 class _LeaseFakeRay:
@@ -677,6 +673,9 @@ class _LeaseFakeRay:
         ):
             raise ref
         return ref
+
+    def wait(self, refs, num_returns=1, timeout=None):
+        return list(refs)[:num_returns], list(refs)[num_returns:]
 
     def kill(self, actor):
         self.killed.append(actor)
@@ -1812,8 +1811,8 @@ def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch)
         lease.start_async(["agent"])
 
 
-class _NoTimeoutCapturingFakeRay:
-    """Fake ray that captures whether a timeout kwarg was passed to get()."""
+class _PendingAcquireFakeRay:
+    """Leave the actor pending once, then expose the benchmark result."""
 
     class exceptions:  # noqa: N801
         class RayTaskError(Exception):
@@ -1824,33 +1823,51 @@ class _NoTimeoutCapturingFakeRay:
 
     def __init__(self, result=(0, "ok", "")):
         self._result = result
-        self.get_kwargs: list[dict] = []
         self.killed: list = []
+        self.wait_count = 0
 
     def get(self, ref, **kwargs):
-        self.get_kwargs.append(dict(kwargs))
-        if isinstance(ref, _NoTimeoutCapturingFakeRay.exceptions.RayTaskError):
+        if isinstance(ref, _PendingAcquireFakeRay.exceptions.RayTaskError):
             raise ref
-        if isinstance(ref, _NoTimeoutCapturingFakeRay.exceptions.RayActorError):
+        if isinstance(ref, _PendingAcquireFakeRay.exceptions.RayActorError):
             raise ref
         return ref
+
+    def cluster_resources(self):
+        return {"GPU": 1.0, "serving_slot": 1.0}
+
+    def wait(self, refs, num_returns=1, timeout=None):
+        self.wait_count += 1
+        if self.wait_count == 1:
+            return [], list(refs)
+        return [refs[0]], list(refs)[1:]
 
     def kill(self, actor):
         self.killed.append(actor)
 
 
-def test_serving_lease_coordinator_no_timeout(monkeypatch: pytest.MonkeyPatch):
-    """ServingLease.run_session_kill calls ray.get(ref) with NO timeout kwarg."""
-    fake = _NoTimeoutCapturingFakeRay(result=(0, "ok", ""))
+def test_serving_lease_pending_actor_has_resource_acquire_timeout(monkeypatch: pytest.MonkeyPatch):
+    fake = _PendingAcquireFakeRay(result=(rs._ACTOR_TIMEOUT_RC, "", "benchmark timeout"))
     monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rs, "RESOURCE_ACQUIRE_TIMEOUT_SEC", 0.0, raising=False)
     lease = rs.ServingLease(num_gpus=1)
-    lease._actor = _FakeActor((0, "ok", ""))  # pre-set: skip ensure()
-    rc, out, _err = lease.run_session_kill(["echo", "ok"], timeout=5)
-    assert rc == 0
-    # The ray.get() for the benchmark call must have no timeout keyword.
-    assert all("timeout" not in kw for kw in fake.get_kwargs), (
-        f"ServingLease must not pass timeout to ray.get; got kwargs: {fake.get_kwargs}"
-    )
+    actor = _FakeActor((rs._ACTOR_TIMEOUT_RC, "", "benchmark timeout"))
+    lease._actor = actor
+
+    try:
+        result = lease.run_session_kill(["echo", "ok"], timeout=5)
+    except subprocess.TimeoutExpired:
+        result = (rs._ACTOR_TIMEOUT_RC, "", "benchmark timeout")
+
+    assert result == (1, "", "resource_acquire_timeout")
+    assert fake.killed == [actor]
+    assert lease._actor is None
+
+    next_actor = _FakeActor((0, "next", ""))
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    monkeypatch.setattr(rs, "make_serving_actor", lambda _num_gpus, *, serving_slot: next_actor)
+    assert lease.run_session_kill(["echo", "next"], timeout=5) == (0, "next", "")
+    assert lease._actor is next_actor
 
 
 # ── Robustness: _RayLeaseProcess.poll dead-actor detection ───────────────────

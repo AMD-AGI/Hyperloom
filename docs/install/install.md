@@ -42,7 +42,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.1 --target .
+pip install hyperloom-inference-optimizer==1.1.2 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -106,19 +106,20 @@ Requirements:
 - Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
   requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
   ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
-- ROCm runtime and ROCm torch are already installed. ROCm 7.2.x is the
-  recommended and validated baseline; see
-  {doc}`Compatibility </compatibility>` for the combination the release is
+- ROCm runtime and ROCm torch are already installed. ROCm 7.2.x and ROCm 10.0
+  are the validated stacks; on ROCm 10.0, bare-metal vLLM is built from source.
+  See {doc}`Compatibility </compatibility>` for the combination the release is
   tested against. Other ROCm versions are not validated.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup might install one.
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
   resolves, not a child venv:
   - Python 3.10+ for SGLang and general operation.
-  - Exactly Python 3.12 when setup installs vLLM. vLLM ROCm wheels are
-    built for 3.12 only. vLLM defaults to an isolated framework venv, but that
-    venv is created from the base interpreter and inherits its version; isolated
-    mode does not relax the requirement.
+  - Exactly Python 3.12 when setup installs vLLM from the ROCm 7.2.x wheel,
+    which is built for 3.12 only; the ROCm 10.0 source build accepts Python
+    >= 3.10, < 3.15. vLLM defaults to an isolated framework venv, but that venv
+    is created from the base interpreter and inherits its version; isolated mode
+    does not relax the requirement.
 
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
@@ -146,15 +147,14 @@ and a ROCm-built torch. Two framework-install details are worth knowing:
   best-effort, trying `libopenmpi3t64` (Ubuntu 24.04's 64-bit `time_t` name) and
   `libopenmpi3`. It skips silently when the library already resolves, when `apt`
   is unavailable, or when not running as root.
-- **ROCm as pip wheels**: the validated baseline is ROCm 7.2.x under a single
-  `/opt/rocm` prefix, and that is the layout to prefer. ROCm can instead arrive
-  as TheRock's wheels, split across the `_rocm_sdk_core`,
-  `_rocm_sdk_libraries` and `_rocm_sdk_devel` namespace packages. The installer
-  handles that layout so it does not fail setup on it, but such a host is not a
-  tested configuration: Phase 1 probes all three packages, including their
-  `rocm_sysdeps` and `host-math` subdirectories, so the gate does not report
-  libraries as missing that the loader does resolve at runtime; and before a
-  source build, which needs hipBLAS/hipSPARSE/thrust headers, it adds
+- **ROCm as pip wheels**: ROCm 7.2.x is validated under a single `/opt/rocm`
+  prefix. ROCm 10.0 arrives as TheRock's wheels, split across the
+  `_rocm_sdk_core`, `_rocm_sdk_libraries` and `_rocm_sdk_devel` namespace
+  packages, which is the layout the `rocm10` images are built from and the one
+  the ROCm 10 routes are validated on. Phase 1 probes all three packages,
+  including their `rocm_sysdeps` and `host-math` subdirectories, so the gate
+  does not report libraries as missing that the loader does resolve at runtime;
+  and before a source build, which needs hipBLAS/hipSPARSE/thrust headers, it adds
   `rocm-sdk-devel` pinned to the installed `rocm-sdk-core` version, expands it
   with `rocm-sdk init`, and exports the root `rocm-sdk path --root` reports so
   the compiler and its include tree come from the same package. All of this is a
@@ -427,7 +427,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
+- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
 
@@ -435,7 +435,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.29.0
+export HYPERLOOM_IMAGE=docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
