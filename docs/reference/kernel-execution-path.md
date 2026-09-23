@@ -206,11 +206,12 @@ export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
 # CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
 export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
 bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
-env file. Re-run it after a venv rebuild or before each session.
+env file. Optimizer preflight loads that file in process; do not source it over
+the launching shell's selections. Re-run installation after a venv rebuild or
+when the prepared runtime is no longer valid.
 
 Required env vars:
 
