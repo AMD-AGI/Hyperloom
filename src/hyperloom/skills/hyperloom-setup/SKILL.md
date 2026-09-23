@@ -242,10 +242,9 @@ to the same API key, so the user only fills one secret:
 ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
 ```
 
-The value **must** be wrapped in double quotes: the setup backend and launch
-scripts may load `.env` with a shell `source`, so an unquoted value containing a
-space and a colon (`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and
-fails with exit 127.
+Keep the value quoted as shown. The shared dotenv loader reads it as data;
+the runtime resolves the `${ANTHROPIC_API_KEY}` reference before passing the
+header to the selected client.
 
 Skip this key entirely when the selected Anthropic base URL host is not
 `llm-api.amd.com`.
@@ -277,18 +276,17 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
 ```
 
-For **preinstalled ATOM**, use the environment-loading and **Selected Python**
-checks in `hyperloom-qwen3-14b-fp8-12h-atom` before the commands below: real
-`import atom` and non-empty `torch.version.hip`, with `PYTHON`, `python3` on
-`PATH`, and any activated `VIRTUAL_ENV` pointing at the same existing environment.
-Set `INFERENCE_OPTIMIZER_FORCE_PYTHON=1`; `/opt/venv` is not required. Do not
-create a fresh venv assuming it inherits another venv's packages. Run `rocm-smi`
-before GPU probes and report conflicts without stopping other workloads.
-Stop on failed imports rather than bypassing verification.
+For **preinstalled ATOM**, activate its existing environment or keep the user's
+explicit `PYTHON`. Do not create a fresh venv or require `/opt/venv`.
+The setup backend owns interpreter/venv consistency, PATH, ROCm torch, and the
+actual ATOM import and server `--help` checks. A failed check stops setup; it
+must not select a different framework or ignore an invalid explicit Python pin.
 
-Run the non-mutating ATOM verification from the selected workspace:
+Run the non-mutating verification from the selected workspace:
 
 ```bash
+export PYTHON="${PYTHON:-$(command -v python3)}"
+export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
 "$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"

@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The documented launch recipes must not let ``.env`` override the caller."""
+"""Published recipes preserve caller choices and delegate environment checks to owners.
+
+Import/help/ROCm and invalid-pin failures are exercised by test_setup_selected_python
+and test_preflight_serving_framework; framework-aware PATH by test_derive_runtime_paths;
+missing runtime and in-process precedence by test_preflight_auth_override; offline
+Forge executable failures by kernelforge/tests/test_claude_cli_resolve.py.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -17,6 +24,8 @@ import pytest
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
+ATOM_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom" / "SKILL.md"
+SETUP_DOC = REPO_ROOT / "src" / "hyperloom" / "skills" / "hyperloom-setup" / "SKILL.md"
 
 # In-package docs ship in the wheel; examples/ only exists in a source checkout.
 RECIPE_DOCS = (
@@ -26,26 +35,12 @@ RECIPE_DOCS = (
     REPO_ROOT / "examples" / "hyperloom-qwen3-8b-3h" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md",
-    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom" / "SKILL.md",
+    ATOM_DOC,
 )
-
-# Loads only credential vars, so the path-variable assertions above do not apply, but .env must still not outrank a
-# credential the caller exported.
 CREDENTIAL_ONLY_DOC = REPO_ROOT / "docs" / "how-to" / "optimize-custom-workload.md"
 
 _FENCE = re.compile(r"^```(?:bash|sh)\s*$")
 _FENCE_END = re.compile(r"^```\s*$")
-
-# Lines belonging to the dotenv-load preamble.
-_LOAD_LINE = (
-    re.compile(r"^\s*$"),
-    re.compile(r"^\s*#"),
-    re.compile(r"^\s*cd\s"),
-    re.compile(r"^\s*export\s+REPO_ROOT="),
-    re.compile(r"/\.env"),
-    re.compile(r"^\s*set\s+[-+]a\s*$"),
-    re.compile(r"_dotenv_prev"),
-)
 
 
 def _bash_blocks(text: str) -> list[list[str]]:
@@ -64,22 +59,15 @@ def _bash_blocks(text: str) -> list[list[str]]:
     return blocks
 
 
-def _extract_dotenv_load(doc: Path) -> str:
-    """Return the leading dotenv-loading fragment of the doc's launch recipe."""
-    for block in _bash_blocks(doc.read_text(encoding="utf-8")):
-        if not any("/.env" in line for line in block):
-            continue
-        if doc == ATOM_DOC:
-            return "\n".join(block)
-        kept: list[str] = []
-        for line in block:
-            if not any(pattern.search(line) for pattern in _LOAD_LINE):
-                break
-            kept.append(line)
-        fragment = "\n".join(kept)
-        if "/.env" in fragment:
-            return fragment
-    raise AssertionError(f"no dotenv-loading bash block found in {doc}")
+def _dotenv_loads(doc: Path) -> list[str]:
+    """Extract real asset discovery and load, stopping before workload steps."""
+    fragments = [
+        "\n".join(block[: block.index("load_dotenv_no_clobber") + 1])
+        for block in _bash_blocks(doc.read_text(encoding="utf-8"))
+        if any("runtime_env.sh" in line for line in block) and "load_dotenv_no_clobber" in block
+    ]
+    assert fragments, f"no shared dotenv-loading bash block found in {doc}"
+    return fragments
 
 
 def _run_recipe(
@@ -89,8 +77,13 @@ def _run_recipe(
     *,
     dotenv_extra: str = "",
     observed: tuple[str, ...] = ("USER_DATA_PATH", "OPENAI_API_KEY", "ONLY_IN_DOTENV"),
+    layout: str = "src",
 ) -> dict[str, str]:
-    """Run the extracted fragment against a conflicting .env and report the result."""
+    """Run the shipped asset via documented wheel/source discovery, without installing."""
+    assets = tmp_path / layout / "hyperloom" / "inference_optimizer" / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "install.sh").touch()
+    (assets / "runtime_env.sh").write_bytes((PKG_ROOT / "assets" / "runtime_env.sh").read_bytes())
     (tmp_path / ".env").write_text(
         "USER_DATA_PATH=/from/dotenv\nOPENAI_API_KEY=key-from-dotenv\nONLY_IN_DOTENV=filled\n" + dotenv_extra,
         encoding="utf-8",
@@ -110,23 +103,9 @@ def _run_recipe(
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=30,
     )
     return dict(zip(observed, proc.stdout.splitlines()[-len(observed) :]))
-
-
-ATOM_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom" / "SKILL.md"
-
-
-def _atom_runtime_load() -> str:
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
-    return "\n".join(
-        next(
-            block
-            for block in blocks
-            if any(line.startswith((". ", "source ")) and "kernel-agent.env.sh" in line for line in block)
-            and any('PYTHON="$_atom_python"' in line and 'USER_DATA_PATH="$_atom_user_data"' in line for line in block)
-        )
-    )
 
 
 def _atom_section_blocks(heading: str) -> list[list[str]]:
@@ -153,7 +132,7 @@ def test_atom_run_mode_requires_user_choice() -> None:
 
 @pytest.mark.parametrize("mode", ["baremetal", "docker"])
 def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -> None:
-    """Execute the published mode, runtime and launch blocks without launching a GPU process."""
+    """Execute mode/selection/launch blocks up to the optimizer process boundary."""
     mode_blocks = _atom_section_blocks("Baremetal" if mode == "baremetal" else "Docker container")
     launch = "\n".join(_atom_section_blocks("First launch")[0])
     workspace = tmp_path / "workspace with spaces"
@@ -162,21 +141,23 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
     runtime = data / "runtime"
     runtime.mkdir(parents=True)
     (runtime / "kernel-agent.env.sh").write_text(
-        "export FRAMEWORK=vllm KERNEL_OPT_BACKEND_ORDER=stale PYTHON=/stale/python USER_DATA_PATH=/stale/data\n"
-        "export RUNTIME_SENTINEL=loaded\n",
+        "export FRAMEWORK=vllm\nexport KERNEL_OPT_BACKEND_ORDER=stale\nexport PYTHON=/stale/python\n"
+        "export USER_DATA_PATH=/stale/data\nexport HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n"
+        "export MAGPIE_PATH=/installed/Magpie\n",
         encoding="utf-8",
     )
     model = workspace / "model files"
     model.mkdir()
     (model / "config.json").write_text("{}", encoding="utf-8")
-    selected = workspace / "selected python"
+    selected = workspace / "selected python" / "python3"
+    selected.parent.mkdir()
     run_log, launch_info = workspace / "run output.log", workspace / "launch info.json"
     observed = (
         "FRAMEWORK",
         "KERNEL_OPT_BACKEND_ORDER",
         "PYTHON",
         "USER_DATA_PATH",
-        "RUNTIME_SENTINEL",
+        "MAGPIE_PATH",
         "ATOM_CONTEXT",
         "CLAW_SESSION_ID",
         "HYPERLOOM_RUN_MODE",
@@ -192,11 +173,14 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         encoding="utf-8",
     )
     selected.chmod(0o755)
+    selected_bin = selected.parent.as_posix()
+    if os.name == "nt":
+        selected_bin = f"/{selected_bin[0].lower()}{selected_bin[2:]}"
     exported = dict(
         USER_DATA_PATH=data.as_posix(),
         MODEL_PATH=model.as_posix(),
         KERNEL_OPT_BACKEND_ORDER="geak",
-        PYTHON="/host-only/python",
+        PYTHON=selected.as_posix() if mode == "baremetal" else "/host-only/python",
         PATH="/host-only/bin:/usr/bin:/bin",
         VIRTUAL_ENV="/host-only/venv",
         INFERENCE_OPTIMIZER_FORCE_PYTHON="1",
@@ -205,14 +189,16 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         CLAW_SESSION_ID="test-harness-session",
         HYPERLOOM_RUN_MODE=mode,
     )
-    docker = """
+    docker = (
+        f"IMAGE_PATH={shlex.quote(selected_bin + ':/usr/bin:/bin')}\n"
+        + """
 docker() {
   MSYS2_ARG_CONV_EXCL='*' "$REAL_PYTHON" -c 'import json,sys; print(json.dumps(sys.argv[1:]), file=open("docker.jsonl", "a"))' "$@"
   [ "$1" != run ] || return 0
   [ "$1" = exec ] || return 90
   shift
   local workdir
-  local -a forwarded=(PATH=/usr/bin:/bin "HOME=$HOME" ATOM_CONTEXT=docker)
+  local -a forwarded=("PATH=$IMAGE_PATH" "HOME=$HOME" ATOM_CONTEXT=docker)
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -i) shift ;;
@@ -225,14 +211,16 @@ docker() {
   (cd "$workdir" && env -i "${forwarded[@]}" bash)
 }
 """
+    )
     payload = "set -e\n"
     if mode == "docker":
         payload += '[ -z "${PYTHON:-}" ]\n[ -z "${VIRTUAL_ENV:-}" ]\n'
         payload += '[ -z "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ]\n[[ "$PATH" != /host-only/bin:* ]]\n'
-    payload += _extract_dotenv_load(ATOM_DOC) + "\n"
-    for key, value in {"PYTHON": selected, "RUN_LOG": run_log, "LAUNCH_INFO_FILE": launch_info}.items():
+    payload += "\n".join(_atom_section_blocks("Execution shell")[0]) + "\n"
+    payload += "\n".join(_atom_section_blocks("Selected Python and Setup")[0]) + "\n"
+    for key, value in {"RUN_LOG": run_log, "LAUNCH_INFO_FILE": launch_info}.items():
         payload += f"export {key}={shlex.quote(value.as_posix())}\n"
-    payload += _atom_runtime_load() + "\n" + launch + "\n: > launch-finished\n"
+    payload += launch + "\n: > launch-finished\n"
     mode_script = "\n".join("\n".join(block) for block in mode_blocks)
     fragment = docker + mode_script
     fragment += (" <<'ATOM_LAUNCH'\n" + payload + "ATOM_LAUNCH\n") if mode == "docker" else "\n" + payload
@@ -240,7 +228,8 @@ docker() {
         fragment,
         workspace,
         exported,
-        dotenv_extra=f"FRAMEWORK=sglang\nKERNEL_OPT_BACKEND_ORDER=forge\nHYPERLOOM_RUN_MODE={'docker' if mode == 'baremetal' else 'baremetal'}\n",
+        dotenv_extra=f"FRAMEWORK=sglang\nKERNEL_OPT_BACKEND_ORDER=forge\nHYPERLOOM_RUN_MODE={'docker' if mode == 'baremetal' else 'baremetal'}\n"
+        "PYTHON=/host-only/dotenv/python\nVIRTUAL_ENV=/host-only/dotenv/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=0\n",
         observed=("REPO_ROOT", "HYPERLOOM_RUN_MODE"),
     )
     record = json.loads((workspace / "launch.json").read_text(encoding="utf-8"))
@@ -265,7 +254,16 @@ docker() {
     assert record["env"] == dict(
         zip(
             observed,
-            ("atom", "geak", selected.as_posix(), data.as_posix(), "loaded", mode, "test-harness-session", mode),
+            (
+                "atom",
+                "geak",
+                selected.as_posix(),
+                data.as_posix(),
+                None,
+                mode,
+                "test-harness-session",
+                mode,
+            ),
         )
     )
     assert Path(record["cwd"]) == workspace
@@ -306,22 +304,11 @@ def test_atom_first_launch_requires_prepared_paths(tmp_path: Path, missing: str)
     assert not (tmp_path / "launch-reached").exists()
 
 
-def test_atom_recipe_stops_on_missing_runtime_env(tmp_path: Path) -> None:
-    """A missing source must fail, not be hidden by the recipe's final printf."""
-    with pytest.raises(subprocess.CalledProcessError) as exc:
-        _run_recipe(
-            _atom_runtime_load(),
-            tmp_path,
-            {"USER_DATA_PATH": tmp_path.as_posix(), "PYTHON": "/selected/bin/python3"},
-        )
-    assert "kernel-agent.env.sh" in exc.value.stderr
-
-
 def test_atom_runtime_install_accepts_readonly_user_data_path(tmp_path: Path) -> None:
     """The install invocation exports the fixed platform path without assigning it."""
     blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
     install = "\n".join(next(b for b in blocks if 'bash "$INSTALL_SH"' in b))
-    fragment = "readonly USER_DATA_PATH\nbash() { INSTALLER_REACHED=yes; }\n" + install
+    fragment = _dotenv_loads(ATOM_DOC)[0] + "\nreadonly USER_DATA_PATH\nbash() { INSTALLER_REACHED=yes; }\n" + install
     result = _run_recipe(
         fragment,
         tmp_path,
@@ -331,54 +318,10 @@ def test_atom_runtime_install_accepts_readonly_user_data_path(tmp_path: Path) ->
     assert result == {"USER_DATA_PATH": tmp_path.as_posix(), "INSTALLER_REACHED": "yes"}
 
 
-def test_atom_recipe_loads_runtime_below_readonly_parent(tmp_path: Path) -> None:
-    """Run the documented child shell while preserving the platform isolation root."""
-    text = ATOM_DOC.read_text(encoding="utf-8")
-    shell = next(("\n".join(b) for b in _bash_blocks(text) if "bash --noprofile --norc" in b), None)
-    assert shell is not None, "a readonly parent needs the documented child-shell boundary before sourcing env files"
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "kernel-agent.env.sh").write_text(
-        f"export USER_DATA_PATH={shlex.quote(tmp_path.as_posix())}\nexport RUNTIME_SENTINEL=loaded\n",
-        encoding="utf-8",
-    )
-    child = "set -e\n" + _extract_dotenv_load(ATOM_DOC) + "\n" + _atom_runtime_load()
-    child += '\n[ "$RUNTIME_SENTINEL" = loaded ]\n[ "$USER_DATA_PATH" = "$EXPECTED_DATA_PATH" ]\n'
-    fragment = "set -e\nreadonly USER_DATA_PATH\n" + shell + " <<'ATOM_RECIPE'\n" + child + "ATOM_RECIPE\n"
-    fragment += '[[ "$(declare -p USER_DATA_PATH)" == "declare -rx "* ]]\n'
-    result = _run_recipe(
-        fragment,
-        tmp_path,
-        {
-            "USER_DATA_PATH": tmp_path.as_posix(),
-            "EXPECTED_DATA_PATH": tmp_path.as_posix(),
-            "PYTHON": "/selected/bin/python3",
-        },
-        observed=("USER_DATA_PATH",),
-    )
-    assert result["USER_DATA_PATH"] == tmp_path.as_posix()
-
-
-def _write_atom_probe_modules(tmp_path: Path, help_exit: int = 0) -> None:
-    for name in ("atom", "atom/entrypoints"):
-        package = tmp_path / name
-        package.mkdir()
-        (package / "__init__.py").write_text("", encoding="utf-8")
-    (tmp_path / "atom/entrypoints/openai_server.py").write_text(
-        "import sys\nfrom pathlib import Path\n"
-        'assert sys.argv[1:] == ["--help"]\nPath("help-called").touch()\n'
-        f"raise SystemExit({help_exit})\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "torch.py").write_text(
-        'from types import SimpleNamespace\nversion = SimpleNamespace(hip="test-rocm")\n__version__ = "test"\n',
-        encoding="utf-8",
-    )
-
-
+@pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
 @pytest.mark.parametrize("mode", ["docker", "baremetal"])
 @pytest.mark.parametrize("caller", ["unset", "empty", "explicit"])
-def test_atom_dotenv_interpreter_settings_follow_source(tmp_path: Path, mode: str, caller: str) -> None:
+def test_recipe_dotenv_interpreter_settings_follow_source(tmp_path: Path, doc: Path, mode: str, caller: str) -> None:
     """Only Docker excludes interpreter settings originating in the mounted dotenv."""
     host = {
         "PYTHON": "/host-only/venv/bin/python3",
@@ -394,9 +337,8 @@ def test_atom_dotenv_interpreter_settings_follow_source(tmp_path: Path, mode: st
     if caller != "unset":
         exported.update(current if caller == "explicit" else dict.fromkeys(host, ""))
     dotenv = "".join(f"export {key}={shlex.quote(value)}\n" for key, value in host.items())
-    dotenv += f"HYPERLOOM_RUN_MODE={'baremetal' if mode == 'docker' else 'docker'}\n"
-    dotenv += "PATH=/host-only/bin\n"
-    fragment = "set -e\n" + _extract_dotenv_load(ATOM_DOC)
+    dotenv += f"HYPERLOOM_RUN_MODE={'baremetal' if mode == 'docker' else 'docker'}\nPATH=/host-only/bin\n"
+    fragment = _dotenv_loads(doc)[0]
     fragment += '\nPYTHON_SET="${PYTHON+x}"\nVENV_SET="${VIRTUAL_ENV+x}"\n'
     fragment += 'FORCE_SET="${INFERENCE_OPTIMIZER_FORCE_PYTHON+x}"\n'
     result = _run_recipe(
@@ -425,242 +367,71 @@ def test_atom_dotenv_interpreter_settings_follow_source(tmp_path: Path, mode: st
     assert [result[key] for key in ("PYTHON_SET", "VENV_SET", "FORCE_SET")] == [expected_set] * 3
 
 
-def _write_atom_interpreter_probe(tmp_path: Path, *, venv: bool) -> Path:
-    """Stand in for an existing container Python; activation never assigns PYTHON."""
+@pytest.mark.parametrize("doc", [ATOM_DOC, SETUP_DOC], ids=["atom-demo", "setup-skill"])
+@pytest.mark.parametrize("selection", ["activate-before", "activate-after", "default", "valid-pin", "invalid-pin"])
+def test_atom_docker_recipe_passes_selected_python_to_setup(tmp_path: Path, doc: Path, selection: str) -> None:
+    """Activation never sets PYTHON; the real recipe selects it and invokes setup."""
     bin_dir = tmp_path / "container env" / "bin"
     bin_dir.mkdir(parents=True)
     python = bin_dir / "python3"
     python.write_text(
-        '#!/usr/bin/env bash\n_probe_bin="$(cd "$(dirname "$0")" && pwd -P)"\n'
-        '_probe_prefix="$(cd "$_probe_bin/.." && pwd -P)"\n'
-        'case "$*" in\n'
-        "  *'print(sys.executable)'*) printf '%s\\n' \"$_probe_bin/python3\" ;;\n"
-        "  *'print(sys.prefix if'*) printf '%s\\n' " + ('"$_probe_prefix"' if venv else "''") + " ;;\n"
-        "  *'print(sys.prefix)'*) printf '%s\\n' \"$_probe_prefix\" ;;\n"
-        "  '-m atom.entrypoints.openai_server --help') : > help-called ;;\n"
-        "  '-m hyperloom.inference_optimizer.setup --check-only '*) : > setup-called ;;\n"
-        "  -) : > imports-called ;;\n"
-        "  *) exit 91 ;;\nesac\n",
+        '#!/usr/bin/env bash\n[ "$INFERENCE_OPTIMIZER_FORCE_PYTHON" = 1 ] || exit 91\n'
+        'printf "%s\\n" "$@" > setup-argv\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
-    (bin_dir / "activate").write_text(
-        f'_activated_bin="$(cd {shlex.quote(bin_dir.as_posix())} && pwd -P)"\n'
-        'export VIRTUAL_ENV="$(cd "$_activated_bin/.." && pwd -P)"\n'
-        'export PATH="$_activated_bin:$PATH"\nunset _activated_bin\n',
-        encoding="utf-8",
-    )
-    return bin_dir
-
-
-@pytest.mark.parametrize("phase", ["setup", "runtime"])
-@pytest.mark.parametrize("selection", ["activate-before", "activate-after", "default", "valid-pin", "invalid-pin"])
-def test_atom_docker_dotenv_uses_container_python(tmp_path: Path, phase: str, selection: str) -> None:
-    """Run the actual preamble and checks without a fixture reselecting Python after dotenv."""
-    bin_dir = _write_atom_interpreter_probe(tmp_path, venv=selection != "default")
-    activation = f". {shlex.quote((bin_dir / 'activate').as_posix())}\n"
-    blocks = _atom_section_blocks("Selected Python and Setup")
-    selected_python, setup_check = "\n".join(blocks[0]), "\n".join(blocks[1])
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "kernel-agent.env.sh").write_text(
-        "export PYTHON=/stale/runtime/python USER_DATA_PATH=/stale/runtime/data\n"
-        "export FRAMEWORK=vllm KERNEL_OPT_BACKEND_ORDER=stale RUNTIME_SENTINEL=loaded\n",
-        encoding="utf-8",
-    )
-    fragment = 'set -e\n[ -z "${PYTHON+x}" ]\n'
-    fragment += f'EXPECTED_BIN="$(cd {shlex.quote(bin_dir.as_posix())} && pwd -P)"\n'
-    if selection == "default":
-        fragment += 'export PATH="$EXPECTED_BIN:$PATH"\n'
-    elif selection != "activate-after":
-        fragment += activation
+    shell_bin = bin_dir.as_posix()
+    if os.name == "nt":
+        shell_bin = f"/{shell_bin[0].lower()}{shell_bin[2:]}"
+    activation = f'export PATH={shlex.quote(shell_bin)}:"$PATH"\n'
+    if selection != "default":
+        activation += f"export VIRTUAL_ENV={shlex.quote(bin_dir.parent.as_posix())}\n"
+    fragment = "set -e\n" + (activation if selection != "activate-after" else "")
     if selection in {"valid-pin", "invalid-pin"}:
-        pin = "$EXPECTED_BIN/python3" if selection == "valid-pin" else "/explicit-missing/python3"
-        fragment += f'export PYTHON="{pin}" INFERENCE_OPTIMIZER_FORCE_PYTHON=0\n'
-    fragment += _extract_dotenv_load(ATOM_DOC) + "\n"
+        pin = python.as_posix() if selection == "valid-pin" else "/explicit-missing/python3"
+        fragment += f"export PYTHON={shlex.quote(pin)} INFERENCE_OPTIMIZER_FORCE_PYTHON=0\n"
+    fragment += _dotenv_loads(ATOM_DOC)[0] + "\n"
     if selection == "activate-after":
         fragment += activation
-    fragment += selected_python + "\n: > selection-reached\n"
-    if phase == "runtime":
-        fragment += _atom_runtime_load() + "\n" + selected_python + "\n"
-    else:
-        fragment += setup_check + "\n"
-    fragment += '[ "$PYTHON" = "$EXPECTED_BIN/python3" ]\n: > phase-reached\n'
-    exported = {"HYPERLOOM_RUN_MODE": "docker", "USER_DATA_PATH": tmp_path.as_posix()}
-    kwargs = {
-        "dotenv_extra": "PYTHON=/host-only/venv/bin/python3\nVIRTUAL_ENV=/host-only/venv\n"
-        "INFERENCE_OPTIMIZER_FORCE_PYTHON=1\nPATH=/host-only/bin\n",
-        "observed": ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON", "RUNTIME_SENTINEL"),
-    }
+    blocks = _bash_blocks(doc.read_text(encoding="utf-8"))
+    selected = next(block for block in blocks if "export INFERENCE_OPTIMIZER_FORCE_PYTHON=1" in block)
+    check = next(block for block in blocks if any("setup --check-only" in line for line in block))
+    fragment += "\n".join(selected) + "\n"
+    if check is not selected:
+        fragment += "\n".join(check) + "\n"
+    fragment += ": > setup-finished\n"
+    kwargs = dict(
+        dotenv_extra="HYPERLOOM_RUN_MODE=docker\nPYTHON=/host/python\nVIRTUAL_ENV=/host/venv\n"
+        "INFERENCE_OPTIMIZER_FORCE_PYTHON=1\nPATH=/host/bin\n",
+        observed=("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON"),
+    )
+    exported = {"HYPERLOOM_RUN_MODE": "docker", "USER_DATA_PATH": "/selected/data"}
     if selection == "invalid-pin":
-        with pytest.raises(subprocess.CalledProcessError) as exc:
+        with pytest.raises(subprocess.CalledProcessError) as failure:
             _run_recipe(fragment, tmp_path, exported, **kwargs)
-        assert exc.value.returncode == 127
-        assert "/explicit-missing/python3" in exc.value.stderr
-        assert not (tmp_path / "selection-reached").exists()
-        assert not (tmp_path / "help-called").exists()
+        assert failure.value.returncode == 127
+        assert "/explicit-missing/python3" in failure.value.stderr
+        assert not (tmp_path / "setup-argv").exists()
+        assert not (tmp_path / "setup-finished").exists()
     else:
         result = _run_recipe(fragment, tmp_path, exported, **kwargs)
-        assert (tmp_path / "phase-reached").exists()
-        assert (tmp_path / "imports-called").exists()
-        assert (tmp_path / "help-called").exists()
+        assert result["PYTHON"] == (python.as_posix() if selection == "valid-pin" else shell_bin + "/python3")
+        assert result["VIRTUAL_ENV"] == ("" if selection == "default" else bin_dir.parent.as_posix())
         assert result["INFERENCE_OPTIMIZER_FORCE_PYTHON"] == "1"
-        expected_venv = Path(result["PYTHON"]).parent.parent.as_posix() if selection != "default" else ""
-        assert result["VIRTUAL_ENV"] == expected_venv
-        if phase == "runtime":
-            assert result["RUNTIME_SENTINEL"] == "loaded"
-        else:
-            assert (tmp_path / "setup-called").exists()
-
-
-@pytest.mark.parametrize("help_exit", [0, 7], ids=["help-succeeds", "help-fails"])
-def test_atom_recipe_requires_working_server_help(tmp_path: Path, help_exit: int) -> None:
-    """Import success must not hide a broken framework CLI before setup starts."""
-    _write_atom_probe_modules(tmp_path, help_exit)
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
-    selected_python = "\n".join(next(b for b in blocks if 'PYTHON="${PYTHON:-$(command -v python3)}"' in b))
-    fragment = 'python3() { "$REAL_PYTHON" "$@"; }\n' + selected_python + "\n: > setup-reached\n"
-    exported = {"PYTHON": Path(sys.executable).as_posix(), "REAL_PYTHON": Path(sys.executable).as_posix()}
-    if help_exit:
-        with pytest.raises(subprocess.CalledProcessError) as exc:
-            _run_recipe(fragment, tmp_path, exported)
-        assert exc.value.returncode == help_exit
-        assert not (tmp_path / "setup-reached").exists()
-    else:
-        _run_recipe(fragment, tmp_path, exported)
-        assert (tmp_path / "setup-reached").exists()
-    assert (tmp_path / "help-called").exists()
-
-
-@pytest.mark.parametrize(
-    "case",
-    ["path-cli", "explicit-cli", "bundle-only", "non-claude", "non-forge", "failed-cli", "timeout", "wrong-cli"],
-)
-def test_atom_recipe_checks_forge_cli_before_launch(tmp_path: Path, monkeypatch, case: str) -> None:
-    """Use the real provider/CLI resolvers without starting an agent or calling its API."""
-    from dataclasses import replace
-
-    from kernelforge.agent_backends import claude, registry
-
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
-    block = next((b for b in blocks if any("resolve_claude_cli" in line for line in b)), None)
-    assert block is not None, "the example must check the actual Forge executable before optimize"
-    start, end = block.index("\"$PYTHON\" - <<'PY'") + 1, block.index("PY")
-    source = "\n".join(block[start:end])
-    monkeypatch.setattr(
-        "os.environ",
-        {
-            "ANTHROPIC_API_KEY": "test-only",
-            "KNOWLEDGE_STORE_MODE": "local",
-            "HOME": str(tmp_path),
-            "USERPROFILE": str(tmp_path),
-        },
-    )
-    monkeypatch.setattr(registry, "_plugins_loaded", True)
-    monkeypatch.setattr(
-        registry,
-        "_providers",
-        {
-            name: replace(
-                provider, availability=lambda: True, credentialed=lambda _env, selected=name: selected == "claude"
-            )
-            for name, provider in registry._providers.items()
-            if name in {"claude", "codex"}
-        },
-    )
-    # Credential ranking should choose Claude without pinning FORGE_AGENT_BACKEND.
-    if case == "non-claude":
-        monkeypatch.setenv("FORGE_AGENT_BACKEND", "codex")
-    if case == "non-forge":
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
-    cli = (tmp_path / "cli tools" / "claude").as_posix()
-    if case == "explicit-cli":
-        monkeypatch.setenv("FORGE_AGENT_CLI", cli)
-    bundle = tmp_path / "claude_agent_sdk" / "_bundled" / "claude"
-    bundle.parent.mkdir(parents=True)
-    bundle.write_text("bundled CLI is not a resolver candidate", encoding="utf-8")
-    monkeypatch.setattr(claude.shutil, "which", lambda name: cli if case == "path-cli" and name == "claude" else None)
-    monkeypatch.setattr(claude.os.path, "isfile", lambda _path: False)
-    calls = []
-
-    def version_check(argv, **kwargs):
-        calls.append(argv)
-        assert argv[1:] == ["--version"]
-        assert kwargs["timeout"] == 10
-        if case == "bundle-only":
-            raise FileNotFoundError("claude is absent")
-        if case == "timeout":
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        if case == "failed-cli":
-            raise subprocess.CalledProcessError(7, argv)
-        assert kwargs["check"] is True
-        return subprocess.CompletedProcess(argv, 0, "other tool" if case == "wrong-cli" else "Claude Code test", "")
-
-    monkeypatch.setattr(subprocess, "run", version_check)
-    if case in {"bundle-only", "failed-cli", "timeout", "wrong-cli"}:
-        with pytest.raises(SystemExit, match="Forge Claude CLI"):
-            exec(compile(source, str(ATOM_DOC), "exec"), {})
-    else:
-        exec(compile(source, str(ATOM_DOC), "exec"), {})
-    if case in {"non-claude", "non-forge"}:
-        assert calls == []
-    else:
-        assert len(calls) == 1
-        assert calls[0][0] == (cli if case in {"path-cli", "explicit-cli"} else "claude")
-    if case == "explicit-cli":
-        assert claude.os.environ["FORGE_AGENT_CLI"] == cli
-
-
-@pytest.mark.parametrize("provider", ("claude", "codex"))
-def test_atom_forge_cli_check_controls_shell_launch(tmp_path: Path, provider: str) -> None:
-    """A failing local version check must stop the documented shell before launch."""
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
-    check = "\n".join(next(b for b in blocks if any("resolve_claude_cli" in line for line in b)))
-    exported = {
-        "PYTHON": Path(sys.executable).as_posix(),
-        "PYTHONPATH": (REPO_ROOT / "src").as_posix(),
-        "FORGE_AGENT_BACKEND": provider,
-        "FORGE_AGENT_CLI": Path(sys.executable).as_posix(),
-        "USERPROFILE": str(tmp_path),
-    }
-    fragment = check + "\n: > launch-reached\n"
-    if provider == "claude":
-        with pytest.raises(subprocess.CalledProcessError) as exc:
-            _run_recipe(fragment, tmp_path, exported)
-        assert "Forge Claude CLI returned an unexpected version" in exc.value.stderr
-        assert not (tmp_path / "launch-reached").exists()
-    else:
-        _run_recipe(fragment, tmp_path, exported)
-        assert (tmp_path / "launch-reached").exists()
-
-
-@pytest.mark.parametrize("source", ["dotenv", "runtime"])
-@pytest.mark.parametrize("same_prefix", [False, True], ids=["conflicting-prefix", "same-prefix"])
-def test_atom_recipe_checks_vllm_venv_root(tmp_path: Path, source: str, same_prefix: bool) -> None:
-    """Old vLLM settings must not redirect ATOM's server to a different environment."""
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
-    selected_python = "\n".join(next(b for b in blocks if 'PYTHON="${PYTHON:-$(command -v python3)}"' in b))
-    _write_atom_probe_modules(tmp_path)
-    vllm_root = (Path(sys.prefix) / ".").as_posix() if same_prefix else (tmp_path / "other-venv").as_posix()
-    setting = f"export VLLM_VENV_ROOT={shlex.quote(vllm_root)}\n"
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "kernel-agent.env.sh").write_text(setting if source == "runtime" else "true\n", encoding="utf-8")
-    fragment = 'python3() { "$REAL_PYTHON" "$@"; }\n' + _extract_dotenv_load(ATOM_DOC)
-    fragment += "\n" + _atom_runtime_load() + "\n" + selected_python
-    exported = {
-        "USER_DATA_PATH": tmp_path.as_posix(),
-        "PYTHON": Path(sys.executable).as_posix(),
-        "REAL_PYTHON": Path(sys.executable).as_posix(),
-    }
-    kwargs = {"dotenv_extra": setting if source == "dotenv" else "", "observed": ("VLLM_VENV_ROOT",)}
-    if same_prefix:
-        assert _run_recipe(fragment, tmp_path, exported, **kwargs)["VLLM_VENV_ROOT"] == vllm_root
-    else:
-        with pytest.raises(subprocess.CalledProcessError) as exc:
-            _run_recipe(fragment, tmp_path, exported, **kwargs)
-        assert "VLLM_VENV_ROOT" in exc.value.stderr
-        assert vllm_root in exc.value.stderr
+        assert (tmp_path / "setup-argv").read_text().splitlines() == [
+            "-m",
+            "hyperloom.inference_optimizer.setup",
+            "--check-only",
+            "--",
+            "--install-framework",
+            "none",
+            "--frameworks",
+            "atom",
+            "--require-frameworks",
+            "--user-data-path",
+            "/selected/data",
+        ]
+        assert (tmp_path / "setup-finished").exists()
 
 
 @pytest.mark.parametrize(
@@ -671,42 +442,28 @@ def test_atom_recipe_checks_vllm_venv_root(tmp_path: Path, source: str, same_pre
 def test_atom_recipe_preserves_backend_selection(
     tmp_path: Path, shell_backend: str | None, dotenv_backend: str | None, expected: str
 ) -> None:
-    """The final launch exports must not discard an explicit backend choice."""
-    fragment = "set -e\n" + _extract_dotenv_load(ATOM_DOC) + "\n" + _atom_runtime_load()
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "kernel-agent.env.sh").write_text(
-        "export FRAMEWORK=vllm KERNEL_OPT_BACKEND_ORDER=stale PYTHON=/stale/python USER_DATA_PATH=/stale/data\n"
-        "export RUNTIME_SENTINEL=loaded\n",
-        encoding="utf-8",
-    )
+    """The workload selection must not discard an explicit kernel backend choice."""
+    fragment = "\n".join(_atom_section_blocks("Execution shell")[0])
     exported = {"USER_DATA_PATH": tmp_path.as_posix(), "PYTHON": "/selected/bin/python3"}
     if shell_backend is not None:
         exported["KERNEL_OPT_BACKEND_ORDER"] = shell_backend
     dotenv = f"KERNEL_OPT_BACKEND_ORDER={dotenv_backend}\n" if dotenv_backend is not None else ""
-
     result = _run_recipe(
         fragment,
         tmp_path,
         exported,
         dotenv_extra=dotenv + "FRAMEWORK=sglang\n",
-        observed=("FRAMEWORK", "KERNEL_OPT_BACKEND_ORDER", "PYTHON", "USER_DATA_PATH", "RUNTIME_SENTINEL"),
+        observed=("FRAMEWORK", "KERNEL_OPT_BACKEND_ORDER", "PYTHON", "USER_DATA_PATH"),
     )
-
     assert result == {
         "FRAMEWORK": "atom",
         "KERNEL_OPT_BACKEND_ORDER": expected,
         "PYTHON": "/selected/bin/python3",
         "USER_DATA_PATH": tmp_path.as_posix(),
-        "RUNTIME_SENTINEL": "loaded",
     }
 
 
-@pytest.mark.parametrize(
-    "doc",
-    [ATOM_DOC, REPO_ROOT / "src" / "hyperloom" / "skills" / "hyperloom-setup" / "SKILL.md"],
-    ids=["atom-demo", "setup-skill"],
-)
+@pytest.mark.parametrize("doc", [ATOM_DOC, SETUP_DOC], ids=["atom-demo", "setup-skill"])
 def test_atom_recipe_provides_direct_setup_commands(tmp_path: Path, doc: Path) -> None:
     """Execute both documented direct setup invocations without installing anything."""
     blocks = _bash_blocks(doc.read_text(encoding="utf-8"))
@@ -727,7 +484,6 @@ export PYTHON=python_probe
     result = _run_recipe(
         fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("CHECK_ARGS", "INSTALL_ARGS")
     )
-
     for key, args in result.items():
         assert "-m hyperloom.inference_optimizer.setup" in args
         assert "--install-framework none" in args
@@ -735,32 +491,31 @@ export PYTHON=python_probe
         assert "--require-frameworks" in args
         assert "--user-data-path /selected/data" in args
         assert ("--check-only" in args) == (key == "CHECK_ARGS")
+        assert ("--yes" in args) == (key == "INSTALL_ARGS")
 
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
-def test_recipe_keeps_caller_user_data_path(doc: Path, tmp_path: Path) -> None:
-    """A USER_DATA_PATH in .env must not overwrite the one the caller exported."""
+@pytest.mark.parametrize("layout", [".", "src"], ids=["wheel", "source"])
+def test_recipe_keeps_caller_user_data_path(doc: Path, tmp_path: Path, layout: str) -> None:
+    """Every shared preamble preserves non-empty exported paths and credentials."""
     if not doc.exists():
         pytest.skip(f"{doc} not present in this layout")
-
-    result = _run_recipe(
-        _extract_dotenv_load(doc),
-        tmp_path,
-        {"USER_DATA_PATH": "/from/caller", "OPENAI_API_KEY": "key-from-caller"},
-    )
-
-    assert result["USER_DATA_PATH"] == "/from/caller"
-    assert result["OPENAI_API_KEY"] == "key-from-caller"
+    for fragment in _dotenv_loads(doc):
+        result = _run_recipe(
+            fragment,
+            tmp_path,
+            {"USER_DATA_PATH": "/from/caller", "OPENAI_API_KEY": "key-from-caller"},
+            layout=layout,
+        )
+        assert result["USER_DATA_PATH"] == "/from/caller"
+        assert result["OPENAI_API_KEY"] == "key-from-caller"
 
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
 def test_recipe_still_fills_missing_values(doc: Path, tmp_path: Path) -> None:
-    """Protecting exported values must not stop .env from filling the gaps."""
     if not doc.exists():
         pytest.skip(f"{doc} not present in this layout")
-
-    result = _run_recipe(_extract_dotenv_load(doc), tmp_path, {})
-
+    result = _run_recipe(_dotenv_loads(doc)[0], tmp_path, {})
     assert result["USER_DATA_PATH"] == "/from/dotenv"
     assert result["OPENAI_API_KEY"] == "key-from-dotenv"
     assert result["ONLY_IN_DOTENV"] == "filled"
@@ -768,48 +523,39 @@ def test_recipe_still_fills_missing_values(doc: Path, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
 def test_recipe_lets_dotenv_fill_a_blank_export(doc: Path, tmp_path: Path) -> None:
-    """An exported-but-empty value is a gap, matching install.sh's restore rule."""
     if not doc.exists():
         pytest.skip(f"{doc} not present in this layout")
-
-    result = _run_recipe(_extract_dotenv_load(doc), tmp_path, {"USER_DATA_PATH": ""})
-
+    result = _run_recipe(_dotenv_loads(doc)[0], tmp_path, {"USER_DATA_PATH": ""})
     assert result["USER_DATA_PATH"] == "/from/dotenv"
 
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
-def test_a_failed_restore_names_the_variable(doc: Path, tmp_path: Path) -> None:
-    """Suppressing eval's stderr hid the only precise diagnosis available."""
-    if not doc.exists():
-        pytest.skip(f"{doc} not present in this layout")
-
-    fragment = _extract_dotenv_load(doc)
-    (tmp_path / ".env").write_text("USER_DATA_PATH=/from/dotenv\n", encoding="utf-8")
-    script = tmp_path / "recipe.sh"
-    script.write_text("readonly LOCKED=locked\nexport LOCKED\n" + fragment + "\n", encoding="utf-8")
-
-    proc = subprocess.run(
-        ["bash", str(script)],
-        cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "REPO_ROOT": str(tmp_path)},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert "LOCKED" in proc.stderr, proc.stderr
-    assert "readonly" in proc.stderr, proc.stderr
+@pytest.mark.parametrize("conflict", [False, True], ids=["same-root", "conflicting-root"])
+def test_recipe_readonly_workspace_is_preserved_or_fails(doc: Path, tmp_path: Path, conflict: bool) -> None:
+    """Readonly shell state needs no child shell; incompatible setup roots fail clearly."""
+    root = "/selected/data" if conflict else "/from/dotenv"
+    fragment = "readonly LOCKED=locked\nexport LOCKED\nreadonly USER_DATA_PATH\n" + _dotenv_loads(doc)[0]
+    fragment += '\n[[ "$(declare -p USER_DATA_PATH)" == "declare -rx "* ]]\n: > load-reached\n'
+    kwargs = dict(dotenv_extra="HYPERLOOM_RUN_MODE=baremetal\n", observed=("USER_DATA_PATH", "LOCKED"))
+    if conflict:
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            _run_recipe(fragment, tmp_path, {"USER_DATA_PATH": root}, **kwargs)
+        assert "USER_DATA_PATH" in failure.value.stderr
+        assert "readonly" in failure.value.stderr.lower()
+        assert not (tmp_path / "load-reached").exists()
+    else:
+        assert _run_recipe(fragment, tmp_path, {"USER_DATA_PATH": root}, **kwargs) == {
+            "USER_DATA_PATH": root,
+            "LOCKED": "locked",
+        }
+        assert (tmp_path / "load-reached").exists()
 
 
 def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
-    """install.sh snapshots the same credential vars for this exact reason."""
     if not CREDENTIAL_ONLY_DOC.exists():
         pytest.skip(f"{CREDENTIAL_ONLY_DOC} not present in this layout")
-
-    fragment = _extract_dotenv_load(CREDENTIAL_ONLY_DOC)
-
+    fragment = _dotenv_loads(CREDENTIAL_ONLY_DOC)[0]
     kept = _run_recipe(fragment, tmp_path, {"OPENAI_API_KEY": "key-from-caller"})
     assert kept["OPENAI_API_KEY"] == "key-from-caller"
-
     filled = _run_recipe(fragment, tmp_path, {})
     assert filled["OPENAI_API_KEY"] == "key-from-dotenv"

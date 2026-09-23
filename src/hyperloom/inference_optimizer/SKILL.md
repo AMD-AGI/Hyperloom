@@ -72,8 +72,8 @@ session path example::
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching
 agent does not need to recreate that logic in shell; it only needs to run
-`install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read
-the session dir printed by the CLI.
+`install.sh` and read the session dir printed by the CLI. CLI preflight loads
+the generated `runtime/kernel-agent.env.sh` in-process.
 
 | Concept | Env / helper | Meaning |
 |---|---|---|
@@ -177,14 +177,16 @@ run it anyway and ask the user.
 processes in *other* containers; the host namespace is the superset (#1314).
 
 ```bash
+set -e
 export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
-# .env fills gaps only — same pattern as the launch block below.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
-export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 
 # Prior launch handles from canonical artifacts (no last_launch.env — never written)
 LATEST_PID_FILE="$(ls -t "$RUN_DIR"/run_*.pid 2>/dev/null | head -1 || true)"
@@ -315,20 +317,19 @@ Never kill processes or stop containers without explicit user approval.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
-Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
-source the regenerated
+Run `bash "$INSTALL_SH"` using the workspace's wheel/source entrypoint resolved
+in [Step 1](#step-1--install-one-time-per-pod--venv-rebuild). CLI preflight reads
+the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
-in the **same shell** that will spawn `python -m hyperloom.inference_optimizer.cli optimize`.
-Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK → `trace_analyze` / `kernel_opt` fail; no live
-Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
-first kernel-opt gateway call returns `401`. `install.sh --check-only` is a
-*diagnostic*, never a substitute.
+in-process; the launch shell must not source it. Skipping install can leave
+TraceLens/GEAK unavailable or Ray unprepared. A missing runtime env fails
+preflight before optimization. `install.sh --check-only` is a *diagnostic*,
+never a substitute.
 
 **Resume carve-out.** `... optimize --resume-from` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
-`kernel-agent.env.sh` is still sourced; (3) `manifest.json` exists under the
-session dir passed to `--resume-from`.
+`kernel-agent.env.sh` remains available under the same workspace root; (3)
+`manifest.json` exists under the session dir passed to `--resume-from`.
 Any failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
@@ -471,20 +472,28 @@ Both are idempotent; do not replicate them inside chat.
 The common single-gateway setup uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
 `OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
-is loaded only to fill missing values. `install.sh` and the CLI preflight
-enforce this internally; the launch recipes below enforce it by re-exporting a
-snapshot of the caller's environment after sourcing `.env`, so a path variable
-such as `USER_DATA_PATH` left in `.env` can never redirect a run to another
-workspace. Never plain `set -a; . .env` — that inverts the precedence.
-After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
+is loaded only to fill missing or empty values. The recipes and `install.sh`
+use `assets/runtime_env.sh` without executing dotenv contents. Docker mode
+excludes dotenv-provided `PYTHON`, `VIRTUAL_ENV`, and
+`INFERENCE_OPTIMIZER_FORCE_PYTHON`; explicit shell selections remain intact.
+A readonly `USER_DATA_PATH` is not reassigned; reconcile a conflict with the
+setup-selected workspace root before continuing. CLI preflight loads generated
+`kernel-agent.env.sh` in-process, not through shell `source`.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd -P)"   # repo root containing src/hyperloom/ + .env
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
+set -e
+export REPO_ROOT="$(pwd -P)"   # workspace containing .env and a wheel or source install
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+bash "$INSTALL_SH"
 ```
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
@@ -521,8 +530,8 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains gateway URLs, auth aliases,
-GEAK runtime variables, and InferenceX path. Source it (don't try to derive these by
-hand). Generated env/config state is written to the pod-local runtime directory,
+GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not derive
+these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
 ### Tool source fields (prompt → env, sandbox-only)
@@ -722,8 +731,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+bash "$INSTALL_SH"
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
 ```
 
@@ -1124,16 +1132,16 @@ connection that started it. Both forms are detached — the difference is whethe
 anything outside the process knows it exists.
 
 ```bash
+set -e
 cd "$REPO_ROOT"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-# Launch is its own shell and inherits no PYTHON from the smoke test, and
-# kernel-agent.env.sh does not set it; resolve it before it leads PATH.
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+# Resolve the launch interpreter in this shell; preflight loads generated runtime state.
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
