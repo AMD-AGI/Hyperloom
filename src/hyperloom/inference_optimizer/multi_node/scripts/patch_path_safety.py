@@ -7,7 +7,6 @@ Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import tempfile
@@ -87,10 +86,7 @@ def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
         and (package / "__init__.py").is_file()
         and (jit_build.parent / "__init__.py").is_file()
     ):
-        spec = importlib.util.find_spec("aiter")
-        if spec is None or not spec.submodule_search_locations:
-            raise ValueError(f"invalid AITER jit/build path: {jit_build}")
-        package = Path(next(iter(spec.submodule_search_locations)))
+        package = _jit_cache.resolve_package_root()
     expected = _jit_cache.resolve_jit_build_dir(package)
     if expected is None or not _jit_cache.trusted_jit_build_dir(jit_build, expected):
         raise ValueError(f"invalid AITER jit/build path: {jit_build}")

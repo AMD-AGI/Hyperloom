@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -906,21 +905,6 @@ _REBUILD_MODE_CONTENT_ADDRESSED_JIT = "content_addressed_jit"
 _SGLANG_JIT_SOURCE_MARKER = "/sglang/kernels/jit/"
 
 
-def _isolated_aiter_pkg_root() -> Path | None:
-    """Locate aiter inside the isolated vLLM venv when it is not importable here."""
-    vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
-    if not vllm_venv:
-        return None
-    lib = Path(vllm_venv) / "lib"
-    if not lib.is_dir():
-        return None
-    for package_dir in ("site-packages", "dist-packages"):
-        for match in sorted(lib.glob(f"python*/{package_dir}/aiter")):
-            if match.is_dir():
-                return match
-    return None
-
-
 def _flydsl_root_for(target_file: Path) -> Path | None:
     """The FlyDSL checkout root containing ``target_file``, else ``None``.
 
@@ -980,20 +964,9 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     return installed[0]
 
 
-def _aiter_package_root() -> Path | None:
-    """Resolve AITER without importing its GPU-initializing package."""
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):
-        spec = None
-    if spec is not None and spec.submodule_search_locations:
-        return Path(next(iter(spec.submodule_search_locations)))
-    return _isolated_aiter_pkg_root()
-
-
 def _aiter_checkout_root(target_file: Path) -> Path | None:
     """Identify a source checkout through the installed runtime, not its basename."""
-    package = _aiter_package_root()
+    package = aiter_jit_cache.resolve_package_root()
     if package is None or package.parent.name in {"site-packages", "dist-packages"}:
         return None
     if not (package / "__init__.py").is_file() or not (package / "jit" / "__init__.py").is_file():
@@ -1010,14 +983,14 @@ def _aiter_checkout_root(target_file: Path) -> Path | None:
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Report whether a file resides under an ``aiter/csrc/`` tree.
+    """Report whether a file belongs to AITER device sources or codegen.
 
     Args:
         target_file: The file path to test.
 
     Returns:
-        ``True`` if the path is under an ``aiter/csrc/`` (in-tree) or
-        ``aiter_meta/csrc/`` (split-wheel) directory.
+        ``True`` under ``aiter/csrc/``, ``aiter_meta/csrc/``, or the ``csrc/``
+        tree of the checkout identified by the installed runtime package.
     """
     norm = str(target_file).replace(os.sep, "/")
     checkout = _aiter_checkout_root(target_file)
@@ -1060,7 +1033,7 @@ def _aiter_jit_build_dir() -> Path | None:
         The build path under ``AITER_JIT_DIR``, the package JIT directory, or
         the initialized user cache; ``None`` when the package/cache is unavailable.
     """
-    return aiter_jit_cache.resolve_jit_build_dir(_aiter_package_root())
+    return aiter_jit_cache.resolve_jit_build_dir(aiter_jit_cache.resolve_package_root())
 
 
 def _invalidate_aiter_jit_build(
@@ -1105,8 +1078,8 @@ def _trusted_aiter_jit_build_dir(path: Path) -> bool:
     package = root / "aiter"
     if aiter_jit_cache.trusted_jit_build_dir(path, package / "jit" / "build"):
         return (package / "__init__.py").is_file() and (package / "jit" / "__init__.py").is_file()
-    package = _aiter_package_root()
-    expected = _aiter_jit_build_dir()
+    package = aiter_jit_cache.resolve_package_root()
+    expected = aiter_jit_cache.resolve_jit_build_dir(package)
     return (
         package is not None
         and expected is not None
@@ -1454,12 +1427,13 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
 def _detect_strategy(target_file: Path) -> dict[str, Any]:
     """Determine the rebuild strategy for a patch target.
 
-    Matches the target against the known framework roots (aiter / sglang /
-    vllm) to pick the rebuild command and artifact roots, and decides whether
-    the target feeds a compiled runtime. Python codegen under AITER ``csrc``
-    requires the same rebuild/JIT invalidation as a native source. Native
-    sources under SGLang's ``kernels/jit`` tree are compiled by the runtime
-    under a source-hashed cache key, so they defer instead of rebuilding.
+    Matches known framework roots and the installed AITER runtime's checkout
+    to select rebuild commands and artifact roots. Python codegen under AITER
+    ``csrc`` in wheel or discovered-checkout runtime-JIT strategies invalidates
+    build state and serving modules like native source. The legacy
+    ``/sgl-workspace/aiter`` strategy keeps Python patches source-only. Native
+    SGLang ``kernels/jit`` sources use a source-hashed cache, deferring compilation
+    to the runtime instead of rebuilding.
 
     Args:
         target_file (Path): The file being patched.
@@ -1839,9 +1813,9 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """Revert a previously applied kernel patch from its manifest.
 
     Restores backed-up artifacts and source, clears Python caches when the
-    target is Python, restores any aiter ``jit/build`` backup, and fans out a
-    best-effort revert to multi-node pods. The manifest is updated in place
-    with the reverted status.
+    target is Python, restores recorded AITER build state and serving modules,
+    and fans out a best-effort revert to multi-node pods. The manifest is updated
+    in place with the reverted status.
 
     Args:
         manifest_path (str | Path): Path to the apply manifest JSON file.
@@ -1930,12 +1904,10 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
 
-    # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
+    # Restore local AITER build state and serving modules before multi-node fan-out.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     jit_build_restore: dict[str, Any] = {}
-    if jit_build_backup.get("status") == "ok" or (
-        jit_build_backup.get("status") == "clean" and jit_build_backup.get("modules_invalidated")
-    ):
+    if jit_build_backup.get("status") in {"ok", "clean"}:
         strategy = manifest.get("strategy") or {}
         # Singular key is retained for manifests created by earlier releases.
         expected_jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
@@ -2351,7 +2323,7 @@ def apply_kernel_patch(
         "is_cpp_itfs": False,
     }
     if strategy["compiled"] and not skip_rebuild:
-        # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
+        # Back up AITER build state and serving modules so the next import re-JITs.
         if _is_multi_node() and remote_jit_dir:
             remote_records = list(multinode_info.get("per_node") or [])
             invalid = [
@@ -2401,7 +2373,7 @@ def apply_kernel_patch(
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": f"aiter jit/build/ invalidation failed: {detail}",
+                "error": f"AITER JIT cache invalidation failed: {detail}",
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
                 "revert": revert,
@@ -2800,7 +2772,7 @@ def _apply_kernel_patch_snapshot(
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": f"aiter jit/build/ invalidation failed: {detail}",
+                "error": f"AITER JIT cache invalidation failed: {detail}",
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
                 "revert": revert,

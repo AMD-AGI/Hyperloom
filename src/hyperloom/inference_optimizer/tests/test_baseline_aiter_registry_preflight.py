@@ -11,8 +11,9 @@ the env var literally or, when it is unset, merges the model overlays on top of 
 shipped default.
 """
 
+import importlib.util
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -21,8 +22,14 @@ from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
 
 @pytest.fixture(autouse=True)
-def _isolate_serving_package(monkeypatch):
-    monkeypatch.setattr(_aiter_jit.importlib.util, "find_spec", lambda _: None)
+def _isolate_serving_package(tmp_path, monkeypatch):
+    package = tmp_path / "aiter"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
 
 
@@ -90,7 +97,7 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_FMOE": "/tuned/fmoe.csv"},
@@ -110,7 +117,7 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("cache_location", ["runtime-env", "home", "wrapper-override"])
 @pytest.mark.parametrize("overlay", [False, True], ids=["shipped", "overlay"])
-def test_unset_csvs_come_from_the_package_with_a_separate_runtime_cache(tmp_path, monkeypatch, cache_location, overlay):
+def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch, cache_location, overlay):
     package_jit = _aiter_tree(
         tmp_path,
         csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
@@ -134,11 +141,7 @@ def test_unset_csvs_come_from_the_package_with_a_separate_runtime_cache(tmp_path
     )
     monkeypatch.delenv("AITER_JIT_DIR", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
-    monkeypatch.setattr(
-        _aiter_jit.importlib.util,
-        "find_spec",
-        lambda _: SimpleNamespace(origin=str(package_jit.parent / "__init__.py")),
-    )
+    assert list(importlib.util.find_spec("aiter").submodule_search_locations) == [str(package_jit.parent)]
     if cache_location == "home":
         monkeypatch.setattr(Path, "home", lambda: home)
         monkeypatch.setattr(_aiter_jit.os, "access", lambda *_: False)
@@ -148,6 +151,14 @@ def test_unset_csvs_come_from_the_package_with_a_separate_runtime_cache(tmp_path
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
 
+    assert "aiter" not in sys.modules
+    if cache_location == "wrapper-override":
+        assert outcome == {"action": "skip", "jit_dir": str(jit)}
+        assert (jit / name).read_bytes() == b"a8w8_blockscale_bpreshuffle_old"
+        assert (jit / "build" / "stamp").read_bytes() == b"runtime build"
+        assert (jit / "module_attention.so").read_bytes() == b"unrelated"
+        assert (package_jit / name).read_bytes() == b"\x7fELF" + b"a8w8_blockscale_bpreshuffle_old"
+        return
     assert outcome["action"] == "invalidate"
     assert outcome["jit_dir"] == str(jit)
     assert outcome["removed"] == [str(jit / name)]
@@ -168,7 +179,7 @@ def test_a_consistent_install_costs_nothing(tmp_path, monkeypatch):
         so_contains=b"a8w8_blockscale_bpreshuffle_built",
         overlay=True,
     )
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
 
@@ -187,7 +198,7 @@ def test_a_pinned_env_does_not_rebuild_for_a_table_it_turns_off(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     pinned = Path("pinned.csv")
     pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_something_else,ck\n", "utf-8")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(pinned)},
@@ -203,7 +214,7 @@ def test_a_shipped_table_this_cannot_decode_does_not_skip_the_check(tmp_path, mo
     jit = _aiter_tree(tmp_path, csv_rows="", so_contains=b"built", overlay=False)
     bad = tmp_path / "aiter" / "configs" / "model_configs" / "dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
     bad.write_bytes(b"\xff\xfeM,N,K,kernelName,libtype\n")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
 
@@ -218,7 +229,7 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
     monkeypatch.chdir(tmp_path)
     pinned = Path("pinned.csv")
     pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n", "utf-8")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(pinned)},
@@ -353,7 +364,7 @@ def test_named_modules_are_unlinked_on_top_of_the_env_s_own(tmp_path, monkeypatc
     jit.mkdir()
     for stem in ("module_gemm_a8w8", "module_gemm_a8w8_blockscale_bpreshuffle", "module_attention"):
         (jit / f"{stem}.so").write_bytes(b"\x7fELF")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.drop_serving_so_for_envs(
         {"AITER_CONFIG_GEMM_A8W8": "/tuned/a8w8.csv"},

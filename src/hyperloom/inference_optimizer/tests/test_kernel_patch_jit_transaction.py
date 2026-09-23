@@ -282,7 +282,7 @@ def test_pod_legacy_clean_record_preserves_top_level_modules(tmp_path, monkeypat
 
 def test_pod_custom_jit_directory_uses_runtime_owner(tmp_path, monkeypatch):
     safety = _load_module()
-    _aiter, _build = _make_aiter_jit(tmp_path)
+    _make_aiter_jit(tmp_path)
     jit = tmp_path / "custom-jit"
     jit.mkdir()
     baseline = jit / "module_gemm.so"
@@ -297,6 +297,40 @@ def test_pod_custom_jit_directory_uses_runtime_owner(tmp_path, monkeypatch):
     assert baseline.read_bytes() == b"baseline"
     with pytest.raises(ValueError):
         safety.invalidate_aiter_jit_build(tmp_path / "untrusted" / "build", tmp_path / "backups", "other")
+
+
+@pytest.mark.parametrize("discovery", ["importable", "isolated-venv"])
+def test_pod_home_cache_uses_shared_package_discovery(tmp_path, monkeypatch, discovery):
+    safety = _load_module()
+    venv = tmp_path / "venv"
+    package = venv / "lib/python3.12/site-packages/aiter"
+    (package / "jit").mkdir(parents=True)
+    (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv))
+    if discovery == "importable":
+        monkeypatch.syspath_prepend(str(package.parent))
+        assert list(importlib.util.find_spec("aiter").submodule_search_locations) == [str(package)]
+    else:
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _: None)
+    home = tmp_path / "home"
+    jit = home / ".aiter/jit"
+    jit.mkdir(parents=True)
+    served = jit / "module_gemm.so"
+    served.write_bytes(b"baseline")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(safety.os, "access", lambda *_: False)
+    backups = tmp_path / "backups"
+    monkeypatch.setenv("HYPERLOOM_MN_KERNEL_BACKUP_DIR", str(backups))
+
+    record = safety.invalidate_aiter_jit_build(jit / "build", backups, "kernel")
+
+    assert record["status"] == "ok"
+    assert not served.exists()
+    assert safety.restore_aiter_jit_build(record)["status"] == "restored"
+    assert served.read_bytes() == b"baseline"
+    assert "aiter" not in sys.modules
 
 
 def test_pod_rejects_disabled_runtime_jit_override(tmp_path, monkeypatch):

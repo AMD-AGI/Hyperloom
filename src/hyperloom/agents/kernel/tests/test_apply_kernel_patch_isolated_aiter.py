@@ -56,16 +56,37 @@ def test_jit_build_dir_falls_back_to_isolated_venv(akp, tmp_path, monkeypatch):
     venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
     # Main process cannot import aiter.
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
 
     assert akp._aiter_jit_build_dir() == aiter_pkg / "jit" / "build"
 
 
 def test_jit_build_dir_none_without_isolated_venv(akp, monkeypatch):
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
 
     assert akp._aiter_jit_build_dir() is None
+
+
+def test_runtime_trust_discovers_the_package_once_without_importing(akp, tmp_path, monkeypatch):
+    _venv, package = _make_isolated_aiter(tmp_path)
+    (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.syspath_prepend(str(package.parent))
+    jit = tmp_path / "runtime" / "build"
+    monkeypatch.setenv("AITER_JIT_DIR", str(jit.parent))
+    find_spec = importlib.util.find_spec
+    discovered = []
+
+    def discover_once(name):
+        discovered.append(name)
+        return find_spec(name) if len(discovered) == 1 else None
+
+    monkeypatch.setattr(importlib.util, "find_spec", discover_once)
+
+    assert akp._trusted_aiter_jit_build_dir(jit) is True
+    assert discovered == ["aiter"]
+    assert "aiter" not in sys.modules
 
 
 def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tmp_path, monkeypatch):
@@ -264,7 +285,7 @@ def test_jit_transaction_restores_top_level_modules_and_build_for_known_layouts(
     assert record["status"] == "ok", record
     assert record["src"] == str(build)
     assert record["build_existed"] is True
-    assert record["modules_invalidated"] is True
+    assert record["module_scope"] is None
     assert record["module_names"] == [served.name]
     saved_build = Path(record["backup_path"])
     saved_modules = Path(record["modules_backup_path"])
@@ -481,7 +502,7 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
     monkeypatch.setattr(
         akp,
@@ -539,7 +560,7 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
     monkeypatch.setattr(
         akp,
@@ -753,7 +774,7 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
     vllm = site / "vllm"
     vllm.mkdir()
@@ -972,7 +993,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     (imported_build / "unrelated.so").write_text("unrelated", encoding="utf-8")
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(
-        akp.importlib.util,
+        akp.aiter_jit_cache.importlib.util,
         "find_spec",
         lambda name: types.SimpleNamespace(submodule_search_locations=[str(import_aiter)]),
     )
@@ -1025,7 +1046,7 @@ def test_installed_custom_cache_requires_restore_trust_before_mutation(
     akp, tmp_path, monkeypatch, snapshot_mode, discoverable
 ):
     venv, package = _make_isolated_aiter(tmp_path)
-    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     if discoverable:
         monkeypatch.setenv("VLLM_VENV_ROOT", str(venv))
@@ -1212,7 +1233,7 @@ def _make_importable_checkout(akp, tmp_path, monkeypatch):
     (package / "jit" / "__init__.py").write_text("", encoding="utf-8")
     (checkout / "csrc" / "kernels").mkdir(parents=True)
     monkeypatch.setattr(
-        akp.importlib.util,
+        akp.aiter_jit_cache.importlib.util,
         "find_spec",
         lambda name: types.SimpleNamespace(submodule_search_locations=[str(package)]),
     )
@@ -1600,6 +1621,33 @@ def test_legacy_build_only_restore_preserves_serving_modules(akp, tmp_path, monk
     assert (build / "baseline.o").read_bytes() == b"baseline build"
 
 
+@pytest.mark.parametrize("scope", ("legacy", None, [], ["module_quant", "module_missing"]))
+def test_manifest_revert_restores_every_clean_scope(akp, tmp_path, monkeypatch, scope):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit/build"
+    (build / "candidate.o").write_bytes(b"candidate build")
+    for name in ("module_quant", "module_missing", "module_unselected"):
+        (build.parent / f"{name}.so").write_bytes(b"candidate")
+    record = {"status": "clean", "src": str(build)}
+    if scope != "legacy":
+        record.update(module_scope=scope, module_names=[], build_existed=False)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    manifest = backups / "manifest.json"
+    manifest.write_text(
+        json.dumps({"strategy": {"jit_build_dir": str(build)}, "jit_build_backup": record}), encoding="utf-8"
+    )
+
+    result = akp.revert_kernel_patch(manifest)
+
+    assert result["status"] == "ok", result
+    assert result["jit_build_restore"]["status"] == "ok"
+    assert not build.exists()
+    for name in ("module_quant", "module_missing", "module_unselected"):
+        removed = scope is None or (isinstance(scope, list) and name in scope)
+        assert (build.parent / f"{name}.so").exists() is not removed
+
+
 @pytest.mark.parametrize("scope", ([], ["module_quant", "module_missing"]))
 def test_restore_obeys_persisted_module_scope(akp, tmp_path, monkeypatch, scope):
     _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
@@ -1610,7 +1658,6 @@ def test_restore_obeys_persisted_module_scope(akp, tmp_path, monkeypatch, scope)
         "status": "clean",
         "src": str(build),
         "build_existed": False,
-        "modules_invalidated": True,
         "module_scope": scope,
         "module_names": [],
     }
