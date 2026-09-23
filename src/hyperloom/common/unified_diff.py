@@ -21,13 +21,17 @@ class FileChange:
 
 
 def parse_unified_diff(patch_text: str) -> list[FileChange]:
-    """Parse a unified diff into per-file added/removed/context line groups."""
+    """Parse a unified diff into per-file added/removed/context line groups.
+
+    A ``diff --git`` header seeds the section's path, so binary, mode-only and
+    pure-rename sections, which carry no ``---``/``+++`` pair, still name their file.
+    """
     changes: list[FileChange] = []
     current: FileChange | None = None
     for raw in (patch_text or "").splitlines():
         if raw.startswith("diff --git"):
-            # New file section; the +++ line below sets the canonical path.
-            current = FileChange(path="")
+            header = raw.split()
+            current = FileChange(path=strip_diff_path(header[3]) if len(header) >= 4 else "")
             changes.append(current)
             continue
         if current is None:
@@ -44,14 +48,14 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             current.is_deleted = True
             continue
         if raw.startswith("+++ "):
-            new_path = _strip_diff_path(raw[4:].strip())
+            new_path = strip_diff_path(raw[4:])
             if new_path == "/dev/null":
                 current.is_deleted = True
             else:
                 current.path = new_path
             continue
         if raw.startswith("--- "):
-            old_path = _strip_diff_path(raw[4:].strip())
+            old_path = strip_diff_path(raw[4:])
             if old_path and old_path != "/dev/null" and not current.path:
                 current.path = old_path
             continue
@@ -67,9 +71,14 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
     return [c for c in changes if c.path and c.path != "/dev/null"]
 
 
-def _strip_diff_path(token: str) -> str:
+def touched_paths(patch_text: str) -> list[str]:
+    """Return the distinct paths a unified diff touches, in diff order (a deletion by its old path)."""
+    return list(dict.fromkeys(change.path for change in parse_unified_diff(patch_text)))
+
+
+def strip_diff_path(token: str) -> str:
     """Normalize a diff path token (strip ``a/``/``b/`` prefix + tab suffix)."""
-    token = token.split("\t", 1)[0].strip()
+    token = token.strip().split("\t", 1)[0].strip()
     if token in ("/dev/null", ""):
         return token
     if token.startswith(("a/", "b/")):
@@ -77,4 +86,12 @@ def _strip_diff_path(token: str) -> str:
     return token
 
 
-__all__ = ["FileChange", "parse_unified_diff"]
+def strip_path_components(path: str, level: int) -> str:
+    """Drop ``level`` leading components like ``git apply -p<level>``, keeping at least the basename."""
+    if level <= 0:
+        return path
+    parts = path.split("/")
+    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
+
+
+__all__ = ["FileChange", "parse_unified_diff", "strip_diff_path", "strip_path_components", "touched_paths"]

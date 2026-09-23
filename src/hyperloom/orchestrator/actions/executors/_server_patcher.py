@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from hyperloom.common.unified_diff import parse_unified_diff
+
 from ._file_lock import best_effort_file_lock
 
 log = logging.getLogger(__name__)
@@ -366,12 +368,7 @@ def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
         # An unreadable patch would silently shrink the sentinel set, which is the detection hole this derivation
         # exists to close.
         text = patch.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            if not line.startswith("+++ "):
-                continue
-            target = line[4:].split("\t", 1)[0].strip()
-            if target and target != "/dev/null":
-                targets.add(target.replace("\\", "/"))
+        targets.update(change.path.replace("\\", "/") for change in parse_unified_diff(text) if not change.is_deleted)
     return frozenset(targets)
 
 

@@ -14,8 +14,9 @@ freeform). It provides:
   merely reported, + numeric-claim regex on the qualitative argument),
 * the cross-domain Critic rule descriptors, surfaced when ``scope == 'domains'``.
 
-Pure / dependency-light: imports only stdlib + git via subprocess so it can be
-imported from the runner, the Critic backend, and tests without cycles.
+Pure / dependency-light: imports only stdlib, git via subprocess, and the
+stdlib-only ``hyperloom.common.unified_diff`` so it can be imported from the
+runner, the Critic backend, and tests without cycles.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
 
 
 # Quantitative / priority fields rejected outright on any patch proposal:
@@ -145,18 +148,8 @@ _GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
 )
 
 
-def _normalize_patch_path(raw: str) -> str:
-    """Strip the header decoration ``git apply -p1`` drops, without judging it."""
-    value = str(raw or "").strip().split("\t", 1)[0]
-    if value in {"", _DEV_NULL}:
-        return value
-    if value.startswith(("a/", "b/")):
-        value = value[2:]
-    return value
-
-
 def _safe_patch_path(raw: str) -> str:
-    value = _normalize_patch_path(raw)
+    value = strip_diff_path(raw)
     if value in {"", _DEV_NULL}:
         return value
     parsed = PurePosixPath(value)
@@ -195,24 +188,6 @@ def parse_patch_targets(patch_text: str) -> ParsedPatchTargets:
     if not existing and not created:
         raise ValueError("patch declares no safe target files")
     return ParsedPatchTargets(tuple(existing), tuple(created))
-
-
-def _strip_path_prefix(path: str, level: int) -> str:
-    """Strip ``level`` leading path components, mimicking ``git apply -p<level>``.
-
-    Args:
-        path: The diff header path to strip.
-        level: Number of leading components to drop (``<= 0`` is a no-op).
-
-    Returns:
-        The path with ``level`` leading components removed (basename floor).
-    """
-    if level <= 0:
-        return path
-    parts = path.split("/")
-    if len(parts) <= level:
-        return parts[-1]
-    return "/".join(parts[level:])
 
 
 def patch_file_targets(patch_text: str) -> list[tuple[str, str]]:
@@ -277,7 +252,7 @@ def patch_targets_missing(
         found = False
         for lvl in strip_levels:
             try:
-                stripped = _strip_path_prefix(old, lvl)
+                stripped = strip_path_components(old, lvl)
                 # A bare filename matches any root holding that name, so deep
                 # strips of a nested path would implicate unrelated repos.
                 if "/" not in stripped and lvl > 1:
@@ -628,7 +603,7 @@ def patch_escapes_tree(patch_text: str) -> str | None:
     """
     for old, new in patch_file_targets(patch_text):
         for raw in (old, new):
-            cand = _normalize_patch_path(raw)
+            cand = strip_diff_path(raw)
             if not cand or cand in _DEV_NULL_PATHS:
                 continue
             if cand.startswith("/") or ".." in PurePosixPath(cand).parts:

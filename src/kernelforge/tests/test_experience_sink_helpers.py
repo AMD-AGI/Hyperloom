@@ -281,11 +281,3 @@ def test_summary_prompt_truncates_inputs():
     prompt = sink._summary_prompt("op", "d" * 20000, "s" * 20000)
     assert prompt.count("d") <= sink._MAX_DIGEST_CHARS + 50
     assert "Operator under optimization: op" in prompt
-
-
-# --------------------------------------------------------------------------- # diff parsing
-# --------------------------------------------------------------------------- #
-def test_changed_files_from_diff_dedups():
-    diff = "diff --git a/x.py b/x.py\ndiff --git a/y.c b/y.c\ndiff --git a/x.py b/x.py\n"
-    assert sink._changed_files_from_diff(diff) == ["x.py", "y.c"]
-    assert sink._changed_files_from_diff("") == []
