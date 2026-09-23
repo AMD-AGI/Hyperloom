@@ -20,7 +20,8 @@ hyperloom-kb-fleet-serve \
 ```
 
 The service starts with an empty catalog. This keeps the demo trace explicit:
-Run A creates three Experiences; no older or bundled corpus is loaded.
+Run A creates however many measured Experiences its attempts produce; no older
+or bundled corpus is loaded.
 
 The process also needs `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
 `LOCAL_KB_PLANNER_MODEL`, `HYPERLOOM_FLEET_KB_WORKER_TOKEN`, and a distinct
