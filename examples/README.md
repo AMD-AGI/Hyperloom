@@ -179,9 +179,10 @@ run:
 - [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run on the
   KernelForge kernel backend.
 - [`12h atom`](hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md) — the same run on ATOM,
-  with Docker as the default or direct execution in the development machine's
-  existing ATOM/ROCm Python environment (`baremetal`, even if that platform is a
-  container; no additional Docker). Setup uses `--install-framework none
+  using the user's selected `docker` or `baremetal` mode from setup; if no mode is
+  selected, ask before continuing. `baremetal` uses the development machine's
+  existing ATOM/ROCm Python environment, even if that platform is a container
+  (no additional Docker). Setup uses `--install-framework none
   --frameworks atom --require-frameworks`, first with `--check-only` and then
   with approval if setup is needed. The CLI defaults to KernelForge when no
   backend is selected; explicit choices are preserved, with a warning and

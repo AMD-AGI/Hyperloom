@@ -137,6 +137,18 @@ def _atom_section_blocks(heading: str) -> list[list[str]]:
     return _bash_blocks(section.group(1))
 
 
+def test_atom_run_mode_requires_user_choice() -> None:
+    text = ATOM_DOC.read_text(encoding="utf-8")
+    run_mode = " ".join(text.split("## Run Mode\n", 1)[1].split("### Execution shell", 1)[0].split())
+    assert "Run Mode Resolution" in run_mode
+    assert "ask the user to choose" in run_mode
+    assert "Do not default to either mode" in run_mode
+    assert "or an unset/empty mode" not in text
+    readme = (REPO_ROOT / "examples" / "README.md").read_text(encoding="utf-8")
+    readme_entry = readme.split("- [`12h atom`]", 1)[1].split("- [`", 1)[0]
+    assert "Docker as the default" not in readme_entry
+
+
 @pytest.mark.parametrize("mode", ["baremetal", "docker"])
 def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -> None:
     """Execute the published mode, runtime and launch blocks without launching a GPU process."""
@@ -165,6 +177,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         "RUNTIME_SENTINEL",
         "ATOM_CONTEXT",
         "CLAW_SESSION_ID",
+        "HYPERLOOM_RUN_MODE",
     )
     probe = (
         "import json, os, sys; "
@@ -187,6 +200,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         REAL_PYTHON=Path(sys.executable).as_posix(),
         ATOM_CONTEXT="baremetal",
         CLAW_SESSION_ID="test-harness-session",
+        HYPERLOOM_RUN_MODE=mode,
     )
     docker = """
 docker() {
@@ -222,7 +236,7 @@ docker() {
         fragment,
         workspace,
         exported,
-        dotenv_extra="FRAMEWORK=sglang\nKERNEL_OPT_BACKEND_ORDER=forge\n",
+        dotenv_extra=f"FRAMEWORK=sglang\nKERNEL_OPT_BACKEND_ORDER=forge\nHYPERLOOM_RUN_MODE={'docker' if mode == 'baremetal' else 'baremetal'}\n",
         observed=("REPO_ROOT", "HYPERLOOM_RUN_MODE"),
     )
     record = json.loads((workspace / "launch.json").read_text(encoding="utf-8"))
@@ -245,7 +259,10 @@ docker() {
     assert len(argv[4:]) == 2 * len(expected_flags)
     assert dict(zip(argv[4::2], argv[5::2])) == expected_flags
     assert record["env"] == dict(
-        zip(observed, ("atom", "geak", selected.as_posix(), data.as_posix(), "loaded", mode, "test-harness-session"))
+        zip(
+            observed,
+            ("atom", "geak", selected.as_posix(), data.as_posix(), "loaded", mode, "test-harness-session", mode),
+        )
     )
     assert Path(record["cwd"]) == workspace
     assert record["stdin"] == ""

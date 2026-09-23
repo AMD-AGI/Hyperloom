@@ -13,11 +13,19 @@ uses the same workload and phase budgets as the
 
 ## Run Mode
 
-Use **baremetal** to run directly in the development machine's existing ATOM
-Python environment, or **docker** to start an ATOM container there. A development
-platform that is itself a container still counts as baremetal when no additional
-Docker container is started. ATOM's unset/empty mode still defaults to **docker**;
-unlike the generic example, baremetal must be selected explicitly.
+Follow the setup skill's **Run Mode Resolution**, shared with the vLLM/SGLang
+workflow. Reuse the user's `HYPERLOOM_RUN_MODE` selection (`baremetal` or `docker`)
+from setup, the caller, or `.env`. If no valid selection is available, ask the user
+to choose before setup, container creation, or launch. Do not default to either mode
+or infer a preference from the framework or a previous validation run.
+
+- `docker`: run in an ATOM container on the selected development host.
+- `baremetal`: run directly in that host's existing ATOM/ROCm Python environment.
+  A development platform that is itself a container still counts as baremetal
+  when no additional Docker container is started.
+
+Export the selected `HYPERLOOM_RUN_MODE` in the execution shell and run only its
+matching entry below; both entries use the same Environment and Launch steps.
 
 ### Execution shell
 
@@ -59,7 +67,7 @@ Continue with [Environment](#environment) below; do not run any Docker commands.
 
 ### Docker container
 
-Only for `HYPERLOOM_RUN_MODE=docker` or an unset/empty mode: use the approved
+Only after the user selects `HYPERLOOM_RUN_MODE=docker`: use the approved
 `HYPERLOOM_DOCKER_TARGET_HOST`, or the current development host if unset. Do not
 create containers or run setup/optimize on a login host. Reuse completed setup
 only in the actual execution environment, not a different host Python.
@@ -70,6 +78,7 @@ After approval, mount the workspace at the same absolute path. Add matching
 mounts for `USER_DATA_PATH` and any model directory outside the workspace:
 
 ```bash
+export HYPERLOOM_RUN_MODE=docker
 export REPO_ROOT="$(pwd -P)"
 export HYPERLOOM_IMAGE="${HYPERLOOM_IMAGE:-docker.io/rocm/atom-dev:v0.1.7-rc0}"
 docker run -d \
@@ -94,7 +103,7 @@ existing ATOM environment after entry.
 ```bash
 set -e
 _atom_container_env=()
-for _atom_name in USER_DATA_PATH MODEL_PATH KERNEL_OPT_BACKEND_ORDER CLAW_SESSION_ID \
+for _atom_name in HYPERLOOM_RUN_MODE USER_DATA_PATH MODEL_PATH KERNEL_OPT_BACKEND_ORDER CLAW_SESSION_ID \
   FORGE_AGENT_BACKEND FORGE_AGENT_CLI CLAUDE_MODEL CODEX_MODEL HYPERLOOM_SKILL_PATH \
   ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN OPENAI_API_KEY OPENAI_BASE_URL; do
   if printenv "$_atom_name" > /dev/null; then
