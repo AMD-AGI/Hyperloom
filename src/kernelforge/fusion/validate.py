@@ -18,9 +18,16 @@ Hyperloom's job). The validator this module provides is:
     (b) NUMERICAL PARITY vs the REAL eager op -- compared with the shared SNR
         gate or an rtol fallback, NEVER strict allclose (bf16 + fp32-accum is
         not bit-exact).
-    (c) MICROBENCH speedup -- ``eager_us`` vs ``fused_us``; ``kept`` iff the
-        speedup clears ``target_speedup`` and stays under this module's own
-        absolute plausibility ceiling.
+    (c) MICROBENCH speedup -- ``eager_us`` vs ``fused_us``; the speedup must
+        clear ``target_speedup`` and stay under this module's own absolute
+        plausibility ceiling.
+    (d) LAUNCH COUNT -- ``fused_launches`` must be strictly below
+        ``eager_launches``. Launches are what a fusion buys, and a chain that
+        times faster while adding a scratch-fill or a cast elsewhere has bought
+        nothing; counts the harness could not measure leave this unverified
+        rather than passed.
+
+``kept`` requires (a) through (d).
 
 The GPU/import work lives entirely behind the injectable ``KernelValidationRunner``
 so the orchestration + parity math + ROCm failure-mode classification are unit
@@ -44,7 +51,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
@@ -909,12 +916,18 @@ class BenchOutcome:
 
     ``skipped`` marks a benign unavailability (e.g. the Mamba backend cannot init
     on ROCm) — correctness still counts, but the speedup is unverified.
+
+    The launch counts are per decode step, over the whole step rather than the
+    replaced chain. ``None`` means the harness could not count them, which leaves
+    the launch gate unverified rather than passed.
     """
 
     eager_us: Optional[float] = None
     fused_us: Optional[float] = None
     skipped: bool = False
     skip_reason: str = ""
+    eager_launches: Optional[int] = None
+    fused_launches: Optional[int] = None
 
 
 @runtime_checkable
@@ -996,9 +1009,120 @@ def implausible_speedup_reason(speedup: float) -> str:
     return ""
 
 
+def launch_regression_reason(eager_launches: Optional[int], fused_launches: Optional[int]) -> str:
+    """Why this fusion did not remove launches, or "" when it did.
+
+    The whole lever is launch count, so a candidate that collapses its chain but
+    adds a scratch-fill, a cast or a copy to feed the fused kernel can time
+    faster on the chain and cost more over the decode step. Unknown counts are
+    NOT a regression: the harness may be unable to profile, and failing a correct
+    fusion for that would teach the author to game the number instead of the
+    kernel. :func:`launch_gate_unverified` reports that case separately.
+    """
+    if eager_launches is None or fused_launches is None:
+        return ""
+    eager, fused = int(eager_launches), int(fused_launches)
+    if fused < eager:
+        return ""
+    verdict = "removes no launches" if fused == eager else "ADDS launches"
+    return (
+        f"the fused path {verdict}: {eager} -> {fused} per decode step. Fusion is "
+        f"paid for in launches, not in the timing of the chain alone; find what "
+        f"the fused path launches in addition to the kernel you wrote"
+    )
+
+
+def launch_gate_unverified(eager_launches: Optional[int], fused_launches: Optional[int]) -> bool:
+    """Whether the harness left the launch gate unmeasured."""
+    return eager_launches is None or fused_launches is None
+
+
+def launch_count(value: Any) -> Optional[int]:
+    """One launch count out of harness JSON, or ``None`` when it is not usable.
+
+    A harness that reports a count it did not measure is the failure this guards:
+    anything that is not a non-negative integer reads as "not counted", which
+    leaves the gate unverified instead of silently passing it.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    count = int(value)
+    return count if count >= 0 else None
+
+
 def _tail(text: str, n: int = 400) -> str:
     """Last ``n`` chars of an error blob, single-lined for compact notes."""
     return " ".join((text or "").split())[-n:]
+
+
+def _kernel_match_key(name: str) -> str:
+    """One kernel name reduced to a form two profilers can agree on."""
+    return " ".join(str(name or "").split()).lower()
+
+
+def _same_kernel(expected: str, observed: str) -> bool:
+    """Whether an observed launch is the kernel the trace recorded.
+
+    Kineto and the in-process profiler render the same symbol slightly
+    differently (a dropped ``void``, a differently spelled template argument), so
+    containment either way counts as a match. The names are long mangled
+    signatures, which makes an accidental containment match unlikely enough that
+    tolerance costs less here than a false mismatch would.
+    """
+    want, got = _kernel_match_key(expected), _kernel_match_key(observed)
+    if not want or not got:
+        return False
+    return want == got or want in got or got in want
+
+
+def eager_trace_alignment(
+    observed: Sequence[str],
+    trace_kernels: Optional[dict[str, Any]],
+) -> tuple[Optional[bool], str]:
+    """Whether the harness's eager arm ran the code path the trace recorded.
+
+    Everything the campaign reports -- parity, speedup, both launch counts -- is
+    measured against whatever the eager arm happens to call, and nothing
+    downstream re-checks that choice. A framework that ships two implementations
+    of one chain (a Triton path and a JIT C++ path, say) will happily export
+    plausible names for the dead one, and a harness built against it produces
+    numbers that are internally consistent and describe software nobody runs.
+    Comparing the arm's actual launches against the anchor's recorded
+    neighbourhood is the one cheap check that catches it.
+
+    Returns ``None`` when there is nothing to check -- unanchored discovery
+    records no neighbourhood, and a harness that reports no kernel names leaves
+    the question open rather than answering it "no".
+    """
+    evidence = trace_kernels or {}
+    anchor = str(evidence.get("anchor") or "").strip()
+    if not anchor:
+        return None, "no anchored trace evidence to check the eager arm against"
+    seen = [str(n) for n in (observed or []) if str(n).strip()]
+    if not seen:
+        return None, "harness reported no eager kernel names; alignment unchecked"
+
+    neighbours: list[str] = []
+    for key in ("before", "after"):
+        for name in evidence.get(key) or []:
+            text = str(name).strip()
+            if text and text != anchor and text not in neighbours:
+                neighbours.append(text)
+
+    if not any(_same_kernel(anchor, name) for name in seen):
+        return False, (
+            f"eager arm never launched the anchor kernel ({_tail(anchor, 120)}); "
+            f"it issued {len(seen)} other kernel(s), so it is a different code path"
+        )
+    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in seen)]
+    if neighbours and not matched:
+        return False, (
+            f"eager arm launched the anchor but none of its {len(neighbours)} recorded "
+            "neighbour kernels; it reproduces the anchor in isolation, not the chain"
+        )
+    return True, f"eager arm matched the anchor and {len(matched)}/{len(neighbours)} recorded neighbours"
 
 
 @dataclass(frozen=True)
@@ -1190,7 +1314,10 @@ def validate_recipe(
     if bench.eager_us and bench.fused_us and bench.fused_us > 0:
         speedup = bench.eager_us / bench.fused_us
     implausible = implausible_speedup_reason(speedup) if speedup is not None else ""
-    kept = speedup is not None and not implausible and speedup >= target_speedup
+    # ── gate (d): launch count ───────────────────────────────────────────────
+    regression = launch_regression_reason(bench.eager_launches, bench.fused_launches)
+    unverified = launch_gate_unverified(bench.eager_launches, bench.fused_launches)
+    kept = speedup is not None and not implausible and not regression and speedup >= target_speedup
     if speedup is None:
         note = (
             "PARITY OK but microbench produced no timing (eager_us/fused_us "
@@ -1198,10 +1325,22 @@ def validate_recipe(
         )
     elif implausible:
         note = f"PARITY OK but the microbench is not believable: {implausible}"
+    elif regression:
+        note = (
+            f"PARITY OK and {speedup:.3f}x on the chain, but {regression}. "
+            f"LESSON: count the launches of both arms before optimizing the "
+            f"schedule; a faster chain that costs a launch is not a fusion."
+        )
     elif kept:
         note = (
             f"KEPT: parity OK and {speedup:.3f}x >= {target_speedup:.2f}x target "
-            f"(eager={bench.eager_us} us, fused={bench.fused_us} us)."
+            f"(eager={bench.eager_us} us, fused={bench.fused_us} us"
+            + (
+                "; launches UNVERIFIED — the harness reported no count"
+                if unverified
+                else f"; launches {bench.eager_launches} -> {bench.fused_launches}"
+            )
+            + ")."
         )
     else:
         note = (
@@ -1217,6 +1356,8 @@ def validate_recipe(
         fused_us=bench.fused_us,
         kept=kept,
         note=note,
+        eager_launches=bench.eager_launches,
+        fused_launches=bench.fused_launches,
     )
 
 
@@ -1236,6 +1377,8 @@ class HarnessKernelRunner:
         {"compiled": bool, "is_triton": bool, "error": str,
          "parity": [{"snr_db": float|null, "max_abs_err": float|null, "label": str}],
          "eager_us": float|null, "fused_us": float|null,
+         "eager_launches": int|null, "fused_launches": int|null,
+         "eager_kernels": [str], "eager_matches_trace": bool,
          "skipped": bool, "skip_reason": str}
     """
 
@@ -1300,6 +1443,10 @@ class HarnessKernelRunner:
         self._cache = result
         return result
 
+    def report(self, recipe: Recipe) -> dict:
+        """The harness's raw JSON, for gates that read fields beyond the protocol."""
+        return dict(self._load(recipe))
+
     def compile_check(self, recipe: Recipe) -> CompileOutcome:
         d = self._load(recipe)
         return CompileOutcome(
@@ -1330,6 +1477,8 @@ class HarnessKernelRunner:
             fused_us=d.get("fused_us"),
             skipped=bool(d.get("skipped")),
             skip_reason=str(d.get("skip_reason") or ""),
+            eager_launches=launch_count(d.get("eager_launches")),
+            fused_launches=launch_count(d.get("fused_launches")),
         )
 
 

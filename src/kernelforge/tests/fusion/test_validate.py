@@ -15,6 +15,8 @@ from kernelforge.fusion.validate import (
     ParitySample,
     classify_bench_skip,
     classify_compile_error,
+    eager_trace_alignment,
+    launch_count,
     max_abs_err,
     snr_db,
     validate_recipe,
@@ -172,6 +174,82 @@ class TestValidateRecipe:
         assert "PARITY UNAVAILABLE" in vr.note
 
 
+# ── gate (d): launch count ───────────────────────────────────────────────────
+class TestLaunchGate:
+    """A fusion is bought in launches, so a faster chain that adds one is refused."""
+
+    @staticmethod
+    def _bench(eager_launches, fused_launches):
+        return BenchOutcome(
+            eager_us=120.0,
+            fused_us=60.0,
+            eager_launches=eager_launches,
+            fused_launches=fused_launches,
+        )
+
+    def test_kept_when_the_fused_path_removes_launches(self):
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(6, 2)), target_speedup=1.03)
+        assert vr.kept is True
+        assert (vr.eager_launches, vr.fused_launches) == (6, 2)
+        assert "launches 6 -> 2" in vr.note
+
+    def test_equal_launch_counts_are_refused_despite_a_2x_chain(self):
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(6, 6)), target_speedup=1.03)
+        assert vr.kept is False
+        assert vr.correctness_passed is True  # parity still held
+        assert "removes no launches" in vr.note
+
+    def test_added_launches_are_refused(self):
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(6, 7)), target_speedup=1.03)
+        assert vr.kept is False
+        assert "ADDS launches: 6 -> 7" in vr.note
+
+    def test_uncounted_launches_leave_the_gate_unverified_rather_than_failed(self):
+        """A harness that cannot profile must not fail a correct, faster fusion."""
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(None, None)), target_speedup=1.03)
+        assert vr.kept is True
+        assert "UNVERIFIED" in vr.note
+
+    def test_a_half_reported_count_is_treated_as_uncounted(self):
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(6, None)), target_speedup=1.03)
+        assert vr.kept is True
+        assert "UNVERIFIED" in vr.note
+
+    def test_a_launch_regression_is_refused_before_the_speedup_is_praised(self):
+        """The note must name the launch count, not read as a plain speedup miss."""
+        vr = validate_recipe(_recipe(), _FakeRunner(bench=self._bench(4, 9)), target_speedup=1.03)
+        assert "KEPT" not in vr.note
+        assert "LESSON" in vr.note
+
+    def test_harness_json_launch_counts_reach_the_verdict(self, tmp_path):
+        harness = tmp_path / "kernel_harness.py"
+        payload = {
+            "compiled": True,
+            "is_triton": True,
+            "error": "",
+            "parity": [{"snr_db": 41.0, "max_abs_err": 1e-3, "label": "T16"}],
+            "eager_us": 100.0,
+            "fused_us": 70.0,
+            "eager_launches": 5,
+            "fused_launches": 6,
+            "skipped": False,
+            "skip_reason": "",
+        }
+        harness.write_text("print(%r)\n" % json.dumps(payload), encoding="utf-8")
+        runner = HarnessKernelRunner(str(harness), workdir=str(tmp_path))
+        vr = validate_recipe(_recipe(), runner, target_speedup=1.03)
+        assert vr.kept is False
+        assert "ADDS launches: 5 -> 6" in vr.note
+
+    def test_a_non_integer_count_is_not_trusted(self):
+        """Anything that is not a plain count reads as "not measured", never as a pass."""
+        assert launch_count(True) is None
+        assert launch_count("5") is None
+        assert launch_count(3.5) is None
+        assert launch_count(-1) is None
+        assert launch_count(4.0) == 4
+
+
 # ── HarnessKernelRunner (subprocess boundary) ─────────────────────────────────
 class TestHarnessKernelRunner:
     def test_missing_harness_degrades_to_compile_failure(self):
@@ -202,3 +280,65 @@ class TestHarnessKernelRunner:
         assert vr.correctness_passed is True
         assert vr.kept is True
         assert vr.kernel_speedup and round(vr.kernel_speedup, 2) == round(100.0 / 70.0, 2)
+
+
+# ── Eager-arm provenance (did the harness bench the code path that runs?) ─────
+_ANCHOR = "void at::native::vectorized_elementwise_kernel<4, bfloat16tofloat32_copy>(int)"
+_AFTER = "void sglang::flash_c4_prefill<512l, float, float, float, false>(sglang::Compress4PrefillParams)"
+_TRACE = {"anchor": _ANCHOR, "before": ["void tgemm_bf16(int)"], "after": [_AFTER]}
+
+
+class TestEagerTraceAlignment:
+    def test_the_real_code_path_aligns(self):
+        ok, why = eager_trace_alignment([_ANCHOR, _AFTER, "void memset(int)"], _TRACE)
+        assert ok is True
+        assert "1/2" in why
+
+    def test_a_different_implementation_is_caught(self):
+        """The bug this exists for: a Triton twin of the chain that never runs."""
+        observed = ["triton_hip_compress_forward", "triton_fused_norm_rope_inplace"]
+        ok, why = eager_trace_alignment(observed, _TRACE)
+        assert ok is False
+        assert "never launched the anchor" in why
+
+    def test_the_anchor_alone_is_not_the_chain(self):
+        ok, why = eager_trace_alignment([_ANCHOR, "void unrelated(int)"], _TRACE)
+        assert ok is False
+        assert "not the chain" in why
+
+    def test_profiler_spelling_differences_still_match(self):
+        """Kineto and the in-process profiler render one symbol two ways."""
+        ok, _ = eager_trace_alignment(
+            ["at::native::vectorized_elementwise_kernel<4, bfloat16tofloat32_copy>(int)", _AFTER],
+            _TRACE,
+        )
+        assert ok is True
+
+    def test_unanchored_discovery_has_nothing_to_check(self):
+        assert eager_trace_alignment([_ANCHOR], {})[0] is None
+        assert eager_trace_alignment([_ANCHOR], None)[0] is None
+
+    def test_a_silent_harness_leaves_the_question_open(self):
+        """No names reported is "unchecked", never "wrong" — the gate must not guess."""
+        ok, why = eager_trace_alignment([], _TRACE)
+        assert ok is None
+        assert "unchecked" in why
+
+
+def test_the_span_marks_the_anchor_occurrence_not_every_matching_name():
+    """One kernel can appear twice in a span; only one of them is the anchor."""
+    from kernelforge.fusion.harness_contract import trace_kernels_block
+
+    block = trace_kernels_block(
+        {
+            "anchor": "void copy(int)",
+            "span": [
+                {"name": "void copy(int)", "is_anchor": False},
+                {"name": "void gemm(int)", "is_anchor": False},
+                {"name": "void copy(int)", "is_anchor": True},
+            ],
+        }
+    )
+
+    assert block.count(">> void copy(int)") == 1
+    assert block.count("   void copy(int)") == 2  # the unmarked one, plus the marked line's tail

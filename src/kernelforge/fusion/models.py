@@ -90,6 +90,14 @@ class Recipe:
     compile_pass_note: str = ""
     # Which mechanism located ``source_file``.
     source_resolution_note: str = ""
+    # The GPU kernels the trace actually recorded around the anchor, as
+    # ``{"anchor": str, "before": [...], "after": [...], "span": [...]}``. This is
+    # the only ground truth about WHICH framework code path runs: a source file can
+    # define several implementations of the same chain and export plausible names for
+    # all of them, so a reference picked by name is a guess until its launches are
+    # matched against these. Empty for non-anchored discovery, which has no single
+    # pinned neighbourhood to compare against.
+    trace_kernels: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +121,7 @@ class Recipe:
             "compile_pass_flag": self.compile_pass_flag,
             "compile_pass_note": self.compile_pass_note,
             "source_resolution_note": self.source_resolution_note,
+            "trace_kernels": dict(self.trace_kernels),
         }
 
 
@@ -131,6 +140,11 @@ class ValidationResult:
     # Whether anything compared the fused path against eager. When this is False,
     # ``correctness_passed`` records an absence of evidence, not a parity failure.
     correctness_measured: bool = True
+    # GPU kernel launches per decode step on each arm, over the whole step rather
+    # than the replaced chain. ``None`` means the harness could not count them,
+    # which leaves the launch gate unverified rather than passed.
+    eager_launches: Optional[int] = None
+    fused_launches: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +157,8 @@ class ValidationResult:
             "kernel_speedup": self.kernel_speedup,
             "eager_us": self.eager_us,
             "fused_us": self.fused_us,
+            "eager_launches": self.eager_launches,
+            "fused_launches": self.fused_launches,
             "kept": self.kept,
             "note": self.note,
         }

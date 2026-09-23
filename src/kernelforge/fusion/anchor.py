@@ -11,15 +11,16 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from .discover import (
-    _FUSION_CONSTRAINTS,
     COMPUTE_CATEGORIES,
     LlmFn,
     _output_schema_block,
+    fusion_constraints,
     kernel_names_from_trace,
     parse_discovered_recipes,
+    render_source_files,
     stream_ordered_kernels,
 )
 from .models import Recipe
@@ -310,15 +311,43 @@ def describe_anchor(report: AnchorReport) -> str:
     return "\n".join(lines)
 
 
+def anchor_trace_evidence(report: AnchorReport) -> dict[str, Any]:
+    """The anchor's recorded launches, as ground truth for later stages.
+
+    ``describe_anchor`` renders this for the discovery agent, but discovery's answer
+    is prose: it names source symbols, and those names are what every later stage
+    builds on. Carrying the kernel names forward lets the harness author CHECK the
+    reference it picked instead of trusting the symbol names it was handed.
+    """
+    return {
+        "anchor": report.name,
+        "before": [name for name, _ in (report.before.names if report.before else [])],
+        "after": [name for name, _ in (report.after.names if report.after else [])],
+        # The anchor's position travels as the flag the span was built with rather
+        # than as a name comparison: the same kernel can legitimately appear twice
+        # in one span, and only one of those occurrences is the anchor.
+        "span": [{"name": item["name"], "is_anchor": bool(item["is_anchor"])} for item in report.span],
+    }
+
+
 def build_anchored_discovery_prompt(
     *,
     model_type: str,
     framework: str,
-    source_text: str,
+    source_files: Sequence[str],
     report: AnchorReport,
     shapes: dict[str, Any],
 ) -> str:
     """Assemble a discovery prompt whose target is fixed and whose fusion is not."""
+    multi_file = len(source_files) > 1
+    source_block = render_source_files(source_files, model_type=model_type, framework=framework)
+    reach = (
+        "If the anchor's neighbours are not reachable from ANY of these files, say so\n"
+        "by proposing the largest fusion that IS reachable and including the anchor."
+        if multi_file
+        else "If the anchor's neighbours are not reachable from this source file, say so\n"
+        "by proposing the largest fusion that IS reachable and including the anchor."
+    )
     return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
 to find a SOURCE-LEVEL KERNEL FUSION built around ONE kernel the operator named.
 Analyze only; do not edit anything. Return your answer as JSON (schema below).
@@ -339,21 +368,17 @@ only when that kernel is not a tuned library call (see the constraints below).
 Representative decode shapes: {shapes}
 
 ## Your task
-Read the model source below and propose the fusion (or at most 2 alternatives) that
+Read the source below and propose the fusion (or at most 2 alternatives) that
 collapses this anchor into its neighbours. Name the exact call site you would
-replace. If the anchor's neighbours are not reachable from this source file, say so
-by proposing the largest fusion that IS reachable and including the anchor.
+replace. {reach}
 
-{_FUSION_CONSTRAINTS}
+{fusion_constraints(multi_file)}
 - The anchor kernel must be part of every proposal. A proposal that does not
   include it answers a question nobody asked.
 
-{_output_schema_block(model_type)}
+{_output_schema_block(model_type, multi_file=multi_file)}
 
-## Model source (`{model_type}` in {framework})
-```python
-{source_text}
-```
+{source_block}
 """
 
 
@@ -368,25 +393,38 @@ def discover_anchored_recipes(
     category_shares: Optional[dict[str, float]] = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    extra_source_files: Sequence[str] = (),
 ) -> list[Recipe]:
     """Propose fusions built around one named kernel.
 
     Unlike :func:`discover.discover_recipes` this does not consult the diagnosis
     verdict: the operator named a kernel, which overrides a trace-wide judgement
     that there was nothing worth fusing.
+
+    ``extra_source_files`` are shown alongside ``source_file`` and are equally
+    proposable. The anchor's chain frequently lives in one of them -- the model
+    file often reaches it through a single opaque call whose operands are not
+    local names there -- and a prompt showing only the model file forces the
+    answer to be a smaller chain that happens to be local to it.
     """
-    try:
-        source_text = Path(source_file).read_text(encoding="utf-8") if source_file else ""
-    except OSError:
-        source_text = ""
-    if not source_text:
+    in_scope: list[str] = []
+    for path in [source_file, *extra_source_files]:
+        if path and path not in in_scope and Path(path).is_file():
+            in_scope.append(path)
+    if not in_scope:
         log.warning("anchored discovery: model source unreadable (%s); cannot propose a fusion", source_file)
         return []
+    if len(in_scope) > 1:
+        log.info(
+            "anchored discovery: %d in-scope file(s): %s",
+            len(in_scope),
+            ", ".join(Path(p).name for p in in_scope),
+        )
 
     prompt = build_anchored_discovery_prompt(
         model_type=model_type,
         framework=framework,
-        source_text=source_text,
+        source_files=in_scope,
         report=report,
         shapes=shapes,
     )
@@ -400,7 +438,11 @@ def discover_anchored_recipes(
         pass_probe=pass_probe,
         framework_root=framework_root,
         explicit_target=True,
+        in_scope_files=in_scope,
     )
+    evidence = anchor_trace_evidence(report)
+    for recipe in recipes:
+        recipe.trace_kernels = dict(evidence)
     log.info(
         "anchored discovery proposed %d fusion(s) around %s: %s",
         len(recipes),
@@ -415,6 +457,7 @@ __all__ = [
     "AnchorResolutionError",
     "KernelAnchor",
     "Slot",
+    "anchor_trace_evidence",
     "build_anchored_discovery_prompt",
     "collapse_whitespace",
     "describe_anchor",

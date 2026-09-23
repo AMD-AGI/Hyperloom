@@ -14,7 +14,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
@@ -518,10 +518,7 @@ def declared_traits(item: Any) -> list[str]:
     return _declared_terms(item, "traits", FUSION_TRAIT_VOCAB)
 
 
-# Shared by every discovery prompt: the rules that decide whether a proposal can be wired at all.
-_FUSION_CONSTRAINTS = """Constraints for each proposed fusion:
-- Must be a real contiguous chain in this source (name the exact functions/methods).
-- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+_SCOPE_SINGLE = """- SCOPE — the single hardest constraint, and the one that wastes a whole run when
   it is broken. The fusion is delivered by REPLACING one call site in the source
   file printed below, so the entire chain must live inside THAT file, and every
   tensor your kernel takes as input must already be a local name at that call
@@ -535,8 +532,34 @@ _FUSION_CONSTRAINTS = """Constraints for each proposed fusion:
   end-to-end even when its microbenchmark is 30x.
 - One patch, one file. If two different modules each hold a fusible chain,
   propose them as two SEPARATE entries, each self-contained in its own file --
-  never one entry spanning both.
-- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
+  never one entry spanning both."""
+
+_SCOPE_MULTI = """- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+  it is broken. EVERY file printed below is in scope and editable, so the call
+  site you replace may live in ANY of them; say which one in "source_file". The
+  chain must live inside that one file, and every tensor your kernel takes as
+  input must already be a local name at the call site you name. Do not fuse
+  across a boundary into a module that is NOT printed below: not into a method
+  defined in an unlisted module (an imported `XMLP`, an imported norm class), and
+  not into work the framework performs below the call (in vLLM the KV-cache write
+  happens inside the attention backend, so `key_cache` / `value_cache` /
+  `slot_mapping` are NOT reachable from a model `forward` and a fusion folding
+  them in cannot be wired). Before proposing, name the exact call site and check
+  that every input is in scope there. A chain that fails this test is worth zero
+  end-to-end even when its microbenchmark is 30x.
+- Several files are listed precisely because the chain worth fusing often does
+  NOT live in the model file: the model file frequently reaches it through one
+  opaque call (`attn_backend.forward_xxx(...)`, `self.indexer(...)`) whose
+  operands are not local names there. When that is what you find, do NOT fall
+  back to a smaller chain that happens to be local to the model file. Follow the
+  call into whichever listed file actually performs the work and propose the
+  fusion THERE, naming that file in "source_file". A big chain wired in the file
+  that owns it beats a minor chain wired where it was convenient.
+- One patch, one file. If two different listed modules each hold a fusible chain,
+  propose them as two SEPARATE entries, each self-contained in its own file --
+  never one entry spanning both."""
+
+_FUSION_CONSTRAINTS_TAIL = """- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
   framework CUDA-only fused op.
 - Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
   their semantics, dtype, shape, and cache layout match.
@@ -556,8 +579,51 @@ _FUSION_CONSTRAINTS = """Constraints for each proposed fusion:
   (say which symbol to import), never a re-derivation."""
 
 
-def _output_schema_block(model_type: str) -> str:
+def fusion_constraints(multi_file: bool = False) -> str:
+    """The rules that decide whether a proposal can be wired at all.
+
+    Scope is the only rule that changes with the number of in-scope files, and it
+    inverts: with one file the model must stay inside it, with several it must
+    stop retreating into the first one.
+    """
+    scope = _SCOPE_MULTI if multi_file else _SCOPE_SINGLE
+    return f"""Constraints for each proposed fusion:
+- Must be a real contiguous chain in this source (name the exact functions/methods).
+{scope}
+{_FUSION_CONSTRAINTS_TAIL}"""
+
+
+def render_source_files(source_files: Sequence[str], *, model_type: str, framework: str) -> str:
+    """Embed each in-scope file under its own path heading.
+
+    The path is the label the model answers with in ``source_file``, so it is
+    printed exactly as it will have to be matched back.
+    """
+    blocks: list[str] = []
+    for path in source_files:
+        text = _read_source(path)
+        if not text:
+            continue
+        blocks.append(f"### {path}\n```python\n{text}\n```")
+    if not blocks:
+        return ""
+    if len(blocks) == 1:
+        return f"## Model source (`{model_type}` in {framework})\n{blocks[0]}"
+    return (
+        f"## In-scope source files (`{model_type}` in {framework})\n"
+        f"All {len(blocks)} files below are editable. Name the one holding your call "
+        'site in "source_file".\n\n' + "\n\n".join(blocks)
+    )
+
+
+def _output_schema_block(model_type: str, *, multi_file: bool = False) -> str:
     """The JSON contract every discovery prompt asks the model to answer in."""
+    source_field = (
+        '  "source_file": "<exact path, copied from one of the headings above, of '
+        'the file holding the call site you would replace>",\n'
+        if multi_file
+        else ""
+    )
     return f"""## Output — a single JSON array (and nothing after it). Be TERSE to fit the
 ## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
 ## sentence. Each element:
@@ -580,7 +646,7 @@ def _output_schema_block(model_type: str) -> str:
           performs, so they do NOT belong in "ops". Omit the field when none
           apply.>],
   "source_anchors": ["<symbol/line to grep>", "..."],
-  "fusion_math": "<what the fused kernel computes, precisely>",
+{source_field}  "fusion_math": "<what the fused kernel computes, precisely>",
   "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
   "candidate_kind": "<integration|new_fusion|replacement>",
   "existing_operator": "<operator name when candidate_kind=integration, else empty>",
@@ -599,8 +665,19 @@ def build_discovery_prompt(
     max_fusions: int = _DEFAULT_MAX_FUSIONS,
     ordered_boundaries: Optional[list[dict[str, Any]]] = None,
     existing_operator_hints: Optional[list[dict[str, str]]] = None,
+    source_files: Sequence[str] = (),
 ) -> str:
-    """Assemble the discovery prompt from runtime, source, and operator evidence."""
+    """Assemble the discovery prompt from runtime, source, and operator evidence.
+
+    ``source_files`` widens the prompt to every in-scope file; without it the
+    single ``source_text`` block is rendered as before.
+    """
+    multi_file = len(source_files) > 1
+    source_block = (
+        render_source_files(source_files, model_type=model_type, framework=framework)
+        if multi_file
+        else f"## Model source (`{model_type}` in {framework})\n```python\n{source_text}\n```"
+    )
     lb = ", ".join(sorted(LAUNCH_BOUND_CATEGORIES))
     hot_lines = "\n".join(
         f"  - {k['category']:11s} {k['share'] * 100:5.1f}%  (n={k['count']}, avg={k['avg_us']:.1f}us)  {k['name'][:90]}"
@@ -677,14 +754,11 @@ that covers a larger boundary as an `integration` candidate and benchmark/wire i
 before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
 runs back-to-back on the decode path.
 
-{_FUSION_CONSTRAINTS}
+{fusion_constraints(multi_file)}
 
-{_output_schema_block(model_type)}
+{_output_schema_block(model_type, multi_file=multi_file)}
 
-## Model source (`{model_type}` in {framework})
-```python
-{source_text}
-```
+{source_block}
 """
 
 
@@ -824,6 +898,36 @@ def _norm_env_flag(flag: str, model_type: str) -> str:
     return f
 
 
+def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], default: str) -> str:
+    """Map a proposal's claimed call-site file onto one the run actually offered.
+
+    The model is asked to copy a path back verbatim, and mostly does; a trailing
+    component still identifies the file unambiguously when it does not. Anything
+    that matches nothing falls back to the primary file rather than inventing a
+    target the loop cannot track.
+    """
+    claimed = str(value or "").strip()
+    if not claimed or not in_scope_files:
+        return default
+    for path in in_scope_files:
+        if claimed == path:
+            return path
+    claimed_parts = Path(claimed).parts
+    for path in in_scope_files:
+        parts = Path(path).parts
+        if claimed_parts and parts[-len(claimed_parts) :] == claimed_parts:
+            return path
+    for path in in_scope_files:
+        if Path(path).name == Path(claimed).name:
+            return path
+    log.warning(
+        "discovery: proposed source_file %r matches no in-scope file; using %s",
+        claimed[:120],
+        Path(default).name or default,
+    )
+    return default
+
+
 def parse_discovered_recipes(
     text: str,
     *,
@@ -835,17 +939,24 @@ def parse_discovered_recipes(
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
     explicit_target: bool = False,
+    in_scope_files: Sequence[str] = (),
 ) -> list[Recipe]:
     """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
 
     ``explicit_target`` marks a run whose target an operator named. The scope gate
     then warns instead of dropping: it recognizes nine coarse terms, so it can reject
     a wireable chain, and discarding what was explicitly asked for hides that.
+
+    ``in_scope_files`` lists every file the prompt embedded. A proposal may name
+    any of them as its call site, and the scope gate judges against all of them --
+    it must see the same source the model did, or it drops chains for being
+    "outside" a file they were never claimed to be in.
     """
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    # The same file the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
+    scope_files = [p for p in (in_scope_files or [source_file]) if p]
+    # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
     # the model was shown.
-    source_text = _read_source(source_file)
+    source_text = "\n".join(_read_source(path) for path in scope_files)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
         name = str(item.get("name") or f"discovered_{i + 1}").strip()
@@ -892,7 +1003,7 @@ def parse_discovered_recipes(
                 "keeping operator-named" if explicit_target else "dropping",
                 name,
                 ",".join(outside),
-                Path(source_file).name or source_file,
+                ", ".join(Path(p).name or p for p in scope_files),
             )
             if not explicit_target:
                 continue
@@ -952,12 +1063,18 @@ def parse_discovered_recipes(
         # the kind while silently skipping the constraint.
         if candidate_kind == "integration" and not existing_operator:
             candidate_kind = "new_fusion"
+        # Which file this proposal wires itself into. With one in-scope file this is
+        # always that file; with several the model chose, and the choice decides
+        # what the loop tracks and what the wiring gate later inspects.
+        proposed_file = resolve_proposed_source_file(item.get("source_file"), scope_files, source_file)
+        if proposed_file != source_file:
+            log.info("discovery: %s wires into %s", name, Path(proposed_file).name or proposed_file)
         out.append(
             Recipe(
                 pattern_id=f"llm:{name}",
                 description=str(item.get("rationale") or op_chain or name)[:300],
                 env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), model_type),
-                source_file=source_file,
+                source_file=proposed_file,
                 source_hints=[str(a) for a in anchors],
                 fusion_math=fusion_math,
                 eager_reference_hint=str(item.get("eager_reference") or ""),

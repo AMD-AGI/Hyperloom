@@ -18,6 +18,7 @@ from kernelforge.fusion.anchor import (
     describe_anchor,
     resolve_anchor,
 )
+from kernelforge.fusion.discover import resolve_proposed_source_file
 
 ANCHOR = (
     "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda"
@@ -262,10 +263,13 @@ class TestPromptEvidence:
         trace = _gemm_cast_attention(tmp_path / "d.trace.json")
         report = resolve_anchor(trace, KernelAnchor(name=ANCHOR))
 
+        model = tmp_path / "deepseek_v4.py"
+        model.write_text("class DeepseekV4Attention:\n    def forward(self): ...\n", encoding="utf-8")
+
         prompt = build_anchored_discovery_prompt(
             model_type="deepseek_v4",
             framework="sglang",
-            source_text="class DeepseekV4Attention:\n    def forward(self): ...\n",
+            source_files=[str(model)],
             report=report,
             shapes={"hidden_size": 2048},
         )
@@ -276,6 +280,32 @@ class TestPromptEvidence:
         # The scope constraint is what keeps a proposal wireable; it must survive into this prompt too.
         assert "SCOPE" in prompt
         assert "class DeepseekV4Attention" in prompt
+        # One file must still read as the single-file case, or the model is told to
+        # pick a call-site file when it has no choice to make.
+        assert "EVERY file printed below" not in prompt
+
+    def test_every_in_scope_file_reaches_the_prompt(self, tmp_path):
+        """The anchor's chain usually lives past the model file's opaque call."""
+        trace = _gemm_cast_attention(tmp_path / "d.trace.json")
+        report = resolve_anchor(trace, KernelAnchor(name=ANCHOR))
+        model = tmp_path / "deepseek_v4.py"
+        model.write_text("def forward(x):\n    return backend.forward_core_compressor(x)\n", encoding="utf-8")
+        compressor = tmp_path / "compressor.py"
+        compressor.write_text("def _compute_wkv_gate(x, w):\n    return linear_bf16_fp32(x, w)\n", encoding="utf-8")
+
+        prompt = build_anchored_discovery_prompt(
+            model_type="deepseek_v4",
+            framework="sglang",
+            source_files=[str(model), str(compressor)],
+            report=report,
+            shapes={"hidden_size": 2048},
+        )
+
+        assert "forward_core_compressor" in prompt
+        assert "_compute_wkv_gate" in prompt
+        assert str(compressor) in prompt  # the heading it must copy into "source_file"
+        assert "EVERY file printed below" in prompt
+        assert '"source_file"' in prompt
 
     def test_the_description_names_both_sides(self, tmp_path):
         trace = _gemm_cast_attention(tmp_path / "d.trace.json")
@@ -291,3 +321,34 @@ def test_collapse_whitespace_leaves_template_parameters_alone():
     """Only whitespace may be normalized: template parameters decide which kernel this is."""
     assert collapse_whitespace("a<4,\n  b>  (int)") == "a<4, b> (int)"
     assert collapse_whitespace("hgemm_SPK4") != collapse_whitespace("hgemm_SPK7")
+
+
+class TestProposedSourceFileRouting:
+    """Which in-scope file a proposal wires itself into.
+
+    Discovery is asked to copy a path back verbatim. Accepting a shorter but
+    unambiguous answer keeps a good proposal from being silently re-pointed at
+    the model file, which is how a chain ends up wired where it does not live.
+    """
+
+    FILES = ["/fw/models/deepseek_v4.py", "/fw/kernels/gemm.py", "/fw/layers/compressor.py"]
+
+    def test_an_exact_path_is_taken(self):
+        assert (
+            resolve_proposed_source_file("/fw/layers/compressor.py", self.FILES, self.FILES[0])
+            == "/fw/layers/compressor.py"
+        )
+
+    def test_a_bare_filename_still_identifies_the_file(self):
+        assert resolve_proposed_source_file("compressor.py", self.FILES, self.FILES[0]) == "/fw/layers/compressor.py"
+
+    def test_a_trailing_path_fragment_resolves(self):
+        assert resolve_proposed_source_file("layers/compressor.py", self.FILES, self.FILES[0]) == "/fw/layers/compressor.py"
+
+    def test_an_unlisted_file_falls_back_to_the_primary(self):
+        """An invented target is one the loop cannot track, keep, or revert."""
+        assert resolve_proposed_source_file("/fw/other/indexer.py", self.FILES, self.FILES[0]) == self.FILES[0]
+
+    def test_no_answer_falls_back_to_the_primary(self):
+        assert resolve_proposed_source_file("", self.FILES, self.FILES[0]) == self.FILES[0]
+        assert resolve_proposed_source_file(None, self.FILES, self.FILES[0]) == self.FILES[0]

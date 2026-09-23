@@ -68,6 +68,7 @@ from .validate import (
     DEFAULT_TARGET_SPEEDUP,
     KERNEL_KEEP_CHECKPOINT,
     HarnessKernelRunner,
+    eager_trace_alignment,
     fused_symbol_invocation_evidence,
     serving_smoke,
     serving_smoke_verdict,
@@ -288,6 +289,47 @@ def _finish_author_harness(
     return ok, reason
 
 
+def _harness_alignment_attempts() -> int:
+    """How many times the harness may be re-authored onto the right code path."""
+    raw = os.environ.get("FORGE_HARNESS_ALIGN_ATTEMPTS", "3")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        log.warning("bad FORGE_HARNESS_ALIGN_ATTEMPTS=%r; using 3", raw)
+        return 3
+
+
+def _probe_eager_alignment(
+    recipe,
+    *,
+    harness_path: str,
+    repo_root: str,
+    gpu: str,
+) -> tuple[Optional[bool], str, list[str]]:
+    """Run the fresh harness once and check its eager arm against the trace.
+
+    This costs one harness run before the campaign starts, which buys the only
+    chance to catch a baseline measured against the wrong implementation. Once
+    the loop is running, every number it produces is relative to this arm and
+    nothing re-examines it.
+    """
+    runner = HarnessKernelRunner(
+        harness_path=harness_path,
+        workdir=repo_root or ".",
+        framework_root=repo_root,
+        gpu=gpu,
+        env_flags={f: "1" for f in recipe.env_flag.split()},
+    )
+    report = runner.report(recipe)
+    observed = [str(k) for k in (report.get("eager_kernels") or []) if str(k).strip()]
+    aligned, reason = eager_trace_alignment(observed, getattr(recipe, "trace_kernels", {}))
+    if aligned is None and report.get("eager_matches_trace") is False:
+        # The harness could not name the kernels but knows it did not match. Its own
+        # verdict is worth more than our inability to check it.
+        return False, "harness reported eager_matches_trace=false", observed
+    return aligned, reason, observed
+
+
 def _author_baseline_harness(
     recipe,
     *,
@@ -299,36 +341,100 @@ def _author_baseline_harness(
     max_turns: int,
     backend,
 ) -> tuple[bool, str]:
-    """Write the harness ``recipe``'s campaign benchmarks, before it starts."""
-    Path(harness_path).unlink(missing_ok=True)
-    staging = _author_harness_target(repo_root, out)
-    ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
-    if not ready:
-        return False, reason
-    target = staging or harness_path
-    prompt = (
-        build_campaign_program_md(recipe, harness_path="")
-        + harness_contract(target, recipe.env_flag)
-        + "\nWrite ONLY that harness. Do not edit the framework source and do "
-        "not create any other file; the fused kernel is authored after this.\n"
-    )
-    (out / "harness_prompt.md").write_text(prompt, encoding="utf-8")
-    rc = run_author(
-        prompt,
-        workdir=repo_root or ".",
-        log_path=str(out / "harness_author.log"),
-        gpu=gpu,
-        model=llm_model,
-        max_turns=max_turns,
-        backend=backend,
-        timeout_s=_agent_timeout_sec(),
-        target_files=[target],
-        new_module_dirs=[],
-    )
-    published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
-    if rc != 0:
-        return False, f"harness author exited {rc}"
-    return published, error
+    """Write the harness ``recipe``'s campaign benchmarks, before it starts.
+
+    The harness is re-authored while its eager arm demonstrably runs a different
+    code path from the one the trace recorded: a wrong baseline is not a smaller
+    version of a right one, and every later stage inherits it.
+    """
+    attempts = _harness_alignment_attempts()
+    feedback = ""
+    published, error = False, "harness was never authored"
+
+    for attempt in range(1, attempts + 1):
+        Path(harness_path).unlink(missing_ok=True)
+        staging = _author_harness_target(repo_root, out)
+        ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
+        if not ready:
+            return False, reason
+        target = staging or harness_path
+        prompt = (
+            build_campaign_program_md(recipe, harness_path="")
+            + harness_contract(target, recipe.env_flag)
+            + "\nWrite ONLY that harness. Do not edit the framework source and do "
+            "not create any other file; the fused kernel is authored after this.\n"
+            + feedback
+        )
+        suffix = "" if attempt == 1 else f".retry{attempt}"
+        (out / f"harness_prompt{suffix}.md").write_text(prompt, encoding="utf-8")
+        rc = run_author(
+            prompt,
+            workdir=repo_root or ".",
+            log_path=str(out / "harness_author.log"),
+            gpu=gpu,
+            model=llm_model,
+            max_turns=max_turns,
+            backend=backend,
+            timeout_s=_agent_timeout_sec(),
+            target_files=[target],
+            new_module_dirs=[],
+        )
+        published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
+        if rc != 0:
+            return False, f"harness author exited {rc}"
+        if not published:
+            return published, error
+
+        aligned, why, observed = _probe_eager_alignment(
+            recipe,
+            harness_path=harness_path,
+            repo_root=repo_root,
+            gpu=gpu,
+        )
+        if aligned is None:
+            log.info("harness eager-arm alignment unchecked: %s", why)
+            return published, error
+        if aligned:
+            log.info("harness eager arm matches the trace: %s", why)
+            return published, error
+
+        log.warning(
+            "harness attempt %d/%d measured the wrong code path: %s",
+            attempt,
+            attempts,
+            why,
+        )
+        feedback = _alignment_feedback(recipe, why, observed)
+
+    return False, f"harness eager arm never matched the traced kernels after {attempts} attempts"
+
+
+def _alignment_feedback(recipe, why: str, observed: list[str]) -> str:
+    """Tell the next harness attempt exactly which code path it actually hit."""
+    evidence = getattr(recipe, "trace_kernels", {}) or {}
+    expected = [str(evidence.get("anchor") or "")]
+    for key in ("before", "after"):
+        expected += [str(n) for n in (evidence.get(key) or [])]
+    expected = [e for e in expected if e]
+    seen = "\n".join(f"    {k}" for k in observed[:20]) or "    (the harness named none)"
+    want = "\n".join(f"    {k}" for k in expected[:20])
+    return f"""
+## Your previous harness measured the WRONG code path — rewrite it
+{why}
+
+Kernels your eager arm actually launched:
+{seen}
+
+Kernels the trace recorded for this fusion:
+{want}
+
+The functions you called are not the ones that run in the served model. Do not
+adjust the ones you picked: go back to the model's forward pass and follow the
+calls through to whatever issues the kernels above — the module the layer really
+instantiates, the mixin the attention backend really inherits, the branch this
+configuration really takes. Symbols that merely look right are how the previous
+attempt got here. Verify with the profiler before you report anything.
+"""
 
 
 def _author_rc_after_harness(rc: int, *, harness_ok: bool) -> int:
@@ -655,6 +761,10 @@ def run(
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
+    # Without --source-file, extras stay empty here; --repo-scope (later) fills
+    # multi-file scope from discovery instead.
+    _primary_override = ""
+    extra_source_files: tuple[str, ...] = ()
     llm_error: LlmUnavailableError | None = None
     anchor_report = None
     if discover_mode == "anchored":
@@ -693,6 +803,7 @@ def run(
                     model_type=model_type,
                     framework=framework,
                     source_file=source_file,
+                    extra_source_files=extra_source_files,
                     shapes=shapes,
                     report=anchor_report,
                     framework_root=framework_root,
@@ -702,7 +813,9 @@ def run(
                         model=discovery_agent.runtime.model,
                         workdir=_framework_repo_root(source_file, framework_root)
                         or str(Path(source_file).parent if source_file else Path.cwd()),
-                        protected_files=[source_file] if source_file else [],
+                        # Discovery is read-only, so every file it is shown is
+                        # snapshotted and restored, not just the primary.
+                        protected_files=[p for p in (source_file, *extra_source_files) if p],
                         log_path=str(out / "discovery_llm.txt"),
                     ),
                 )
