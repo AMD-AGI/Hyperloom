@@ -548,6 +548,8 @@ class TestDriverShim:
 
     def test_a_microbench_that_ran_and_timed_nothing_fails_the_iteration(self, tmp_path):
         """No skip, no fused time: the harness claims it benchmarked and has no number to show."""
+        fused = tmp_path / "model_fused.py"
+        fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
         proc = self._run(
             tmp_path,
             {
@@ -560,6 +562,7 @@ class TestDriverShim:
                 "skipped": False,
                 "skip_reason": "",
             },
+            fused_module=str(fused),
         )
 
         assert proc.returncode == 1
@@ -567,6 +570,31 @@ class TestDriverShim:
         # The eager time standing in for the fused arm is exactly what made this look like a clean 1.0x run.
         assert "case_ms" not in proc.stdout
         assert "SKIPPED" not in proc.stdout
+
+    def test_an_untimed_fused_arm_still_anchors_before_any_kernel_exists(self, tmp_path):
+        """The pristine bench has no fused arm to time, so a null fused time is the baseline, not a failure."""
+        fused = tmp_path / "model_fused.py"
+        fused.write_text("", encoding="utf-8")  # committed empty by the campaign
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": False,
+                "is_triton": False,
+                "error": "",
+                "parity": [{"snr_db": 999.0, "max_abs_err": 0.0, "label": "T16 (baseline: eager vs eager)"}],
+                "eager_us": 425.0,
+                "fused_us": None,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(fused),
+        )
+
+        # Aborting here would kill the campaign before its first iteration: the loop needs these
+        # pristine per-case timings to score against.
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "case_ms: decode 0.425000" in proc.stdout
+        assert "BENCH MISSING" not in proc.stdout
 
 
 class TestFusedModulePath:
