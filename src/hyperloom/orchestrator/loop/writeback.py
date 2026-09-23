@@ -4963,7 +4963,7 @@ class WritebackCollaborator:
         summary instead.
         """
         outcome.early_return = True
-        # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.
+        # Write last_conc_sweep so exit_normal_sweep can distinguish an honest sweep_done from a no-pair sweep_failed.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
 

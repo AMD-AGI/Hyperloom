@@ -778,8 +778,12 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     """Trace directories to probe for a Magpie profile workspace."""
     return [
         workspace / "torch_trace",
+        workspace,
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
+        # vLLM writes rank traces straight into the run's output dir, which is the
+        # workspace's parent rather than anything under the Magpie workspace.
+        workspace.parent,
     ]
 
 

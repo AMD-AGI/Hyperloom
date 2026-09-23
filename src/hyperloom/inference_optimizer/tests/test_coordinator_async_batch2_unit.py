@@ -1445,7 +1445,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1463,7 +1463,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         ps, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1480,7 +1480,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1498,7 +1498,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1525,7 +1525,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)

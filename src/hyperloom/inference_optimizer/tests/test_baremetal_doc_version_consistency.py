@@ -45,6 +45,11 @@ def test_baremetal_defaults_match_compat_doc():
         "docs/compatibility.rst pip spec must be 'vllm==%s+%s'" % (vllm_version, vllm_variant)
     )
 
+    vllm_source_ref = _default("VLLM_SOURCE_REF", sh)
+    assert vllm_source_ref[:12] in doc, (
+        "docs/compatibility.rst must name the pinned vLLM source commit %s" % vllm_source_ref[:12]
+    )
+
     assert not sglang_ref.startswith("v"), "SGLANG_REF is expected to pin a commit SHA (see docs/compatibility.rst)"
     assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
 

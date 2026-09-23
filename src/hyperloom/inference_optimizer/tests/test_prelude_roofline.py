@@ -281,6 +281,36 @@ def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     assert coord._needs_roofline_for_watermark() is False
 
 
+@pytest.mark.asyncio
+async def test_a_condemned_stack_enqueues_no_analysis_at_all(coord: Coordinator):
+    """``roofline_failure_streak`` only bounds the watermark path, so a stack that can never produce a GPU trace has
+    to be stopped here instead -- cycle_start and the KERNEL re-profile do not pass through that counter.
+    """
+    coord.shared_state.gpu_trace_unsupported_reason = "no GPU kernels on this stack"
+
+    for reason in ("prelude_initial", "cycle_start", "kernel_entry_g1_abc", "close_post_opt"):
+        assert await coord._enqueue_internal_analysis_task(reason=reason) is None
+
+    assert coord.tasks._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_watermark_gate_closes_on_a_condemned_stack(coord: Coordinator):
+    """The watermark gate is consulted before the enqueue, so it must agree rather than arm a task that is dropped."""
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.cumulative_gain_validated = 50.0
+    state.last_roofline_tput = 0.0
+    state.auto_roofline_pending_task_id = ""
+    state.roofline_failure_streak = 1  # anchors on baseline_tput, which is what arms the gate
+    assert coord._needs_roofline_for_watermark() is True
+
+    state.gpu_trace_unsupported_reason = "no GPU kernels on this stack"
+
+    assert coord._needs_roofline_for_watermark() is False
+    assert await coord._maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
+
+
 def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
     """Watermark roofline still profiles the optimized current_best config."""
     coord.shared_state.current_best = {
