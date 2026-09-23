@@ -263,14 +263,8 @@ if VLLM_AVAILABLE:
             USE_CONTEXT_MANAGER = True
             print("API mode: override_config context manager", file=sys.stderr)
         except ImportError:
-            alt_names = ["config", "triton_config", "kernel_config"]
-            for alt in alt_names:
-                if alt in params:
-                    print(f"API mode: alt kwarg '{{alt}}'", file=sys.stderr)
-                    break
-            else:
-                print(f"fused_experts params: {{params}}", file=sys.stderr)
-                VLLM_AVAILABLE = False
+            print(f"fused_experts params: {{params}}", file=sys.stderr)
+            VLLM_AVAILABLE = False
 
 NUM_EXPERTS = _config["num_experts"]
 INTERMEDIATE_SIZE = _config["intermediate_size"]

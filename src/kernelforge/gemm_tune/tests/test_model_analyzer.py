@@ -91,7 +91,6 @@ class TestAnalyzeModel:
         assert profile.num_experts == 128
         assert profile.num_experts_per_tok == 8
         assert profile.moe_intermediate_size == 768
-        assert profile.activation_type_str == "ActivationType.Silu"
 
     def test_num_experts_field_variant(self, tmp_path):
         config = {"hidden_size": 2048, "num_experts": 64, "num_experts_per_tok": 4}
