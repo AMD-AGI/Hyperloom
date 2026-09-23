@@ -646,8 +646,10 @@ log "PYTHON=${PYTHON}"
 # the same interpreter. Otherwise PATH-only resolution can split the
 # installation across two different pythons.
 export PYTHON
-PATH="$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+_ROCM_BIN_ROOT="${ROCM_PATH:-/opt/rocm}"
+PATH="${_ROCM_BIN_ROOT}/llvm/bin:${_ROCM_BIN_ROOT}/bin:$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 export PATH
+unset _ROCM_BIN_ROOT
 
 # --- 0a. Torch compatibility gate (ROCm-aware) ---
 # If rocm-smi reports devices, the resolved PYTHON must already have a

@@ -173,6 +173,7 @@ def render_phase_action_bullets(
 #: stop_reason outside it, so a typo on either side would silently degrade into
 #: "the run did not stop" rather than into an error anyone sees.
 AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
+PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON: str = "prelude_orchestration_unavailable"
 
 
 # stop_reason vocab
@@ -189,6 +190,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "custom",
         "robustness_escalated",
         "prelude_baseline_failed",
+        PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON,
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
@@ -2315,6 +2317,7 @@ __all__ = [
     "PHASE_KERNEL_AGENT",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
+    "PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON",
     "PHASE_SWEEP",
     "STOP_REASON_VOCAB",
     "lifecycle_label",

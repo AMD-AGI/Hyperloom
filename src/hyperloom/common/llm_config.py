@@ -11,6 +11,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -620,6 +621,14 @@ def claude_sdk_env_options(
     source.update(deepseek_compat_env(source))
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
+
+    if not (source.get("NODE_EXTRA_CA_CERTS") or "").strip():
+        for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            raw_candidate = (source.get(name) or "").strip()
+            candidate = Path(raw_candidate).expanduser()
+            if raw_candidate and candidate.is_file():
+                source["NODE_EXTRA_CA_CERTS"] = str(candidate)
+                break
 
     # Anthropic-side credentials only, and only the synthesizable subset: an OAuth token copied into either API-key
     # var would drop the CLI out of subscription mode and 401 the run.

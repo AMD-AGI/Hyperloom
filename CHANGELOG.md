@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **A bounded cold-start gate for long inference campaigns.**
+  `cold_start_check.py` validates the installed runtime, model/GPU state,
+  serving framework, optional Experience KB, trusted gateway TLS, and one real
+  request through the production orchestration backend. It writes a
+  non-secret JSON report and exits before a multi-hour budget is spent when any
+  required capability is unusable.
+
 ### Fixed
 
 - **Experience publication now keeps runtime failures out of KB outcome
@@ -15,6 +24,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   attempts also record the action-time reasoning field that supplied their
   rationale and retain an action/proposal reference, so provenance labels,
   gap summaries, and post-action text cannot impersonate original reasoning.
+
+- **PRELUDE no longer retries a dead orchestration transport for the whole run
+  budget.** An unreachable model catalog now blocks launch even when custom
+  model ids are allowed. If a caller bypasses that gate, a consecutive
+  orchestration-error streak before baseline work exists stops with
+  `prelude_orchestration_unavailable`; an already queued or running baseline is
+  still allowed to finish. This prevents repeated transport errors from
+  inflating the unread prompt until it fails with `Prompt is too long`.
+
+- **Claude orchestration now inherits an existing Python CA bundle when Node
+  trust is otherwise unset.** `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, or
+  `CURL_CA_BUNDLE` is bridged to `NODE_EXTRA_CA_CERTS` only when it names a real
+  file; an explicit Node CA remains authoritative and TLS verification is
+  never disabled.
+
+- **Fresh setup no longer activates example credentials or hides the ROCm
+  compiler behind a reconstructed PATH.** Credential examples in
+  `.env.template` are comments, so auto-created configuration cannot form a
+  phantom OpenAI provider or treat angle brackets as shell syntax. Launcher
+  guidance now preserves the image's existing PATH order when selecting
+  Python, keeping `/opt/rocm/bin/hipcc` ahead of unrelated system shims. The
+  kernel installer also reasserts its Ray/Click compatibility pair after GEAK
+  dependencies, so a successful install passes an immediate `--check-only`
+  instead of leaving a broken Ray CLI.
 
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing

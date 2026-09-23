@@ -1547,6 +1547,10 @@ main() {
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
+  # GEAK's dependency resolver may upgrade Click after Ray's compatibility
+  # pin was established. Re-assert the certified Ray/Click pair last so a
+  # successful install is guaranteed to pass an immediate --check-only.
+  ensure_ray
   _prune_dep_cache "TraceLens" "GEAK"
   ensure_forge_claude_cli
   write_env_file

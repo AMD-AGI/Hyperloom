@@ -649,6 +649,48 @@ def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
     assert "ANTHROPIC_CUSTOM_HEADERS" not in opts["env"]
 
 
+def test_claude_sdk_env_options_bridges_python_ca_to_node(tmp_path: Path):
+    ca_bundle = tmp_path / "internal-ca.pem"
+    ca_bundle.write_text("certificate", encoding="utf-8")
+
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "SSL_CERT_FILE": str(ca_bundle),
+        }
+    )
+
+    assert opts["env"]["NODE_EXTRA_CA_CERTS"] == str(ca_bundle)
+
+
+def test_claude_sdk_env_options_preserves_explicit_node_ca(tmp_path: Path):
+    python_ca = tmp_path / "python-ca.pem"
+    node_ca = tmp_path / "node-ca.pem"
+    python_ca.write_text("python", encoding="utf-8")
+    node_ca.write_text("node", encoding="utf-8")
+
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "SSL_CERT_FILE": str(python_ca),
+            "NODE_EXTRA_CA_CERTS": str(node_ca),
+        }
+    )
+
+    assert opts["env"]["NODE_EXTRA_CA_CERTS"] == str(node_ca)
+
+
+def test_claude_sdk_env_options_does_not_bridge_missing_ca(tmp_path: Path):
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "SSL_CERT_FILE": str(tmp_path / "missing.pem"),
+        }
+    )
+
+    assert "NODE_EXTRA_CA_CERTS" not in opts["env"]
+
+
 # ---- client construction (get_openai_client / get_async_openai_client) ----
 class _FakeSDKClient:
     """Stand-in for an ``openai`` SDK client class; records its kwargs."""

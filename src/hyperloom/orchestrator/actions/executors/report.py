@@ -21,7 +21,10 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
+from ...phases.machine_state import (
+    AGENTX_PREFLIGHT_STOP_REASON,
+    PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON,
+)
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
 
@@ -259,6 +262,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
+    PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON: (
+        "The orchestration backend failed repeatedly before it could enqueue a baseline. "
+        "Run the cold-start check and repair the LLM transport before starting another session."
+    ),
     "time_exhausted_during_prelude": (
         "The session's wall-clock budget ran out during preparation, before optimization began. Whatever PRELUDE "
         "was doing when the clock reached zero — measuring the baseline, bringing up the framework agent, taking "

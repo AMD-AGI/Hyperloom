@@ -189,6 +189,7 @@ except ImportError:
         "target_reached", "global_converged", "time_exhausted", "max_ticks",
         "baseline_failed", "prelude_baseline_failed", "emergency", "signal",
         "unknown", "custom", "time_exhausted_during_prelude",
+        "prelude_orchestration_unavailable",
         "model_context_window_too_small", "unsupported_model_arch",
         "model_config_incompatible", "baseline_accuracy_failed",
     })

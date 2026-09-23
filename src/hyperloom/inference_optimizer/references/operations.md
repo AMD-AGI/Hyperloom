@@ -55,12 +55,24 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
-export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH="${ROCM_PATH:-/opt/rocm}/llvm/bin:${ROCM_PATH:-/opt/rocm}/bin:$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
 ```
 
-Then run the outer launcher preflight (IR-1):
+On a fresh host, image, container, or checkout, run the bounded cold-start
+check. It includes the outer launcher preflight (IR-1) and a real orchestration
+backend request:
+
+```bash
+"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/cold_start_check.py" \
+  --model "$MODEL_PATH" \
+  --framework "${FRAMEWORK:-sglang}" \
+  --output "$USER_DATA_PATH/optimizer_runs/cold_start_$(date -u +%Y%m%dT%H%M%SZ).json"
+```
+
+On an already-proven environment, or immediately before a replacement launch,
+run the narrower outer launcher preflight:
 
 ```bash
 "$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH" \

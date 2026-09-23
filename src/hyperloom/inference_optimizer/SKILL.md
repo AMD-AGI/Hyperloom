@@ -536,6 +536,27 @@ GEAK runtime variables, and InferenceX path. Source it (don't try to derive thes
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
+### Step 1.25 — Prove a cold environment before spending a long budget
+
+On every new host, image, container, or source checkout, run the bounded
+cold-start check after `install.sh` and before `optimize`:
+
+```bash
+mkdir -p "$USER_DATA_PATH/optimizer_runs"
+python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/cold_start_check.py" \
+  --model "$MODEL_PATH" \
+  --framework "${FRAMEWORK:-sglang}" \
+  --output "$USER_DATA_PATH/optimizer_runs/cold_start_$(date -u +%Y%m%dT%H%M%SZ).json"
+```
+
+Pass `--require-experience-kb` when Experience collection is part of the run.
+The check runs `install.sh --check-only`, the launcher GPU/model gate,
+framework and Experience-KB bootstrap checks, verified gateway TLS, and one
+real request through the production orchestration backend. Any required
+failure exits 2. A PID plus `manifest.json` and `state.json` is not a substitute:
+the environment is ready only after this check succeeds and a short canary
+produces a measured baseline.
+
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side
@@ -731,7 +752,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
-export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH="${ROCM_PATH:-/opt/rocm}/llvm/bin:${ROCM_PATH:-/opt/rocm}/bin:$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"

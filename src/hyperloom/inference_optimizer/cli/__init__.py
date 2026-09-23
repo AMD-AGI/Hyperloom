@@ -715,14 +715,9 @@ def _validate_and_resolve_claude_model(
         return None
 
     if catalog_ids is None:
-        # Auth/network/server/non-JSON/empty-catalog failure: genuinely unverifiable.
-        if allow_custom:
-            print(
-                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
-                f"model support enabled (trusting the operator id)."
-            )
-            return None
+        # Auth/network/server/non-JSON/empty-catalog failure says the transport is
+        # unusable, not merely that ``chosen`` is a custom id. Continuing here
+        # leaves PRELUDE unable to propose even the baseline.
         print(
             "ERROR: gateway catalog unreachable after retries; cannot "
             "verify Claude model availability. Refusing to start.",

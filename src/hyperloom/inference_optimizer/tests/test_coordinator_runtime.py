@@ -574,6 +574,47 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
 
 
 @pytest.mark.asyncio
+async def test_orchestration_error_streak_stops_prelude_before_baseline(session_dir, monkeypatch):
+    """A dead orchestration transport cannot spend the entire run before proposing baseline."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "2")
+    backends = _build_backends({})
+    backends["orchestration"] = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c._reactor_pass("orchestration")
+        assert c.shared_state.stop_reason == ""
+        await c._reactor_pass("orchestration")
+        assert c.shared_state.stop_reason == "prelude_orchestration_unavailable"
+
+        observations = await c.bus.tail(n=20, topic="observation")
+        unhealthy = [row for row in observations if (row.payload or {}).get("kind") == "backend_unhealthy"]
+        assert len(unhealthy) == 1
+        assert "cold-start check" in unhealthy[0].payload["hint"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_error_streak_does_not_abort_running_baseline(session_dir, monkeypatch):
+    """A long baseline already in flight remains allowed to finish."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "2")
+    backends = _build_backends({})
+    backends["orchestration"] = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tasks.create(
+            kind="baseline",
+            params={},
+            idempotency_key="cold-start-baseline",
+        )
+        await c._reactor_pass("orchestration")
+        await c._reactor_pass("orchestration")
+        assert c.shared_state.stop_reason == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_unexpected_backend_exception_records_last_tick_exception(session_dir):
     backends = _build_backends({})
     backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
