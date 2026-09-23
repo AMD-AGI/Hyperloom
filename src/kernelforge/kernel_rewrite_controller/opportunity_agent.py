@@ -19,6 +19,7 @@ from kernelforge.agent_backends.base import (
     AgentBackend,
     AgentHook,
     AgentHooks,
+    AgentRunResult,
     AgentRunSpec,
     AgentToolPolicy,
     with_writable_sandbox,
@@ -206,6 +207,37 @@ class _AnalysisToolGuard:
                     ),
                 }
             }
+
+
+async def _resume_for_refused_staging_drafts(
+    backend: AgentBackend,
+    spec: AgentRunSpec,
+    guard: _AnalysisToolGuard,
+    result: AgentRunResult,
+    *,
+    usage: UsageAccumulator,
+) -> AgentRunResult:
+    """Drive Stop refusals from outside the provider when hooks are not executed."""
+    run_result = result
+    if backend.capabilities.stop_hooks or not backend.capabilities.resumable:
+        return run_result
+    if not hasattr(backend, "resume"):
+        return run_result
+    while True:
+        decision = await guard._on_stop({}, None, None)
+        if decision.get("decision") != "block":
+            break
+        session_id = str(run_result.session_id or "").strip()
+        if not session_id:
+            break
+        feedback = str(decision.get("reason") or "").strip()
+        if not feedback:
+            break
+        try:
+            run_result = await backend.resume(spec, session_id, feedback, usage=usage)
+        except Exception:
+            break
+    return run_result
 
 
 def _ensure_agent_workspace(path: Path) -> None:
@@ -459,8 +491,10 @@ class OpportunityAnalysisAgent:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
-        if not backend.capabilities.stop_hooks:
-            raise ValueError("opportunity analysis requires a provider with tool hooks")
+        if not (backend.capabilities.stop_hooks or backend.capabilities.resumable):
+            raise ValueError(
+                "opportunity analysis requires a provider with tool hooks or a resumable session"
+            )
         self.backend = backend
         self.timeout_sec = int(timeout_sec)
         self.max_turns = int(max_turns)
@@ -476,6 +510,7 @@ class OpportunityAnalysisAgent:
         _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
         usage = UsageAccumulator()
+        tool_guard = _AnalysisToolGuard(layout.agent_staging_root)
         spec = AgentRunSpec(
             role="rewrite opportunity",
             system_prompt=_system_prompt(),
@@ -500,7 +535,7 @@ class OpportunityAnalysisAgent:
                 permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
                 bare=False,
             ),
-            hooks=_AnalysisToolGuard(layout.agent_staging_root).hooks(),
+            hooks=tool_guard.hooks() if self.backend.capabilities.stop_hooks else None,
             progress_log=progress,
         )
 
@@ -535,6 +570,13 @@ class OpportunityAnalysisAgent:
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
+                    agent_result = await _resume_for_refused_staging_drafts(
+                        self.backend,
+                        spec,
+                        tool_guard,
+                        agent_result,
+                        usage=usage,
+                    )
                     end_reason = str(agent_result.end_reason or "").strip()
                     if end_reason == "timeout":
                         status = ANALYSIS_STATUS_TIMED_OUT

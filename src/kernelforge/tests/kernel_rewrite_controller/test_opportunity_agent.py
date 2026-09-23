@@ -413,12 +413,19 @@ def test_incomplete_staging_directory_is_not_published(tmp_path: Path) -> None:
     assert not list(layout.tasks_root.glob("*")) if layout.tasks_root.exists() else True
 
 
-def test_analysis_requires_a_hook_capable_provider() -> None:
+def test_analysis_requires_hooks_or_a_resumable_provider() -> None:
     backend = _Backend(lambda _staging: None)
-    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=False)
 
-    with pytest.raises(ValueError, match="requires a provider with tool hooks"):
+    with pytest.raises(ValueError, match="tool hooks or a resumable session"):
         OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+
+def test_analysis_accepts_a_resumable_hookless_provider() -> None:
+    backend = _Backend(lambda _staging: None)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=True)
+
+    OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
 
 
 def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:

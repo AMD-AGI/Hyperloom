@@ -424,7 +424,6 @@ register_agent_provider(
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,
-            stop_hooks=True,
             native_subagents=True,
             mcp=True,
             sandbox=True,

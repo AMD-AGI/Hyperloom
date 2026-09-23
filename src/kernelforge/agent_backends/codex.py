@@ -369,7 +369,6 @@ class CodexBackend:
         requires_workspace_cwd=True,
         session_env=True,
         workspace_guard=True,
-        stop_hooks=True,
     )
 
     def __init__(
@@ -722,17 +721,6 @@ class CodexBackend:
             raise CodexUnavailableError("Codex gateway precheck returned an empty SDK response")
         return result
 
-    def _materialize_managed_hooks(self, spec: AgentRunSpec, child_env: dict[str, str]) -> None:
-        """Install Codex command hooks when the caller attached Forge hook groups."""
-        if spec.hooks is None:
-            return
-        from kernelforge.agent_backends.codex_managed_hooks import materialize_codex_managed_hooks
-
-        codex_home = Path(child_env.get("CODEX_HOME", "")).expanduser()
-        if not str(codex_home):
-            raise CodexExecutionError("CODEX_HOME is required to materialize managed hooks")
-        materialize_codex_managed_hooks(codex_home=codex_home, spec=spec)
-
     async def _execute(
         self,
         *,
@@ -754,7 +742,6 @@ class CodexBackend:
         try:
             with tempfile.TemporaryDirectory(prefix="forge-codex-git-") as tmpdir:
                 child_env = self._child_environment(_write_git_guard(Path(tmpdir)))
-                self._materialize_managed_hooks(spec, child_env)
                 config = self._sdk_config(
                     sdk=sdk,
                     spec=spec,

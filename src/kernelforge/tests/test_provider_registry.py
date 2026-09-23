@@ -125,14 +125,14 @@ def test_builtin_providers_declare_the_session_environment_they_apply() -> None:
 
 
 def test_only_a_hook_running_provider_declares_stop_hooks() -> None:
-    """stop_hooks gates AgentRunSpec.hooks as a whole.
+    """stop_hooks gates AgentRunSpec.hooks as a whole, and Codex runs none of it.
 
     Claude translates the PreToolUse, PostToolUse and Stop groups through one
-    path keyed on ``spec.hooks is not None``. Codex materializes the same
-    groups as managed command hooks under ``CODEX_HOME`` before each session.
+    path keyed on ``spec.hooks is not None``; Codex has no equivalent, so a
+    session it runs carries no protection hook however the caller builds one.
     """
     assert get_agent_provider("claude").capabilities.stop_hooks
-    assert get_agent_provider("codex").capabilities.stop_hooks
+    assert not get_agent_provider("codex").capabilities.stop_hooks
 
 
 def test_builtin_model_ownership_predicates() -> None:
