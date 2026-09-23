@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import builtins
 import json
 import sys
 from pathlib import Path
@@ -37,44 +36,21 @@ _BYPASS_TRACE_EVENTS = [
 ]
 
 
-def _without_hyperloom(monkeypatch):
-    """Make every ``hyperloom`` import fail, as in a standalone tool invocation."""
-    real_import = builtins.__import__
-
-    def blocked(name, *args, **kwargs):
-        if name.startswith("hyperloom"):
-            raise ImportError("simulated standalone invocation")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
-
-
 class TestDiffusionCeilingGate:
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_the_gate_is_whatever_the_registry_declares(self, framework):
-        """Asserted against the table itself, so a new entry is classified when it is added rather than when someone remembers this call site."""
-        assert tl._has_diffusion_ceiling(framework) is fr.has_denoiser_config(framework)
-
     def test_custom_claims_no_diffusion_ceiling(self):
         """Hyperloom never sees the operator's model, so it cannot bound it."""
-        assert tl._has_diffusion_ceiling("custom") is False
+        assert fr.has_denoiser_config("custom") is False
 
     def test_the_shipped_scriptable_framework_keeps_its_own(self):
-        assert tl._has_diffusion_ceiling("xdit") is True
+        assert fr.has_denoiser_config("xdit") is True
 
     @pytest.mark.parametrize("framework", ["", None, "bogus"])
     def test_unknown_frameworks_claim_none(self, framework):
-        assert tl._has_diffusion_ceiling(framework) is False
+        assert fr.has_denoiser_config(framework) is False
 
     def test_custom_is_still_scriptable(self):
         """The gate narrows the ceiling only; custom keeps the scriptable route (plain pytorch perf report, no decode steady-state splitter)."""
-        assert tl._is_scriptable_framework("custom") is True
-
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_the_standalone_fallback_mirrors_the_registry(self, monkeypatch, framework):
-        expected = fr.has_denoiser_config(framework)
-        _without_hyperloom(monkeypatch)
-        assert tl._has_diffusion_ceiling(framework) is expected
+        assert fr.is_scriptable("custom") is True
 
 
 def _write_reports_for(tmp_path, framework):
@@ -120,10 +96,10 @@ class TestTheGateIsWiredIn:
     """The helper above is only worth anything if ``write_reports`` consults it."""
 
     def test_the_analytic_gate_asks_has_diffusion_ceiling(self, tmp_path, monkeypatch):
-        """Pins the call site, not just the predicate: swapping the gate back to ``_is_scriptable_framework`` leaves this recorder untouched."""
+        """Pins the call site, not just the predicate: swapping the gate back to ``is_scriptable`` leaves this recorder untouched."""
         _stub_trace_derived_report(monkeypatch)
         asked: list[str | None] = []
-        monkeypatch.setattr(tl, "_has_diffusion_ceiling", lambda fw: asked.append(fw) or False)
+        monkeypatch.setattr(fr, "has_denoiser_config", lambda fw: asked.append(fw) or False)
         _write_reports_for(tmp_path, "custom")
         assert asked == ["custom"]
 
@@ -143,41 +119,16 @@ class TestTheGateIsWiredIn:
 
 
 class TestThroughputUnit:
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_the_unit_is_whatever_the_registry_declares(self, framework):
-        """Asserted against the table itself, so a new entry cannot regress."""
-        assert bta._throughput_unit(framework) == fr.throughput_unit(framework)
-
     def test_custom_is_not_mislabelled_as_tokens(self):
-        assert bta._throughput_unit("custom") == "unit/s"
+        assert fr.throughput_unit("custom") == "unit/s"
 
     @pytest.mark.parametrize("framework", ["", None, "bogus"])
     def test_unknown_frameworks_fall_back_to_tokens(self, framework):
-        assert bta._throughput_unit(framework) == "tok/s"
-
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_the_standalone_fallback_mirrors_the_registry(self, monkeypatch, framework):
-        """Two routes answer this question; they must not disagree by environment."""
-        expected = fr.throughput_unit(framework)
-        _without_hyperloom(monkeypatch)
-        assert bta._throughput_unit(framework) == expected
+        assert fr.throughput_unit(framework) == "tok/s"
 
 
 class TestTheTwoRoutesAgree:
     """bypass and TraceLens are two spellings of one feature (`request_handlers` picks between them), so a framework must not be scriptable on one and not the other -- the sidecar they each emit is the same artifact."""
-
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_both_routes_read_scriptable_from_the_registry(self, framework):
-        expected = fr.is_scriptable(framework)
-        assert bta._is_scriptable_framework(framework) is expected
-        assert tl._is_scriptable_framework(framework) is expected
-
-    @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
-    def test_both_standalone_fallbacks_agree_with_the_registry(self, monkeypatch, framework):
-        expected = fr.is_scriptable(framework)
-        _without_hyperloom(monkeypatch)
-        assert bta._is_scriptable_framework(framework) is expected
-        assert tl._is_scriptable_framework(framework) is expected
 
     def _bypass_sidecar_for(self, tmp_path, capsys, framework):
         """Run the bypass route end to end and report whether the sidecar landed."""

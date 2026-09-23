@@ -846,19 +846,14 @@ def test_build_manifest_provenance_shared_path(monkeypatch):
     assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "shared"
 
 
-def test_build_manifest_provenance_stub_when_shared_absent(monkeypatch):
-    monkeypatch.setattr(bta, "_shared_build_provenance", None)
-    out = bta._build_manifest_provenance(_prov_args())
-    assert out["_provenance_source"] == "wp1_stub"
-    assert out["model_name"] == "m" and out["dtype"] == "fp8"
-
-
 def test_build_manifest_provenance_stub_when_shared_raises(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("shared blew up")
 
     monkeypatch.setattr(bta, "_shared_build_provenance", _boom)
-    assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "wp1_stub"
+    out = bta._build_manifest_provenance(_prov_args())
+    assert out["_provenance_source"] == "wp1_stub"
+    assert out["model_name"] == "m" and out["dtype"] == "fp8"
 
 
 def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
