@@ -1,8 +1,9 @@
 # Fleet KB customer demo
 
-The customer demo uses one Fleet KB service on the Slack central server. Every
-Hyperloom worker connects outbound to that service; workers do not maintain
-writable KB replicas.
+The customer demo uses one Fleet KB service on the Slack central server.
+Workers catalog immutable Experiences there as `unverified`. Humans can
+discover those records across runs, but Hyperloom can read only the
+Experiences explicitly selected for its own Run scope.
 
 ## Central server
 
@@ -18,11 +19,12 @@ hyperloom-kb-fleet-serve \
   --declaration ./declarations/inference-recipe-v1.yaml
 ```
 
-The Fleet KB demo branch automatically loads its bundled 59-Experience seed.
-Repeated service starts are idempotent.
+The service starts with an empty catalog. This keeps the demo trace explicit:
+Run A creates three Experiences; no older or bundled corpus is loaded.
 
 The process also needs `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
-`LOCAL_KB_PLANNER_MODEL`, and `HYPERLOOM_FLEET_KB_TOKEN`.
+`LOCAL_KB_PLANNER_MODEL`, `HYPERLOOM_FLEET_KB_WORKER_TOKEN`, and a distinct
+`HYPERLOOM_FLEET_KB_BOT_TOKEN`.
 
 ## Worker launch
 
@@ -39,9 +41,10 @@ When Slack starts Hyperloom over SSH, inject:
 export HYPERLOOM_KB_ENABLE=true
 export HYPERLOOM_KB_DECL=/workspace/Hyperloom/examples/hyperloom-kb-inference.yaml
 export HYPERLOOM_FLEET_KB_URL=https://slack-central.example/fleet-kb
-export HYPERLOOM_FLEET_KB_TOKEN=...
+export HYPERLOOM_FLEET_KB_WORKER_TOKEN=...
 export HYPERLOOM_FLEET_KB_ID=customer-demo
 export HYPERLOOM_FLEET_KB_WORKER_ID="$(hostname)"
+export HYPERLOOM_FLEET_KB_SCOPE_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
 export HYPERLOOM_FLEET_KB_SPOOL="$SESSION_DIR/fleet-kb-spool"
@@ -56,6 +59,12 @@ recorded on the proposal and preserved in the measured Experience. Historical
 evidence may seed a proposal or current-best candidate, but the original Recipe
 measurement remains the immutable gain-accounting baseline.
 
+Before launching Run B, the Slack Bot uses its Bot credential to discover
+Run A's unverified Experiences. It adds candidates to Run B only after an
+explicit user request such as “use these Experiences for Run B.” That action
+creates a Run B selection; it does not mark the records verified or expose
+them to Run C.
+
 Hyperloom captures runtime `identity`, `workload`, `objective`,
 `benchmark_baseline`, `current_best`, `observations`, `recent_results`, and
 `already_tried`. The workflow does not construct search fields, weights, or a
@@ -64,8 +73,9 @@ Use the project `fleet-kb-integrate` Skill when adapting this boundary to
 another optimization workflow.
 
 At CLOSE, the existing Experience publisher uses the same SDK. When the Fleet
-URL is configured, completed Experiences publish to the central service.
-Failed network writes spool on the worker for idempotent retry.
+URL is configured, completed Experiences enter the central catalog as
+unverified and unavailable to automated reads. Failed network writes spool on
+the worker for idempotent retry.
 
 ## Slack event cursor
 
@@ -77,7 +87,8 @@ Authorization: Bearer <token>
 X-Hyperloom-Fleet-ID: customer-demo
 ```
 
-Render `kb.read.completed` and `kb.experience.published` in the Hyperloom job
+Render `kb.experience.cataloged`, `kb.discovery.completed`,
+`kb.experiences.selected`, and `kb.read.completed` in the Hyperloom job
 thread. Read events include signals, top Repeat Groups, actual rendered
 Experience IDs, latency, and warnings. The accepted decision context is
 retained as a future Test Case seed, but the Slack message renders only bounded
@@ -89,6 +100,7 @@ Re-reading a cursor is safe because each event has a stable `event_id`.
 
 ## Demo failure behavior
 
+- No human selection produces a successful empty read.
 - Read failure is advisory: Hyperloom continues without a KB prompt block.
 - Write failure does not discard the Experience: the worker spool retains it.
 - Slack failure does not roll back KB operations: the central SQLite outbox

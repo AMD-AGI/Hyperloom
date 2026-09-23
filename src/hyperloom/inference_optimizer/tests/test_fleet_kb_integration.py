@@ -127,6 +127,23 @@ def test_fleet_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) 
     assert kwargs["operation_id"].startswith("fleet-read-session-1-")
 
 
+def test_fleet_bootstrap_requires_slack_run_scope(tmp_path) -> None:
+    env = {
+        "HYPERLOOM_FLEET_KB_URL": "https://fleet.example",
+        "HYPERLOOM_FLEET_KB_WORKER_TOKEN": "worker-token",
+        "HYPERLOOM_FLEET_KB_ID": "customer-demo",
+        "HYPERLOOM_FLEET_KB_WORKER_ID": "worker-1",
+    }
+
+    assert FleetKBIntegration.from_env(tmp_path, env) is None
+
+    env["HYPERLOOM_FLEET_KB_SCOPE_ID"] = "run-b"
+    integration = FleetKBIntegration.from_env(tmp_path, env)
+
+    assert integration is not None
+    assert integration.client.config.scope_id == "run-b"
+
+
 def test_conversation_fleet_block_is_fail_open_and_records_exposure(tmp_path) -> None:
     evidence = FleetKBEvidence(
         tick=7,

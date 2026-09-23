@@ -15,7 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   worker spool. Reads now capture the actual pre-proposal identity, workload,
   baseline, current-best, observations, and recent outcomes; retries within one
   decision are reused while later decisions see the current shared corpus,
-  without weakening the original Recipe baseline.
+  without weakening the original Recipe baseline. New Fleet Experiences are
+  unverified and unavailable by default; runtime reads see only Experiences a
+  Slack user explicitly selected for that Run scope.
 
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,

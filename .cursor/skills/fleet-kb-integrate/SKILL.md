@@ -58,6 +58,10 @@ Call Fleet KB before the proposal LLM. If the read completes, insert its
 rendered prompt block into that same LLM request. Keep the read fail-open: a
 network, Planner, or Executor failure must not stop optimization.
 
+Require one Slack-created `HYPERLOOM_FLEET_KB_SCOPE_ID`. Runtime read searches
+only Experiences a human selected for that scope. Do not fall back to the full
+Fleet Catalog when the scope is absent or empty.
+
 Never let the workflow reinterpret raw hits or rebuild ranking. The Executor's
 rendered result is the evidence contract.
 
@@ -77,7 +81,8 @@ it does not claim the evidence caused the decision.
 
 Publish the measured Experience through the Fleet client. Reuse the immutable
 Experience ID for retries, and configure a durable worker spool so transient
-network failures do not lose writes.
+network failures do not lose writes. A new record is cataloged as
+`unverified`; publishing must not make it automatically readable.
 
 ## 6. Verify the integration
 
@@ -87,6 +92,7 @@ Test:
 - no `candidate_change`, `question`, weights, or search strategy is supplied;
 - retries inside one decision reuse its read;
 - a changed context or later decision reads the current shared corpus;
+- an empty or different Run scope cannot see unselected Catalog records;
 - completed evidence appears before proposal generation;
 - failures continue without evidence;
 - only consumed refs reach the measured Experience;
