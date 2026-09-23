@@ -1352,8 +1352,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5

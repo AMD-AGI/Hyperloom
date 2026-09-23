@@ -54,7 +54,7 @@ from ..loop.coordinator_helpers import (
     _geak_spec_name,
     geak_is_cand_tag,
     geak_spec_is_env,
-    _resolve_roofline_watermark_ratio,
+    ROOFLINE_WATERMARK_RATIO,
     _accepted_config_as_variant,
     _accepted_config_controls,
     _coerce_tp,
@@ -4193,7 +4193,7 @@ class KernelPhase(PhaseHandler):
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return False
-        return cur / last_rl >= _resolve_roofline_watermark_ratio()
+        return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
     async def _release_finished_roofline_gate(self) -> None:
         """Drop an in-flight marker that names a roofline which already finished."""
@@ -4237,7 +4237,7 @@ class KernelPhase(PhaseHandler):
             task.task_id,
             self._current_tput_from_validated_gain(),
             float(self.shared_state.last_roofline_tput or 0.0),
-            self._ROOFLINE_WATERMARK_RATIO,
+            ROOFLINE_WATERMARK_RATIO,
         )
         return True
 

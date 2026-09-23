@@ -212,7 +212,7 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
 # Consecutive roofline failures tolerated before the watermark stops re-arming.
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
@@ -389,11 +389,6 @@ def approved_proposal_idempotency_key(action_name: str, params: dict[str, Any] |
         usedforsecurity=False,
     ).hexdigest()[:16]
     return f"approved:{action_name}:{digest}"
-
-
-def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio."""
-    return _DEFAULT_ROOFLINE_WATERMARK_RATIO
 
 
 def _merge_cumulative_extra_server_args(
