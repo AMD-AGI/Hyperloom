@@ -2833,7 +2833,7 @@ class WritebackCollaborator:
             "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
-        recorder = getattr(self, "_framework_timeline_recorder", None)
+        recorder = self._framework_timeline()
         if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
             try:
                 recorder.record_run(str(task.task_id or ""), **product)

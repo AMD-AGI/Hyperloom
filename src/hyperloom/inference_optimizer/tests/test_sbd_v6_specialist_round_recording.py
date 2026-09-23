@@ -148,13 +148,20 @@ class _StubState:
 
 
 class _Seam:
-    """The writeback method under test, with only what it reads on it."""
+    """The writeback method under test, with only what it reads on it.
+
+    The framework phase owns the recorder, so it is reachable only through ``_framework_timeline()``: a raw
+    attribute read on the writeback collaborator resolves on the Coordinator, where no recorder lives.
+    """
 
     _record_specialist_round_product = WritebackCollaborator._record_specialist_round_product
 
     def __init__(self, *, phase: str, framework_recorder: Any = None) -> None:
         self.shared_state = _StubState(phase)
-        self._framework_timeline_recorder = framework_recorder
+        self._framework_recorder = framework_recorder
+
+    def _framework_timeline(self) -> Any:
+        return self._framework_recorder
 
 
 def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> None:
