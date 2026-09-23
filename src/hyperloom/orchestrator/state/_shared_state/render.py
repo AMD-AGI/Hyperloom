@@ -5,22 +5,16 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
-
-    return shared_state
-
+from .explore_state import GAP_SEVERITY_RANK, _shared_state_module
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
@@ -414,8 +408,6 @@ class _RenderMixin:
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        rank = {"high": 3, "medium": 2, "low": 1}
-
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
@@ -437,7 +429,7 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
+                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
 
@@ -851,10 +843,7 @@ class _RenderMixin:
             gain_str = "?"
         # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
         # the verbatim md.
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "0",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "

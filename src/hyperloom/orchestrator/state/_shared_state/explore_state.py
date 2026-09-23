@@ -19,6 +19,16 @@ def _shared_state_module():
     return shared_state
 
 
+# Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
+GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+
+
+def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
+    """Sort key putting the highest-severity, then least-attempted, then oldest gap first."""
+    severity = GAP_SEVERITY_RANK.get(str(gap.get("severity") or "").lower(), 0)
+    return (-severity, len(gap.get("attempts") or []), str(gap.get("first_seen_ts") or ""))
+
+
 class _ExploreStateMixin:
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
@@ -105,7 +115,6 @@ class _ExploreStateMixin:
         target = self._anchor_for(anchor)
         if not target:
             return ""
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
         matches: list[tuple[tuple[int, int, str], str]] = []
         for g in self.gaps:
             if not isinstance(g, dict):
@@ -115,10 +124,7 @@ class _ExploreStateMixin:
                 continue
             if self._anchor_for(str(g.get("domain_hint") or "")) != target:
                 continue
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            matches.append(((-sev, attempts, first_seen), cid))
+            matches.append((gap_actionability_key(g), cid))
         if not matches:
             return ""
         matches.sort(key=lambda m: m[0])
