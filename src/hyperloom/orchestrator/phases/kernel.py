@@ -2345,6 +2345,7 @@ class KernelPhase(PhaseHandler):
                 versions=versions,
                 recovered_from_disk=recovered_from_disk,
                 stages_reached=result.get("stages_reached"),
+                search_termination=result.get("search_termination"),
             )
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: GEAK delegation record failed", exc_info=True)

@@ -1510,6 +1510,22 @@ def exit_normal_kernel(
         }
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         if not kernel_work_pending(state):
+            geak = getattr(state, "geak_result", None)
+            if geak and getattr(state, "kernel_optimizer", "geak") == "geak":
+                from hyperloom.inference_optimizer.geak_completion import search_termination
+
+                termination = search_termination(geak)
+                reason = {
+                    "dispatch_cutoff": "kernel_geak_dispatch_cutoff",
+                    "completed": "kernel_geak_completed",
+                    "unknown": "kernel_geak_completion_unknown",
+                }[termination["reason"]]
+                return reason, {
+                    "evidence": reason,
+                    "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+                    "geak_status": geak.get("status"),
+                    "search_termination": termination,
+                }
             return "kernel_no_more_leverage", {
                 "evidence": "kernel_no_more_leverage",
                 "hint": ESCALATE_HINT_SKIP_TO_SWEEP,

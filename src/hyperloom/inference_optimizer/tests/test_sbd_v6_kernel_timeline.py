@@ -1484,6 +1484,7 @@ def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
             "eval_dir": "/tmp/geak/eval",
             "report_path": "/tmp/geak/report.json",
             "stages_reached": ["discover", "optimize"],
+            "search_termination": {"reason": "dispatch_cutoff", "remaining_s": 5400},
         },
         handoff={"exp_root": "/tmp/geak"},
         started_at="2026-09-02T00:00:00+00:00",
@@ -1498,6 +1499,7 @@ def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
     assert delegation["returncode"] == 0
     assert delegation["duration_sec"] == 12.5
     assert delegation["stages_reached"] == ["discover", "optimize"]
+    assert delegation["search_termination"] == {"reason": "dispatch_cutoff", "remaining_s": 5400}
 
 
 def test_finish_records_stack_delta(tmp_path):

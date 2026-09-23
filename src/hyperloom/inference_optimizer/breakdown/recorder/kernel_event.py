@@ -1589,8 +1589,11 @@ class KernelEventRecorder:
         versions: dict[str, Any] | None = None,
         recovered_from_disk: bool = False,
         stages_reached: Any = None,
+        search_termination: dict[str, Any] | None = None,
     ) -> None:
         """Record how the delegated runner itself ended."""
+        from hyperloom.inference_optimizer.geak_completion import search_termination as read_termination
+
         self._sink.record(
             SECTION_EVENT,
             {
@@ -1610,6 +1613,7 @@ class KernelEventRecorder:
                     "versions": _as_dict(versions),
                     "recovered_from_disk": bool(recovered_from_disk),
                     "stages_reached": [str(item) for item in _as_list(stages_reached)],
+                    "search_termination": read_termination({"search_termination": search_termination}),
                 }
             },
         )

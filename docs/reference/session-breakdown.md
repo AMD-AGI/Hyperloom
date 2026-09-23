@@ -60,7 +60,25 @@ Forge invocation, and GEMM-tuning result projections are no longer emitted.
 Archived V2/V3/V4/V5 documents require a downstream migration before V6 readers
 consume them.
 
-Compatibility rules:
+### GEAK search termination
+
+GEAK's performance verdict and its search termination are independent. Kernel
+timeline events expose `ext.geak.delegation.search_termination` with a `reason`
+of `dispatch_cutoff`, `completed`, or `unknown`. When recorded by GEAK, `budget_s`,
+`dispatch_cutoff_s`, `elapsed_s`, and `remaining_s` describe its timer-based budget
+at the end of search, before finalization. A successful result can still have
+stopped dispatching early with useful work unattempted.
+
+The corresponding KERNEL → SWEEP phase-history reasons are
+`kernel_geak_dispatch_cutoff`, `kernel_geak_completed`, and
+`kernel_geak_completion_unknown`. `completed` means the delegated workflow
+finished; it does not assert that no useful optimizations remain. Older GEAK
+results without the structured field are `unknown`; neither runtime duration nor
+report prose is used to infer a cutoff. The phase still waits for pending result
+revalidation and proceeds to SWEEP; this distinction does not automatically launch
+another GEAK run.
+
+### Compatibility rules
 
 * **Parse the version, do not gate on string equality**. Read the
   `vN[.M]` prefix and compare the major component so a future minor

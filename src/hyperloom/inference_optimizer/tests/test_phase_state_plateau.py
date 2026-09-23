@@ -528,7 +528,7 @@ def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
-    assert reason == "kernel_no_more_leverage"
+    assert reason == "kernel_geak_completion_unknown"
 
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
