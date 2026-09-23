@@ -147,7 +147,7 @@ def _paused_writer(
             Path(source),
             version="new",
         )
-    except Exception as error:  # pragma: no cover - surfaced through the parent
+    except Exception as error:  # pragma: no cover - surfaced through the parent  # noqa: BLE001
         errors.put(repr(error))
 
 

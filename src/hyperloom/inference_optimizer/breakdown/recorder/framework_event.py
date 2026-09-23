@@ -991,9 +991,11 @@ def record_review_evidence(
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
     """Build a recorder already opened on the timeline, or ``None``. Phase
     behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", and an unbound session declines rather than writing
+    that are not recorder bugs degrade to "no event", and an unbound session declines rather than writing
     the timeline into an arbitrary directory."""
     from ...session.session_binding import session_is_bound
+
+    from .recorder_warnings import RECORDING_ERRORS
 
     try:
         if not session_is_bound():
@@ -1007,7 +1009,7 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
             make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
             macro_cycle=int(macro_cycle or 0),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS:
         log.warning(
             "framework timeline: recorder construction failed; this phase entry's whole event "
             "will be missing from the breakdown",

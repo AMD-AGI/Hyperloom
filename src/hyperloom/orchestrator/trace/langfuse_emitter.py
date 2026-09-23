@@ -171,10 +171,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     if obs is None:
         return
     if end_dt is None:
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
         return
     end_time = _to_ns(end_dt) if _end_time_wants_int(obs) else end_dt
     try:
@@ -213,7 +210,7 @@ def _set_trace_attrs(
         return
     except AttributeError:
         pass  # v4: no update_trace
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("langfuse: update_trace failed", exc_info=True)
         return
     otel = getattr(span, "_otel_span", None)
@@ -233,7 +230,7 @@ def _set_trace_attrs(
                 otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
             except Exception:  # noqa: BLE001 — skip unserialisable values
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
 
 
@@ -402,7 +399,7 @@ class LangfuseEmitter:
                 self._trace_id,
             )
             return True
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._disabled_reason = "init_failed"
             log.warning("langfuse: client init failed; live push disabled.", exc_info=True)
             return False
@@ -478,17 +475,14 @@ class LangfuseEmitter:
             return
         try:
             self._buffer(row, half="llm")
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug("langfuse: record_llm_call failed", exc_info=True)
 
     def record_conversation(self, row: dict[str, Any]) -> None:
         """Buffer a conversation row; emit the Generation if its tokens are in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="conv")
-        except Exception:  # noqa: BLE001
-            log.debug("langfuse: record_conversation failed", exc_info=True)
+        self._buffer(row, half="conv")
 
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
         """Buffer one half of a generation and emit once both halves arrive."""
@@ -538,7 +532,7 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
 
@@ -583,7 +577,7 @@ class LangfuseEmitter:
             else:
                 self._counts["generations_token_only"] += 1
             return True
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
             return False
@@ -620,7 +614,7 @@ class LangfuseEmitter:
                 continue
             try:
                 steps[name]()
-            except Exception:  # noqa: BLE001 — one failed step must not skip the rest
+            except Exception:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
                 continue
@@ -679,13 +673,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["session_start_recorded"] = 1
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_start failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after session_start failed", exc_info=True)
             # Persist the flag so a later process skips re-emitting.
@@ -727,13 +721,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_breakdown failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after breakdown failed", exc_info=True)
             # Persist the flag so a later process skips re-attaching the document.
@@ -781,7 +775,7 @@ class LangfuseEmitter:
             self._counts["status_updates_sent"] += 1
             self._last_status_sig = sig
             self._last_status_ts = now
-        except Exception:  # noqa: BLE001 — status mirror must never break the loop
+        except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: record_status failed", exc_info=True)
 
@@ -799,7 +793,7 @@ class LangfuseEmitter:
         """End a span, swallowing any errors."""
         try:
             span.end()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
@@ -928,16 +922,12 @@ class LangfuseEmitter:
             "cost_calls": (tokens.get("calls") or None),
         }
         md = {k: v for k, v in md.items() if v is not None}
-        try:
-            return _start_obs(
-                parent,
-                name=f"optimization_step:{op_kind}",
-                as_type="span",
-                metadata=md,
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("langfuse: open decision span failed", exc_info=True)
-            return None
+        return _start_obs(
+            parent,
+            name=f"optimization_step:{op_kind}",
+            as_type="span",
+            metadata=md,
+        )
 
     def _create_score(
         self,
@@ -969,7 +959,7 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._counts["errors"] += 1
             log.debug(
                 "langfuse: create_score failed for %s",
@@ -1054,7 +1044,7 @@ class LangfuseEmitter:
                 fsync=True,
                 fsync_dir=True,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("langfuse: receipt write failed", exc_info=True)
         record_metadata_langfuse(self.session_dir, receipt)
 

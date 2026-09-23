@@ -36,7 +36,7 @@ class _FakeResp:
 def _install_urlopen(monkeypatch, handler) -> None:
     """Replace urllib.request.urlopen used by pr_monitor with handler."""
 
-    def fake(req, timeout):  # noqa: ARG001
+    def fake(req, timeout):
         return handler(req)
 
     monkeypatch.setattr(pc.urllib.request, "urlopen", fake)

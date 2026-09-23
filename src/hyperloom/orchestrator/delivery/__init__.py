@@ -18,7 +18,6 @@ from hyperloom.orchestrator.delivery.archive import (
 from hyperloom.orchestrator.delivery.deliverable import (
     Artifact,
     Deliverable,
-    DeliverableRefused,
     parse_deliverable,
 )
 from hyperloom.orchestrator.delivery.ledger import file_digest, load_records
@@ -33,7 +32,6 @@ __all__ = [
     "ArchivedFile",
     "Artifact",
     "Deliverable",
-    "DeliverableRefused",
     "RoundArchive",
     "file_digest",
     "load_records",

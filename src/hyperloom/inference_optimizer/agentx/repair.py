@@ -137,7 +137,7 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
         ONLY_AIPERF_FLAG,
     )
     try:
-        proc = subprocess.run(  # noqa: S603  # nosec B603 - fixed argv, packaged installer.
+        proc = subprocess.run(  # nosec B603 - fixed argv, packaged installer.
             ["bash", str(script), ONLY_AIPERF_FLAG],
             capture_output=True,
             text=True,

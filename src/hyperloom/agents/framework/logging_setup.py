@@ -52,7 +52,7 @@ def _resolve_level(explicit: str | int | None) -> int:
 class _JsonLineFormatter(logging.Formatter):
     """Emit one JSON object per log record (machine-friendly sink)."""
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+    def format(self, record: logging.LogRecord) -> str:
         """Serialise a log record to a single JSON line."""
         payload: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
@@ -148,7 +148,7 @@ def stage_log(
     ctx: dict[str, Any] = dict(base)
     try:
         yield ctx
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         wall = time.monotonic() - started
         ctx["wall_sec"] = round(wall, 3)
         ctx["error"] = type(exc).__name__

@@ -24,7 +24,7 @@ from typing import Any, Iterable
 
 # Sibling import works whether run as a script or via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete, utc_now  # noqa: E402
+from _io_utils import source_text_looks_complete, utc_now
 
 sys.path.pop(0)
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))

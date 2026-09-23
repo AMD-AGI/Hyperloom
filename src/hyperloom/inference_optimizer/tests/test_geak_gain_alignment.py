@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -147,6 +149,7 @@ def test_revalidation_validated_when_beating_current_best() -> None:
 def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
     coord.shared_state = SharedState(
         baseline_tput=baseline,
         current_best={"action": "explore", "tput": best_tput},

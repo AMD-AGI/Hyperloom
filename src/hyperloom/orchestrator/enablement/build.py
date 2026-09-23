@@ -200,7 +200,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     loaded.degraded or "-",
                     task_id,
                 )
-        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
     async def _maybe_enqueue_specialist_requested_build(
@@ -303,7 +303,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     ref or "(autoselect)",
                     build_task_id,
                 )
-        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
@@ -332,7 +332,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 else:
                     await self._route_failed_build(task)
                 return
-        except Exception:  # noqa: BLE001 — never wedge the tick
+        except Exception:
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
     async def _route_failed_build(self, task: "Task") -> None:

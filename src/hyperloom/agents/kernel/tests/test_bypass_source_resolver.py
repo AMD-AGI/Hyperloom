@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_source_resolver as resolver  # noqa: E402
-import source_resolver  # noqa: E402
+import _bypass_source_resolver as resolver
+import source_resolver
 
 
 def test_native_sources_are_editable():

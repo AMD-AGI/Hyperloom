@@ -259,7 +259,7 @@ def harvest_leaked_artifacts(
     # benchmark_report.json (no-op single-node).
     try:
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - telemetry harvest must not fail the run
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
     # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session

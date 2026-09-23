@@ -67,21 +67,10 @@ class KernelRecipeIdentity:
 def _validate_scheme(value: str) -> str:
     if not isinstance(value, str) or not _SCHEME_RE.fullmatch(value) or len(value.encode("ascii")) > 64:
         raise ValueError(
-            "scheme_name/prefix must be 1-64 lowercase ASCII characters, "
+            "scheme_name must be 1-64 lowercase ASCII characters, "
             "start with a letter, and contain only letters, digits, '.', '_', '+', or '-'"
         )
     return value
-
-
-def _resolve_scheme_name(
-    *,
-    scheme_name: str | None,
-    prefix: str | None,
-) -> str:
-    if scheme_name is not None and prefix is not None and scheme_name != prefix:
-        raise ValueError("scheme_name and prefix conflict; pass only one or use the same value")
-    selected = scheme_name if scheme_name is not None else prefix if prefix is not None else DEFAULT_SCHEME_NAME
-    return _validate_scheme(selected)
 
 
 def _validate_identity_segment(name: str, value: str) -> str:
@@ -96,11 +85,10 @@ def _validate_identity_segment(name: str, value: str) -> str:
 def kernel_recipe_canonical_id(
     identity: KernelRecipeIdentity,
     *,
-    scheme_name: str | None = None,
-    prefix: str | None = None,
+    scheme_name: str = DEFAULT_SCHEME_NAME,
 ) -> str:
     """Encode a recipe identity as a scheme plus six ordered dimensions."""
-    scheme = _resolve_scheme_name(scheme_name=scheme_name, prefix=prefix)
+    scheme = _validate_scheme(scheme_name)
     identity_values = asdict(identity)
     dimensions = [_validate_identity_segment(name, identity_values[name]) for name in KERNEL_CANONICAL_DIMENSIONS]
     return ":".join([scheme, *dimensions])

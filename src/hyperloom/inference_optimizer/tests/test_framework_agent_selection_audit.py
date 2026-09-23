@@ -177,7 +177,7 @@ class _FakeStream:
     async def __anext__(self):
         try:
             return next(self._it)
-        except StopIteration:  # noqa: PERF203
+        except StopIteration:
             raise StopAsyncIteration from None
 
 
@@ -200,7 +200,7 @@ class _FakeClient:
 
 
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, seen: list | None = None):
-    def _fake(args, timeout=None):  # noqa: ANN001
+    def _fake(args, timeout=None):
         sub = args[2] if len(args) > 2 else ""
         if seen is not None:
             seen.append(sub)

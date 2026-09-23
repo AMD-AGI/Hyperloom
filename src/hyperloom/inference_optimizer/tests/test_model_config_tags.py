@@ -118,7 +118,7 @@ class _FakeSharedState:
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
 
-    def save(self, _path: Path) -> None:  # noqa: D401
+    def save(self, _path: Path) -> None:
         """No-op save — these tests don't assert on disk persistence."""
 
 
