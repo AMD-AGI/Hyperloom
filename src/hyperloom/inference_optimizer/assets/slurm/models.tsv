@@ -4,5 +4,5 @@
 # ep_size is optional and trails target_gain so existing 13-column rows still
 # parse; an empty or absent value means expert parallelism stays at 1.
 deepseek_r1_sglang	deepseek-ai/DeepSeek-R1	sglang	MI300X	lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920	8	fp8	1024	1024	64	moe_mla	6	10	1
-deepseek_r1_vllm	deepseek-ai/DeepSeek-R1	vllm	MI300X	vllm/vllm-openai-rocm:v0.29.0	8	fp8	1024	1024	64	moe_mla	6	10	1
-gptoss_vllm	openai/gpt-oss-120b	vllm	MI300X	vllm/vllm-openai-rocm:v0.29.0	8	fp4	1024	1024	64	moe_swa	6	10	1
+deepseek_r1_vllm	deepseek-ai/DeepSeek-R1	vllm	MI300X	rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0	8	fp8	1024	1024	64	moe_mla	6	10	1
+gptoss_vllm	openai/gpt-oss-120b	vllm	MI300X	rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0	8	fp4	1024	1024	64	moe_swa	6	10	1
