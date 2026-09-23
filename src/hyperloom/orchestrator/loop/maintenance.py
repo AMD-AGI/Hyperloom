@@ -21,7 +21,16 @@ async def run_lease_and_db_reclaim(
     """Report confirmed-dead cleanup and prune retained database history.
 
     Shared by periodic maintenance and cycle soft-restart. Resource ownership
-    is resolved by the reconciler, never inferred from elapsed lease budgets.
+    is resolved by the reconciler: owners it proved dead, and lanes whose holder
+    both ended and proved nothing is still using them -- never inferred from
+    elapsed lease budgets.
+
+    ``leases_unverifiable`` rides the same summary because it is the other half
+    of that answer: lanes still held by a holder that ended without confirming
+    its cleanup. Nothing decides those -- no identity available to this process
+    survives a served process that setsid's away from it -- so they are retained
+    on purpose. A number that stays put while the queue does not drain is where
+    an operator starts; the remedy for each one is logged once by the diagnostic.
 
     Args:
         host: Coordinator exposing ``reconciler`` and ``db``.
@@ -31,6 +40,15 @@ async def run_lease_and_db_reclaim(
     try:
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
+        summary["leases_unverifiable"] = report.leases_unverifiable
+        # Whether retained lanes are an accident or the ordinary outcome. Every
+        # portable way to release them automatically was refuted (see
+        # docs/task-containment.md), and the one candidate left is
+        # safety-critical, so this is the number that decides whether anyone
+        # should build it.
+        unconfirmed, ended = await host.reconciler.cleanup_confirmation_rate()
+        if ended:
+            summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
     except Exception:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
