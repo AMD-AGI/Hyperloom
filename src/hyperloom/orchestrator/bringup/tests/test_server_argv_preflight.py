@@ -75,16 +75,26 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 """
 
 
+_ATOM_KV_CACHE_FLAGS = (
+    pytest.param(_ATOM_ARG_PARSER, "--kv_cache_dtype", id="native-snake"),
+    pytest.param(_ATOM_ARG_PARSER, "--kv-cache-dtype", id="native-kebab"),
+    pytest.param(None, "--kv_cache_dtype", id="legacy-module-absent"),
+    pytest.param("", "--kv_cache_dtype", id="legacy-class-absent"),
+)
+
+
 @pytest.fixture
-def atom_serving(tmp_path, monkeypatch):
-    """Expose ATOM's snake/kebab parser contract to the real probe subprocess."""
+def atom_serving(tmp_path, monkeypatch, request):
+    """Expose the installed ATOM parser contract to the real probe subprocess."""
     site = tmp_path / "serve"
     atom = site / "atom"
     for package in (atom, atom / "model_engine", atom / "utils"):
         package.mkdir(parents=True, exist_ok=True)
         (package / "__init__.py").write_text("", encoding="utf-8")
     (atom / "model_engine" / "arg_utils.py").write_text(_ATOM_ENGINE_ARGS, encoding="utf-8")
-    (atom / "utils" / "arg_parser.py").write_text(_ATOM_ARG_PARSER, encoding="utf-8")
+    parser_source = getattr(request, "param", _ATOM_ARG_PARSER)
+    if parser_source is not None:
+        (atom / "utils" / "arg_parser.py").write_text(parser_source, encoding="utf-8")
     monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
     return {
         "PATH": os.environ.get("PATH", ""),
@@ -93,7 +103,7 @@ def atom_serving(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
 @pytest.mark.parametrize("digest", ("", "atom-fp8"), ids=("no-repair", "repair-available"))
 def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals, digest):
@@ -109,7 +119,7 @@ def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals,
     assert verdict.repaired_digest == ""
 
 
-@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
 def test_atom_invalid_kv_cache_dtype_is_never_repaired(atom_serving, flag, equals):
     """Alias support does not turn rejected values into droppable unknown flags."""
@@ -127,7 +137,7 @@ def test_atom_invalid_kv_cache_dtype_is_never_repaired(atom_serving, flag, equal
     assert "invalid choice" in verdict.detail
 
 
-@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
 def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_serving, flag, equals):
     """Only a genuinely unknown flag may consume the one drop-only repair."""
@@ -157,6 +167,106 @@ def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_se
     assert repeated.argv == argv
     assert repeated.dropped == ("--unknown-option",)
     assert repeated.repaired_digest == ""
+
+
+@pytest.mark.parametrize("atom_serving", (None, ""), ids=("module-absent", "class-absent"), indirect=True)
+@pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
+def test_atom_legacy_parser_does_not_invent_kebab_aliases(atom_serving, equals):
+    """A plain argparse server only accepts the flags its EngineArgs registers."""
+    argv = ("--kv-cache-dtype=fp8",) if equals else ("--kv-cache-dtype", "fp8")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(framework="atom", argv=argv, text=text, launch_env=atom_serving)
+    assert verdict.status == pf.INVALID
+    assert verdict.reason == pf.REPAIR_SPENT
+    assert verdict.argv == argv
+    assert verdict.text == text
+    assert verdict.dropped == ("--kv-cache-dtype",)
+    assert verdict.repaired_digest == ""
+    assert "unrecognized arguments" in verdict.detail
+
+
+@pytest.mark.parametrize(
+    ("atom_serving", "detail"),
+    (
+        pytest.param(
+            "import atom_parser_missing_dependency\n",
+            "atom_parser_missing_dependency",
+            id="dependency-module-absent",
+        ),
+        pytest.param(
+            "from argparse import atom_parser_missing_dependency\n",
+            "atom_parser_missing_dependency",
+            id="dependency-class-absent",
+        ),
+        pytest.param(
+            "from atom.utils import atom_parser_missing_dependency\n",
+            "atom_parser_missing_dependency",
+            id="same-package-dependency-absent",
+        ),
+        pytest.param(
+            _ATOM_ARG_PARSER
+            + "\n    def __init__(self):\n        raise ImportError('native parser construction failed')\n",
+            "native parser construction failed",
+            id="parser-construction-failed",
+        ),
+    ),
+    indirect=("atom_serving",),
+)
+def test_atom_broken_native_parser_is_unavailable_not_legacy(atom_serving, detail):
+    """A broken modern parser must not be mistaken for a legacy installation."""
+    argv = ("--kv_cache_dtype", "fp8")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-parser-error"
+    )
+    assert verdict.status == pf.UNAVAILABLE
+    assert verdict.reason == pf.PROBE_FAILED
+    assert detail in verdict.detail
+    assert verdict.argv == argv
+    assert verdict.text == text
+    assert verdict.dropped == ()
+    assert verdict.repaired_digest == ""
+
+
+@pytest.mark.parametrize("atom_serving", (_ATOM_ARG_PARSER, None), ids=("native", "legacy"), indirect=True)
+@pytest.mark.parametrize(
+    ("engine_source", "detail"),
+    (
+        pytest.param("raise ImportError('engine import failed')\n", "engine import failed", id="import-failed"),
+        pytest.param(
+            "class EngineArgs:\n"
+            "    @staticmethod\n"
+            "    def add_cli_args(parser):\n"
+            "        raise ImportError('engine registration failed')\n",
+            "engine registration failed",
+            id="registration-import-failed",
+        ),
+        pytest.param(
+            "class EngineArgs:\n"
+            "    @staticmethod\n"
+            "    def add_cli_args(parser):\n"
+            "        raise RuntimeError('engine registration failed')\n",
+            "engine registration failed",
+            id="registration-runtime-failed",
+        ),
+    ),
+)
+def test_atom_engine_args_errors_are_unavailable(atom_serving, engine_source, detail):
+    """Neither parser generation may hide EngineArgs import or registration errors."""
+    engine_module = Path(atom_serving["PYTHONPATH"]) / "atom" / "model_engine" / "arg_utils.py"
+    engine_module.write_text(engine_source, encoding="utf-8")
+    argv = ("--kv_cache_dtype", "fp8")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-engine-error"
+    )
+    assert verdict.status == pf.UNAVAILABLE
+    assert verdict.reason == pf.PROBE_FAILED
+    assert detail in verdict.detail
+    assert verdict.argv == argv
+    assert verdict.text == text
+    assert verdict.dropped == ()
+    assert verdict.repaired_digest == ""
 
 
 def _check(argv, env, **kwargs):

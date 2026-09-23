@@ -31,11 +31,20 @@ _SGLANG_PARSER_SOURCE = (
     "    return parser\n"
 )
 
+# ATOM v0.1.5's server uses plain argparse; newer releases provide a native parser.
 _ATOM_PARSER_SOURCE = (
     "def _build_parser():\n"
-    "    from atom.utils.arg_parser import FlexibleArgumentParser\n"
+    "    import argparse\n"
+    "    try:\n"
+    "        import atom.utils.arg_parser as arg_parser\n"
+    "    except ModuleNotFoundError as exc:\n"
+    "        if exc.name not in ('atom.utils', 'atom.utils.arg_parser'):\n"
+    "            raise\n"
+    "        parser_cls = argparse.ArgumentParser\n"
+    "    else:\n"
+    "        parser_cls = getattr(arg_parser, 'FlexibleArgumentParser', argparse.ArgumentParser)\n"
     "    from atom.model_engine.arg_utils import EngineArgs\n"
-    "    parser = FlexibleArgumentParser()\n"
+    "    parser = parser_cls()\n"
     "    EngineArgs.add_cli_args(parser)\n"
     "    return parser\n"
 )
