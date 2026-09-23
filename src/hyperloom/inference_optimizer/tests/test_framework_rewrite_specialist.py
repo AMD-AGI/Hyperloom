@@ -313,13 +313,11 @@ class _DispatchStub:
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
         from hyperloom.orchestrator.phases.framework import FrameworkPhase
+        from hyperloom.orchestrator.state.shared_state import SharedState
 
         self.session_dir = tmp_path
         self.tasks = _Tasks()
-        self.shared_state = _State(framework, evidence)
-        self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_specialist_candidate_map = {}
-        self.shared_state.save = lambda _dir: None
+        self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
         for name in (
             "_authoring_specialist_domain",
             "_render_rewrite_evidence_for_prompt",
