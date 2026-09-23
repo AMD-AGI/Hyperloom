@@ -50,7 +50,25 @@ EVENT_LLM_CALL = "llm.call"
 # One model request inside an LLM call (a tool round trip); its usage is informational and never re-summed into
 # spend, which ``llm_calls.jsonl`` owns.
 EVENT_LLM_REQUEST = "llm.request"
-VALID_EVENT_TYPES: frozenset[str] = frozenset({EVENT_SESSION, EVENT_LLM_CALL, EVENT_LLM_REQUEST})
+EVENT_PHASE = "phase"
+EVENT_INTENT = "intent"
+# span_id is the proposal's bus msg_id: queued at propose time, started when the Critic's verdict is applied.
+EVENT_PROPOSAL = "proposal"
+# span_id is the task_id: queued / started / terminal follow the TaskRegistry state machine.
+EVENT_TASK = "task"
+EVENT_TASK_RETRY = "task.retry"
+VALID_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_SESSION,
+        EVENT_LLM_CALL,
+        EVENT_LLM_REQUEST,
+        EVENT_PHASE,
+        EVENT_INTENT,
+        EVENT_PROPOSAL,
+        EVENT_TASK,
+        EVENT_TASK_RETRY,
+    }
+)
 
 VALID_COMPONENTS: frozenset[str] = _LLM_COMPONENTS | {"coordinator"}
 
@@ -302,6 +320,17 @@ def llm_call_summary(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return {key: md[key] for key in _LLM_CALL_SUMMARY_KEYS if md.get(key) is not None}
 
 
+def scalar_attributes(mapping: dict[str, Any] | None, *, max_chars: int = 200) -> dict[str, Any]:
+    """The scalar entries of ``mapping`` with strings clipped, for attributes read off free-form evidence."""
+    out: dict[str, Any] = {}
+    for key, value in (mapping or {}).items():
+        if isinstance(value, str):
+            out[str(key)] = value[:max_chars]
+        elif value is None or isinstance(value, (bool, int, float)):
+            out[str(key)] = value
+    return out
+
+
 def _error_attributes(exc: BaseException) -> dict[str, Any]:
     return {"error_type": type(exc).__name__, "error_message": str(exc)[:_ERROR_MESSAGE_MAX]}
 
@@ -365,9 +394,14 @@ def load_events(session_dir: Path) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "EVENT_INTENT",
     "EVENT_LLM_CALL",
     "EVENT_LLM_REQUEST",
+    "EVENT_PHASE",
+    "EVENT_PROPOSAL",
     "EVENT_SESSION",
+    "EVENT_TASK",
+    "EVENT_TASK_RETRY",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
     "STATUS_CANCELLED",
@@ -389,6 +423,7 @@ __all__ = [
     "load_shard",
     "new_span_id",
     "record_event",
+    "scalar_attributes",
     "trajectory_scope",
     "trajectory_shards",
     "trajectory_span",

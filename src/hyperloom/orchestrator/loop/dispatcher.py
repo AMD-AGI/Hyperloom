@@ -50,6 +50,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
+from ..trace.trajectory_trace import trajectory_scope
 from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -970,7 +971,11 @@ class DispatcherCollaborator:
                 self._inflight_actions.pop(task.task_id, None)
                 self._executions.discard(asyncio.current_task())
 
-        with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
+        with (
+            use_cancel_scope(cancel_scope),
+            current_action_scope(task.kind),
+            trajectory_scope(task_id=task.task_id, parent_span_id=task.task_id),
+        ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
         execution.add_done_callback(self._report_unjoined_failure(task))

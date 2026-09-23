@@ -24,6 +24,7 @@ from ..policy.gate import (
     PolicyDenied,
     validate_freeform_wave_task,
 )
+from ..trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
@@ -358,13 +359,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 base_key = head
         retry_key = f"{base_key}-autoretry{next_attempt}"
 
-        new_task, was_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=retry_params,
-            idempotency_key=retry_key,
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-        )
+        with trajectory_scope(parent_span_id=task.task_id):
+            new_task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=retry_params,
+                idempotency_key=retry_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+            )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
             await self._record_specialist_retry_exhausted(
@@ -376,6 +378,19 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 detail="retry slot already taken",
             )
             return False
+        record_event(
+            EVENT_TASK_RETRY,
+            task_id=task.task_id,
+            parent_span_id=task.task_id,
+            attributes={
+                "name": "specialist",
+                "retry_task_id": new_task.task_id,
+                "attempt": next_attempt,
+                "max_attempts": cap,
+                "failure_type": ftype.value,
+                "reason": error[:200],
+            },
+        )
         await self._record_observation(
             "coordinator",
             "observation",

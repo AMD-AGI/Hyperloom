@@ -418,6 +418,7 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    task_id: str | None = None
 
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
@@ -1950,8 +1951,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        for intent in result.intents:
-            await self._handle_intent(agent_name, intent)
+        with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
+            for intent in result.intents:
+                await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 

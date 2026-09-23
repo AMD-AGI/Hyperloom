@@ -2097,6 +2097,19 @@ def record_phase_transition(
     from hyperloom.common.llm_attribution import set_current_phase
 
     set_current_phase(str(row["to_phase"] or ""))
+    from ..trace.trajectory_trace import EVENT_PHASE, record_event
+
+    record_event(
+        EVENT_PHASE,
+        phase=str(row["to_phase"] or "") or None,
+        attributes={
+            "name": row["to_phase"],
+            "from_phase": from_phase or None,
+            "to_phase": row["to_phase"],
+            "reason": reason,
+            "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        },
+    )
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 

@@ -42,6 +42,16 @@ from ..policy.gate import (
 )
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
+from ..trace.trajectory_trace import (
+    EVENT_INTENT,
+    EVENT_PROPOSAL,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_QUEUED,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
@@ -462,13 +472,23 @@ class IntentRouter:
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate an emitted intent through PolicyGate, then route it."""
+        """Validate an emitted intent through PolicyGate, then route it under its trajectory event."""
+        attributes = {"name": intent.type.value, "source": source}
+        action_name = (intent.payload or {}).get("action_name")
+        if isinstance(action_name, str) and action_name:
+            attributes["action_name"] = action_name
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
+            record_event(EVENT_INTENT, attributes={**attributes, "admitted": False, "denied": str(denied)[:200]})
             await self._record_policy_denied(source, intent, denied)
             return
+        intent_span_id = record_event(EVENT_INTENT, attributes={**attributes, "admitted": True})
+        with trajectory_scope(parent_span_id=intent_span_id):
+            await self._route_intent(source, intent)
 
+    async def _route_intent(self, source: str, intent: Intent) -> None:
+        """Run the handler for an admitted intent; a handler failure is recorded, never raised."""
         try:
             it = intent.type
             handler_name = _INTENT_DISPATCH.get(it)
@@ -563,6 +583,17 @@ class IntentRouter:
             payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
+        record_event(
+            EVENT_PROPOSAL,
+            status=STATUS_QUEUED,
+            span_id=msg.msg_id,
+            attributes={
+                "name": action_name,
+                "action_name": action_name,
+                "from_agent": source,
+                "predicted_gain_pct": pending.predicted_gain_pct,
+            },
+        )
         _record_phase_proposal(self, pending)
         _record_config_proposal(self, pending)
 
@@ -778,6 +809,37 @@ class IntentRouter:
             reauthored=verdict == "needs_review",
             patch_verdict_key=sid_candidate if patch_verdict else "",
         )
+        with trajectory_span(
+            EVENT_PROPOSAL,
+            span_id=pending.proposal_msg_id,
+            attributes={"name": pending.action_name, "verdict": verdict},
+        ) as proposal_span:
+            await self._apply_verdict_outcome(
+                pending,
+                verdict=verdict,
+                reasoning=reasoning,
+                advisory=advisory,
+                approved_variant_names=approved_variant_names,
+                pa_params=pa_params,
+                sid_candidate=sid_candidate,
+            )
+            proposal_span.finish(
+                STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
+                task_id=getattr(pending, "task_id", None),
+            )
+
+    async def _apply_verdict_outcome(
+        self,
+        pending: Any,
+        *,
+        verdict: str,
+        reasoning: str,
+        advisory: dict[str, Any] | None,
+        approved_variant_names: set[str] | None,
+        pa_params: Mapping[str, Any],
+        sid_candidate: str,
+    ) -> None:
+        """Materialise, deny, or send back a proposal according to its collapsed verdict."""
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):
