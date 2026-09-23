@@ -35,7 +35,7 @@ phase_gate = _load_phase_gate()
 class _ProgressHandler(BaseHTTPRequestHandler):
     requests_seen = 0
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         type(self).requests_seen += 1
         if type(self).requests_seen < 3:
             payload = {"phases": {"warmup": {"start_ns": 1}}}
@@ -887,7 +887,7 @@ def test_wait_for_phase_fails_when_aiperf_process_exits():
 
 def test_wait_for_phase_times_out_without_phase():
     class EmptyProgressHandler(_ProgressHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = b'{"phases":{}}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -917,7 +917,7 @@ def test_capture_stops_when_phase_completes():
     class PhaseCompletionHandler(_ProgressHandler):
         requests_seen = 0
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             type(self).requests_seen += 1
             body = json.dumps(
                 {
@@ -956,7 +956,7 @@ def test_capture_stops_when_phase_completes():
 
 def test_capture_stops_at_wall_clock_limit_without_phase_completion():
     class NoCoverageHandler(_ProgressHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = b'{"phases":{"profiling":{"start_ns":1,"requests_completed":0,"requests_end_ns":null}}}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

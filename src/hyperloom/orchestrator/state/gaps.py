@@ -11,17 +11,11 @@ from hashlib import sha1
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
+from ._shared_state.phase_state import _shared_state_module
 
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from . import shared_state
-
-    return shared_state
 
 
 class GapsStateMixin:
@@ -45,7 +39,7 @@ class GapsStateMixin:
         if not cid:
             return {}
         ss = _shared_state_module()
-        now = ss._now_iso()
+        now = ss.now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -105,11 +99,11 @@ class GapsStateMixin:
             return None
         attempts = list(gap.get("attempts") or [])
         ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss.now_iso())})
         if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
             attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss._now_iso()
+        gap["last_updated_ts"] = ss.now_iso()
         return gap
 
 
@@ -117,22 +111,16 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
+        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.
         """
         state = self.shared_state
-        try:
-            for entry in self._extract_gaps_from_baseline():
-                state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("gaps refresh: baseline extraction failed")
-        try:
-            for entry in self._extract_gaps_from_attempts():
-                state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("gaps refresh: attempts extraction failed")
+        for entry in self._extract_gaps_from_baseline():
+            state.upsert_gap(entry)
+        for entry in self._extract_gaps_from_attempts():
+            state.upsert_gap(entry)
 
         plane = getattr(self, "knowledge_plane", None)
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
@@ -148,7 +136,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                             entry = dict(entry)
                             entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.warning(
                     "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
@@ -279,23 +267,17 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             tags = hint.get("domain_tags") or []
             key = f"{what.lower()}::{source.lower()}"
             cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
-            try:
-                self.shared_state.upsert_gap(
-                    {
-                        "canonical_id": cid,
-                        "symptom": what,
-                        "layer": "research_hint",
-                        "severity": "medium",
-                        "domain_hint": str(tags[0]) if tags else "",
-                        "source": "research_scout",
-                        "provenance": str(hint.get("source") or ""),
-                    }
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "research-scout: upsert_gap failed for %s",
-                    cid,
-                )
+            self.shared_state.upsert_gap(
+                {
+                    "canonical_id": cid,
+                    "symptom": what,
+                    "layer": "research_hint",
+                    "severity": "medium",
+                    "domain_hint": str(tags[0]) if tags else "",
+                    "source": "research_scout",
+                    "provenance": str(hint.get("source") or ""),
+                }
+            )
 
     def _framework_authoring_domain(self) -> str:
         """Return the authoring domain matching this session's framework kind.

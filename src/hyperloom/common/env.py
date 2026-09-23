@@ -27,11 +27,26 @@ def is_truthy(value: object, *, default: bool = False) -> bool:
 
 
 def env_bool(name: str, default: bool = False) -> bool:
-    """Read a boolean env var."""
+    """Read a boolean env var using the true-token set only.
+
+    Unrecognised values (not in _TRUE_TOKENS and not in _FALSE_TOKENS) return
+    ``False`` regardless of *default*. Use ``env_flag`` when unrecognised values
+    should fall back to *default*.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
     return raw.strip().lower() in _TRUE_TOKENS
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean env var, falling back to *default* for unrecognised values.
+
+    Unlike ``env_bool``, a value that is neither a true-token nor a false-token
+    returns *default* rather than ``False``.
+    """
+    raw = os.environ.get(name)
+    return is_truthy(raw, default=default)
 
 
 def env_int(name: str, default: int = 0) -> int:
@@ -72,6 +87,7 @@ def forge_explicitly_enabled() -> bool:
 __all__ = [
     "is_truthy",
     "env_bool",
+    "env_flag",
     "env_int",
     "env_float",
     "env_str",

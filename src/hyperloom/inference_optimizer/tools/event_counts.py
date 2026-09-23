@@ -77,7 +77,7 @@ def main() -> int:
         for fa, ta, topic, payload in con.execute(query, params):
             try:
                 p = json.loads(payload)
-            except Exception:
+            except ValueError:
                 continue
             if topic == "proposal":
                 counts[f"proposal:{p.get('action_name')}"] += 1

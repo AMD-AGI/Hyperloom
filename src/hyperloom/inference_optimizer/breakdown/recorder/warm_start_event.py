@@ -211,7 +211,7 @@ class WarmStartEventRecorder:
             return True
         try:
             return Path(session_dir).resolve() == Path(self._session).resolve()
-        except (OSError, TypeError, ValueError):  # noqa: BLE001 — unusable path
+        except (OSError, TypeError, ValueError):
             return False
 
     def begin(self) -> None:
@@ -297,7 +297,7 @@ class WarmStartEventRecorder:
             return
         try:
             _ACTIVE.reset(token)
-        except ValueError:  # noqa: BLE001 — settled from a different context
+        except ValueError:
             _ACTIVE.set(None)
 
 

@@ -99,10 +99,7 @@ def collect_v6_metadata(
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
-        "architecture": architecture_block(
-            model_info,
-            model_class=str(workload.get("model_class") or ""),
-        ),
+        "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
     }
     signature = workload_signature(task_config)
     if signature:

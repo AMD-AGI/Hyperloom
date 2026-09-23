@@ -691,7 +691,7 @@ def test_clean_stale_aiter_locks_deletes_stale_keeps_fresh(tmp_path):
 def test_clean_stale_aiter_locks_handles_missing_dir():
     """When aiter cannot be located, return empty stats — never raise."""
     stats = cli.clean_stale_aiter_locks(
-        aiter_jit_dir=type("X", (), {"is_dir": lambda self: False})(),  # noqa: E731
+        aiter_jit_dir=type("X", (), {"is_dir": lambda self: False})(),
     )
     assert stats["scanned"] == 0
     assert stats["deleted"] == 0

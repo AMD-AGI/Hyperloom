@@ -20,6 +20,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
@@ -43,6 +45,8 @@ RESULT_TRANSPORT_FAILED = "transport_failed"
 RESULT_NO_NEW_KEEP = "no_new_keep_or_pure_warm_replay"
 RESULT_INVALID_THROUGHPUT = "invalid_throughput"
 RESULT_MISSING_THROUGHPUT = "missing_throughput"
+RESULT_UNVALIDATED_RECIPE = "unvalidated_recipe"
+RESULT_INVALID_SELECTION_PROFILE = "invalid_selection_profile"
 RESULT_EMPTY_REPLAY_MATERIAL = "empty_replay_material"
 RESULT_NOT_BETTER = "not_better_than_champion"
 RESULT_CHAMPION_NOT_PROMOTED = "champion_not_promoted"
@@ -83,7 +87,6 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
         trace_skip(reason="empty payload", section=SECTION)
         return
     recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
-
 
 def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None:
     """Open the section as the sequencer is entered.
@@ -131,7 +134,6 @@ def record_close_step(
     if detail:
         row["detail"] = str(detail)
     recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
-
 
 def record_close_artifacts(
     session_dir: Path | str | None,
@@ -182,9 +184,9 @@ def record_baseline_progress(
         session_dir,
         {
             "baseline_progress": {
-                "failure_streak": _to_int(failure_streak),
-                "total_failures": _to_int(total_failures),
-                "arg_error_streak": _to_int(arg_error_streak),
+                "failure_streak": to_int(failure_streak) or 0,
+                "total_failures": to_int(total_failures) or 0,
+                "arg_error_streak": to_int(arg_error_streak) or 0,
             }
         },
     )
@@ -210,9 +212,9 @@ def record_final_recipe(
         session_dir,
         {
             "final_recipe": {
-                "throughput": _to_float(throughput),
-                "ttft_mean_ms": _to_float(ttft_mean_ms),
-                "e2el_mean_ms": _to_float(e2el_mean_ms),
+                "throughput": to_float(throughput),
+                "ttft_mean_ms": to_float(ttft_mean_ms),
+                "e2el_mean_ms": to_float(e2el_mean_ms),
                 "action_path": [str(step) for step in (action_path or []) if str(step)],
                 "extra_server_args": str(extra_server_args or ""),
                 "extra_envs": {str(key): str(value) for key, value in dict(extra_envs or {}).items()},
@@ -245,8 +247,8 @@ def record_geak_candidate(
                 "status": str(slot.get("status") or ""),
                 "revalidation_error": str(slot.get("revalidation_error") or "") or None,
                 "revalidation_error_class": str(slot.get("revalidation_error_class") or "") or None,
-                "self_reported_gain_pct": _to_float(slot.get("self_reported_gain_pct")),
-                "self_reported_tput": _to_float(slot.get("self_reported_tput")),
+                "self_reported_gain_pct": to_float(slot.get("self_reported_gain_pct")),
+                "self_reported_tput": to_float(slot.get("self_reported_tput")),
                 "self_reported_basis": str(slot.get("self_reported_basis") or ""),
             }
         },
@@ -274,14 +276,14 @@ def record_roofline_progress(
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
-    baseline = _to_float(baseline_tput) or 0.0
+    baseline = to_float(baseline_tput) or 0.0
     trajectory = _trajectory(baseline, baseline_ts, optimization_stack)
     snapshot = dict(latest_snapshot or {})
 
-    ceiling = _to_float(snapshot.get("theoretical_peak_tok_per_sec"))
+    ceiling = to_float(snapshot.get("theoretical_peak_tok_per_sec"))
     ceiling_available = ceiling is not None and ceiling > 0
     target = round(ceiling * ROOFLINE_TARGET_RATIO, 4) if ceiling_available else None
-    best = _to_float(trajectory[-1]["tput"]) if trajectory else 0.0
+    best = to_float(trajectory[-1]["tput"]) if trajectory else 0.0
 
     payload: dict[str, Any] = {
         "ceiling_kind": "throughput" if ceiling_available else "none",
@@ -296,19 +298,19 @@ def record_roofline_progress(
         "trajectory": trajectory,
         "baseline_tput": baseline,
         "current_best_tput": best,
-        "cumulative_gain_pct": round(_to_float(cumulative_gain_pct) or 0.0, 4),
+        "cumulative_gain_pct": round(to_float(cumulative_gain_pct) or 0.0, 4),
         "current_best_pct_of_ceiling": (round(best / ceiling * 100.0, 4) if ceiling_available and best > 0 else None),
         "current_best_pct_of_target": (round(best / target * 100.0, 4) if target and target > 0 and best > 0 else None),
-        "roofline_failure_streak": _to_int(failure_streak),
-        "latest_snapshot_id": _to_int(snapshot.get("snapshot_id")) or None,
+        "roofline_failure_streak": to_int(failure_streak) or 0,
+        "latest_snapshot_id": to_int(snapshot.get("snapshot_id")) or None,
     }
 
     # Diffusion (xDiT) image models decode no tokens: their roofline is the
     # ideal per-image compute floor against measured latency. ``ceiling_kind``
     # keeps a reader from taking the null tok/s fields for a failed analysis.
     if not ceiling_available:
-        ideal_ms = _to_float(snapshot.get("roofline_ideal_ms"))
-        measured_ms = _to_float(snapshot.get("e2e_mean_ms"))
+        ideal_ms = to_float(snapshot.get("roofline_ideal_ms"))
+        measured_ms = to_float(snapshot.get("e2e_mean_ms"))
         if ideal_ms and ideal_ms > 0 and measured_ms and measured_ms > 0:
             payload["ceiling_kind"] = "latency"
             payload["latency_ceiling_ms"] = round(ideal_ms, 4)
@@ -319,7 +321,7 @@ def record_roofline_progress(
 
     # A tail disagreeing with the session's own best means a promotion never
     # made it onto the stack, as when a resume interrupted a mid-promote.
-    declared = _to_float(current_best_tput)
+    declared = to_float(current_best_tput)
     if declared and declared > 0 and best > 0 and abs(declared - best) / max(declared, 1.0) > 0.001:
         payload["trajectory_incomplete"] = True
         payload["current_best_tput_declared"] = declared
@@ -349,7 +351,7 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
     # Sorted by timestamp rather than trusted in list order: a legacy prepend
     # puts the newest first and would silently invert the curve.
     for entry in sorted((e for e in entries if isinstance(e, Mapping)), key=lambda e: str(e.get("ts") or "")):
-        tput = _to_float(entry.get("tput"))
+        tput = to_float(entry.get("tput"))
         if tput is None or tput <= 0:
             continue
         points.append(
@@ -358,33 +360,12 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
                 "tput": tput,
                 "label": str(entry.get("variant_name") or entry.get("action") or ""),
                 "action": str(entry.get("action") or ""),
-                "gain_pct": round((tput - baseline) / baseline * 100.0, 4) if baseline > 0 else 0.0,
+                "gain_pct": round(gain_pct_or_zero(tput, baseline), 4),
                 "flags": str(entry.get("candidate_extra_server_args") or ""),
                 "extra_envs": dict(entry.get("extra_envs") or {}),
             }
         )
     return points
-
-
-def _to_float(value: Any) -> float | None:
-    """``value`` as a float, or ``None`` when it is not a finite number."""
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if result == result and result not in (float("inf"), float("-inf")) else None
-
-
-def _to_int(value: Any) -> int:
-    """``value`` as an int, or ``0`` when it is not one."""
-    if isinstance(value, bool) or value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 def record_close_settled(
@@ -528,7 +509,6 @@ def _write_arc(session_dir: Path | str, payload: Mapping[str, Any]) -> None:
         dict(payload),
     )
 
-
 def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping[str, Any]) -> None:
     """Upsert one attempt row, keyed by its number."""
     if not session_dir:
@@ -539,7 +519,6 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
         dict(row),
         key=str(int(attempt)),
     )
-
 
 def _queue_depth(session_dir: Path | str) -> dict[str, int]:
     """Line counts of the local KB write queues, as of this settlement.
@@ -601,6 +580,7 @@ __all__ = [
     "RESULT_CHAMPION_NOT_PROMOTED",
     "RESULT_CONFIGURATION_FAILED",
     "RESULT_EMPTY_REPLAY_MATERIAL",
+    "RESULT_INVALID_SELECTION_PROFILE",
     "RESULT_INVALID_SCOPE",
     "RESULT_INVALID_THROUGHPUT",
     "RESULT_KB_DISABLED",
@@ -609,6 +589,7 @@ __all__ = [
     "RESULT_NO_NEW_KEEP",
     "RESULT_SKIPPED_OTHER",
     "RESULT_TRANSPORT_FAILED",
+    "RESULT_UNVALIDATED_RECIPE",
     "RESULT_WRITTEN",
     "ROOFLINE_TARGET_RATIO",
     "SESSION_BREAKDOWN_PATH",

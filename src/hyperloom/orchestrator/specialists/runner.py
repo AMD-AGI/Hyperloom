@@ -158,9 +158,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 )
 
 
-_now_iso = now_iso
-
-
 _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
     sorted(
         {
@@ -724,22 +721,19 @@ class SpecialistRunner:
 
     @staticmethod
     def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
-        """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
+        """(tick, phase) from the live SharedState on ``ctx.extra``.
 
         Returns ``(None, None)`` when unavailable.
         """
-        try:
-            ss = (ctx.extra if ctx is not None else {}).get("shared_state")
-            if ss is None:
-                return None, None
-            tick = ss.tick
-            phase = ss.phase
-            return (
-                int(tick) if tick is not None else None,
-                (str(phase) or None) if phase else None,
-            )
-        except Exception:  # noqa: BLE001 — telemetry must never break the run
+        ss = (ctx.extra if ctx is not None else {}).get("shared_state")
+        if ss is None:
             return None, None
+        tick = ss.tick
+        phase = ss.phase
+        return (
+            int(tick) if tick is not None else None,
+            (str(phase) or None) if phase else None,
+        )
 
     def _trace_specialist_llm_call(
         self,
@@ -791,7 +785,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
                 task_id,
@@ -837,7 +831,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
                 task_id,
@@ -863,7 +857,7 @@ class SpecialistRunner:
         try:
             path = specialist_intel_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            ts = _now_iso()
+            ts = now_iso()
             with path.open("a", encoding="utf-8") as f:
                 for call in tool_calls:
                     if not isinstance(call, dict):
@@ -878,7 +872,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -906,34 +900,26 @@ class SpecialistRunner:
         """
         if self.session_dir is None:
             return
-        try:
-            md = metadata or {}
-            prompt = md.get("prompt")
-            response = md.get("response")
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="specialist",
-                # Same metadata dict as the token row for this turn, so both
-                # halves carry the backend's call_id when it stamped one.
-                call_id=md.get("call_id"),
-                task_id=task_id,
-                turn=turn,
-                tick=tick,
-                phase=phase,
-                model=md.get("model"),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
-            log.debug(
-                "full-trace: specialist conversation append failed for task_id=%s turn=%s",
-                task_id,
-                turn,
-                exc_info=True,
-            )
+        md = metadata or {}
+        prompt = md.get("prompt")
+        response = md.get("response")
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="specialist",
+            # Same metadata dict as the token row for this turn, so both
+            # halves carry the backend's call_id when it stamped one.
+            call_id=md.get("call_id"),
+            task_id=task_id,
+            turn=turn,
+            tick=tick,
+            phase=phase,
+            model=md.get("model"),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     # In-process Backend path (test path)
     async def _run_via_backend(
@@ -1675,7 +1661,7 @@ class SpecialistRunner:
         line = json.dumps(
             {
                 "turn": turn,
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 **safe_entry,
             },
             sort_keys=True,
@@ -1707,7 +1693,7 @@ class SpecialistRunner:
         if path is None:
             return
         payload = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "ts_unix": time.time(),
             "turn": turn,
             "max_turns": max_turns,
@@ -1732,7 +1718,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": _now_iso(), **payload}, make_parents=False)
+        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
 
     def _write_specialist_done_partial(
         self,
@@ -1754,7 +1740,7 @@ class SpecialistRunner:
             return
         _common_io.atomic_write_json(
             path,
-            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
+            {"ts": now_iso(), "_recovered_from_partial": True, **payload},
             make_parents=False,
         )
 

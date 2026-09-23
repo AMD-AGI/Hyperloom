@@ -208,5 +208,4 @@ def record_critic_iteration(
     except RECORDING_ERRORS as exc:
         note_failure(section=ITERATION_SECTION, error=exc, detail="record_critic_iteration failed")
 
-
 __all__ = ["ITERATION_SECTION", "SECTION", "record_critic_iteration"]

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
 from .storage.schema import DEFAULT_LANE_CAPACITIES
@@ -72,9 +74,6 @@ ROUND_LEASE_PID = 0
 
 #: Recorded in the lane row's ``action`` column.
 _ROUND_LEASE_ACTION = "bringup_round"
-
-
-_now_iso = now_iso
 
 
 def local_owner_scope() -> str:
@@ -169,6 +168,255 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
     return sorted(out)
 
 
+#: Evidence keys :meth:`SubAgentRunner.run_task` builds and hands to
+#: :meth:`SubAgentRunner._write_terminal` on the terminal transition of a task
+#: it ran (``loop/sub_agent_runner``). ``cleanup_confirmed`` rides every
+#: terminal transition; the process-group id is recorded only on the unconfirmed
+#: path, and only when the raise site knew which group it had failed to confirm.
+#:
+#: Neither is probed. Nothing reclaims a lane from them: a served process is
+#: setsid'd by design and leaves the group its spawn created, so three attempts
+#: to decide from such an identity whether a lane was free were refuted in
+#: review. They are read only to tell an operator WHY a lane is retained and
+#: where to start looking -- see :func:`_report_unverifiable`.
+#:
+#: Writer and reader still take both names from here so they cannot drift apart:
+#: a reader looking for a key the writer stopped writing would print a diagnostic
+#: that silently lost its only lead.
+CLEANUP_CONFIRMED_KEY = "cleanup_confirmed"
+CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
+
+#: Why a retained row could not be verified. Logged verbatim to the operator,
+#: so each one reads as a cause rather than a code.
+UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot or PID namespace"
+#: The ordinary case: the holder ended without confirming its cleanup, so the
+#: release was skipped on purpose and its work may still be running. Nothing
+#: this process can observe settles it -- every cheaper proof tried during
+#: review (terminal state, an empty spawn process group, no pidfile naming a
+#: live server) turned out to be a proxy a real process slips out of, because a
+#: served process is setsid'd by design and its pidfile appears only after it
+#: answers. The lane stays held and an operator decides.
+UNVERIFIABLE_CLEANUP_UNCONFIRMED = "the holder ended without confirming its cleanup"
+#: The odd one: cleanup WAS confirmed, which means the release ran -- so this
+#: row should not exist. It is reported rather than reclaimed because nothing
+#: here can tell a release that half-happened from one whose row simply
+#: outlived it, and because a lane nobody is coming back for is exactly what an
+#: operator needs to hear about.
+UNVERIFIABLE_CONFIRMED_BUT_HELD = "the holder confirmed its cleanup yet its lane row is still here"
+#: Distinct from the above: the row may well be ours, but this process cannot
+#: name its own ownership domain (an unreadable /proc), so nothing here may be
+#: judged at all. Labelling this "another namespace" would tell an operator to
+#: go look at a machine that is not involved.
+UNVERIFIABLE_NO_LOCAL_SCOPE = "this process cannot read its own boot/PID namespace, so no row here can be judged"
+#: Retained by the gpu_leases exemption. Not a defect -- a lane records its
+#: coordinator, not the specialist's GPU worker -- but the operator still has to
+#: be told, because this is the very path that wedged 2026-09-21 and the
+#: exemption is a reason not to RECLAIM, never a reason not to REPORT.
+UNVERIFIABLE_HOLDS_GPU = "the holder still owns GPU cards, so its lane is exempt from reclamation"
+#: The holder's ``tasks`` row was pruned out from under its lease. Nothing can
+#: judge it any more: the state that said it ended is gone.
+UNVERIFIABLE_HOLDER_PRUNED = "the holder's task row no longer exists, so nothing can attest it ended"
+
+#: ``(lane, holder_id)`` pairs whose remedy has already been printed. A sweep
+#: runs every maintenance tick and an unverifiable row stays unverifiable by
+#: design -- possibly for the life of the session -- so without this the same
+#: warning would be reprinted every tick and bury everything else in the log.
+_DIAGNOSED: set[tuple[str, str]] = set()
+
+
+def _last_cleanup_evidence(history_json: str) -> dict:
+    """Return the newest history entry's cleanup evidence, or ``{}``.
+
+    Args:
+        history_json: The holder task's ``history`` column, as stored.
+
+    Returns:
+        dict: The ``evidence`` of the newest entry carrying
+        :data:`CLEANUP_CONFIRMED_KEY`; empty when no entry carries one, which
+        includes a history this process cannot parse.
+    """
+    try:
+        history = json.loads(history_json or "[]")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(history, list):
+        return {}
+    for entry in reversed(history):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if isinstance(evidence, dict) and CLEANUP_CONFIRMED_KEY in evidence:
+            return evidence
+    return {}
+
+
+def cleanup_confirmation_rate(cur: sqlite3.Cursor) -> tuple[int, int]:
+    """How often an ended task confirmed its teardown, this session.
+
+    ``leases_unverifiable`` says how many lanes are held right now. It cannot
+    say whether that is a rare accident or the ordinary outcome, and that is the
+    number which decides whether an automatic release mechanism is worth its
+    risk at all: every portable one was refuted, and the only candidate left
+    (a sealed descriptor behind a seccomp filter) is safety-critical to get
+    right. Measure before building it.
+
+    Reads what :meth:`SubAgentRunner._write_terminal` already records, so it
+    costs one query and writes nothing.
+
+    Args:
+        cur: Cursor of the caller's transaction.
+
+    Returns:
+        tuple[int, int]: Ended tasks whose cleanup was NOT confirmed, and ended
+        tasks in total. A task whose history carries no cleanup evidence at all
+        counts as unconfirmed: it is exactly the shape that strands a lane.
+    """
+    unconfirmed = total = 0
+    for (history,) in cur.execute("SELECT history FROM tasks WHERE state IN (?,?,?)", tuple(sorted(TERMINAL_STATES))):
+        total += 1
+        if _last_cleanup_evidence(history).get(CLEANUP_CONFIRMED_KEY) is not True:
+            unconfirmed += 1
+    return unconfirmed, total
+
+
+def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
+    """Retained rows whose holder ended and which nothing can show unused.
+
+    This is the whole operator story for a leaked lane: there is no cleanup
+    command, so :func:`_report_unverifiable` logging the remedy IS the
+    interface. Nothing reclaims these rows any more, so everything it returns
+    is a lane that will stay held until an operator acts on it.
+
+    Unlike that pass it does NOT filter on ``owner_scope``. A row this process
+    may not judge is precisely the kind an operator has to be told about, since
+    no reaper here will ever take it back -- including the inherited case of a
+    row acquired while ``/proc`` was unreadable, which is stored with
+    ``owner_scope=''`` and is unreclaimable for good.
+
+    Args:
+        cur: Cursor of the caller's transaction.
+        scope: The boot/PID namespace whose rows this process may judge; empty
+            when the kernel would not name one, in which case no row is ours.
+
+    Returns:
+        list[dict]: One entry per unverifiable row, each with a ``reason``.
+    """
+    # A LEFT JOIN, and no gpu_leases exemption: both of those filters belong to
+    # reclamation, and either would silence exactly the rows an operator most
+    # needs to see. An inner join drops a row whose holder was pruned
+    # (bus/db_maintenance.py prune_tasks does not spare a task that still holds
+    # a lease), and the exemption drops the GPU path -- the one
+    # dispatcher.py's release_resources() fails on, i.e. the shape of the
+    # 2026-09-21 incident.
+    rows = [
+        dict(r)
+        for r in cur.execute(
+            "SELECT leases.lane AS lane, leases.holder_id AS holder_id, leases.task_id AS task_id, "
+            "leases.owner_scope AS owner_scope, tasks.state AS holder_state, tasks.history AS holder_history, "
+            "(SELECT 1 FROM gpu_leases WHERE gpu_leases.task_id = leases.task_id LIMIT 1) AS holds_gpu "
+            "FROM leases LEFT JOIN tasks ON tasks.task_id = leases.task_id "
+            "WHERE leases.lane != ?",
+            (BRINGUP_ROUND_LANE,),
+        )
+    ]
+    stuck: list[dict] = []
+    for row in rows:
+        state = row.pop("holder_state", None)
+        holds_gpu = row.pop("holds_gpu", None)
+        history = row.pop("holder_history", None)
+        if state is None:
+            # The task row is gone; its lease outlived it and no pass can judge it.
+            row["reason"] = UNVERIFIABLE_HOLDER_PRUNED
+            stuck.append(row)
+            continue
+        if str(state) not in TERMINAL_STATES:
+            continue
+        evidence = _last_cleanup_evidence(history)
+        # Carried for the operator log only; see _report_unverifiable.
+        row["pgid"] = evidence.get(CLEANUP_TREE_PGID_KEY)
+        if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
+            # Nothing reclaims rows any more, so a confirmed holder whose row
+            # survived is no longer quietly cleaned up behind the scenes: it
+            # sits there like any other. Say so instead of skipping it.
+            row["reason"] = UNVERIFIABLE_CONFIRMED_BUT_HELD
+            stuck.append(row)
+            continue
+        if holds_gpu:
+            row["reason"] = UNVERIFIABLE_HOLDS_GPU
+            stuck.append(row)
+            continue
+        if not scope or row["owner_scope"] != scope:
+            # Never probed, but for two different reasons that owe the operator
+            # two different messages: with no local scope nothing here can be
+            # judged at all, whereas a mismatching scope means the recorded id
+            # names a process on a machine this one cannot see.
+            if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
+                continue
+            row["reason"] = UNVERIFIABLE_NO_LOCAL_SCOPE if not scope else UNVERIFIABLE_FOREIGN_SCOPE
+            stuck.append(row)
+            continue
+        # Nothing here tries to decide whether the lane is free. Seven rounds of
+        # review established that this process cannot know: a served process is
+        # setsid'd by design (:mod:`actions.executors._server_lifecycle` says so
+        # where it reads a pidfile), so it leaves the group recorded at spawn;
+        # its pidfile is written only after the server answers, so the whole
+        # model-load window has a live server nothing names; and matching a
+        # cmdline is the same kind of guess as matching a group. Each candidate
+        # proof turned out to be a proxy with a way around it, and releasing a
+        # lane wrongly lets two rounds onto the same cards -- silent corruption,
+        # against a deadlock an operator clears in 90 seconds. So the lane is
+        # kept and the operator is told; that asymmetry is the design.
+        row["reason"] = UNVERIFIABLE_CLEANUP_UNCONFIRMED
+        stuck.append(row)
+    return stuck
+
+
+def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
+    """Log what happened and what to do about it, once per ``(lane, holder)``.
+
+    One warning per row, carrying the lane, the holder task, why it could not be
+    verified, and a statement the operator can paste. It took an hour of
+    ``py-spy`` and sqlite spelunking to work that out on 2026-09-21; it should
+    take reading one log line now.
+
+    The caution is not decoration. Reclamation is deliberately refused here
+    exactly because nothing could prove the task's processes stopped, so an
+    operator deleting the row without checking is doing the one thing the
+    retention exists to prevent.
+
+    Args:
+        rows: What :func:`_unverifiable_holders` returned.
+        db_path: Real path of this session's database, so the remedy is a
+            statement the operator can paste rather than one they must first
+            resolve ``$SESSION_DIR`` for themselves.
+    """
+    for row in rows:
+        key = (str(row["lane"]), str(row["holder_id"]))
+        if key in _DIAGNOSED:
+            continue
+        _DIAGNOSED.add(key)
+        log.warning(
+            "resource_lock: lane %s is held by ended task %s (holder %s) and cannot be verified free: %s. "
+            "It is retained on purpose -- nothing observable proves that task's processes stopped, and "
+            "releasing it would let conflicting work onto the machine. To release it by hand, FIRST confirm "
+            "no process of task %s is still running%s, then run: "
+            'sqlite3 "%s" '
+            "\"DELETE FROM leases WHERE lane='%s' AND holder_id='%s';\"",
+            row["lane"],
+            row["task_id"],
+            row["holder_id"],
+            row["reason"],
+            row["task_id"],
+            # The spawn process group, when one was recorded. It is no longer
+            # evidence -- a served process setsid's out of it -- but it is still
+            # the best starting point a human has for "what did this task leave".
+            f" (its spawn process group was {row['pgid']}; a server it started may have left it)"
+            if row.get("pgid")
+            else "",
+            db_path or "$SESSION_DIR/storage/coordinator.db",
+            row["lane"],
+            row["holder_id"],
+        )
+
+
 @dataclass
 class Lease:
     """Lease handle returned by ``acquire_many``."""
@@ -225,9 +473,9 @@ class SqliteLeaseBackend:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
         now_ts = time.time()
-        now_iso = _now_iso()
+        stamp = now_iso()
         expires_ts = now_ts + ttl_sec
-        expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
+        expires_iso = _lease_iso(expires_ts)
 
         async with self.db.transaction() as cur:
             # Resolve capacity per lane (fallback for unseeded DBs).
@@ -291,9 +539,9 @@ class SqliteLeaseBackend:
                         task_id,
                         action,
                         os.getpid(),
-                        now_iso,
+                        stamp,
                         expires_iso,
-                        now_iso,
+                        stamp,
                         local_owner_scope(),
                     ),
                 )
@@ -303,34 +551,34 @@ class SqliteLeaseBackend:
             task_id=task_id,
             action=action,
             lanes=tuple(expanded),
-            acquired_at=now_iso,
+            acquired_at=stamp,
             expires_at=expires_iso,
         )
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
         """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
-        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
-        now_iso = _now_iso()
+        new_expires_iso = _lease_iso(time.time() + ttl_sec)
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
                 f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
-                (new_expires_iso, now_iso, *lease.lanes, lease.holder_id),
+                (new_expires_iso, stamp, *lease.lanes, lease.holder_id),
             )
             if cur.rowcount != len(lease.lanes):
                 raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
-        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
-        now_iso = _now_iso()
+        new_expires_iso = _lease_iso(time.time() + ttl_sec)
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             cur.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))
             lanes = sorted(str(r["lane"]) for r in cur.fetchall())
             if lanes:
                 cur.execute(
                     "UPDATE leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                    (new_expires_iso, now_iso, task_id),
+                    (new_expires_iso, stamp, task_id),
                 )
         return lanes
 
@@ -395,6 +643,32 @@ class SqliteLeaseBackend:
                 ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(pid={r.get('pid')})" for r in reaped),
             )
         return reaped
+
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """Unconfirmed-cleanup count and total ended tasks, for this session.
+
+        Returns:
+            tuple[int, int]: ``(unconfirmed, total)``.
+        """
+        async with self.db.transaction() as cur:
+            return cleanup_confirmation_rate(cur)
+
+    async def diagnose_unverifiable_holders(self) -> list[dict]:
+        """Report every retained row nothing can prove free, and how to free it.
+
+        Run after :meth:`reap_dead_holders` on the same tick. There is no
+        cleanup command and there will not be one -- a row is released by an
+        operator who has checked what the reaper could not -- so this warning is
+        the entire remedy path.
+
+        Returns:
+            list[dict]: The rows currently held and unverifiable, whether or not
+            this tick was the one that logged their remedy.
+        """
+        async with self.db.transaction() as cur:
+            stuck = _unverifiable_holders(cur, scope=local_owner_scope())
+        _report_unverifiable(stuck, db_path=str(getattr(self.db, "db_path", "") or ""))
+        return stuck
 
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
         """Return round ids with a retained ownership row, irrespective of age."""
@@ -477,6 +751,20 @@ class ResourceLockManager:
             return []
         return await fn()
 
+    async def diagnose_unverifiable_holders(self) -> list[dict]:
+        """Report retained lanes nothing can prove free, via the backend."""
+        fn = getattr(self.backend, "diagnose_unverifiable_holders", None)
+        if not callable(fn):
+            return []
+        return await fn()
+
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """Unconfirmed-cleanup count and total ended tasks, via the backend."""
+        fn = getattr(self.backend, "cleanup_confirmation_rate", None)
+        if not callable(fn):
+            return 0, 0
+        return await fn()
+
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
         """Return the ids of rounds still holding their lane, via the backend.
 
@@ -504,9 +792,14 @@ class ResourceLockManager:
 
 __all__ = [
     "BRINGUP_ROUND_LANE",
+    "CLEANUP_CONFIRMED_KEY",
+    "CLEANUP_TREE_PGID_KEY",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
     "ROUND_LEASE_PID",
+    "UNVERIFIABLE_FOREIGN_SCOPE",
+    "UNVERIFIABLE_CONFIRMED_BUT_HELD",
+    "UNVERIFIABLE_CLEANUP_UNCONFIRMED",
     "LaneBusy",
     "LaneFull",
     "Lease",

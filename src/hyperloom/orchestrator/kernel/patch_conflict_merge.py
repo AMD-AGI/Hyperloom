@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom.common.unified_diff import parse_unified_diff
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
@@ -185,14 +186,8 @@ def _added_lines(patch_text: str) -> set[str]:
     Blank and near-blank additions carry no identity, so they cannot witness
     that a side survived a merge.
     """
-    added: set[str] = set()
-    for line in patch_text.splitlines():
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        body = " ".join(line[1:].split())
-        if len(body) >= 4:
-            added.add(body)
-    return added
+    bodies = (" ".join(line.split()) for change in parse_unified_diff(patch_text) for line in change.added)
+    return {body for body in bodies if len(body) >= 4}
 
 
 def _missing_additions(repo: Path, patch_path: Path) -> list[str]:

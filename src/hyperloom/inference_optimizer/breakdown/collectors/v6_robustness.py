@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._common import _dict_rows
+from ._common import _dict_rows, _mapping
 
 __all__ = ["collect_v6_robustness"]
 
@@ -28,5 +28,4 @@ def collect_v6_robustness(recorded: Any = None) -> dict[str, Any]:
         ``turns`` says the agent never completed a turn, which is itself the
         answer a reader is after.
     """
-    view = recorded if isinstance(recorded, dict) else {}
-    return {"turns": _dict_rows(view.get("turns"))}
+    return {"turns": _dict_rows(_mapping(recorded).get("turns"))}

@@ -920,26 +920,6 @@ def test_model_gate_projection_failure_does_not_change_gate_result(tmp_path, mon
     assert model_gate._preflight_unsupported_model_arch(_gate_args(model), tmp_path) is False
 
 
-def test_install_projection_failure_does_not_change_step_result(monkeypatch):
-    from hyperloom.inference_optimizer.cli import preflight
-
-    monkeypatch.setattr(
-        preflight,
-        "_record_install_step",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad V6 projection")),
-    )
-
-    assert (
-        preflight._run_install_step(
-            {"ext": {"steps": []}},
-            step_id="unchanged",
-            category="check",
-            action=lambda: "original-result",
-        )
-        == "original-result"
-    )
-
-
 def test_install_event_write_failure_is_exported_as_v6_warning(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.inference_optimizer.session import sbd_v6

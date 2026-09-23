@@ -8,6 +8,8 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -37,6 +39,7 @@ def promotion(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "2")
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
     coord.shared_state = SharedState(
         framework="sglang",
         benchmark_mode="synthetic",

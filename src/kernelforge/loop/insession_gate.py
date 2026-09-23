@@ -551,7 +551,7 @@ class InSessionGate:
                 p = Path(candidate).resolve()
                 if p.exists():
                     return p.parent if p.is_file() else p
-            except Exception:
+            except OSError:
                 continue
         return None
 

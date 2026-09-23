@@ -1203,12 +1203,8 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    if bool(getattr(state, "has_keep_pending_integrate", False)):
+        return True
 
     if _controller_phase_terminal(state):
         return False
@@ -1225,13 +1221,9 @@ def kernel_work_pending(state: Any) -> bool:
             return True
         return False
 
-    try:
-        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-        if callable(untried_hot) and bool(untried_hot()):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+    if callable(untried_hot) and bool(untried_hot()):
+        return True
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
     integrated_entries: list[dict[str, Any]] = []
@@ -1398,10 +1390,7 @@ def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting."""
     getter = getattr(state, "session_budget_usable_sec", None)
     if callable(getter):
-        try:
-            return getter()
-        except Exception:  # noqa: BLE001 — fall back to the attribute path
-            pass
+        return getter()
     return session_remaining_seconds(state)
 
 
@@ -2189,7 +2178,8 @@ def record_lifecycle_event(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """Append a structured lifecycle event marking a phase/step boundary."""
-    from ..state.shared_state import _LIFECYCLE_CAP, _now_iso
+    from ..state.shared_state import _LIFECYCLE_CAP
+    from hyperloom.common.timeutil import now_iso
 
     events = state.lifecycle
     if events is None:
@@ -2204,7 +2194,7 @@ def record_lifecycle_event(
         detail=detail,
         duration_s=duration_s,
         seq=next_seq,
-        ts=ts or _now_iso(),
+        ts=ts or now_iso(),
     )
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)

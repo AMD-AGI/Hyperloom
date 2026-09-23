@@ -10,13 +10,10 @@ import base64
 import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
 
 @pytest.fixture
@@ -30,24 +27,12 @@ def patch_env(tmp_path, monkeypatch):
     return fw, bak
 
 
-def _strip_pod_script_header(body: str) -> str:
-    lines = body.splitlines()
-    if lines and lines[0].startswith("#!"):
-        lines = lines[1:]
-    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
-    return "\n".join(lines).strip()
-
-
 def _bundle_kernel_node_ops() -> str:
-    root = _repo_root() / "multi_node" / "scripts"
-    chunks = [_strip_pod_script_header((root / dep).read_text(encoding="utf-8")) for dep in ("patch_path_safety.py",)]
-    main_body = _strip_pod_script_header((root / "kernel_node_ops.py").read_text(encoding="utf-8"))
-    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
+    return mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS)
 
 
 def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
-    mod.__dict__["__file__"] = str(_repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py")
     exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod

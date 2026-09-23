@@ -430,13 +430,10 @@ def main() -> int:
         }
     achievable = args.achievable_tflops or None
     if achievable is None and args.target_platform:
-        try:
-            from hyperloom.orchestrator.kernel.roofline_ceiling import _resolve_achievable_tflops
+        from hyperloom.orchestrator.kernel.roofline_ceiling import _resolve_achievable_tflops
 
-            resolved = _resolve_achievable_tflops(args.target_platform, "bf16")
-            achievable = resolved if resolved and resolved > 0 else None
-        except Exception:
-            achievable = None
+        resolved = _resolve_achievable_tflops(args.target_platform, "bf16")
+        achievable = resolved if resolved and resolved > 0 else None
 
     report = build_report(
         Path(args.perf_csv_dir).expanduser().resolve(),

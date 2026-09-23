@@ -1301,3 +1301,22 @@ def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
     assert len(patches) == 1
     assert roots == {}
+
+
+def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
+    """An actor's ids come from the node Ray placed it on, so they mean nothing here.
+
+    Nothing reclaims a lane from this number -- no reaper probes it -- but it is
+    printed to the operator who has to clear one by hand, so a number that names
+    a process on a different host would send them to the wrong machine. None is
+    the honest answer for an actor; a local specialist leads its own group and
+    can say so.
+    """
+    local = subprocess_._local_tree_pgid(type("_P", (), {"pid": 4242})())
+    actor = subprocess_._local_tree_pgid(subprocess_._RayLeaseProcess(object(), 4242))
+
+    # A local specialist leads its own group, so its root pid IS the group id.
+    assert local == 4242
+    assert actor is None
+    # Nothing to report is also the answer when the cleanup never spawned a root.
+    assert subprocess_._local_tree_pgid(None) is None

@@ -24,7 +24,12 @@ import logging
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..actions.cancel_channel import current_cancel_scope
-from ..bus.resource_lock import Lease, ResourceLockManager
+from ..bus.resource_lock import (
+    CLEANUP_CONFIRMED_KEY,
+    CLEANUP_TREE_PGID_KEY,
+    Lease,
+    ResourceLockManager,
+)
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from ..trace.task_progress import ProgressReporter, progress_scope
@@ -115,11 +120,33 @@ class SubAgentResult:
 
 
 class ExecutionCleanupUnconfirmed(RuntimeError):
-    """Physical cleanup did not acknowledge release of an execution's resources."""
+    """Physical cleanup did not acknowledge release of an execution's resources.
+    Recorded on the terminal row as a LEAD FOR AN OPERATOR, not as something a
+    reaper acts on. Nothing probes it: a served process is setsid'd by design,
+    so it leaves the group its spawn created, and three attempts to prove a lane
+    free from identities like this one were refuted in review. What it is still
+    good for is telling a human where to start looking when a lane is reported
+    held -- see :func:`~hyperloom.orchestrator.bus.resource_lock._report_unverifiable`,
+    which prints it with exactly that caveat.
 
-    def __init__(self, message: str, *, result: SubAgentResult | None = None) -> None:
+    Attributes:
+        result: The executor's own outcome, for the terminal row.
+        tree_pgid: Process group whose teardown went unconfirmed, or None when
+            the raise site has no local group to name -- a cleanup that failed
+            before any process existed, or a Ray actor whose ids belong to
+            another node.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: SubAgentResult | None = None,
+        tree_pgid: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.result = result
+        self.tree_pgid = tree_pgid
 
 
 class SubAgentRunner:
@@ -389,11 +416,21 @@ class SubAgentRunner:
                 finally:
                     cleanup_confirmed = released and cleanup_error is None
                     if outcome is not None:
-                        evidence.update(outcome=asdict(outcome), cleanup_confirmed=cleanup_confirmed)
+                        evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: cleanup_confirmed})
                         if not cleanup_confirmed:
                             evidence["cleanup_error"] = (
                                 repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
                             )
+                            # The lane this path deliberately retains is not
+                            # taken back by anything: no reaper inspects this
+                            # number, because a served process setsid's out of
+                            # the group it names. It is recorded so the operator
+                            # who has to clear that lane by hand has somewhere
+                            # to start -- as a number, rather than left to be
+                            # dug back out of the repr above.
+                            pgid = getattr(cleanup_error, "tree_pgid", None)
+                            if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 0:
+                                evidence[CLEANUP_TREE_PGID_KEY] = pgid
                         await self._write_terminal(
                             task.task_id,
                             terminal_state or outcome.state,

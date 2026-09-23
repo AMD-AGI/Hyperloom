@@ -13,7 +13,7 @@ from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
 # Import every renderer module for its @register_renderer side effect.
-from ._renderers import (  # noqa: F401  (side-effect imports)
+from ._renderers import (
     session as _r_session,
     workload as _r_workload,
     baseline as _r_baseline,

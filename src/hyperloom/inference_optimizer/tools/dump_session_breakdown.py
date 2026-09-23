@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             sd,
             output_path=args.output,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("write_breakdown_json failed")
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

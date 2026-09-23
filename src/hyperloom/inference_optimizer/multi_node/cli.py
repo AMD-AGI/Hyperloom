@@ -9,6 +9,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import shlex
 import sys
 import tempfile
@@ -490,14 +491,19 @@ def _strip_pod_script_header(body: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _read_bundled_pod_python_script(
-    main: str,
-    *,
-    deps: tuple[str, ...] = ("patch_path_safety.py",),
-) -> str:
-    """Read a pod Python script with stdlib-only dependencies inlined."""
-    chunks = [_strip_pod_script_header(_read_pod_script(dep)) for dep in deps]
-    main_body = _strip_pod_script_header(_read_pod_script(main))
+_KERNEL_NODE_OPS_DEPS = (_SCRIPTS_DIR / "patch_path_safety.py",)
+_LAUNCHER_DEPS = (
+    Path(__file__).parent / "_internal" / "server_args_safety.py",
+    _SCRIPTS_DIR / "sglang_shape_gate.py",
+)
+
+
+def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...]) -> str:
+    """Read a pod Python script as one self-contained file: stdlib-only *deps* inlined, their imports dropped."""
+    chunks = [_strip_pod_script_header(dep.read_text(encoding="utf-8")) for dep in deps]
+    stems = "|".join(re.escape(dep.stem) for dep in deps)
+    main_body = re.sub(rf"^from (?:{stems}) import (?:\([^)]*\)|.*)\n", "", _read_pod_script(main), flags=re.MULTILINE)
+    main_body = _strip_pod_script_header(main_body)
     return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
 
 
@@ -645,7 +651,7 @@ def _build_multinode_launch_entrypoint(
     log_dir: str,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
-    py = _read_pod_script("launch_multinode.py")
+    py = _read_bundled_pod_python_script("launch_multinode.py", _LAUNCHER_DEPS)
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
         extra_args = prepare_shell_safe_extra_args(

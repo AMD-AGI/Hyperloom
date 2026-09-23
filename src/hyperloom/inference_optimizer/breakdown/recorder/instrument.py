@@ -276,7 +276,6 @@ def record_backend_versions_and_timeline(
             )
     _mirror_backend_attempts_to_kernel_timeline(result)
 
-
 __all__ = [
     "PRODUCER_COORDINATOR",
     "PRODUCER_KERNEL_AGENT",

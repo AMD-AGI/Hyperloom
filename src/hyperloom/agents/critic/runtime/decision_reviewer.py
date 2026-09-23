@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
 
 from .errors import (
@@ -20,7 +21,6 @@ from .errors import (
 )
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
-    ALLOWED_VERDICTS,
     Intent,
     build_advice_intent,
     build_envelope,

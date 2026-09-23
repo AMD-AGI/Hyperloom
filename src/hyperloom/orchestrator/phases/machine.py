@@ -65,7 +65,7 @@ class MachinePhase(PhaseHandler):
             state.phase_budget_pct = dict(self._phase_budget_pct)
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
         # Fresh start; pre-phase-machine resume state is treated as fresh.
@@ -76,7 +76,7 @@ class MachinePhase(PhaseHandler):
         )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
@@ -129,7 +129,7 @@ class MachinePhase(PhaseHandler):
                 session_dir=self.session_dir,
                 save_state=True,
             )
-        except Exception:  # noqa: BLE001 — defensive; helper is itself best-effort
+        except Exception:
             log.exception(
                 "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
                 workload,
@@ -244,16 +244,13 @@ class MachinePhase(PhaseHandler):
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
-            try:
-                state.mark_bottleneck_switch(
-                    prev_bottleneck=state.current_top_bottleneck(),
-                )
-                log.info(
-                    "plateau → bottleneck switch flagged (off %r)",
-                    state.last_cycle_bottleneck,
-                )
-            except Exception:  # noqa: BLE001 — advisory bookkeeping is best-effort
-                log.exception("mark_bottleneck_switch failed")
+            state.mark_bottleneck_switch(
+                prev_bottleneck=state.current_top_bottleneck(),
+            )
+            log.info(
+                "plateau → bottleneck switch flagged (off %r)",
+                state.last_cycle_bottleneck,
+            )
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
         if is_loopback:
             prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -303,18 +300,15 @@ class MachinePhase(PhaseHandler):
         )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
-        try:
-            state.record_lifecycle_event(
-                step=target,
-                status=_phase_state.LIFECYCLE_STATUS_ENTER,
-                phase=target,
-                detail=f"reason={reason}" if reason else "",
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.debug("Coordinator: lifecycle phase emit failed", exc_info=True)
+        state.record_lifecycle_event(
+            step=target,
+            status=_phase_state.LIFECYCLE_STATUS_ENTER,
+            phase=target,
+            detail=f"reason={reason}" if reason else "",
+        )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: save after phase transition failed")
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
@@ -337,7 +331,7 @@ class MachinePhase(PhaseHandler):
                     },
                 )
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged only. Only KERNEL entry runs out-of-band so
         # its GEAK/reprofile/tuning work does not freeze the tick loop; the phase is held until it returns.
@@ -356,7 +350,7 @@ class MachinePhase(PhaseHandler):
         # CLOSE rely on to see the sequencer's settlement once the transition returns.
         try:
             await self._on_phase_entered(**entry_kwargs)
-        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
+        except Exception as exc:
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
@@ -368,7 +362,7 @@ class MachinePhase(PhaseHandler):
             task.result()
         except asyncio.CancelledError:
             log.warning("Coordinator: _on_phase_entered hook was cancelled")
-        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
+        except Exception as exc:
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
@@ -395,17 +389,14 @@ class MachinePhase(PhaseHandler):
                 a phase that recomputed them at close would report counts over
                 a history that kept growing after the decision.
         """
-        try:
-            self._reseed_orch_prompt_for_phase(to_phase)
-        except Exception:  # noqa: BLE001 — prompt scoping is best-effort
-            log.exception("Coordinator: phase-boundary prompt reseed failed")
+        self._reseed_orch_prompt_for_phase(to_phase)
 
         # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
         # a hook of its own.
         if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
             try:
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
-            except Exception:  # noqa: BLE001 — observability cannot change the transition
+            except Exception:
                 log.debug("Coordinator: kernel timeline close failed", exc_info=True)
         # FRAMEWORK closes on the same terms, and additionally needs the
         # evidence: its exit rule already read both arms' plateau state, and
@@ -416,7 +407,7 @@ class MachinePhase(PhaseHandler):
                     exit_reason=str(reason or ""),
                     evidence=evidence if isinstance(evidence, dict) else None,
                 )
-            except Exception:  # noqa: BLE001 — observability cannot change the transition
+            except Exception:
                 log.debug("Coordinator: framework timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
@@ -465,7 +456,7 @@ class MachinePhase(PhaseHandler):
             evidence[k] = v
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "phase entry evidence: SharedState.save failed for kvs=%r",
                 kvs,

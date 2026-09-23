@@ -183,5 +183,4 @@ def record_tool_version(
     meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
     recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
 
-
 __all__ = ["record_tool_version"]
