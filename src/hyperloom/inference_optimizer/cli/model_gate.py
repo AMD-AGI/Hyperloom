@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.timeutil import now_iso
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
@@ -987,16 +988,6 @@ def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str
     )
 
 
-def _framework_is_scriptable(framework: str | None) -> bool:
-    """True when ``framework`` is a scriptable diffusion runtime (e.g. xDiT)."""
-    try:
-        from .. import framework_registry as _fr
-
-        return _fr.is_scriptable(framework)
-    except Exception:  # noqa: BLE001 — registry import must never block the gate
-        return str(framework or "").strip().lower() == "xdit"
-
-
 def _detect_amd_unsupported_architecture(data: dict) -> str | None:
     """Return a reason when the architecture has no AMD/ROCm runtime path."""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -1179,7 +1170,7 @@ def _detect_incompatible_model_config(
     """Detect a statically-knowable model-config incompatibility."""
     if not model_path:
         return None
-    is_scriptable_fw = _framework_is_scriptable(framework)
+    is_scriptable_fw = framework_registry.is_scriptable(framework)
     # Step 1: diffusers pipeline gate (before the config-absent short-circuit).
     if not is_scriptable_fw:
         pipeline_reason = _detect_diffusers_pipeline_model(model_path)
@@ -1748,14 +1739,7 @@ def _preflight_unsupported_model_arch(
 ) -> bool:
     """Gate multimodal/vision models before expensive bring-up."""
     # Scriptable diffusion frameworks (xDiT) are server-less image workloads, not decoder-only causal LMs.
-    framework = getattr(args, "framework", "") or ""
-    try:
-        from . import framework_registry as _fr
-
-        is_scriptable = _fr.is_scriptable(framework)
-    except Exception:  # noqa: BLE001 — registry import must never block the gate
-        is_scriptable = str(framework).strip().lower() == "xdit"
-    if is_scriptable:
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
         _record_model_gate_check(
             args,
             session_dir,
