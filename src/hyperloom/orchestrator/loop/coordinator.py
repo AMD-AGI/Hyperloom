@@ -18,6 +18,7 @@ from typing import AbstractSet, Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -654,16 +655,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
         # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
         # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
         # ON within the soft restart.
-        self._cycle_restart_servers: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -689,20 +684,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        _inline_raw = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS",
-                "",
-            )
-            .strip()
-            .lower()
-        )
-        self._inline_fast_actions_enabled: bool = _inline_raw not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        self._inline_fast_actions_enabled: bool = env_flag("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", default=True)
         self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -778,6 +760,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_revalidate_stack_for_close": "phase_close",
         "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
@@ -875,7 +858,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "gpu_lanes",
         "_framework_gpu_params": "gpu_lanes",
         "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
@@ -1396,8 +1378,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
@@ -1412,6 +1392,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+
+    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
+    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
+    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})

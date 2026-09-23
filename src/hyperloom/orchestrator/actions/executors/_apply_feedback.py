@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...specialists.patch_safety import patch_file_targets
+
 log = logging.getLogger(__name__)
 
 
@@ -85,50 +87,30 @@ def _read_source_context_impl(
     """Implementation of :func:`read_patch_source_context` (may raise)."""
     import re
 
-    lines = patch_text.splitlines()
-
-    # Find the first target file, preferring the +++ (new) side.
-    target_raw: str | None = None
-    hunk_start: int = 0
-
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
-        if ln.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
-            plus = lines[i + 1][4:].strip().split("\t")[0]
-            if plus and plus != "/dev/null":
-                target_raw = plus
-            else:
-                # Deletion patch: use the --- side.
-                minus = ln[4:].strip().split("\t")[0]
-                if minus and minus != "/dev/null":
-                    target_raw = minus
-            i += 2
-            continue
-        if target_raw and ln.startswith("@@ "):
-            # Parse the new-side start line from @@ -L,N +L2,N2 @@.
-            m = re.search(r"\+(\d+)", ln)
-            if m:
-                hunk_start = max(0, int(m.group(1)) - 1)  # 0-indexed
-            break
-        i += 1
-
+    # The first target file, preferring the +++ (new) side over a deletion's --- side.
+    sides = (new if new and new != "/dev/null" else old for old, new in patch_file_targets(patch_text))
+    target_raw = next((side for side in sides if side and side != "/dev/null"), None)
     if not target_raw:
         return ""
+    hunk = re.search(r"(?m)^@@ .*?\+(\d+)", patch_text)
+    hunk_start = max(0, int(hunk.group(1)) - 1) if hunk else 0
 
     target_path = _resolve_patch_target(target_raw, framework_root)
     if target_path is None:
         return ""
 
     file_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return _numbered_window(target_path, file_lines, hunk_start, radius)
+
+
+def _numbered_window(target: Path, file_lines: list[str], center: int, window: int) -> str:
+    """Render ``window`` numbered lines of ``target`` opening half a window above ``center``; "" for an empty file."""
     if not file_lines:
         return ""
-
-    half = max(1, radius // 2)
-    start = max(0, hunk_start - half)
-    end = min(len(file_lines), start + radius)
+    start = max(0, center - max(1, window // 2))
+    end = min(len(file_lines), start + window)
     snippet = "\n".join(f"{n + 1:>5}| {file_lines[n]}" for n in range(start, end))
-    return f"# {target_path} (lines {start + 1}-{end})\n{snippet}"
+    return f"# {target} (lines {start + 1}-{end})\n{snippet}"
 
 
 def _resolve_patch_target(target_raw: str, framework_root: Path) -> Path | None:
@@ -194,21 +176,8 @@ def _source_context_for_file_impl(
         return ""
 
     file_lines = target.read_text(errors="replace").splitlines()
-    if not file_lines:
-        return ""
-
-    hit = 0
-    if symbol:
-        for idx, ln in enumerate(file_lines):
-            if symbol in ln:
-                hit = idx
-                break
-
-    half = max(1, window // 2)
-    start = max(0, hit - half)
-    end = min(len(file_lines), start + window)
-    snippet = "\n".join(f"{n + 1:>5}| {file_lines[n]}" for n in range(start, end))
-    return f"# {target} (lines {start + 1}-{end})\n{snippet}"
+    hit = next((idx for idx, ln in enumerate(file_lines) if symbol in ln), 0) if symbol else 0
+    return _numbered_window(target, file_lines, hit, window)
 
 
 def build_apply_feedback(

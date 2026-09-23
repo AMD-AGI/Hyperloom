@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 log = logging.getLogger(__name__)
 
 # aiter dense GEMM lookup.
@@ -256,7 +258,7 @@ def _moe_demand(report: dict[str, Any]) -> Demand | None:
     Reuses existing miss evidence and excludes tokens seen only on one-stage
     dispatch, which the fmoe CK tuner cannot serve.
     """
-    if os.environ.get(MOE_DEMAND_DISABLE_ENV, "").strip().lower() in ("1", "true", "yes"):
+    if env_bool(MOE_DEMAND_DISABLE_ENV):
         return None
     moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
     impl = str(moe.get("impl") or "")

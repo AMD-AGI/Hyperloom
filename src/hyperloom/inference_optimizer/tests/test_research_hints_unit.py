@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,26 @@ def test_coerce_hint_valid():
     assert out["source"] == "paper"
     assert out["domain_tags"] == ["moe"]
     assert out["status"] == "proposed"
+
+
+def test_a_hint_observed_longer_ago_than_the_window_stops_advising(tmp_path):
+    stale = (datetime.now(timezone.utc) - rh.HINT_STALE_AFTER - timedelta(minutes=1)).isoformat()
+    rh.append_hints(tmp_path, [{"what": "x", "source": "s", "observed_at": stale}])
+
+    assert rh.load_hints(tmp_path) == []
+    # Withheld from readers, still on disk as the record of what was observed.
+    assert [h["what"] for h in rh._recorded_hints(tmp_path)] == ["x"]
+
+
+def test_a_stale_hint_is_not_re_added_as_new(tmp_path):
+    stale = (datetime.now(timezone.utc) - rh.HINT_STALE_AFTER - timedelta(minutes=1)).isoformat()
+    hint = {"what": "x", "source": "s", "observed_at": stale}
+    rh.append_hints(tmp_path, [hint])
+
+    added, _dropped = rh.append_hints(tmp_path, [hint])
+
+    assert added == 0
+    assert len(rh._recorded_hints(tmp_path)) == 1
 
 
 def test_coerce_hint_rejects():
@@ -87,12 +108,14 @@ def test_render_md_with_hints():
                 "accuracy_risk": "",
                 "domain_tags": [],
                 "status": "proposed",
+                "observed_at": "2026-09-22T00:00:00Z",
                 "source": "s",
             }
         ]
     )
     assert "## 1. x" in md
     assert "domain_tags: -" in md
+    assert "observed_at: 2026-09-22T00:00:00Z" in md
 
 
 # ---- competitor target ----

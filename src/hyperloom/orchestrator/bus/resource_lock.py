@@ -74,9 +74,6 @@ ROUND_LEASE_PID = 0
 _ROUND_LEASE_ACTION = "bringup_round"
 
 
-_now_iso = now_iso
-
-
 def local_owner_scope() -> str:
     """Identify this boot and PID namespace, or leave ownership unobservable."""
     try:
@@ -225,9 +222,9 @@ class SqliteLeaseBackend:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
         now_ts = time.time()
-        now_iso = _now_iso()
+        stamp = now_iso()
         expires_ts = now_ts + ttl_sec
-        expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
+        expires_iso = _lease_iso(expires_ts)
 
         async with self.db.transaction() as cur:
             # Resolve capacity per lane (fallback for unseeded DBs).
@@ -291,9 +288,9 @@ class SqliteLeaseBackend:
                         task_id,
                         action,
                         os.getpid(),
-                        now_iso,
+                        stamp,
                         expires_iso,
-                        now_iso,
+                        stamp,
                         local_owner_scope(),
                     ),
                 )
@@ -303,34 +300,34 @@ class SqliteLeaseBackend:
             task_id=task_id,
             action=action,
             lanes=tuple(expanded),
-            acquired_at=now_iso,
+            acquired_at=stamp,
             expires_at=expires_iso,
         )
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
         """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
-        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
-        now_iso = _now_iso()
+        new_expires_iso = _lease_iso(time.time() + ttl_sec)
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
                 f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
-                (new_expires_iso, now_iso, *lease.lanes, lease.holder_id),
+                (new_expires_iso, stamp, *lease.lanes, lease.holder_id),
             )
             if cur.rowcount != len(lease.lanes):
                 raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
-        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
-        now_iso = _now_iso()
+        new_expires_iso = _lease_iso(time.time() + ttl_sec)
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             cur.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))
             lanes = sorted(str(r["lane"]) for r in cur.fetchall())
             if lanes:
                 cur.execute(
                     "UPDATE leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                    (new_expires_iso, now_iso, task_id),
+                    (new_expires_iso, stamp, task_id),
                 )
         return lanes
 

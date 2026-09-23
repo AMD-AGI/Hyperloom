@@ -86,6 +86,7 @@ from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -512,6 +513,12 @@ class ExploreExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
             }
 

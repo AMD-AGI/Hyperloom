@@ -18,12 +18,10 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.knowledge.experience_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
@@ -196,12 +194,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:
@@ -2415,10 +2408,7 @@ def forge_rewrite(
     rewrite_kb_enabled = bool(rewrite_kb)
     # A disabled KB must not validate ambient remote credentials.
     try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(
-            mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     config = Config.from_env(

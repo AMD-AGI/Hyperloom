@@ -659,9 +659,9 @@ def test_set_stop_reason_empty_string_clears():
 def test_a_later_stop_reason_does_not_move_the_stop_time(monkeypatch):
     """CLOSE stops the session on entry and ships the breakdown; a later write must not re-date it."""
     s = SharedState()
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
     s.set_stop_reason("time_exhausted")
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
     s.set_stop_reason("target_reached")
     assert s.stop_reason == "target_reached"
     assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
@@ -670,9 +670,9 @@ def test_a_later_stop_reason_does_not_move_the_stop_time(monkeypatch):
 def test_rewriting_the_same_stop_reason_does_not_move_the_stop_time(monkeypatch):
     """The Coordinator's ``finally`` re-asserts the reason CLOSE already wrote."""
     s = SharedState()
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
     s.set_stop_reason("time_exhausted")
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:04:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:04:00.000000+00:00")
     s.set_stop_reason(s.stop_reason)
     assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
 

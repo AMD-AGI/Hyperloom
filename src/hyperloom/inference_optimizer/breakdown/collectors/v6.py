@@ -14,6 +14,7 @@ from typing import Any
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
+from ..recorder.session_metadata import architecture_block
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ._common import (
     _dict_rows,
@@ -24,52 +25,6 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
-
-
-# Structural model fields carried verbatim out of ``state.model_info``. Kept in
-# lockstep with the recorder's own list (``recorder/session_metadata.py``) so a
-# fragment-backed session and a collector fallback expose the same block.
-_ARCHITECTURE_FIELDS = (
-    "model_family",
-    "model_type",
-    "architectures",
-    "attention_type",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "hidden_size",
-    "intermediate_size",
-    "max_position_embeddings",
-    "vocab_size",
-    "torch_dtype",
-    "kv_cache_dtype",
-    "quantization",
-    "is_moe",
-    "num_experts",
-    "num_experts_per_tok",
-    "has_shared_expert",
-    "num_shared_experts",
-)
-
-
-def _architecture(workload: dict[str, Any], model_info: dict[str, Any]) -> dict[str, Any]:
-    """The structural model summary, carried whole rather than digested.
-
-    ``model_class`` is the operator's declaration when present and a dense/moe
-    split otherwise; every other field is the parsed ``config.json`` summary as
-    ``summarize_model_config`` produced it.
-    """
-    if not workload and not model_info:
-        return {}
-    model_class = str(workload.get("model_class") or "").strip()
-    if not model_class and model_info:
-        model_class = "moe" if bool(model_info.get("is_moe")) else "dense"
-    architecture: dict[str, Any] = {"model_class": model_class}
-    for field in _ARCHITECTURE_FIELDS:
-        if field in model_info:
-            architecture[field] = model_info[field]
-    return architecture
 
 
 def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +99,7 @@ def collect_v6_metadata(
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
-        "architecture": _architecture(workload, model_info),
+        "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
     }
     projected = {
         "versions": {
@@ -606,7 +561,7 @@ def collect_v6_outcome(
         dict[str, Any]: The ``outcome`` block.
     """
     stop_reason = str(session.get("stop_reason") or "").strip()
-    outcome_status = _outcome_status(stop_reason)
+    outcome_status = _outcome_status(stop_reason, _optional_float(state.get("baseline_tput")) or 0.0)
     for event in reversed(timeline):
         if not isinstance(event, dict) or str(event.get("type") or "") not in {"install", "model_gate"}:
             continue

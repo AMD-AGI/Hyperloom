@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 from .utils import check_gpu_status, run_subprocess
 
 log = logging.getLogger(__name__)
@@ -66,7 +68,7 @@ _SOFT_FAULT_RE = re.compile(
 
 def is_isolation_enabled() -> bool:
     """Whether per-shape isolation is opted in via env."""
-    return os.environ.get(ISOLATE_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
+    return env_bool(ISOLATE_ENV)
 
 
 def with_task_timeout(cmd: list[str], task_timeout_s: int = DEFAULT_TASK_TIMEOUT_S) -> list[str]:

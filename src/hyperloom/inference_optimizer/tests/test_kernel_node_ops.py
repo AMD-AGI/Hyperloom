@@ -10,13 +10,10 @@ import base64
 import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
 
 @pytest.fixture
@@ -30,16 +27,17 @@ def patch_env(tmp_path, monkeypatch):
     return fw, bak
 
 
-def _load(unique_name: str):
-    from hyperloom.inference_optimizer.multi_node.cli import _read_bundled_pod_python_script
+def _bundle_kernel_node_ops() -> str:
+    return mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS)
 
+
+def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
-    mod.__dict__["__file__"] = str(_repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py")
-    bundle = _read_bundled_pod_python_script("kernel_node_ops.py")
+    mod.__file__ = str(mn_cli._SCRIPTS_DIR / "kernel_node_ops.py")
     with pytest.MonkeyPatch.context() as context:
-        for name in ("aiter_jit_cache", "patch_path_safety"):
-            context.setitem(sys.modules, name, sys.modules.get(name))
-        exec(compile(bundle, "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
+        for dep in mn_cli._KERNEL_NODE_OPS_DEPS:
+            context.setitem(sys.modules, dep.stem, sys.modules.get(dep.stem))
+        exec(compile(_bundle_kernel_node_ops(), mod.__file__, "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod
 

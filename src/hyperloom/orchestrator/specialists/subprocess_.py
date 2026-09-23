@@ -906,7 +906,7 @@ class SpecialistSubprocessDispatcher:
         env = _build_specialist_env()
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
+        from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands

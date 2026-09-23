@@ -22,7 +22,6 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
-    coerce_needs_gpu,
     collapse_verdict_map,
     collapse_verdicts,
     format_exc_brief,
@@ -30,6 +29,7 @@ from .coordinator_helpers import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
+from hyperloom.common.env import is_truthy
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message, TOPIC_ALLOWLIST
@@ -926,7 +926,7 @@ class IntentRouter:
                 if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
                 # Any GPU-holding specialist serializes against serving via gpu_research_lane.
-                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
+                needs_gpu = is_truthy(params.get("needs_gpu"))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:

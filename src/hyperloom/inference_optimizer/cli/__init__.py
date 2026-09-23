@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
+from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
 from .executors import (
     _build_specialist_executor,
@@ -598,17 +599,8 @@ def _catalog_probe_has_no_credential() -> bool:
 
 
 def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _custom_orch_model_explicitly_disabled() -> bool:
-    """Whether the operator explicitly requested strict AMD model allowlisting."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
+    return is_truthy(os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "").strip() or None, default=True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
@@ -624,8 +616,6 @@ def _validate_and_resolve_claude_model(
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    if not _custom_orch_model_explicitly_disabled():
-        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -1345,16 +1335,16 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
-def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
-    Reads the same set the breakdown grades outcomes against. A second copy here
-    would decide CI's verdict on a vocabulary that had drifted from the one the
-    report was written from.
+    Reads the same classifier the breakdown grades outcomes against. A second
+    copy here would decide CI's verdict on a vocabulary that had drifted from
+    the one the report was written from.
     """
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 
-    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
+    return 0 if outcome_status(str(stop_reason or ""), baseline_tput) == "completed" else 1
 
 
 def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
@@ -2424,7 +2414,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:

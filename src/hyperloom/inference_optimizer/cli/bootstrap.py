@@ -365,11 +365,7 @@ def _print_final_summary(
             if failure_summary.get("server_log"):
                 print(f"  server_log           : {failure_summary.get('server_log')}")
     if state.cumulative_gain_validated_ts:
-        stale = (
-            " ⚠ stack changed since validation"
-            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
-            else ""
-        )
+        stale = " ⚠ stack changed since validation" if state.optimization_stack_has_unvalidated_keeps() else ""
         print(
             f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
             f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "

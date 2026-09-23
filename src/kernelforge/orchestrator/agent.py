@@ -214,6 +214,20 @@ def make_agent_fn(
         "under forge_experiments/ and remove it before ending the turn."
     )
 
+    # The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
+    # are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
+    deliverable_hygiene_rule = (
+        "What you submit is a finished operator, not a scratchpad: when you end "
+        "the turn it carries no `print` and reads no `os.environ` of its own. A "
+        "sweep knob or a probe print may live in the kernel while you search; "
+        "before ending the turn, replace each knob with the constant it selected, "
+        "delete each probe, and re-run the driver on the file you submit. A knob "
+        "left behind is indistinguishable, to everyone downstream, from live "
+        "configuration. The one exception is an option a library you call "
+        "exposes no other way: set that, and say in a comment why there is no "
+        "API for it."
+    )
+
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
     # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
@@ -304,7 +318,8 @@ explain your rationale in one sentence.
    harness — it is in the workspace — and cite the lines that say so. An
    assumption about what the harness does is not a reason.
 5. {workspace_hygiene_rule}
-6. As your last output, output one line starting with `PLAN:` — a SHORT headline
+6. {deliverable_hygiene_rule}
+7. As your last output, output one line starting with `PLAN:` — a SHORT headline
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
    loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
@@ -409,6 +424,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   benchmark, read the harness — it is in the workspace — and cite the lines that
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
+- {deliverable_hygiene_rule}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization

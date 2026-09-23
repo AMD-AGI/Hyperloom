@@ -17,10 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-from patch_path_safety import (  # noqa: E402
+from patch_path_safety import (
     atomic_write_bytes,
     assert_backup_dir_allowed,
     assert_backup_path_allowed,

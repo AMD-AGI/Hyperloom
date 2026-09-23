@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import tokenize_server_args_preserving_json
 from ._grid_server_args import validate_server_args_shell_safe
+from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
 
 
 @dataclass(frozen=True)
@@ -85,22 +86,36 @@ def add_server_arg_unless_pinned(
     return True
 
 
-def seal_server_argv(envs: MutableMapping[str, Any], framework: str | None) -> ServerArgv:
+def seal_server_argv(
+    envs: MutableMapping[str, Any],
+    framework: str | None,
+    *,
+    bench: Mapping[str, Any] | None = None,
+) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
 
     Args:
         envs: The benchmark env mapping being materialised.
         framework: The framework the config serves.
+        bench: The benchmark mapping naming the recipe these args are for.
+            Supplied by the two materialisers; a caller re-sealing a string the
+            recipe already accepted has nothing left to ask it.
 
     Returns:
         ServerArgv: The sealed argv.
 
     Raises:
         ValueError: When the composed string carries shell control syntax.
+        RecipeLeverUnavailableError: When the recipe's server script never
+            reads the argument env, so the sealed string cannot reach it.
     """
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
     sealed = _sealed(framework, env_name, text)
+    if sealed.text and bench is not None and not recipe_launch_contract(bench)[0]:
+        raise RecipeLeverUnavailableError(
+            f"the server script this recipe boots never reads {env_name}, so {sealed.text!r} would not reach it"
+        )
     if sealed.text or env_name in envs:
         envs[env_name] = sealed.text
     return sealed

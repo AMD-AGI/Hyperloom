@@ -22,10 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import truthy  # noqa: E402
 
 sys.path.pop(0)
-sys.path.insert(0, str(Path(__file__).resolve().parent / "backends"))
-from _llm_stability_env import apply_llm_stability_env  # noqa: E402
-
-sys.path.pop(0)
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
@@ -84,6 +80,7 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
     # merged in here or the run arrives at the gateway anonymous.
     from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common.llm_stability_env import apply_llm_stability_env  # noqa: PLC0415 - standalone import-light
 
     inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.

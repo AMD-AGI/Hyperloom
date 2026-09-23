@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.env import env_bool
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
@@ -437,7 +438,9 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
         or summary["cumulative_gain_validated"]
     ):
         return "unavailable"
-    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"]:
+    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"] or summary.get(
+        "has_unvalidated_keeps"
+    ):
         return "stale"
     from hyperloom.common.perf_metric import VERDICT_KEEP
 
@@ -590,13 +593,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
     stack_len = summary.get("optimization_stack_len", 0) or 0
+    changed_since_validation = stack_len > val_len or bool(summary.get("has_unvalidated_keeps"))
     if val_ts:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
     elif val_gain or val_len:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
@@ -1331,8 +1335,7 @@ class ReportExecutor:
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
         """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
-        auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
-        if not service_url and auto_publish not in {"1", "true", "yes"}:
+        if not service_url and not env_bool("HYPERLOOM_RESULTS_AUTO_PUBLISH"):
             return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
 
         repo_root = Path(__file__).resolve().parents[3]

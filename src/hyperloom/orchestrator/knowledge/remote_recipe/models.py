@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -54,6 +55,10 @@ _BUILDER_REF_PREFIXES: tuple[str, ...] = (
 class RemoteRecipeValidationError(ValueError):
     """A locally-built remote recipe violates the KB Store contract."""
 
+    def __init__(self, message: str, *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 def _scope_int(value: Any) -> int | None:
     """Normalize an integer scope value echoed through a URL query."""
@@ -73,8 +78,9 @@ class RecipeScope:
     kernel_optimizer: str
     tp: int
     conc: int
-    isl: int
-    osl: int
+    # AgentX trace replay omits the fixed-length InferenceX dimensions.
+    isl: int | None = None
+    osl: int | None = None
 
     @classmethod
     def from_state(cls, state: Any) -> "RecipeScope":
@@ -83,12 +89,15 @@ class RecipeScope:
         # CLI bootstrap records an explicitly enabled Forge backend as "native"; KB Store uses the public backend name
         # "forge".
         backend = "forge" if optimizer in {"native", "forge", "kernel_agent_forge"} else optimizer
+        from hyperloom.common.perf_metric import agentx_active
+
+        is_agentx = agentx_active(benchmark_mode=getattr(state, "benchmark_mode", ""))
         scope = cls(
             kernel_optimizer=backend,
             tp=int(getattr(state, "tp", 0) or 0),
             conc=int(getattr(state, "conc", 0) or 0),
-            isl=int(getattr(state, "isl", 0) or 0),
-            osl=int(getattr(state, "osl", 0) or 0),
+            isl=None if is_agentx else int(getattr(state, "isl", 0) or 0),
+            osl=None if is_agentx else int(getattr(state, "osl", 0) or 0),
         )
         scope.validate()
         return scope
@@ -97,39 +106,144 @@ class RecipeScope:
         """Reject a scope the KB Store cannot partition on."""
         if self.kernel_optimizer not in {"forge", "geak"}:
             raise RemoteRecipeValidationError(f"unsupported kernel_optimizer: {self.kernel_optimizer!r}")
-        if min(self.tp, self.conc, self.isl, self.osl) <= 0:
-            raise RemoteRecipeValidationError("Recipe scope tp/conc/isl/osl must be positive")
+        if min(self.tp, self.conc) <= 0:
+            raise RemoteRecipeValidationError("Recipe scope tp/conc must be positive")
+        if (self.isl is None) != (self.osl is None):
+            raise RemoteRecipeValidationError("Recipe scope isl/osl must be present together")
+        if self.isl is not None and min(self.isl, self.osl or 0) <= 0:
+            raise RemoteRecipeValidationError("Recipe scope isl/osl must be positive")
 
     def as_dict(self) -> dict[str, Any]:
         """Return the scope as the Store's query / payload mapping."""
-        return {
+        scope = {
             "kernel_optimizer": self.kernel_optimizer,
             "tp": self.tp,
             "conc": self.conc,
-            "isl": self.isl,
-            "osl": self.osl,
         }
+        if self.isl is not None:
+            scope.update({"isl": self.isl, "osl": self.osl})
+        return scope
+
+    @property
+    def identity_scheme(self) -> str:
+        """The KB identity scheme whose scope contract this represents."""
+        return "agentx" if self.isl is None else "inference"
 
     def matches(self, value: Any) -> bool:
         """True when a View's recorded scope is exactly this one."""
         expected = self.as_dict()
+        comparable = (
+            {key: item for key, item in value.items() if key != "scope_schema"} if isinstance(value, dict) else value
+        )
         return (
-            isinstance(value, dict)
-            and set(value) == set(expected)
-            and value.get("kernel_optimizer") == self.kernel_optimizer
-            and self.matches_workload_shape(value)
+            isinstance(comparable, dict)
+            and set(comparable) == set(expected)
+            and comparable.get("kernel_optimizer") == self.kernel_optimizer
+            and self.matches_workload_shape(comparable)
         )
 
     def matches_workload_shape(self, value: Any) -> bool:
         """True when workload dimensions match, accepting URL string echoes."""
         return isinstance(value, dict) and all(
             _scope_int(value.get(key)) == expected
-            for key, expected in (
-                ("tp", self.tp),
-                ("conc", self.conc),
-                ("isl", self.isl),
-                ("osl", self.osl),
+            for key, expected in self.as_dict().items()
+            if key != "kernel_optimizer"
+        )
+
+
+@dataclass(frozen=True)
+class KBSelectionProfile:
+    """Mode-specific scope and metric values for the shared KB client."""
+
+    scope: RecipeScope
+    primary_metric: str
+    primary_value: float
+    objective_schema: str
+    metrics: dict[str, float]
+
+    @classmethod
+    def from_state(
+        cls,
+        state: Any,
+        *,
+        scope: RecipeScope | None = None,
+    ) -> "KBSelectionProfile":
+        from hyperloom.common.perf_metric import agentx_active, output_tput_of
+        from hyperloom.orchestrator.state.shared_state import resolve_graded_comparison
+
+        scope = scope or RecipeScope.from_state(state)
+        current = getattr(state, "current_best", {}) or {}
+        if not isinstance(current, dict):
+            raise RemoteRecipeValidationError(
+                "current_best must be a mapping",
+                reason="invalid_recipe_selection_profile",
             )
+
+        def validated_gain() -> float:
+            try:
+                value = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            except (TypeError, ValueError) as exc:
+                raise RemoteRecipeValidationError(
+                    "cumulative_gain_validated must be numeric",
+                    reason="invalid_recipe_selection_profile",
+                ) from exc
+            if not math.isfinite(value):
+                raise RemoteRecipeValidationError(
+                    "cumulative_gain_validated must be finite",
+                    reason="invalid_recipe_selection_profile",
+                )
+            return value
+
+        if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+            graded = resolve_graded_comparison(state, current, against_baseline=True)
+            if (
+                not graded.comparable
+                or not graded.graded_on_intvty
+                or graded.tput_candidate <= 0
+                or graded.tput_reference <= 0
+            ):
+                detail = graded.degrade_reason or "interactivity grading did not apply"
+                raise RemoteRecipeValidationError(
+                    f"AgentX write needs comparable baseline/current interactivity and total-throughput axes ({detail})",
+                    reason="invalid_recipe_selection_profile",
+                )
+            gain = validated_gain()
+            return cls(
+                scope=scope,
+                primary_metric="interactivity_gain_pct",
+                primary_value=gain,
+                objective_schema="agentx_keep",
+                metrics={
+                    "interactivity_gain_pct": gain,
+                    "total_throughput": graded.tput_candidate,
+                    "baseline_interactivity": graded.reference,
+                    "candidate_interactivity": graded.candidate,
+                    "baseline_total_throughput": graded.tput_reference,
+                },
+            )
+        throughput = output_tput_of(current)
+        if not math.isfinite(throughput) or throughput <= 0:
+            raw_throughput = current.get("output_throughput")
+            if raw_throughput is None:
+                raw_throughput = current.get("tput")
+            try:
+                nonfinite = raw_throughput is not None and not math.isfinite(float(raw_throughput))
+            except (TypeError, ValueError):
+                nonfinite = False
+            reason = "nonfinite_optimized_throughput" if nonfinite else "missing_optimized_throughput"
+            raise RemoteRecipeValidationError(
+                "InferenceX write needs positive optimized_throughput",
+                reason=reason,
+            )
+        return cls(
+            scope=scope,
+            primary_metric="optimized_throughput",
+            primary_value=throughput,
+            objective_schema="single_throughput",
+            metrics={
+                "optimized_throughput": throughput,
+                "validated_e2e_gain": validated_gain(),
+            },
         )
 
 
@@ -262,7 +376,8 @@ class RemoteWriteResult:
     reason: str = ""
     canonical_id: str = ""
     session_id: str = ""
-    optimized_throughput: float = 0.0
+    primary_metric: str = ""
+    primary_value: float = 0.0
 
 
 __all__ = [
@@ -270,6 +385,7 @@ __all__ = [
     "CONFIG_SECTION",
     "KERNEL_SECTION",
     "KnowledgeBundle",
+    "KBSelectionProfile",
     "MAX_FILE_BYTES",
     "MAX_FILES",
     "MAX_KNOWLEDGE_BYTES",

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
@@ -28,6 +29,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_KERNEL,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+from ..actions.executors._recipe_script import resolve_launch_server_script
 from ..actions.executors._workload_envs import geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
@@ -53,7 +55,7 @@ from ..loop.coordinator_helpers import (
     _geak_spec_name,
     geak_is_cand_tag,
     geak_spec_is_env,
-    _resolve_roofline_watermark_ratio,
+    ROOFLINE_WATERMARK_RATIO,
     _accepted_config_as_variant,
     _accepted_config_controls,
     _coerce_tp,
@@ -893,46 +895,11 @@ class KernelPhase(PhaseHandler):
         try:
             from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
 
-            envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-
             # Only the AgentX client misleads the inference; anything else in
             # this field is the launcher GEAK should keep deriving for itself.
             if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
                 return ""
-
-            builtin = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
-            if not builtin:
-                framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
-                if not framework:
-                    return ""
-                gpu = (
-                    str(
-                        envs.get("GPU_TYPE")
-                        or envs.get("RUNNER_TYPE")
-                        or bench.get("runner_type")
-                        or os.environ.get("GPU_TYPE")
-                        or os.environ.get("RUNNER_TYPE")
-                        or "mi300x"
-                    )
-                    .strip()
-                    .lower()
-                )
-                builtin = f"{framework}_{gpu}.sh"
-
-            for root in (
-                str(bench.get("inferencex_path") or "").strip(),
-                os.environ.get("INFERENCEX_PATH", "").strip(),
-            ):
-                if not root:
-                    continue
-                benchmarks = Path(root) / "benchmarks"
-                candidate = benchmarks / builtin
-                # The builtin sources benchmark_lib.sh from its own directory and
-                # dies without it, so a half-populated checkout has to degrade to
-                # GEAK's existing derivation instead of pinning a dead path.
-                if candidate.is_file() and (benchmarks / "benchmark_lib.sh").is_file():
-                    return str(candidate)
-            return ""
+            return resolve_launch_server_script(bench)
         except Exception:  # noqa: BLE001
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""
@@ -2669,6 +2636,7 @@ class KernelPhase(PhaseHandler):
         """Did the tuned table reach the server's merge list and get read?"""
         if tuner_name == "fmoe_ck":
             return self._fmoe_apply_verdict(envs)
+        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
         from ..measurement.apply_verification import verify_applied
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
@@ -2690,8 +2658,7 @@ class KernelPhase(PhaseHandler):
         table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
         # aiter prints a hit line only under this flag; every serving run now sets it by default, but an operator
         # value in the candidate env wins, and then a zero-hit result means nothing.
-        raw_flag = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
-        hit_logging = raw_flag not in ("", "0", "false", "no", "off")
+        hit_logging = aiter_log_tuned_config_enabled(envs)
 
         try:
             return verify_applied(
@@ -3988,9 +3955,7 @@ class KernelPhase(PhaseHandler):
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry."""
-        import os
-
-        if str(os.environ.get("HYPERLOOM_SKIP_FUSION", "")).strip().lower() in ("1", "true", "yes", "on"):
+        if env_bool("HYPERLOOM_SKIP_FUSION"):
             return False
         framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
         if framework not in ("sglang", "vllm", "vllm-aiter"):
@@ -4216,7 +4181,7 @@ class KernelPhase(PhaseHandler):
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return False
-        return cur / last_rl >= _resolve_roofline_watermark_ratio()
+        return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
     async def _release_finished_roofline_gate(self) -> None:
         """Drop an in-flight marker that names a roofline which already finished."""
@@ -4262,7 +4227,7 @@ class KernelPhase(PhaseHandler):
             task.task_id,
             self._current_tput_from_validated_gain(),
             float(self.shared_state.last_roofline_tput or 0.0),
-            self._ROOFLINE_WATERMARK_RATIO,
+            ROOFLINE_WATERMARK_RATIO,
         )
         return True
 
