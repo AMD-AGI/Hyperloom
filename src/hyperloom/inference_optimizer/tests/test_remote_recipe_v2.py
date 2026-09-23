@@ -1349,6 +1349,77 @@ def test_remote_close_transport_failure_is_nonfatal(
     assert row["error"]["type"] == "OSError"
 
 
+def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(
+        current_best={"tput": 120.0},
+        optimization_stack=[{"action": "explore", "variant_name": "a"}, {"action": "explore", "variant_name": "b"}],
+        cumulative_gain_validated=10.0,
+        cumulative_gain_validated_stack_len=1,
+        working_recipe_generation=2,
+        validated_recipe_generation=1,
+    )
+    coordinator = SimpleNamespace(
+        shared_state=state,
+        session_dir=tmp_path,
+        recipe_kb=None,
+        knowledge_plane=None,
+        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
+        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
+    )
+
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert outcome["result_type"] == "unvalidated_recipe"
+
+
+def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    collaborator = WritebackCollaborator(
+        SimpleNamespace(
+            shared_state=SimpleNamespace(
+                current_best={"tput": 2200.0},
+                cumulative_gain_validated=20.0,
+                kernel_optimizer="forge",
+                tp=8,
+                conc=64,
+                isl=1024,
+                osl=256,
+            ),
+            session_dir=tmp_path,
+        )
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",
+        lambda *args, **kwargs: captured.update(kwargs),
+    )
+
+    collaborator._record_write_back_settled(
+        {
+            "status": "skipped",
+            "reason": "unvalidated_recipe_stack",
+            "backend": "none",
+            "result_type": "unvalidated_recipe",
+        },
+        attempt=1,
+        source="close",
+    )
+
+    assert captured["optimized_throughput"] is None
+    assert captured["validated_gain_pct"] is None
+
+
 class _FakeStore:
     def __init__(
         self,

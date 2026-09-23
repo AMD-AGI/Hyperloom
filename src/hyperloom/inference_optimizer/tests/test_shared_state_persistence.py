@@ -59,6 +59,8 @@ def test_save_load_round_trip(tmp_path):
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         baseline_tput=1840.0,
         cumulative_gain_validated=12.5,
+        working_recipe_generation=3,
+        validated_recipe_generation=2,
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
         last_fusion={"status": "complete", "kept": False},
@@ -70,10 +72,31 @@ def test_save_load_round_trip(tmp_path):
     assert s2.model_name == "meta-llama/Llama-3.1-8B-Instruct"
     assert s2.baseline_tput == 1840.0
     assert s2.cumulative_gain_validated == 12.5
+    assert (s2.working_recipe_generation, s2.validated_recipe_generation) == (3, 2)
+    assert s2.optimization_stack_has_unvalidated_keeps()
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
     assert s2.last_fusion == {"status": "complete", "kept": False}
     assert s2.last_fusion_integrate == {"status": "ok", "decision": "KEEP"}
+
+
+def test_a_session_saved_before_recipe_generations_loads_on_the_stack_watermark(tmp_path):
+    s = SharedState(
+        session_id="legacy", optimization_stack=[{"action": "explore"}], cumulative_gain_validated_stack_len=1
+    )
+    s.save(tmp_path)
+    path = tmp_path / "state.json"
+    payload = json.loads(path.read_text())
+    payload.pop("working_recipe_generation")
+    payload.pop("validated_recipe_generation")
+    path.write_text(json.dumps(payload))
+
+    s2 = SharedState.load_or_init(tmp_path)
+
+    assert (s2.working_recipe_generation, s2.validated_recipe_generation) == (0, 0)
+    assert not s2.optimization_stack_has_unvalidated_keeps()
+    s2.optimization_stack.append({"action": "explore"})
+    assert s2.optimization_stack_has_unvalidated_keeps()
 
 
 def test_profile_osl_round_trip(tmp_path):

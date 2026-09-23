@@ -916,6 +916,9 @@ class WritebackCollaborator:
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+        self.shared_state.validated_recipe_generation = int(
+            getattr(self.shared_state, "working_recipe_generation", 0) or 0
+        )
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
@@ -2504,12 +2507,17 @@ class WritebackCollaborator:
         state = self.shared_state
         current_best = getattr(state, "current_best", {}) or {}
         tput = current_best.get("tput") if isinstance(current_best, dict) else None
+        validated_gain = getattr(state, "cumulative_gain_validated", None)
+        result_type = str(outcome.get("result_type") or "")
+        if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
+            # The throughput and the gain belong to different Recipes here.
+            tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
             attempt=attempt,
             source=source,
             status=str(outcome.get("status") or ""),
-            result_type=str(outcome.get("result_type") or ""),
+            result_type=result_type,
             raw_reason=str(outcome.get("reason") or ""),
             error_class=str(outcome.get("error_class") or ""),
             backend=str(outcome.get("backend") or ""),
@@ -2517,7 +2525,7 @@ class WritebackCollaborator:
             session_id=str(outcome.get("session_id") or ""),
             scope=self._write_back_scope(),
             optimized_throughput=to_float(tput, None),
-            validated_gain_pct=to_float(getattr(state, "cumulative_gain_validated", None), None),
+            validated_gain_pct=to_float(validated_gain, None),
             ts=str(outcome.get("updated_at") or ""),
         )
 
@@ -2541,6 +2549,26 @@ class WritebackCollaborator:
         source: str = "close",
     ) -> dict[str, Any]:
         """Finalize Recipe state and return a secret-free observable outcome."""
+        # ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
+        # figures when nothing was lifted since the last validation. Otherwise
+        # every sink below -- journal, local KB, remote KB -- would pair the
+        # newer config with the older gain, so none of them runs.
+        has_unvalidated_keeps = getattr(self.shared_state, "optimization_stack_has_unvalidated_keeps", None)
+        if callable(has_unvalidated_keeps) and has_unvalidated_keeps():
+            ss = self.shared_state
+            log.warning(
+                "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
+                len(getattr(ss, "optimization_stack", None) or []),
+                getattr(ss, "cumulative_gain_validated_stack_len", 0),
+                getattr(ss, "working_recipe_generation", 0),
+                getattr(ss, "validated_recipe_generation", 0),
+            )
+            return {
+                "status": "skipped",
+                "reason": "unvalidated_recipe_stack",
+                "backend": "none",
+                "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
+            }
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -3487,6 +3515,9 @@ class WritebackCollaborator:
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
+        self.shared_state.working_recipe_generation = (
+            int(getattr(self.shared_state, "working_recipe_generation", 0) or 0) + 1
+        )
         self._stamp_current_best_measurement(bv)
         return True
 
@@ -5507,13 +5538,15 @@ class WritebackCollaborator:
         # measured tput when that rebench promotes (see _promote_to_shared_state).
         stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
         vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
-        if vlen < len(stack):
+        if state.optimization_stack_has_unvalidated_keeps():
             state.resume_pending_revalidation = True
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
                     "validated_stack_len": vlen,
                     "stack_len": len(stack),
+                    "working_recipe_generation": state.working_recipe_generation,
+                    "validated_recipe_generation": state.validated_recipe_generation,
                 }
             )
             try:
@@ -6039,7 +6072,13 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
-    async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
+    async def _enqueue_internal_stack_rebench(
+        self,
+        *,
+        reason: str,
+        idempotency_key: str = "resume-stack-revalidate",
+        include_geak: bool = True,
+    ) -> dict[str, Any]:
         """Enqueue one full-stack end-to-end rebench of the cumulative config.
 
         Builds a single-variant ``explore`` task from ``current_best``'s launch
@@ -6053,6 +6092,10 @@ class WritebackCollaborator:
 
         Args:
             reason: Human-readable reason stamped on the task params.
+            idempotency_key: Key for the native stack rebench; GEAK 2b keeps
+                its per-macro-cycle key.
+            include_geak: Whether a pending GEAK result is folded into the
+                rebench. ``False`` measures ``current_best`` exactly as stacked.
 
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
@@ -6060,7 +6103,11 @@ class WritebackCollaborator:
         benchmark_script = baseline_benchmark_script(self.shared_state)
         # GEAK's explicit launch controls distinguish complete flags from legacy
         # deltas. Both retain the current stack's environment removal controls.
-        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps = (
+            self.shared_state.geak_result
+            if include_geak and isinstance(getattr(self.shared_state, "geak_result", None), dict)
+            else {}
+        )
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
@@ -6236,7 +6283,7 @@ class WritebackCollaborator:
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key="resume-stack-revalidate",
+            idempotency_key=idempotency_key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )
