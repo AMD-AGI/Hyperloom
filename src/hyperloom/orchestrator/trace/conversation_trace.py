@@ -31,9 +31,6 @@ def redact_secrets(text: str) -> str:
     return redact_secret_values(text)
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-
-
 def _coerce_text(value: Any) -> str:
     """Normalize a prompt / response field to a (possibly empty) string."""
     if value is None:

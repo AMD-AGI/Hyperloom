@@ -8,9 +8,6 @@ from __future__ import annotations
 import os
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable via shared_state for callers that still use that legacy
-# path).
-
 # Default partial-attempt cap for run_optimization; override via env in the integrate lane's retirement check (1
 # disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2

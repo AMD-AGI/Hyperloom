@@ -39,9 +39,6 @@ TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if
 _MAX_PROGRESS_NOTES = 120
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-
-
 @dataclass
 class Task:
     """A delegated task row persisted in the ``tasks`` table."""
