@@ -2438,12 +2438,10 @@ def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
 def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
-    start = script_text.index("setup_dotenv_is_authoritative() {")
-    end = script_text.index("\nload_dotenv_no_clobber() {", start)
+    start = script_text.index("scrub_stale_workspace_env_for_setup_dotenv() {")
+    end = script_text.index("\n# Load .env before deriving", start)
     helpers = script_text[start:end]
-    load_start = script_text.index("load_dotenv_no_clobber() {")
-    load_end = script_text.index("\n# Load .env before deriving", load_start)
-    loader = script_text[load_start:load_end]
+    loader = install_script.with_name("runtime_env.sh")
 
     workspace = tmp_path / "target"
     workspace.mkdir()
@@ -2464,9 +2462,9 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                f"REPO_ROOT={workspace}",
+                f'REPO_ROOT="{workspace.as_posix()}"',
+                f'. "{loader.as_posix()}"',
                 helpers,
-                loader,
                 "USER_DATA_PATH=/old/workspace/session",
                 "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
                 "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
@@ -2488,10 +2486,11 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
     out = subprocess.run(
-        ["bash", str(runner)],
+        ["bash", runner.as_posix()],
         check=True,
         text=True,
         stdout=subprocess.PIPE,

@@ -76,16 +76,14 @@ resolve_repo_root() {
 }
 
 REPO_ROOT="$(resolve_repo_root)"
-DOTENV_LOADED_COUNT=0
-
-setup_dotenv_is_authoritative() {
-  [ -f "$REPO_ROOT/.env" ] || return 1
-  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
-}
+# shellcheck source=runtime_env.sh
+. "${_script_dir}/runtime_env.sh"
 
 scrub_stale_workspace_env_for_setup_dotenv() {
   setup_dotenv_is_authoritative || return 0
-  unset USER_DATA_PATH
+  if ! runtime_env_var_is_readonly USER_DATA_PATH; then
+    unset USER_DATA_PATH
+  fi
   unset HYPERLOOM_RUNTIME_DIR
   unset KERNEL_AGENT_ENV
   unset HYPERLOOM_ROOT
@@ -94,37 +92,6 @@ scrub_stale_workspace_env_for_setup_dotenv() {
   unset FRAMEWORK_AGENT_ROOT
   unset HYPERLOOM_SKILL_PATH
   unset PYTHONPATH
-}
-
-load_dotenv_no_clobber() {
-  DOTENV_LOADED_COUNT=0
-  [ -f "$REPO_ROOT/.env" ] || return 0
-  local loaded=0
-  local raw key value
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    raw="${raw#"${raw%%[![:space:]]*}"}"
-    raw="${raw%"${raw##*[![:space:]]}"}"
-    [ -z "$raw" ] && continue
-    case "$raw" in \#*) continue ;; esac
-    case "$raw" in export\ *) raw="${raw#export }" ;; esac
-    case "$raw" in *=*) ;; *) continue ;; esac
-    key="${raw%%=*}"
-    value="${raw#*=}"
-    key="${key%"${key##*[![:space:]]}"}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    case "$value" in
-      \"*\") value="${value#\"}"; value="${value%\"}" ;;
-      \'*\') value="${value#\'}"; value="${value%\'}" ;;
-    esac
-    [ -z "$key" ] && continue
-    if [ -z "${!key:-}" ]; then
-      export "$key=$value"
-      loaded=$((loaded + 1))
-    fi
-  done < "$REPO_ROOT/.env"
-  DOTENV_LOADED_COUNT="$loaded"
-  return 0
 }
 
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
@@ -145,7 +112,13 @@ _default_workspace_root() {
   while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
-USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
+if [ -z "${USER_DATA_PATH:-}" ]; then
+  if runtime_env_var_is_readonly USER_DATA_PATH; then
+    printf '%s\n' '[install ERROR] readonly USER_DATA_PATH is empty; cannot select a workspace root' >&2
+    exit 1
+  fi
+  USER_DATA_PATH="$(_default_workspace_root)"
+fi
 if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
@@ -809,7 +782,14 @@ preflight_validate_credentials
 # Gated by apt-get present, not --check-only / --dry-run, and
 # INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP unset.
 resolve_python() {
-  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+  if [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" = "1" ]; then
+    if [ -n "${PYTHON:-}" ] && [ -f "$PYTHON" ] && [ -x "$PYTHON" ]; then
+      return 0
+    fi
+    die "INFERENCE_OPTIMIZER_FORCE_PYTHON=1 requires an executable PYTHON; refusing interpreter fallback"
+    return 1
+  fi
+  if [ -x "/opt/venv/bin/python" ]; then
     if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
       log "preferring /opt/venv/bin/python over PYTHON=${PYTHON} (canonical ROCm stack)"
       log "  set INFERENCE_OPTIMIZER_FORCE_PYTHON=1 to honor PYTHON verbatim"
