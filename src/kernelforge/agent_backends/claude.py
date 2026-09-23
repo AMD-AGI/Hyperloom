@@ -137,12 +137,10 @@ class ClaudeTimeoutError(ClaudeBackendError):
 
 
 def resolve_claude_cli(explicit: str = "") -> str:
-    """Locate the Claude CLI for SDK subprocess execution."""
-    if explicit.strip():
-        return explicit.strip()
-    candidate = os.environ.get("FORGE_AGENT_CLI", "").strip()
-    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        return candidate
+    """Select the Claude CLI, preserving explicit and environment pins even if invalid."""
+    selected = explicit.strip() or os.environ.get("FORGE_AGENT_CLI", "").strip()
+    if selected:
+        return selected
     found = shutil.which("claude")
     if found:
         return found
@@ -313,14 +311,17 @@ class ClaudeBackend:
         self.fallback_reason = ""
 
     def preflight(self) -> None:
-        """Validate that an explicitly configured executable is Claude CLI."""
-        explicit = self.runtime.executable.strip()
-        if not explicit:
-            return
-        candidate = Path(explicit).expanduser()
-        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(explicit)
+        """Validate this backend's selected CLI without contacting a model."""
+        self.validate_runtime(self.runtime)
+
+    @staticmethod
+    def validate_runtime(runtime: AgentRuntimeConfig) -> None:
+        """Check the selected CLI with a 10-second --version call, without loading the SDK."""
+        selected = resolve_claude_cli(runtime.executable)
+        candidate = Path(selected).expanduser()
+        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(selected)
         if not executable:
-            raise ClaudeUnavailableError(f"Claude CLI is not executable: {explicit}")
+            raise ClaudeUnavailableError(f"Claude CLI is not executable: {selected}")
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -333,7 +334,7 @@ class ClaudeBackend:
         version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
         if version.returncode != 0 or "claude" not in version_text.lower():
             raise ClaudeUnavailableError(
-                f"configured CLI does not appear to be Claude: {explicit}; --version returned {version_text!r}"
+                f"configured CLI does not appear to be Claude: {selected}; --version returned {version_text!r}"
             )
 
     def probe(
