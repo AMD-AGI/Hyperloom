@@ -224,7 +224,7 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
         return None
     best = max(
         (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
-        default=1.0,
+        default=None,
     )
     return TuneResult(
         tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
@@ -235,7 +235,7 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
         candidate=True,
         total_shapes=len(outcome.judgements),
         improved_shapes=outcome.improved_shapes,
-        best_micro_speedup=float(best or 1.0),
+        best_micro_speedup=None if best is None else float(best),
         key_source="runtime_observed",
     )
 
@@ -679,12 +679,12 @@ def run(
         result = tuner_instance.execute()
         results.append(result)
         log.info(
-            "Tuner %s finished: status=%s, improved=%d/%d, best_speedup=%.3fx, elapsed=%.1fs",
+            "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
             spec.name,
             result.status,
-            result.improved_shapes,
+            "unmeasured" if result.improved_shapes is None else result.improved_shapes,
             result.total_shapes,
-            result.best_micro_speedup,
+            "unmeasured" if result.best_micro_speedup is None else f"{result.best_micro_speedup:.3f}x",
             result.elapsed_s,
         )
 

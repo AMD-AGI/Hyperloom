@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, measured_improvements
 from ..dense_shapes import compute_dense_nk_shapes, compute_dense_m_values
 from ..evidence import demand_for_tuner, demand_shapes, load_demand
 from ..script_discovery import discover_tuner_script
@@ -629,10 +629,10 @@ class SglangDenseBf16Tuner(BaseTuner):
             candidate=bool(unverified),
             total_shapes=total,
             expected_shapes=n_expected,
-            improved_shapes=len(improved),
+            improved_shapes=measured_improvements(shape_results),
             unverified_shapes=len(unverified),
-            best_micro_speedup=max(speedups) if speedups else 1.0,
-            avg_micro_speedup=sum(speedups) / len(speedups) if speedups else 1.0,
+            best_micro_speedup=max(speedups) if speedups else None,
+            avg_micro_speedup=sum(speedups) / len(speedups) if speedups else None,
             shape_results=shape_results,
             dropped_inaccurate=[
                 {

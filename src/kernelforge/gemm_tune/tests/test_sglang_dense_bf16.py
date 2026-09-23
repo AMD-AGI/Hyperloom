@@ -698,9 +698,13 @@ class TestUnverifiedShapes:
             ],
         )
         res = _run(tmp_path)
-        assert res.improved_shapes == 0
+        # Nothing was timed against a baseline, so the count of winners is unknown too: a 0 here would read as a
+        # measurement that found no gain, beside two metrics admitting no measurement happened.
+        assert res.improved_shapes is None
         assert res.unverified_shapes == 2
-        assert res.best_micro_speedup == 1.0  # nothing fabricated from TFLOPS
+        assert res.best_micro_speedup is None  # nothing fabricated from TFLOPS
+        assert res.avg_micro_speedup is None
+        assert res.to_dict()["improved_shapes"] is None
         # Forced to e2e rather than dropped as no_improvement.
         assert res.candidate is True and res.status == "ok"
         assert all(r["tuned_unverified"] for r in res.shape_results)

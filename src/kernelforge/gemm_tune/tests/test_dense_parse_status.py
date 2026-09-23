@@ -98,12 +98,12 @@ class TestParseNewShapes:
         assert new.get("is_new") is True and new["improved"] is False
 
     def test_all_new_summary_is_ok_with_unverified_not_improved(self):
-        # Align with bf16: shapes without a baseline are unverified, not losers. status=ok + n_improved=0 (do not
-        # claim improved).
+        # Align with bf16: shapes without a baseline are unverified, not losers. status=ok, and every micro metric is
+        # unmeasured rather than a claim of zero winners.
         s = _summarize_shape_results(_parse_tuner_stdout(_NEW_SHAPES_TABLE, ""))
         assert s["status"] == "ok"
-        assert s["total"] == 2 and s["n_improved"] == 0 and s["n_unverified"] == 2
-        assert s["best"] == 1.0 and s["avg"] == 1.0  # no fabricated speedup
+        assert s["total"] == 2 and s["n_improved"] is None and s["n_unverified"] == 2
+        assert s["best"] is None and s["avg"] is None  # unmeasured, not "measured 1.00x"
 
 
 class TestSummarize:
@@ -170,9 +170,9 @@ class TestCandidateCsvFallback:
         shape_results = stdout_rows or _parse_candidate_csv(self._write_candidate(tmp_path))
         s = _summarize_shape_results(shape_results)
         assert s["status"] == "ok" and s["total"] == 2
-        assert s["n_improved"] == 0 and s["n_unverified"] == 2
-        # speedups unknown in this path -> best/avg stay 1.0 (no fabrication)
-        assert s["best"] == 1.0 and s["avg"] == 1.0
+        assert s["n_improved"] is None and s["n_unverified"] == 2
+        # Nothing is knowable about gains in this path, so no micro metric is published.
+        assert s["best"] is None and s["avg"] is None
 
     def test_fallback_empty_stdout_no_candidate_is_empty_output(self, tmp_path):
         stdout_rows = _parse_tuner_stdout("Successfully tuned 2 shapes\n", "")

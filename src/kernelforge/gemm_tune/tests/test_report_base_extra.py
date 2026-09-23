@@ -81,6 +81,14 @@ def test_tune_result_to_dict_full():
     assert d["error"] == "e" and d["skip_reason"] == "sr"
 
 
+def test_tune_result_to_dict_leaves_unmeasured_metrics_null():
+    # Shapes were tuned but never timed against a baseline: "no gain" and "no measurement" are different claims.
+    d = TuneResult("t", "ok", total_shapes=3, unverified_shapes=3).to_dict()
+    assert d["total_shapes"] == 3
+    assert d["improved_shapes"] is None
+    assert d["best_micro_speedup"] is None and d["avg_micro_speedup"] is None
+
+
 def test_has_improvement_variants():
     assert TuneResult("t", "ok", candidate=True).has_improvement is True
     assert TuneResult("t", "ok", improved_shapes=1, best_micro_speedup=1.1).has_improvement is True

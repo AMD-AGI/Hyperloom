@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .base import TuneContext, TuneResult
+from .base import TuneContext, TuneResult, measured_improvements
 from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
@@ -835,10 +835,10 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
         return {
             "status": "empty_output",
             "total": 0,
-            "n_improved": 0,
+            "n_improved": None,
             "n_unverified": 0,
-            "best": 1.0,
-            "avg": 1.0,
+            "best": None,
+            "avg": None,
         }
     improved = [r for r in shape_results if r.get("improved")]
     # Tuned, but with nothing to compare against (new shape, or the candidate-CSV fallback).
@@ -851,10 +851,10 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
     return {
         "status": "ok" if (improved or unverified) else "no_improvement",
         "total": total,
-        "n_improved": len(improved),
+        "n_improved": measured_improvements(shape_results),
         "n_unverified": len(unverified),
-        "best": max(speedups) if speedups else 1.0,
-        "avg": sum(speedups) / len(speedups) if speedups else 1.0,
+        "best": max(speedups) if speedups else None,
+        "avg": sum(speedups) / len(speedups) if speedups else None,
     }
 
 

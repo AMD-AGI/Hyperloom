@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, measured_improvements
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
 
@@ -345,8 +345,8 @@ class FmoeCKTuner(BaseTuner):
 
         total = len(shape_results)
         n_improved = len(improved)
-        best_speedup = max(speedups) if speedups else 1.0
-        avg_speedup = sum(speedups) / len(speedups) if speedups else 1.0
+        best_speedup = max(speedups) if speedups else None
+        avg_speedup = sum(speedups) / len(speedups) if speedups else None
 
         if total == 0:
             status = "empty_output"
@@ -366,7 +366,7 @@ class FmoeCKTuner(BaseTuner):
             error=f"Unusable MoE compare artifact: {artifact_problem}" if status == "failed" else "",
             error_class="missing_artifact" if status == "failed" else "",
             total_shapes=total,
-            improved_shapes=n_improved,
+            improved_shapes=measured_improvements(shape_results),
             best_micro_speedup=best_speedup,
             avg_micro_speedup=avg_speedup,
             shape_results=shape_results,
