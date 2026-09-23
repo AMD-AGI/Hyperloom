@@ -200,6 +200,36 @@ def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tm
     row = out["by_kernel"][0]
     assert row["kernel_id"] == "k001"
     assert row["category"] == CATEGORY_INTEGRATED
+    # This kernel's real gain is recorded elsewhere in optimization_stack -- this row must never
+    # print a fabricated "measured 0.000x" for a micro benchmark that never ran.
+    assert "0.000x" not in row["summary"]
+    assert "micro_speedup=" not in row["summary"]
+
+
+def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> None:
+    """Reproduces a real session: the winning optimization was a gemm_tuning KEEP (one campaign
+    retuning 14 GEMM shapes through a CSV), which never writes kernel_opt_task_attempts and has no
+    single roofline top15 kernel_id to match against. Without a standalone entry, this session's
+    kernel_optimization_summary.json reports attempted:0 / kernel_opt_outcome:skip even though the
+    session's current_best came from exactly this KEEP."""
+    state = _make_state(top15=[])
+    state.optimization_stack = [
+        {
+            "action": "gemm_tuning",
+            "variant_name": "forge_fmoe_ck",
+            "gain_pct": 6.957474814637951,
+            "tput": 1263.3585977736439,
+            "ts": "2026-09-18T14:19:56.765419+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "forge_fmoe_ck"
+    assert row["category"] == CATEGORY_INTEGRATED
+    assert "micro_speedup=" not in row["summary"]
 
 
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:

@@ -279,7 +279,9 @@ def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]
         "failure_count": 0,
         "last_decision": "KEEP",
         "last_status": "integrated",
-        "last_micro_speedup": 0.0,
+        # Absent, not 0.0: this row was never measured at the micro level, only end to end (see
+        # _summary_integrated).
+        "last_micro_speedup": None,
         "last_source_file": str(stack_entry.get("target_file") or stack_entry.get("source_file") or ""),
         "last_ts": str(stack_entry.get("ts") or ""),
         "rejected_reason": "",
@@ -287,6 +289,38 @@ def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]
         "correctness_passed": stack_entry.get("accuracy") is not None,
         "integration_status": "integrated",
     }
+
+
+def _synthetic_gemm_tuning_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
+    """A ledger-shaped attempt for a gemm_tuning KEEP, which never writes ``kernel_opt_task_attempts``.
+
+    gemm_tuning retunes GEMM configs across many shapes through one CSV, not one named kernel, so
+    unlike a forge-loop integration it cannot be reconciled against a specific roofline top15 row --
+    it is surfaced as its own standalone entry instead of a match (see
+    ``_gemm_tuning_entries_in_optimization_stack``).
+    """
+    return {
+        "attempts": 1,
+        "partial_count": 0,
+        "failure_count": 0,
+        "last_decision": "KEEP",
+        "last_status": "integrated",
+        "last_micro_speedup": None,
+        "last_ts": str(stack_entry.get("ts") or ""),
+        "rejected_reason": "",
+        "compile_passed": True,
+        "correctness_passed": None,
+        "integration_status": "integrated",
+    }
+
+
+def _gemm_tuning_entries_in_optimization_stack(state: Any) -> list[dict[str, Any]]:
+    """``optimization_stack`` entries a gemm_tuning KEEP landed, in stack order."""
+    entries = []
+    for e in getattr(state, "optimization_stack", []) or []:
+        if isinstance(e, dict) and e.get("action") == "gemm_tuning":
+            entries.append(e)
+    return entries
 
 
 def _classify_attempted(
@@ -436,8 +470,16 @@ def _summary_integrated(
     backend_ladder: list[dict[str, Any]],
     artifact_error: str,
 ) -> str:
-    """One-line summary for an ``INTEGRATED`` kernel."""
-    micro = entry.get("last_micro_speedup") or 0.0
+    """One-line summary for an ``INTEGRATED`` kernel.
+
+    ``last_micro_speedup`` is absent (``None``), not ``0.0``, for a synthetic row built from an
+    optimization_stack entry a kernel-opt ledger never measured (forge-loop, fusion, gemm_tuning) --
+    a real 0.000x would misreport a kernel this session's own stack shows was kept for a positive
+    gain.
+    """
+    micro = entry.get("last_micro_speedup")
+    if micro is None:
+        return "integrated into optimization_stack; no kernel-level micro speedup recorded"
     return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
 
 
@@ -644,6 +686,24 @@ def build_kernel_optimization_summary(
                 {"kernel_id": kid},
                 attempt,
                 category,
+                results_dir=results_dir,
+                session_dir=sd_path,
+                last_kernel_opt=None,
+            )
+        )
+
+    # gemm_tuning KEEPs: no roofline top15 row to match against (one campaign retunes many GEMM
+    # shapes at once, not one named kernel), so each lands as its own standalone entry rather than
+    # silently reading as "never attempted".
+    for gemm_entry in _gemm_tuning_entries_in_optimization_stack(state):
+        gemm_kid = str(gemm_entry.get("variant_name") or "gemm_tuning")
+        counts["attempted"] += 1
+        counts["integrated"] += 1
+        by_kernel.append(
+            _render_attempted_row(
+                {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
+                _synthetic_gemm_tuning_attempt(gemm_entry),
+                CATEGORY_INTEGRATED,
                 results_dir=results_dir,
                 session_dir=sd_path,
                 last_kernel_opt=None,
