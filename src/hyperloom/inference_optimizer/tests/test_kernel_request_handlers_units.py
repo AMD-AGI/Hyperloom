@@ -520,37 +520,42 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_fusion_sentinel("no marker") is None
         assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
 
-    def test_resolve_fusion_decode_trace_prefers_payload_over_this_runs_trace(self, tmp_path):
-        state = SharedState()
-        state_trace = tmp_path / "prelude.trace.json.gz"
-        payload_trace = tmp_path / "asked-for.trace.json"
-        state_trace.write_text("state", encoding="utf-8")
-        payload_trace.write_text("payload", encoding="utf-8")
-        state.last_profile_trace = str(state_trace)
-
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": str(payload_trace)}) == str(payload_trace)
-        assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
-
-    def test_resolve_fusion_decode_trace_refuses_to_substitute_another_trace(self, tmp_path):
-        """Discovery is attributed to the trace it read, so a wrong one is worse than none."""
+    def test_resolve_fusion_decode_trace_reads_this_runs_trace_file(self, tmp_path):
+        """A merged or AgentX profile records a single file; it is used verbatim."""
         state = SharedState()
         state_trace = tmp_path / "prelude.trace.json.gz"
         state_trace.write_text("state", encoding="utf-8")
         state.last_profile_trace = str(state_trace)
-        directory = tmp_path / "traces"
-        directory.mkdir()
-        (directory / "someone-elses.trace.json").write_text("other", encoding="utf-8")
 
-        with pytest.raises(FileNotFoundError):
-            krh._resolve_fusion_decode_trace(state, {"trace_path": str(tmp_path / "missing.json")})
-        with pytest.raises(FileNotFoundError):
-            krh._resolve_fusion_decode_trace(state, {"trace_path": str(directory)})
+        assert krh._resolve_fusion_decode_trace(state) == str(state_trace)
+
+    def test_resolve_fusion_decode_trace_reads_the_capture_dir_a_profile_records(self, tmp_path):
+        """Non-AgentX profiles record the capture directory (``trace_dir_preferred``)."""
+        state = SharedState()
+        trace_dir = tmp_path / "benchmark_vllm_20260501_001122"
+        trace_dir.mkdir()
+        older = trace_dir / "rank1.177.pt.trace.json.gz"
+        newest = trace_dir / "rank0.177.pt.trace.json.gz"
+        older.write_text("old", encoding="utf-8")
+        newest.write_text("new", encoding="utf-8")
+        import os
+
+        os.utime(older, (1, 1))
+        os.utime(newest, (10, 10))
+        state.last_profile_trace = str(trace_dir)
+
+        assert krh._resolve_fusion_decode_trace(state) == str(newest)
 
     def test_resolve_fusion_decode_trace_reports_no_trace_when_the_run_has_none(self, tmp_path):
+        """Nothing is substituted for a missing trace: discovery is attributed to what it read."""
         state = SharedState()
-        assert krh._resolve_fusion_decode_trace(state, {}) == ""
+        assert krh._resolve_fusion_decode_trace(state) == ""
         state.last_profile_trace = str(tmp_path / "deleted.trace.json")
-        assert krh._resolve_fusion_decode_trace(state, {}) == ""
+        assert krh._resolve_fusion_decode_trace(state) == ""
+        empty_dir = tmp_path / "no_captures"
+        empty_dir.mkdir()
+        state.last_profile_trace = str(empty_dir)
+        assert krh._resolve_fusion_decode_trace(state) == ""
 
     def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
         probed: list[str] = []
@@ -1022,7 +1027,8 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(
             framework="sglang",
             model_path="/models/zaya",
-            last_profile_trace=str(trace_file),
+            # The shape a non-AgentX profile records: the capture directory, not a file.
+            last_profile_trace=str(trace_dir),
         )
         state.save(tmp_path)
         _pin_fusion_provider_env(
@@ -1083,12 +1089,11 @@ class TestForgeGemmHelperCoverage:
         """Run the fusion lane against a faked subprocess and return its input JSON."""
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
-        trace_file = trace_dir / "decode.trace.json.gz"
-        trace_file.write_text("{}", encoding="utf-8")
+        (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
         state = SharedState(
             framework="sglang",
             model_path="/models/zaya",
-            last_profile_trace=str(trace_file),
+            last_profile_trace=str(trace_dir),
             max_minutes=max_minutes,
         )
         state.save(tmp_path)
