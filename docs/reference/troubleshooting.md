@@ -263,7 +263,7 @@ The installer is idempotent and re-installs only what's missing.
 ## Codex SDK turns stall or TraceLens roofline times out
 
 **Symptom**: On code paths that use the shared Codex SDK session helper
-(TraceLens roofline analysis, GEAK on Codex, orchestrator Codex turns), one or
+(TraceLens roofline via `run_codex_turn`, orchestrator Codex turns), one or
 more of:
 
 * A Codex stage hits its phase budget with no declared output (for example,
@@ -293,9 +293,11 @@ from the main agent and spawned sub-agents can block for minutes on the critical
 path.
 
 **Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
-Subprocess **specialist** Codex tasks set `CODEX_HOME` to
-`<task-workspace>/.codex` and do not read `HYPERLOOM_RUNTIME_DIR`; treat stalls
-there as a separate workspace-placement issue.
+It does **not** cover Forge-fusion / GEAK Codex (KernelForge uses its own home
+under `~/.cache/kernelforge/codex_home`) or subprocess **specialist** Codex
+tasks (`CODEX_HOME=<task-workspace>/.codex`, which also ignores
+`HYPERLOOM_RUNTIME_DIR`). Treat stalls on those paths as separate placement
+issues.
 
 **Fix**: Before launch, set `HYPERLOOM_RUNTIME_DIR` to a private directory
 outside any source checkout, on storage suitable for SQLite (typically
