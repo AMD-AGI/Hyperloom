@@ -498,7 +498,17 @@ class KernelPhase(PhaseHandler):
             log.debug("kernel timeline: Controller rewrite record failed", exc_info=True)
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
-        """Record a settled GEMM campaign in the Forge lane."""
+        """Record a settled GEMM campaign in the Forge lane -- one row per tuner that ran.
+
+        A campaign can run several tuners (e.g. ``fmoe_ck`` and ``a4w4_blockscale``) in one cycle;
+        each has its own status, shape coverage and failure. Collapsing them into one row joined
+        `tuner` names with a comma and let one tuner's `failure_reason` land on a row whose
+        `gain_pct` came from a different, successful tuner -- a row that read as both "complete"
+        and "failed" at once. The campaign's own `gain_pct` (set only after e2e validation of the
+        winning candidate) is attached to the tuner whose artifact was actually applied
+        (``tuned_file``); a tuner's own best micro speedup is never substituted for it, since a
+        per-shape timing ratio is not the axis the KEEP verdict was graded on.
+        """
         recorder = self._kernel_timeline()
         if recorder is None or not isinstance(result, dict):
             return
@@ -506,52 +516,111 @@ class KernelPhase(PhaseHandler):
         tuner_rows = [row for row in tuners if isinstance(row, dict)] if isinstance(tuners, list) else []
         shape_capture = result.get("shape_capture")
         shape_capture = shape_capture if isinstance(shape_capture, dict) else {}
-        shapes_tuned = result.get("shapes_tuned")
-        if shapes_tuned is None and tuner_rows:
-            values = [
-                row.get("improved_shapes")
-                for row in tuner_rows
-                if isinstance(row.get("improved_shapes"), int) and not isinstance(row.get("improved_shapes"), bool)
-            ]
-            shapes_tuned = sum(values) if values else None
-        gain_pct = result.get("gain_pct")
-        best_speedup = result.get("best_speedup")
-        if gain_pct is None and isinstance(best_speedup, (int, float)) and not isinstance(best_speedup, bool):
-            gain_pct = (float(best_speedup) - 1.0) * 100.0
         workspace = str(result.get("workspace") or "")
-        run_id = str(
+        base_run_id = str(
             result.get("task_id")
             or (Path(workspace).name if workspace else "")
             or f"gemm-c{int(getattr(self.shared_state, 'macro_cycle', 0) or 0)}"
         )
-        tuner = str(result.get("tuner") or "")
-        if not tuner and tuner_rows:
-            tuner = ",".join(str(row.get("tuner") or "") for row in tuner_rows if row.get("tuner"))
+        tuned_file = str(result.get("tuned_file") or result.get("config_path") or "")
+        campaign_gain_pct = result.get("gain_pct")
+        campaign_graded_objective = str(result.get("graded_objective") or "")
+        campaign_micro_decision = str(result.get("micro_decision") or result.get("decision") or "")
+        campaign_integrate_ref = str(result.get("integration_id") or "")
         try:
-            recorder.record_gemm_tuning_run(
-                run_id=run_id,
-                status=str(result.get("status") or "unknown"),
-                shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
-                shapes_tuned=shapes_tuned,
-                config_path=str(result.get("tuned_file") or result.get("config_path") or ""),
-                gain_pct=gain_pct,
-                # Set by the e2e validation above, and only when a KEEP was
-                # actually graded; an unvalidated run has no axis to name.
-                graded_objective=str(result.get("graded_objective") or ""),
-                tuner=tuner,
-                micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                integrate_ref=str(result.get("integration_id") or ""),
-                started_at=str(result.get("started_at") or ""),
-                ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                duration_sec=result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
-            )
+            if tuner_rows:
+                for row in tuner_rows:
+                    tuner_name = str(row.get("tuner") or "")
+                    artifact = str(row.get("artifact") or row.get("env_value") or "")
+                    # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
+                    # belongs on the tuner whose artifact was actually applied, not on every row
+                    # this cycle produced.
+                    is_applied_tuner = bool(tuned_file) and artifact == tuned_file
+                    self._record_one_gemm_tuner_run(
+                        recorder,
+                        run_id=f"{base_run_id}-{tuner_name}" if tuner_name else base_run_id,
+                        status=str(row.get("status") or result.get("status") or "unknown"),
+                        shapes_total=row.get(
+                            "total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))
+                        ),
+                        shapes_tuned=row.get("improved_shapes"),
+                        config_path=artifact,
+                        gain_pct=campaign_gain_pct if is_applied_tuner else None,
+                        graded_objective=campaign_graded_objective if is_applied_tuner else "",
+                        tuner=tuner_name,
+                        micro_decision=campaign_micro_decision,
+                        integrate_ref=campaign_integrate_ref,
+                        started_at=str(result.get("started_at") or ""),
+                        ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                        duration_sec=row.get("elapsed_s", result.get("duration_sec")),
+                        error_class=str(row.get("error_class") or ""),
+                        failure_reason=str(row.get("error") or row.get("skip_reason") or row.get("error_class") or ""),
+                    )
+            else:
+                self._record_one_gemm_tuner_run(
+                    recorder,
+                    run_id=base_run_id,
+                    status=str(result.get("status") or "unknown"),
+                    shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
+                    shapes_tuned=result.get("shapes_tuned"),
+                    config_path=tuned_file,
+                    gain_pct=campaign_gain_pct,
+                    graded_objective=campaign_graded_objective,
+                    tuner=str(result.get("tuner") or ""),
+                    micro_decision=campaign_micro_decision,
+                    integrate_ref=campaign_integrate_ref,
+                    started_at=str(result.get("started_at") or ""),
+                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    duration_sec=result.get("duration_sec"),
+                    error_class=str(result.get("error_class") or ""),
+                    failure_reason=str(
+                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
+                    ),
+                )
             backend = str(result.get("backend") or result.get("engine") or "").lower()
             if backend:
                 tool_versions.record_tool_version(self.session_dir, tool=backend)
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
+
+    def _record_one_gemm_tuner_run(
+        self,
+        recorder: Any,
+        *,
+        run_id: str,
+        status: str,
+        shapes_total: Any,
+        shapes_tuned: Any,
+        config_path: str,
+        gain_pct: Any,
+        graded_objective: str,
+        tuner: str,
+        micro_decision: str,
+        integrate_ref: str,
+        started_at: str,
+        ended_at: str,
+        duration_sec: Any,
+        error_class: str,
+        failure_reason: str,
+    ) -> None:
+        """Write one ``record_gemm_tuning_run`` row for a single tuner's outcome."""
+        recorder.record_gemm_tuning_run(
+            run_id=run_id,
+            status=status,
+            shapes_total=shapes_total,
+            shapes_tuned=shapes_tuned,
+            config_path=config_path,
+            gain_pct=gain_pct,
+            graded_objective=graded_objective,
+            tuner=tuner,
+            micro_decision=micro_decision,
+            integrate_ref=integrate_ref,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_sec=duration_sec,
+            error_class=error_class,
+            failure_reason=failure_reason,
+        )
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
