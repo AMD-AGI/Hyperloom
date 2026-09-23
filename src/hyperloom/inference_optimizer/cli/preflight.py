@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -26,6 +28,7 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
+    is_python_package_root,
 )
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
@@ -189,6 +192,24 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
     return False
 
 
+_HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON"})
+
+
+def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
+    """Fill gaps without importing host Python choices into an explicit Docker run."""
+    mode = (os.environ.get("HYPERLOOM_RUN_MODE") or file_vars.get("HYPERLOOM_RUN_MODE", "")).strip().lower()
+    loaded = 0
+    if mode and not os.environ.get("HYPERLOOM_RUN_MODE"):
+        os.environ["HYPERLOOM_RUN_MODE"] = mode
+        loaded += 1
+    for key, value in file_vars.items():
+        if key in os.environ or (mode == "docker" and key in _HOST_PYTHON_ENV_KEYS):
+            continue
+        os.environ[key] = value
+        loaded += 1
+    return loaded
+
+
 def _load_dotenv_fallback() -> dict[str, Any]:
     """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber)."""
     env_file = _resolve_dotenv_file()
@@ -198,36 +219,17 @@ def _load_dotenv_fallback() -> dict[str, Any]:
             "skip_reason": "dotenv_missing",
             "detail": {"vars_loaded": 0, "source": None},
         }
-    parsed: dict[str, str] = {}
-    loaded = 0
-    for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if not key:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
-            continue
-        parsed[key] = value
+    parsed = _parse_env_assignments(env_file.read_text(encoding="utf-8", errors="replace"))
+    for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
+        if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
+            del parsed[key]
     safe_vars, dropped_vars = filter_untrusted_env_mapping(
         parsed,
-        allow_predicate=is_allowed_dotenv_key,
+        allow_predicate=lambda key: key == "PYTHON" or is_allowed_dotenv_key(key),
     )
     for key in dropped_vars:
         print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
-    for key, value in safe_vars.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            loaded += 1
+    loaded = _load_missing_env_vars(safe_vars)
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
     return {
@@ -296,8 +298,18 @@ def _derive_runtime_paths() -> None:
     for lib_dir in reversed(_rocm_sdk_wheel_lib_dirs()):
         _prepend_path("LD_LIBRARY_PATH", lib_dir)
     vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
-    if vllm_root:
+    if os.environ.get("FRAMEWORK", "").strip().lower() == "vllm" and vllm_root:
         _prepend_path("PATH", str(Path(vllm_root) / "bin"))
+
+    # Reconstruct the installer's import roots instead of accepting raw PATH/PYTHONPATH assignments from files.
+    magpie = os.environ.get("MAGPIE_PATH", "")
+    if magpie and not is_python_package_root(Path(magpie).as_posix()):
+        _prepend_path("PYTHONPATH", magpie)
+    package_parent = Path(__file__).resolve().parents[2].parent
+    root = Path(os.environ.get("REPO_ROOT") or package_parent)
+    for candidate in (root / "src", root):
+        if (candidate / "hyperloom").is_dir() and not is_python_package_root(candidate.as_posix()):
+            _prepend_path("PYTHONPATH", str(candidate))
 
 
 _KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
@@ -306,23 +318,42 @@ _SHELL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_env_assignments(text: str) -> dict[str, str]:
-    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    """Read assignments as data (first wins), decoding quoted values without expansion."""
     out: dict[str, str] = {}
-    for raw in text.splitlines():
+    stream = io.StringIO(text)
+    while True:
+        start = stream.tell()
+        raw = stream.readline()
+        if not raw:
+            break
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
             line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
+        key, separator, value = line.partition("=")
         key = key.strip()
-        if not _SHELL_NAME_RE.match(key):
+        if not separator:
+            continue
+        if not _SHELL_NAME_RE.fullmatch(key):
+            if not any(char.isspace() for char in key):
+                out.setdefault(key, value.strip())  # The allowlist reports invalid assignment names.
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value.startswith(("'", '"')):
+            value_start = raw.index("=") + 1
+            while value_start < len(raw) and raw[value_start] in " \t":
+                value_start += 1
+            stream.seek(start + value_start)
+            lexer = shlex.shlex(stream, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                value = lexer.get_token()
+                if stream.tell() and text[stream.tell() - 1] != "\n":
+                    stream.readline()
+            except ValueError as exc:
+                raise ValueError(f"Invalid quoted environment assignment for {key}: {exc}") from exc
         out.setdefault(key, value)
     return out
 
@@ -356,47 +387,11 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
         if user_data:
             candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        # Root is set: no bootstrap, but still correct invalid path vars from the env file when resolvable.
-        if not candidate:
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": None},
-            }
-        env_path = Path(candidate)
-        if not env_path.is_file():
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
-            }
-        try:
-            text = env_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
-            }
-        file_vars, dropped_file_vars = filter_untrusted_env_mapping(
-            _parse_env_assignments(text),
-            allow_predicate=is_allowed_kernel_agent_env_key,
-        )
-        for key in dropped_file_vars:
-            print(
-                f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
-                file=sys.stderr,
-            )
-        corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT") and not candidate:
         return {
-            "status": "applied" if corrected else "already_present",
+            "status": "already_present",
             "skip_reason": None,
-            "detail": {
-                "vars_loaded": 0,
-                "env_file": str(env_path),
-                "corrected_keys": corrected,
-            },
+            "detail": {"vars_loaded": 0, "env_file": None},
         }
 
     if not candidate:
@@ -436,18 +431,16 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
     parsed_file_vars = _parse_env_assignments(text)
     file_vars, dropped_file_vars = filter_untrusted_env_mapping(
         parsed_file_vars,
-        allow_predicate=is_allowed_kernel_agent_env_key,
+        allow_predicate=lambda key: (
+            key in _HOST_PYTHON_ENV_KEYS or key == "HYPERLOOM_RUN_MODE" or is_allowed_kernel_agent_env_key(key)
+        ),
     )
     for key in dropped_file_vars:
         print(
             f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
             file=sys.stderr,
         )
-    loaded = 0
-    for key, value in file_vars.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            loaded += 1
+    loaded = _load_missing_env_vars(file_vars)
     corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
     if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
         print(
@@ -812,6 +805,10 @@ def _in_container() -> bool:
 
 def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
     """Interpreters that may hold the serving package, deduped in probe order."""
+    if framework == "atom":
+        # Magpie launches ATOM with python3 from PATH, not its benchmark client interpreter.
+        python = shutil.which("python3")
+        return [python] if python else []
     candidates: list[str] = []
     venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
     venv_python = str(Path(venv_root) / "bin" / "python") if venv_root else ""
@@ -880,9 +877,25 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
     # rc 1 means only "definitely not ROCm", so nothing else may produce it -- Python exits 1 on any uncaught
     # exception, and find_spec found the package without importing it, so "spec present but import explodes" is a
     # normal path, not a corner.
-    probe = [
-        "import sys",
-        "def verdict():",
+    probe = ["import sys", "def verdict():"]
+    if framework == "atom":
+        selected_python = os.environ.get("PYTHON", sys.executable)
+        probe += [
+            "    import os, subprocess",
+            "    from pathlib import Path",
+            f"    selected = {selected_python!r}",
+            "    try:",
+            "        prefix = subprocess.check_output([selected, '-c', 'import sys; print(sys.prefix)'],",
+            "                                         text=True, stderr=subprocess.PIPE, timeout=20).strip()",
+            "    except (OSError, subprocess.SubprocessError) as exc:",
+            "        raise RuntimeError(f'Cannot execute selected PYTHON={selected!r}: {exc}') from exc",
+            "    if Path(prefix).resolve() != Path(sys.prefix).resolve():",
+            "        raise RuntimeError(f'python3 prefix {sys.prefix} differs from selected PYTHON prefix {prefix}')",
+            "    venv = os.environ.get('VIRTUAL_ENV')",
+            "    if venv and Path(venv).resolve() != Path(sys.prefix).resolve():",
+            "        raise RuntimeError(f'VIRTUAL_ENV={venv} differs from python3 prefix {sys.prefix}')",
+        ]
+    probe += [
         "    import torch",
         "    if not getattr(torch.version, 'hip', None):",
         "        return 1",
@@ -897,6 +910,8 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
             "    return 0 if ok else 1",
         ]
     else:
+        if framework == "atom":
+            probe.append("    import atom")
         probe.append("    return 0")
     probe += [
         "try:",
@@ -1006,6 +1021,16 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    if framework == "atom" and (not found or probe.verdict is not True):
+        print(
+            f"Preflight: ERROR — atom runtime check failed in python3 ({found or ', '.join(interpreters) or 'not on PATH'}). "
+            "ATOM must import with a ROCm torch build (torch.version.hip) in the selected Python environment."
+            f"{_probe_detail_block(probe.detail)}\n"
+            "Select the existing ATOM Python and put its bin directory first on PATH; "
+            "setup does not install ATOM.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # Publish the interpreter this scan resolved to, so consumers that would otherwise re-derive it from
     # installer-written host state read the probed answer instead.
     if found and probe.verdict is not False:
@@ -1511,7 +1536,26 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
 
 
 def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
+    """Validate Forge's selected Claude CLI; other agent CLIs retain presence warnings."""
+    from hyperloom.common.env import forge_explicitly_enabled
+
+    backend = os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip()
+    atom_default = not backend and os.environ.get("FRAMEWORK", "").strip().lower() == "atom"
+    if forge_explicitly_enabled() or atom_default:
+        from kernelforge.config import Config
+
+        runtime = Config.from_env().agent_runtime()
+        if runtime.provider == "claude":
+            from kernelforge.agent_backends.claude import ClaudeBackend, ClaudeUnavailableError
+
+            try:
+                ClaudeBackend.validate_runtime(runtime)
+            except ClaudeUnavailableError as exc:
+                print(f"Preflight: ERROR — Forge Claude runtime unavailable: {exc}", file=sys.stderr)
+                raise SystemExit(2) from exc
+            print("Preflight: Forge Claude CLI verified (--version)")
+        return
+
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
     if missing:
         print(
@@ -2017,6 +2061,8 @@ def _preflight(
         category="normalize",
         action=_load_kernel_agent_env_fallback,
     )
+    if framework_arg := getattr(args, "framework", None):
+        os.environ["FRAMEWORK"] = framework_arg.strip().lower()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
@@ -2034,6 +2080,14 @@ def _preflight(
         action=_validate_credentials,
         detail={"exit_code": 0},
     )
+
+    if not getattr(args, "no_kernel", False):
+        _run_install_step(
+            install_event,
+            step_id="check_node_claude_cli",
+            category="check",
+            action=_check_node_claude_cli,
+        )
 
     # Same timing, same reason: run after the loaders so a withdrawn KB override set in ``.env`` is caught, and before
     # any KB read happens.
@@ -2434,9 +2488,6 @@ def _preflight(
             "inferencex_patch_anchors_ok": anchors_ok,
         },
     )
-
-    # --- node / claude / codex CLI presence (WARN-only) ---
-    _check_node_claude_cli()
 
     # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) --- Catches launchers that skip
     # install.sh before a missing CLI surfaces mid-run.

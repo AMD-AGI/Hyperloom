@@ -6,13 +6,156 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 
 
+@pytest.fixture(autouse=True)
+def _restore_environment():
+    snapshot = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(snapshot)
+
+
+@pytest.mark.parametrize("framework", [None, "atom", "sglang", "xdit", "custom"])
+def test_other_frameworks_do_not_activate_the_vllm_venv(monkeypatch, framework):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("VLLM_VENV_ROOT", "/unrelated/vllm")
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    if framework is not None:
+        monkeypatch.setenv("FRAMEWORK", framework)
+
+    cli_preflight._derive_runtime_paths()
+
+    assert str(Path("/unrelated/vllm") / "bin") not in os.environ["PATH"].split(os.pathsep)
+    assert os.environ["VLLM_VENV_ROOT"] == "/unrelated/vllm"
+
+
+@pytest.mark.parametrize("framework", [None, "atom", "vllm"])
+@pytest.mark.parametrize("environment_framework", [None, "sglang"])
+def test_preflight_derives_paths_from_the_actual_framework_argument(
+    monkeypatch, tmp_path, framework, environment_framework
+):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path / "kernel"))
+    monkeypatch.delenv("KERNEL_AGENT_ENV", raising=False)
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    if environment_framework is not None:
+        monkeypatch.setenv("FRAMEWORK", environment_framework)
+    monkeypatch.setenv("VLLM_VENV_ROOT", "/isolated/vllm")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    class ReachedCredentials(Exception):
+        pass
+
+    def stop_before_external_work():
+        raise ReachedCredentials
+
+    monkeypatch.setattr(cli_preflight, "_validate_credentials", stop_before_external_work)
+    with pytest.raises(ReachedCredentials):
+        cli_preflight._preflight(SimpleNamespace(framework=framework))
+
+    expected_framework = framework or environment_framework
+    assert os.environ.get("FRAMEWORK") == expected_framework
+    assert (str(Path("/isolated/vllm") / "bin") in os.environ["PATH"].split(os.pathsep)) == (
+        expected_framework == "vllm"
+    )
+
+
+@pytest.mark.parametrize("layout", ["target", "src"])
+def test_runtime_paths_make_known_source_roots_importable_by_children(monkeypatch, tmp_path, layout):
+    root = tmp_path / "installed checkout"
+    source = root / "src" if layout == "src" else root
+    source.mkdir(parents=True)
+    (source / "hyperloom").mkdir()
+    (source / "runtime_checkout_probe.py").write_text("VALUE = 'checkout'\n", encoding="utf-8")
+    magpie = tmp_path / "Magpie checkout"
+    magpie.mkdir()
+    (magpie / "runtime_magpie_probe.py").write_text("VALUE = 'magpie'\n", encoding="utf-8")
+    monkeypatch.setenv("REPO_ROOT", str(root))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
+
+    cli_preflight._derive_runtime_paths()
+    cli_preflight._derive_runtime_paths()
+
+    paths = os.environ["PYTHONPATH"].split(os.pathsep)
+    assert paths.count(str(source)) == 1
+    assert paths.count(str(magpie)) == 1
+    assert str(tmp_path / "operator-imports") in paths
+    child = subprocess.run(
+        [sys.executable, "-c", "import runtime_checkout_probe, runtime_magpie_probe"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert child.returncode == 0, child.stderr
+
+
+@pytest.mark.parametrize("mode", ["baremetal", "docker"])
+def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatch, tmp_path, mode):
+    repo = Path(cli_preflight.__file__).resolve().parents[4]
+    magpie = tmp_path / "Magpie checkout"
+    magpie.mkdir()
+    (magpie / "runtime_child_probe.py").write_text("VALUE = 'runtime-child'\n", encoding="utf-8")
+    runtime = tmp_path / "kernel-agent.env.sh"
+    runtime.write_text(
+        f"HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\nMAGPIE_PATH='{magpie}'\n"
+        "PYTHON=/host/python\nVIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
+    monkeypatch.setenv("HYPERLOOM_RUN_MODE", mode)
+    monkeypatch.setenv("PYTHON", sys.executable)
+    monkeypatch.setenv("VIRTUAL_ENV", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FORCE_PYTHON", "1")
+    for key in ("HYPERLOOM_KERNEL_AGENT_ROOT", "MAGPIE_PATH", "PYTHONPATH"):
+        monkeypatch.delenv(key, raising=False)
+
+    class ReachedCredentials(Exception):
+        pass
+
+    def check_child_before_external_work():
+        child = subprocess.run(
+            [sys.executable, "-c", "import hyperloom, runtime_child_probe; print(runtime_child_probe.VALUE)"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert child.returncode == 0, child.stderr
+        assert child.stdout.strip() == "runtime-child"
+        assert os.environ["PYTHON"] == sys.executable
+        assert os.environ["VIRTUAL_ENV"] == ""
+        raise ReachedCredentials
+
+    monkeypatch.setattr(cli_preflight, "_validate_credentials", check_child_before_external_work)
+    with pytest.raises(ReachedCredentials):
+        cli_preflight._preflight(SimpleNamespace(framework="atom"))
+
+
+@pytest.mark.parametrize("package_root", ["site-packages", "dist-packages"])
+def test_runtime_paths_do_not_cross_contaminate_site_packages(monkeypatch, tmp_path, package_root):
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / package_root))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
+
+    cli_preflight._derive_runtime_paths()
+
+    assert str(tmp_path / package_root) not in os.environ["PYTHONPATH"].split(os.pathsep)
+
+
 def test_prepend_path_adds_and_dedups(monkeypatch):
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join(("/usr/bin", "/bin")))
     cli_preflight._prepend_path("PATH", "/opt/x/bin")
     assert os.environ["PATH"] == f"/opt/x/bin{os.pathsep}/usr/bin{os.pathsep}/bin"
     # Idempotent: already leading -> unchanged.
@@ -40,20 +183,21 @@ def test_derive_runtime_paths_rocm_and_venv(monkeypatch):
 
     path_parts = os.environ["PATH"].split(os.pathsep)
     # ROCm prepended last of the two -> leads; venv follows; system last.
-    assert path_parts[0] == os.path.join("/opt/rocm", "bin")
-    assert os.path.join("/venv", "bin") in path_parts
-    assert os.environ["LD_LIBRARY_PATH"].startswith(os.path.join("/opt/rocm", "lib"))
+    assert path_parts[0] == str(Path("/opt/rocm") / "bin")
+    assert str(Path("/venv") / "bin") in path_parts
+    assert os.environ["LD_LIBRARY_PATH"].startswith(str(Path("/opt/rocm") / "lib"))
 
 
 def test_derive_runtime_paths_isolated_vllm_leads(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("ROCM_PATH", "/opt/rocm")
     monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/vllm-venv")
+    monkeypatch.setenv("FRAMEWORK", "vllm")
 
     cli_preflight._derive_runtime_paths()
 
     # vLLM venv prepended last -> must lead PATH.
-    assert os.environ["PATH"].split(os.pathsep)[0] == os.path.join("/opt/vllm-venv", "bin")
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(Path("/opt/vllm-venv") / "bin")
 
 
 def test_derive_runtime_paths_noop_without_roots(monkeypatch):
