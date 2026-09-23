@@ -4164,6 +4164,56 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     }
 
 
+def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
+    tmp_path,
+    monkeypatch,
+):
+    """The next round is told the review never happened, not that it passed."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+    )
+    critic = PlanCriticOutcome(
+        verdict="NOT_REVIEWED",
+        error="TimeoutError: plan critic exceeded 600s",
+        verdict_source="error",
+    )
+    result = SimpleNamespace(
+        optimization_plans=("# Draft plan\nVectorize global loads.",),
+        optimization_plan_draft="# Draft plan\nVectorize global loads.",
+        optimization_plan_executable=True,
+        dispatch_plan=None,
+        specialist_outcomes=(),
+        structured_output_diagnostics={"plan_critic": critic.to_dict()},
+        plan_critic=critic,
+        plan_revised=False,
+    )
+
+    class OrchestrationService:
+        async def run(self, _context, **_kwargs):
+            return result
+
+    plan_path, error = asyncio.run(
+        loop._run_orchestration(
+            iteration=1,
+            orchestration_service=OrchestrationService(),
+        )
+    )
+    root = workspace / "forge_experiments" / "orchestration" / "iter_001"
+
+    assert error == ""
+    assert plan_path is not None
+    # The plan still publishes -- an outage costs this round its review, not its round.
+    assert plan_path.read_text().startswith("# Draft plan")
+    assert loop._last_critic_verdict == "NOT_REVIEWED"
+    assert (root / "critic_review.md").read_text().startswith("STATUS: CRITIC_ERROR")
+    # No review exists to resume, so a later process inherits no ruling at all.
+    assert loop.run_state.last_critic.verdict == ""
+
+
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     tmp_path,
     monkeypatch,
