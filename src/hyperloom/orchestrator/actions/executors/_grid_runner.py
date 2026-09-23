@@ -43,7 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
+from ._recipe_script import recipe_launch_contract
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -456,13 +456,7 @@ def _build_variant_yaml(
                 variant.name,
             )
             combined = _remove_moe_runner_backend_arg(combined)
-    reads_extra_args, recipe_overwritten = recipe_launch_contract(bench)
     if combined:
-        if not reads_extra_args:
-            raise RecipeLeverUnavailableError(
-                f"the server script this recipe boots never reads {extra_args_env}, so "
-                f"variant {variant.name} args={combined!r} would not reach the server"
-            )
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
         envs[extra_args_env] = ""
@@ -473,8 +467,6 @@ def _build_variant_yaml(
             continue
         envs.pop(k, None)
     for k, v in (base_extra_envs or {}).items():
-        if str(k) in recipe_overwritten:
-            continue
         envs[str(k)] = str(v)
     for k in getattr(variant, "unset_envs", []) or []:
         # Unsetting a pin retargets the benchmark rather than toggling a knob.
@@ -483,12 +475,12 @@ def _build_variant_yaml(
             continue
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
-        # The recipe re-exports this name unconditionally, so publishing it here
-        # records a value the run never used.
-        if str(k) in recipe_overwritten:
-            log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
-            continue
         envs[str(k)] = str(v)
+    # The recipe re-exports these unconditionally, so a value carried here is
+    # one the run never used.
+    for k in recipe_launch_contract(bench)[1] & envs.keys():
+        log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
+        envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
     _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
@@ -539,7 +531,7 @@ def _build_variant_yaml(
         )
 
     # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:

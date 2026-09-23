@@ -69,7 +69,7 @@ from ._grid_server_args import (
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
+from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -1788,14 +1788,8 @@ def materialize_config_with_envs(
 
         overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
         envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
-    reads_extra_args, recipe_overwritten = recipe_launch_contract(bench)
+    _, recipe_overwritten = recipe_launch_contract(bench)
     if server_args:
-        if not reads_extra_args:
-            raise RecipeLeverUnavailableError(
-                f"the server script this recipe boots never reads "
-                f"{server_args_env_name(bench.get('framework'))}, so "
-                f"extra_server_args={server_args!r} would not reach the server"
-            )
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
         framework_env = server_args_env_name(bench.get("framework"))
@@ -2181,7 +2175,7 @@ def materialize_config_with_envs(
         )
         envs.clear()
         envs.update(filtered_envs)
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
