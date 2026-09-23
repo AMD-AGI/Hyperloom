@@ -15,9 +15,11 @@ hyperloom-kb-fleet-serve \
   --port 8787 \
   --fleet-id customer-demo \
   --home /var/lib/hyperloom-fleet-kb \
-  --declaration /opt/Hyperloom/examples/hyperloom-kb-inference.yaml \
-  --seed-jsonl /opt/intake/accepted-experiences.jsonl
+  --declaration ./declarations/inference-recipe-v1.yaml
 ```
+
+The Fleet KB demo branch automatically loads its bundled 59-Experience seed.
+Repeated service starts are idempotent.
 
 The process also needs `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
 `LOCAL_KB_PLANNER_MODEL`, and `HYPERLOOM_FLEET_KB_TOKEN`.
