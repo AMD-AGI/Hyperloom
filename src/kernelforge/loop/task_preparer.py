@@ -844,27 +844,21 @@ class PrepareResult:
 
 
 def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
-    """Record current bytes (or None if absent) for each path, for rollback."""
-    snap: dict[Path, bytes | None] = {}
-    for p in paths:
-        try:
-            snap[p] = p.read_bytes() if p.is_file() else None
-        except OSError:
-            snap[p] = None
-    return snap
+    """Record current bytes (or None if absent) for each path, for rollback.
+
+    Taken before preparation touches anything, so an unreadable path aborts while the workspace is still the
+    caller's: recording it as absent would make the rollback delete the file it was meant to protect.
+    """
+    return {p: (p.read_bytes() if p.is_file() else None) for p in paths}
 
 
 def _restore(snapshot: dict[Path, bytes | None]) -> None:
     """Restore snapshotted paths: rewrite originals, delete ones that were absent."""
     for p, original in snapshot.items():
-        try:
-            if original is None:
-                if p.is_file():
-                    p.unlink()
-            else:
-                p.write_bytes(original)
-        except OSError:
-            continue
+        if original is None:
+            p.unlink(missing_ok=True)
+        else:
+            p.write_bytes(original)
 
 
 def _abs(workspace: Path, path_like: str) -> Path:

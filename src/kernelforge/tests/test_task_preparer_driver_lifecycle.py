@@ -433,6 +433,35 @@ def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
     assert task_preparer._git_indexed(bare, stray) is None
 
 
+def test_a_protected_source_that_cannot_be_read_stops_preparation(tmp_path, monkeypatch):
+    """The snapshot is the rollback's only record of a source that git does not track."""
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("def kernel(x):\n    return x\n", encoding="utf-8")
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(f"cannot read {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    with pytest.raises(PermissionError):
+        task_preparer._snapshot([kernel])
+
+
+def test_rollback_restores_originals_and_deletes_only_what_was_absent(tmp_path):
+    """Only a path the snapshot found absent may be deleted; everything else is rewritten."""
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("original\n", encoding="utf-8")
+    created_later = tmp_path / "helper.py"
+
+    snapshot = task_preparer._snapshot([kernel, created_later])
+    kernel.write_text("agent edit\n", encoding="utf-8")
+    created_later.write_text("agent invention\n", encoding="utf-8")
+    task_preparer._restore(snapshot)
+
+    assert kernel.read_text(encoding="utf-8") == "original\n"
+    assert not created_later.exists()
+
+
 def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeypatch):
     """An external bundle already ships the spec next to the driver."""
     output_dir = tmp_path / "forge_attempt"
