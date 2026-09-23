@@ -451,5 +451,22 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
         )
 
 
+class TestFlyDSLTargetArch(unittest.TestCase):
+    """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
+
+    def test_every_supported_board_gets_the_table_arch(self) -> None:
+        from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+
+        for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+            self.assertEqual(
+                _flydsl_kernel_params("", board).get("FLYDSL_TARGET_ARCH"),
+                arch,
+                board,
+            )
+
+    def test_an_unsupported_board_gets_no_arch(self) -> None:
+        self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params("", "mi250x"))
+
+
 if __name__ == "__main__":
     unittest.main()

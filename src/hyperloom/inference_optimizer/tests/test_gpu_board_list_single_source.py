@@ -82,10 +82,8 @@ def test_a_board_without_an_identity_has_no_arch(gpu_type):
     assert gfx_arch_for_gpu_type(gpu_type) is None
 
 
-def test_the_arch_consumers_read_the_table_rather_than_their_own_copy():
-    """Each copy deleted here had drifted: one lacked mi325x, one still named gfx90a boards."""
-    from hyperloom.agents.kernel.tools import tracelens_analysis
+def test_the_build_path_reads_the_table_rather_than_its_own_copy():
+    """The copy deleted here had drifted: it lacked mi325x and still named gfx90a boards."""
     from hyperloom.orchestrator.enablement import build
 
     assert build.gfx_arch_for_gpu_type is gfx_arch_for_gpu_type
-    assert tracelens_analysis.gfx_arch_for_gpu_type is gfx_arch_for_gpu_type
