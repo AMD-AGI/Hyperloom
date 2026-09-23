@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from kernelforge.fusion.driver_shim import write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH
 from kernelforge.fusion.validate import DEFAULT_TARGET_SPEEDUP
+from kernelforge.llm.git import git
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger("forge_fusion")
@@ -105,16 +107,56 @@ def _read_harness_reports(report_log: str) -> list[dict]:
     return reports
 
 
-def _best_harness_report(reports: list[dict], best_ms) -> dict:
-    """The recorded report describing the candidate the loop settled on."""
-    usable = [
-        r for r in reports if r.get("compiled") and isinstance(r.get("fused_us"), (int, float)) and not r.get("skipped")
-    ]
-    if not usable:
+def tracked_relative_paths(workspace: str, paths: Sequence[str]) -> tuple[str, ...]:
+    """``paths`` as the loop's index names them, or ``()`` when one lies outside the workspace."""
+    if not workspace:
+        return ()
+    root = Path(workspace).resolve()
+    relative: list[str] = []
+    for path in paths:
+        if not path:
+            return ()
+        try:
+            relative.append(Path(path).resolve().relative_to(root).as_posix())
+        except ValueError:
+            return ()
+    return tuple(relative)
+
+
+def _digest_sources(blobs: Sequence[tuple[str, bytes]]) -> str:
+    """Bind each tracked file's contents to its path, matching the driver's digest."""
+    digest = hashlib.sha256()
+    for relative, blob in blobs:
+        digest.update(relative.encode("utf-8"))
+        digest.update(hashlib.sha256(blob).digest())
+    return digest.hexdigest()
+
+
+def committed_sources_sha256(
+    workspace: str,
+    source_files: Sequence[str],
+    commit: str,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Digest the tracked sources as the loop committed them, or ``""`` when they cannot be read."""
+    if not (workspace and source_files and commit):
+        return ""
+    blobs: list[tuple[str, bytes]] = []
+    for relative in source_files:
+        shown = git("show", f"{commit}:{relative}", cwd=workspace, check=False, text=False, env=env)
+        if shown.returncode != 0:
+            log.warning("cannot read %s at %s: %s", relative, commit, (shown.stderr or b"").decode(errors="replace"))
+            return ""
+        blobs.append((relative, shown.stdout))
+    return _digest_sources(blobs)
+
+
+def _harness_report_for(reports: list[dict], sources_sha256: str) -> dict:
+    """The recorded report that measured exactly these sources."""
+    if not sources_sha256:
         return {}
-    if isinstance(best_ms, (int, float)):
-        return min(usable, key=lambda r: abs(float(r["fused_us"]) / 1000.0 - float(best_ms)))
-    return min(usable, key=lambda r: float(r["fused_us"]))
+    measured = [r for r in reports if r.get("sources_sha256") == sources_sha256 and not r.get("skipped")]
+    return measured[-1] if measured else {}
 
 
 def _worst_parity(report: dict) -> tuple[float | None, float | None]:
@@ -125,20 +167,39 @@ def _worst_parity(report: dict) -> tuple[float | None, float | None]:
     return (max(errs) if errs else None, min(snrs) if snrs else None)
 
 
-def _to_validation_result(payload: dict, target_speedup: float, reports: list[dict] | None = None) -> ValidationResult:
+def _to_validation_result(
+    payload: dict,
+    target_speedup: float,
+    reports: list[dict] | None = None,
+    *,
+    committed_sources_digest: str = "",
+) -> ValidationResult:
     """Translate the loop's campaign result into the fusion verdict shape."""
     speedup = payload.get("mean_case_speedup")
     speedup = float(speedup) if isinstance(speedup, (int, float)) else None
     committed = bool(str(payload.get("best_commit") or "").strip())
-    kept = committed and speedup is not None and speedup >= target_speedup
-    report = _best_harness_report(reports or [], payload.get("best_ms"))
+    report = _harness_report_for(reports or [], committed_sources_digest)
     max_abs_err, snr_db = _worst_parity(report)
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
-    if committed and not report:
-        log.warning("no harness report recorded; manifest parity and timings stay null")
+    verified = committed and bool(report)
+    kept = verified and speedup is not None and speedup >= target_speedup
+    if not committed:
+        note = "forge-loop produced no validated candidate"
+    elif not report:
+        log.warning("no harness report measured the committed sources; the recipe stays unverified")
+        note = (
+            f"forge-loop committed {payload.get('best_commit')} but no harness report measured those sources: "
+            "parity and per-arm timings are unavailable"
+        )
+    else:
+        note = (
+            f"forge-loop best iteration {payload.get('best_iteration')}: "
+            f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
+            + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
+        )
     return ValidationResult(
-        correctness_passed=committed,
+        correctness_passed=verified,
         max_abs_err=max_abs_err,
         # The harness reports SNR and absolute error, never a relative tolerance.
         rtol=None,
@@ -146,13 +207,7 @@ def _to_validation_result(payload: dict, target_speedup: float, reports: list[di
         eager_us=float(eager_us) if isinstance(eager_us, (int, float)) else None,
         fused_us=float(fused_us) if isinstance(fused_us, (int, float)) else None,
         kept=kept,
-        note=(
-            f"forge-loop best iteration {payload.get('best_iteration')}: "
-            f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
-            + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
-            if committed
-            else "forge-loop produced no validated candidate"
-        ),
+        note=note,
     )
 
 
@@ -268,6 +323,7 @@ def run_recipe_campaign(
     env_flags = tuple(f for f in (recipe.env_flag or "").split() if f)
     report_log = str(out / f"harness_reports_{stem}.jsonl")
     Path(report_log).unlink(missing_ok=True)
+    tracked = tracked_relative_paths(workspace, [recipe.source_file] + ([fused_module] if fused_module else []))
     driver_path = write_driver(
         out / f"driver_{stem}.py",
         harness_path,
@@ -275,6 +331,8 @@ def run_recipe_campaign(
         report_log=report_log,
         case_id=stem,
         fused_module=fused_module,
+        workspace=workspace,
+        source_files=tracked,
     )
 
     program_md_file = str(out / f"program_{stem}.md")
@@ -343,7 +401,17 @@ def run_recipe_campaign(
         return _failed_campaign(f"forge-loop exited {returncode}")
     payload = _read_result_json(result_json)
     return CampaignOutcome(
-        result=_to_validation_result(payload, target_speedup, _read_harness_reports(report_log)),
+        result=_to_validation_result(
+            payload,
+            target_speedup,
+            _read_harness_reports(report_log),
+            committed_sources_digest=committed_sources_sha256(
+                workspace,
+                tracked,
+                str(payload.get("best_commit") or "").strip(),
+                env=shadow_env,
+            ),
+        ),
         experiment_id=str(payload.get("experiment_id") or ""),
     )
 

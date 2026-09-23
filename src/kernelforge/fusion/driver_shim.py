@@ -10,6 +10,7 @@ from pathlib import Path
 _SHIM_TEMPLATE = '''\
 """Generated driver: runs the fusion harness and reports the loop's contract."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -20,6 +21,8 @@ ENV_FLAGS = {env_flags!r}
 CASE_ID = {case_id!r}
 REPORT_LOG = {report_log!r}
 FUSED_MODULE = {fused_module!r}
+WORKSPACE = {workspace!r}
+SOURCE_FILES = {source_files!r}
 
 
 def _fused_kernel_authored():
@@ -39,6 +42,28 @@ def _fused_kernel_authored():
         return False
 
 
+def _measured_sources_sha256():
+    """Digest the tracked sources exactly as this run measured them.
+
+    These are the only files the loop keeps or reverts, so their contents are
+    the state this report describes. The campaign matches the digest against
+    the same files as the loop committed them, so a manifest never describes
+    one attempt with another attempt's parity or timings.
+    """
+    if not SOURCE_FILES:
+        return ""
+    digest = hashlib.sha256()
+    for relative in SOURCE_FILES:
+        try:
+            with open(os.path.join(WORKSPACE, relative), "rb") as handle:
+                blob = handle.read()
+        except OSError:
+            return ""
+        digest.update(relative.encode("utf-8"))
+        digest.update(hashlib.sha256(blob).digest())
+    return digest.hexdigest()
+
+
 def _record(report):
     """Append one harness report so the campaign can recover what it measured.
 
@@ -46,8 +71,10 @@ def _record(report):
     per-arm timings would otherwise be lost by the time the manifest is written.
     One short line per append keeps concurrent lanes from interleaving.
     """
+    identified = dict(report)
+    identified["sources_sha256"] = _measured_sources_sha256()
     with open(REPORT_LOG, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(report, sort_keys=True) + "\\n")
+        handle.write(json.dumps(identified, sort_keys=True) + "\\n")
 
 
 def _harness_json(env):
@@ -121,6 +148,8 @@ def render_driver(
     case_id: str = "decode",
     timeout_sec: int = 1800,
     fused_module: str = "",
+    workspace: str = "",
+    source_files: tuple[str, ...] | list[str] = (),
 ) -> str:
     """Render the driver source for one recipe's harness."""
     return _SHIM_TEMPLATE.format(
@@ -130,6 +159,8 @@ def render_driver(
         timeout=int(timeout_sec),
         report_log=str(report_log),
         fused_module=str(fused_module),
+        workspace=str(workspace),
+        source_files=tuple(source_files),
     )
 
 
@@ -142,6 +173,8 @@ def write_driver(
     case_id: str = "decode",
     timeout_sec: int = 1800,
     fused_module: str = "",
+    workspace: str = "",
+    source_files: tuple[str, ...] | list[str] = (),
 ) -> str:
     """Write the driver next to the campaign artifacts and return its path."""
     path = Path(destination)
@@ -154,6 +187,8 @@ def write_driver(
             case_id=case_id,
             timeout_sec=timeout_sec,
             fused_module=fused_module,
+            workspace=workspace,
+            source_files=source_files,
         ),
         encoding="utf-8",
     )
