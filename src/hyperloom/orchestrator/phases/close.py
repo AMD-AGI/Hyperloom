@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..state.task_registry import Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -165,7 +165,7 @@ class ClosePhase(PhaseHandler):
                 await self.tasks.transition(task.task_id, "cancelled", {"reason": reason})
             elif current.state == "running":
                 await self.tasks.transition(task.task_id, "failed", {"reason": reason})
-        except Exception:  # noqa: BLE001
+        except (TaskNotFound, IllegalTransition):
             log.debug("CLOSE: failed to settle abandoned task %s", task.task_id, exc_info=True)
 
     async def _revalidate_stack_for_close(self) -> None:
@@ -397,7 +397,7 @@ class ClosePhase(PhaseHandler):
         # describe the stack after its last validation settled.
         try:
             await self._revalidate_stack_for_close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE: stack revalidation failed")
             await self._record_close_step("stack_revalidation", status="failed", detail=repr(exc)[:240])
 
