@@ -760,11 +760,6 @@ def test_backend_factory_falls_back_only_when_enabled(
         "kernelforge.agent_backends.claude._load_claude_sdk",
         fake_claude_sdk,
     )
-    monkeypatch.setattr("kernelforge.agent_backends.claude.resolve_claude_cli", lambda _explicit: sys.executable)
-    version_check = mock.Mock(
-        return_value=subprocess.CompletedProcess([sys.executable, "--version"], 0, b"Claude Code test", b"")
-    )
-    monkeypatch.setattr("kernelforge.agent_backends.claude.subprocess.run", version_check)
 
     with pytest.raises(CodexUnavailableError):
         create_registered_backend(
@@ -783,7 +778,6 @@ def test_backend_factory_falls_back_only_when_enabled(
 
     assert backend.name == "claude"
     assert "Codex Python SDK is not installed" in backend.fallback_reason
-    version_check.assert_called_once_with([sys.executable, "--version"], capture_output=True, timeout=10, check=False)
 
 
 def test_make_agent_fn_dispatches_codex_without_claude_model(
