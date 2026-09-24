@@ -1,0 +1,241 @@
+{
+  "workflow_contract_version": "hyperloom.workflow_evaluation.v1",
+  "sbd_schema_version": "hyperloom.session_breakdown.v6.0",
+  "canonicalization": "UTF-8 JSON with sorted keys, compact separators, and ensure_ascii=false; SHA-256 hex digest",
+  "vocabularies": {
+    "phases": [
+      "PRELUDE",
+      "ENABLEMENT",
+      "FRAMEWORK_AGENT",
+      "KERNEL_AGENT",
+      "SWEEP",
+      "CLOSE"
+    ],
+    "dispatch_classes": [
+      "llm",
+      "coordinator",
+      "inline"
+    ],
+    "process_statuses": [
+      "running",
+      "interrupted",
+      "succeeded",
+      "failed",
+      "degraded",
+      "skipped",
+      "rejected"
+    ],
+    "event_types": [
+      "install",
+      "model_gate",
+      "roofline",
+      "kernel",
+      "baseline",
+      "conc_sweep",
+      "enablement",
+      "phase",
+      "stack",
+      "warm_start",
+      "warm_replay",
+      "framework_agent"
+    ],
+    "stop_reasons": [
+      "active_inferencex_checkout_missing",
+      "agentx_client_unavailable",
+      "baseline_accuracy_failed",
+      "baseline_arg_error",
+      "baseline_failed",
+      "coordinator_exception",
+      "custom",
+      "emergency",
+      "enablement_attempts_exhausted",
+      "environment_fault",
+      "framework_agent_phase_done",
+      "global_converged",
+      "max_ticks",
+      "model_config_incompatible",
+      "model_context_window_too_small",
+      "no_kernel_skipped",
+      "prelude_baseline_failed",
+      "prelude_cold_anchor_low_budget",
+      "robustness_escalated",
+      "server_argv_invalid",
+      "signal",
+      "supervisor_coordinator_died",
+      "supervisor_tick_stalled",
+      "sweep_done",
+      "sweep_failed",
+      "target_reached",
+      "time_exhausted",
+      "time_exhausted_during_prelude",
+      "unknown",
+      "unsupported_model_arch",
+      "warm_replay_rollback_failed"
+    ],
+    "dispatch_actions": [
+      "baseline",
+      "conc_sweep",
+      "explore",
+      "gemm_tuning",
+      "integrate",
+      "integrate_patch",
+      "kernel_opt",
+      "profile",
+      "recover",
+      "replay_warm_recipe",
+      "report",
+      "roofline",
+      "session_breakdown",
+      "specialist",
+      "target_analysis",
+      "targeted_build"
+    ]
+  },
+  "phase_actions": {
+    "PRELUDE": [
+      "baseline",
+      "profile",
+      "replay_warm_recipe",
+      "roofline",
+      "target_analysis"
+    ],
+    "ENABLEMENT": [
+      "baseline",
+      "integrate_patch",
+      "profile",
+      "roofline",
+      "specialist",
+      "target_analysis",
+      "targeted_build"
+    ],
+    "FRAMEWORK_AGENT": [
+      "explore",
+      "integrate_patch",
+      "profile",
+      "roofline",
+      "specialist"
+    ],
+    "KERNEL_AGENT": [
+      "integrate",
+      "kernel_agent",
+      "profile",
+      "roofline"
+    ],
+    "SWEEP": [
+      "conc_sweep"
+    ],
+    "CLOSE": [
+      "report",
+      "session_breakdown"
+    ]
+  },
+  "llm_proposable_actions": {
+    "PRELUDE": [
+      "baseline",
+      "target_analysis"
+    ],
+    "ENABLEMENT": [
+      "integrate_patch",
+      "specialist",
+      "target_analysis"
+    ],
+    "FRAMEWORK_AGENT": [
+      "explore",
+      "integrate_patch",
+      "specialist"
+    ],
+    "KERNEL_AGENT": [
+      "integrate"
+    ],
+    "SWEEP": [],
+    "CLOSE": [
+      "report",
+      "session_breakdown"
+    ]
+  },
+  "coordinator_internal_actions": [
+    "conc_sweep",
+    "kernel_agent",
+    "profile",
+    "replay_warm_recipe",
+    "roofline",
+    "targeted_build"
+  ],
+  "coordinator_reserved_actions": {
+    "ENABLEMENT": [
+      "baseline"
+    ]
+  },
+  "kernel_lane_task_kinds": [
+    "integrate",
+    "kernel_agent",
+    "profile",
+    "roofline"
+  ],
+  "event_business_outcomes": {
+    "warm_start": {
+      "path": "match_status",
+      "values": [
+        "hit",
+        "seed_only",
+        "miss"
+      ]
+    },
+    "warm_replay": {
+      "path": "verdict.outcome_status",
+      "values": [
+        "reproduced",
+        "quality_failed",
+        "accuracy_failed",
+        "drift",
+        "reproduced_but_no_params",
+        "promotion_failed",
+        "rollback_failed",
+        "failed",
+        "skipped",
+        "kernel_preparation_failed",
+        "enqueue_failed"
+      ]
+    },
+    "enablement": {
+      "path": "result.outcome",
+      "values": [
+        "succeeded",
+        "stalled",
+        "pending"
+      ]
+    },
+    "kernel": {
+      "path": "outcome.verdict",
+      "values": [
+        "improved",
+        "no_improvement",
+        "failed"
+      ]
+    }
+  },
+  "consumer_paths": [
+    "metadata.workflow.workflow_contract_version",
+    "metadata.workflow.contract_digest",
+    "metadata.workflow.run_flags",
+    "metadata.workflow.phase_actions",
+    "metadata.workflow.llm_proposable_actions",
+    "metadata.workflow.coordinator_reserved_actions",
+    "timeline[].process_status",
+    "timeline[].business_outcome",
+    "timeline[].failure",
+    "timeline[].blocked_by",
+    "timeline[type=phase].ext.segments[].exit_evidence.predicate_inputs",
+    "timeline[type=phase].ext.actions.rows[].dispatch_class",
+    "timeline[type=phase].ext.actions.rows[].allowed",
+    "timeline[type=phase].ext.actions.rows[].denial_rule",
+    "timeline[type=phase].ext.denials.rows[].actor",
+    "timeline[type=phase].ext.denials.rows[].proposal_msg_id",
+    "timeline[type=phase].ext.denials.rows[].action",
+    "timeline[type=phase].ext.denials.rows[].phase",
+    "timeline[type=phase].ext.denials.rows[].rule",
+    "timeline[type=phase].ext.denials.rows[].hint",
+    "metadata.workflow.coordinator_internal_actions",
+    "metadata.workflow.kernel_lane_task_kinds"
+  ]
+}

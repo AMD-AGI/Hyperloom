@@ -217,6 +217,19 @@ def test_the_real_runner_records_the_dispatch(tmp_path):
     assert row.get("status", "") == ""
 
 
+def test_the_real_runner_uses_persisted_dispatch_provenance(tmp_path):
+    state = _state(tmp_path)
+    machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
+    dispatcher = _dispatcher(tmp_path, state, _Sub(result="done"))
+    task = _task("baseline", "t-provenance")
+    task.history = [{"dispatch_class": "llm", "allowed": True, "denial_rule": None}]
+
+    asyncio.run(dispatcher.run_task_registered(task))
+
+    row = _ext("FRAMEWORK_AGENT")["actions"]["rows"][0]
+    assert (row["dispatch_class"], row["allowed"], row["denial_rule"]) == ("llm", True, None)
+
+
 def test_the_real_runner_records_every_kind_it_is_given(tmp_path):
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="CLOSE", reason="start")

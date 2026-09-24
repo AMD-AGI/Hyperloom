@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -210,6 +212,7 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
     assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
     assert evidence["terminal"] is True
     assert is_valid_stop_reason(reason)
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
 
 
 def test_a_landed_baseline_outranks_the_exhausted_clock():
@@ -736,18 +739,35 @@ def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
 def test_enablement_exits_once_the_baseline_lands_and_work_drains():
     """All three conjuncts satisfied is the only way out through the normal exit."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
-    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None
+    phase, reason, evidence = out
     assert phase != phase_state.PHASE_ENABLEMENT
     assert reason == "enablement_done"
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
 
 
 def test_enablement_holds_while_work_is_in_flight():
     """A build outliving its round must not let a later phase reopen validation."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
     assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
+    inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
+    assert phase_state.replay_next_phase(inputs) is None
 
 
 def test_enablement_holds_while_revalidation_is_pending():
     """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
     state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
     assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+
+
+def test_replay_recomputes_from_primitive_baseline_facts():
+    state = _prelude_state(baseline_tput=100.0, usable_sec=1000.0)
+    out = phase_state.compute_next_phase(state)
+    assert out is not None
+    inputs = deepcopy(out[2]["predicate_inputs"])
+
+    assert "matched" not in inputs["baseline"]
+    inputs["baseline"]["tput"] = 0.0
+
+    assert phase_state.replay_next_phase(inputs) is None

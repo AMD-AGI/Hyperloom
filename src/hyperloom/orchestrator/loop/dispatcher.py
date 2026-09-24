@@ -523,6 +523,7 @@ class DispatcherCollaborator:
                     idempotency_key=new_key,
                     requires_lanes=list(task.requires_lanes or []),
                     lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                    dispatch_class="coordinator",
                 )
                 if not was_existing:
                     created.append(new_task.task_id)
@@ -918,13 +919,19 @@ class DispatcherCollaborator:
         # then the wrong owner.
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+            from hyperloom.orchestrator.state.task_registry import task_dispatch_evidence
 
+            dispatch_evidence = task_dispatch_evidence(task)
+            dispatch_class, allowed, denial_rule = dispatch_evidence or (None, None, None)
             phase_event.record_dispatch(
                 action=str(task.kind or ""),
                 task_id=str(task.task_id or ""),
                 phase=str(getattr(self.shared_state, "phase", "") or ""),
                 macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                dispatch_class=dispatch_class,
+                allowed=allowed,
+                denial_rule=denial_rule,
                 dispatched_unix=time.time(),
             )
         except Exception:
@@ -1905,6 +1912,7 @@ class DispatcherCollaborator:
             idempotency_key=key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="inline",
         )
         if was_existing and task.state in ("succeeded", "failed", "cancelled"):
             for entry in reversed(task.history):

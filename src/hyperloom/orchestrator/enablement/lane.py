@@ -290,6 +290,7 @@ class EnablementLane(CoordinatorCollaborator):
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=holder,
+                dispatch_class="coordinator",
             )
 
         acquired = await self.rounds.open(

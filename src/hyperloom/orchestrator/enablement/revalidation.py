@@ -140,6 +140,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=key_for(generation),
                 **create_kwargs,
+                dispatch_class="coordinator",
             )
             if str(getattr(task, "state", "") or "") not in TERMINAL_STATES:
                 return task, generation
@@ -202,6 +203,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                     requires_lanes=requires_lanes,
                     lease_ttl_sec=lease_ttl_sec,
                     task_id=_holder,
+                    dispatch_class="coordinator",
                 )
                 if existing:
                     # A live row already runs this generation, under the round

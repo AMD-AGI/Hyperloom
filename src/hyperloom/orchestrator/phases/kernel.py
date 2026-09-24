@@ -681,6 +681,7 @@ class KernelPhase(PhaseHandler):
                 idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 break

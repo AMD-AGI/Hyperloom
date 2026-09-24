@@ -298,6 +298,15 @@ def build_manifest(
         # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
+        # Workflow identity is stamped only on a fresh manifest. Resumed
+        # pre-contract sessions therefore remain honestly legacy.
+        "workflow_flags": {
+            "kernel_enabled": not bool(getattr(args, "no_kernel", False)) if args is not None else True,
+            "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False))
+            if args is not None
+            else True,
+            "enablement_mode": str(getattr(args, "enablement", "all") or "all") if args is not None else "all",
+        },
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),

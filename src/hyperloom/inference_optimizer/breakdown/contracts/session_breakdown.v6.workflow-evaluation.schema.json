@@ -1,0 +1,1758 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyperloom.amd.com/schema/session_breakdown.v6.workflow-evaluation.json",
+  "title": "Hyperloom SBD V6 workflow-evaluation profile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "metadata",
+    "timeline"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "hyperloom.session_breakdown.v6.0"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "workflow"
+      ],
+      "properties": {
+        "workflow": {
+          "type": "object",
+          "required": [
+            "workflow_contract_version",
+            "contract_digest",
+            "run_flags",
+            "phase_actions",
+            "llm_proposable_actions",
+            "coordinator_internal_actions",
+            "coordinator_reserved_actions",
+            "kernel_lane_task_kinds"
+          ],
+          "properties": {
+            "workflow_contract_version": {
+              "const": "hyperloom.workflow_evaluation.v1"
+            },
+            "contract_digest": {
+              "const": "2eaf42e8a846e5b9692890ddb4b78e6b03bb349d4f3285990aaa9b6d0db020c0"
+            },
+            "run_flags": {
+              "type": "object",
+              "required": [
+                "kernel_enabled",
+                "framework_agent_enabled",
+                "enablement_mode"
+              ],
+              "properties": {
+                "kernel_enabled": {
+                  "type": "boolean"
+                },
+                "framework_agent_enabled": {
+                  "type": "boolean"
+                },
+                "enablement_mode": {
+                  "enum": [
+                    "off",
+                    "launch",
+                    "eval",
+                    "all"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "phase_actions": {
+              "const": {
+                "PRELUDE": [
+                  "baseline",
+                  "profile",
+                  "replay_warm_recipe",
+                  "roofline",
+                  "target_analysis"
+                ],
+                "ENABLEMENT": [
+                  "baseline",
+                  "integrate_patch",
+                  "profile",
+                  "roofline",
+                  "specialist",
+                  "target_analysis",
+                  "targeted_build"
+                ],
+                "FRAMEWORK_AGENT": [
+                  "explore",
+                  "integrate_patch",
+                  "profile",
+                  "roofline",
+                  "specialist"
+                ],
+                "KERNEL_AGENT": [
+                  "integrate",
+                  "kernel_agent",
+                  "profile",
+                  "roofline"
+                ],
+                "SWEEP": [
+                  "conc_sweep"
+                ],
+                "CLOSE": [
+                  "report",
+                  "session_breakdown"
+                ]
+              }
+            },
+            "llm_proposable_actions": {
+              "const": {
+                "PRELUDE": [
+                  "baseline",
+                  "target_analysis"
+                ],
+                "ENABLEMENT": [
+                  "integrate_patch",
+                  "specialist",
+                  "target_analysis"
+                ],
+                "FRAMEWORK_AGENT": [
+                  "explore",
+                  "integrate_patch",
+                  "specialist"
+                ],
+                "KERNEL_AGENT": [
+                  "integrate"
+                ],
+                "SWEEP": [],
+                "CLOSE": [
+                  "report",
+                  "session_breakdown"
+                ]
+              }
+            },
+            "coordinator_internal_actions": {
+              "const": [
+                "conc_sweep",
+                "kernel_agent",
+                "profile",
+                "replay_warm_recipe",
+                "roofline",
+                "targeted_build"
+              ]
+            },
+            "coordinator_reserved_actions": {
+              "const": {
+                "ENABLEMENT": [
+                  "baseline"
+                ]
+              }
+            },
+            "kernel_lane_task_kinds": {
+              "const": [
+                "integrate",
+                "kernel_agent",
+                "profile",
+                "roofline"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "status",
+          "process_status",
+          "business_outcome",
+          "failure",
+          "blocked_by",
+          "ext"
+        ],
+        "properties": {
+          "process_status": {
+            "enum": [
+              "running",
+              "interrupted",
+              "succeeded",
+              "failed",
+              "degraded",
+              "skipped",
+              "rejected"
+            ]
+          },
+          "business_outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/$defs/failure"
+              }
+            ]
+          },
+          "blocked_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ext": {
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "install",
+              "model_gate",
+              "roofline",
+              "kernel",
+              "baseline",
+              "conc_sweep",
+              "enablement",
+              "phase",
+              "stack",
+              "warm_start",
+              "warm_replay",
+              "framework_agent"
+            ]
+          },
+          "status": {
+            "enum": [
+              "running",
+              "interrupted",
+              "succeeded",
+              "failed",
+              "degraded",
+              "skipped",
+              "rejected"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "phase"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "ext": {
+                  "required": [
+                    "phase",
+                    "segments",
+                    "actions",
+                    "denials"
+                  ],
+                  "properties": {
+                    "segments": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/phase_segment"
+                      }
+                    },
+                    "actions": {
+                      "type": "object",
+                      "required": [
+                        "count",
+                        "settled",
+                        "kinds",
+                        "rows"
+                      ],
+                      "properties": {
+                        "rows": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/$defs/action"
+                          }
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "settled": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "kinds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "denials": {
+                      "type": "object",
+                      "required": [
+                        "count",
+                        "rows"
+                      ],
+                      "properties": {
+                        "rows": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/$defs/denial"
+                          }
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "phase": {
+                      "enum": [
+                        "PRELUDE",
+                        "ENABLEMENT",
+                        "FRAMEWORK_AGENT",
+                        "KERNEL_AGENT",
+                        "SWEEP",
+                        "CLOSE"
+                      ]
+                    },
+                    "markers": {
+                      "type": "object",
+                      "required": [
+                        "count",
+                        "rows"
+                      ],
+                      "properties": {
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "rows": {
+                          "type": "array"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "proposals": {
+                      "type": "object",
+                      "required": [
+                        "count",
+                        "reviewed",
+                        "materialized",
+                        "rows"
+                      ],
+                      "properties": {
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "reviewed": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "materialized": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "rows": {
+                          "type": "array"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "macro_cycle": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "entered_at": {
+                      "type": "string"
+                    },
+                    "exited_at": {
+                      "type": "string"
+                    },
+                    "exit_reason": {
+                      "type": "string"
+                    },
+                    "entries": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "duration_sec": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "open": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "running"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "running"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "interrupted"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "succeeded"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "succeeded"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "failed"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "degraded"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "skipped"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "skipped"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "rejected"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "process_status": {
+                  "const": "rejected"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "warm_start"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "business_outcome": {
+                  "enum": [
+                    "hit",
+                    "seed_only",
+                    "miss",
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "warm_replay"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "business_outcome": {
+                  "enum": [
+                    "reproduced",
+                    "quality_failed",
+                    "accuracy_failed",
+                    "drift",
+                    "reproduced_but_no_params",
+                    "promotion_failed",
+                    "rollback_failed",
+                    "failed",
+                    "skipped",
+                    "kernel_preparation_failed",
+                    "enqueue_failed",
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "enablement"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "business_outcome": {
+                  "enum": [
+                    "succeeded",
+                    "stalled",
+                    "pending",
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "kernel"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "business_outcome": {
+                  "enum": [
+                    "improved",
+                    "no_improvement",
+                    "failed",
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "not": {
+                    "enum": [
+                      "warm_start",
+                      "warm_replay",
+                      "enablement",
+                      "kernel"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "business_outcome": {
+                  "const": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "stop_reason": {
+          "enum": [
+            "",
+            "active_inferencex_checkout_missing",
+            "agentx_client_unavailable",
+            "baseline_accuracy_failed",
+            "baseline_arg_error",
+            "baseline_failed",
+            "coordinator_exception",
+            "custom",
+            "emergency",
+            "enablement_attempts_exhausted",
+            "environment_fault",
+            "framework_agent_phase_done",
+            "global_converged",
+            "max_ticks",
+            "model_config_incompatible",
+            "model_context_window_too_small",
+            "no_kernel_skipped",
+            "prelude_baseline_failed",
+            "prelude_cold_anchor_low_budget",
+            "robustness_escalated",
+            "server_argv_invalid",
+            "signal",
+            "supervisor_coordinator_died",
+            "supervisor_tick_stalled",
+            "sweep_done",
+            "sweep_failed",
+            "target_reached",
+            "time_exhausted",
+            "time_exhausted_during_prelude",
+            "unknown",
+            "unsupported_model_arch",
+            "warm_replay_rollback_failed"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": [
+        "action",
+        "task_id",
+        "phase",
+        "dispatch_class",
+        "allowed",
+        "denial_rule"
+      ],
+      "properties": {
+        "dispatch_class": {
+          "enum": [
+            "llm",
+            "coordinator",
+            "inline"
+          ]
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "denial_rule": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "enum": [
+            "baseline",
+            "conc_sweep",
+            "explore",
+            "gemm_tuning",
+            "integrate",
+            "integrate_patch",
+            "kernel_opt",
+            "profile",
+            "recover",
+            "replay_warm_recipe",
+            "report",
+            "roofline",
+            "session_breakdown",
+            "specialist",
+            "target_analysis",
+            "targeted_build"
+          ]
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phase": {
+          "enum": [
+            "PRELUDE",
+            "ENABLEMENT",
+            "FRAMEWORK_AGENT",
+            "KERNEL_AGENT",
+            "SWEEP",
+            "CLOSE"
+          ]
+        },
+        "macro_cycle": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tick": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dispatched_at": {
+          "type": "string"
+        },
+        "dispatched_unix": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "error_class": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settled_at": {
+          "type": "string"
+        },
+        "settled_unix": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration_sec": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "round_id": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "gap_canonical_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "residual_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proposals_total": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "empty": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ensemble_scores": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "denial": {
+      "type": "object",
+      "required": [
+        "actor",
+        "proposal_msg_id",
+        "action",
+        "phase",
+        "rule",
+        "hint",
+        "denied_at"
+      ],
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "proposal_msg_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "PRELUDE",
+            "ENABLEMENT",
+            "FRAMEWORK_AGENT",
+            "KERNEL_AGENT",
+            "SWEEP",
+            "CLOSE"
+          ]
+        },
+        "rule": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "denied_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "predicate_inputs": {
+      "type": "object",
+      "required": [
+        "current_phase",
+        "now_unix",
+        "global",
+        "baseline",
+        "pending_work",
+        "budget",
+        "plateau",
+        "hint",
+        "sweep_result",
+        "macro_cycle",
+        "run_flags",
+        "enablement_in_flight",
+        "phase_budget_pct"
+      ],
+      "properties": {
+        "baseline": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "pending_work": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "budget": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "plateau": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "hint": {
+          "enum": [
+            null,
+            "skip_to_kernel",
+            "skip_to_sweep",
+            "skip_to_close",
+            "extend_explore_budget",
+            "extend_kernel_budget"
+          ]
+        },
+        "sweep_result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "macro_cycle": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_phase": {
+          "enum": [
+            "PRELUDE",
+            "ENABLEMENT",
+            "FRAMEWORK_AGENT",
+            "KERNEL_AGENT",
+            "SWEEP",
+            "CLOSE"
+          ]
+        },
+        "now_unix": {
+          "type": "number"
+        },
+        "global": {
+          "$ref": "#/$defs/workflow_global"
+        },
+        "run_flags": {
+          "type": "object",
+          "required": [
+            "kernel_enabled",
+            "framework_agent_enabled",
+            "enablement_enabled"
+          ],
+          "properties": {
+            "kernel_enabled": {
+              "type": "boolean"
+            },
+            "framework_agent_enabled": {
+              "type": "boolean"
+            },
+            "enablement_enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "enablement_in_flight": {
+          "type": "boolean"
+        },
+        "phase_budget_pct": {
+          "type": "object",
+          "properties": {
+            "PRELUDE": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "ENABLEMENT": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "FRAMEWORK_AGENT": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "KERNEL_AGENT": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "SWEEP": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "CLOSE": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "PRELUDE"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "$ref": "#/$defs/prelude_inputs"
+              },
+              "pending_work": {
+                "type": "null"
+              },
+              "budget": {
+                "type": "null"
+              },
+              "plateau": {
+                "type": "null"
+              },
+              "sweep_result": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "ENABLEMENT"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "$ref": "#/$defs/enablement_baseline"
+              },
+              "pending_work": {
+                "$ref": "#/$defs/enablement_pending"
+              },
+              "budget": {
+                "type": "null"
+              },
+              "plateau": {
+                "type": "null"
+              },
+              "sweep_result": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "FRAMEWORK_AGENT"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "type": "null"
+              },
+              "pending_work": {
+                "type": "null"
+              },
+              "budget": {
+                "$ref": "#/$defs/phase_budget"
+              },
+              "plateau": {
+                "$ref": "#/$defs/framework_plateau"
+              },
+              "sweep_result": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "KERNEL_AGENT"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "type": "null"
+              },
+              "pending_work": {
+                "$ref": "#/$defs/kernel_pending"
+              },
+              "budget": {
+                "$ref": "#/$defs/phase_budget"
+              },
+              "plateau": {
+                "$ref": "#/$defs/kernel_plateau"
+              },
+              "sweep_result": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "SWEEP"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "type": "null"
+              },
+              "pending_work": {
+                "type": "null"
+              },
+              "budget": {
+                "$ref": "#/$defs/phase_budget"
+              },
+              "plateau": {
+                "type": "null"
+              },
+              "sweep_result": {
+                "$ref": "#/$defs/sweep_inputs"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current_phase": {
+                "const": "CLOSE"
+              }
+            },
+            "required": [
+              "current_phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "baseline": {
+                "type": "null"
+              },
+              "pending_work": {
+                "type": "null"
+              },
+              "budget": {
+                "type": "null"
+              },
+              "plateau": {
+                "type": "null"
+              },
+              "sweep_result": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "workflow_global": {
+      "type": "object",
+      "required": [
+        "stop_reason",
+        "closing_phase",
+        "target_reached_at",
+        "sweep_closeout_status",
+        "session_remaining_sec",
+        "cycle_reloop_min_remaining_sec"
+      ],
+      "properties": {
+        "stop_reason": {
+          "type": "string"
+        },
+        "closing_phase": {
+          "type": "boolean"
+        },
+        "target_reached_at": {
+          "type": "string"
+        },
+        "sweep_closeout_status": {
+          "type": "string"
+        },
+        "session_remaining_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cycle_reloop_min_remaining_sec": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "phase_budget": {
+      "type": "object",
+      "required": [
+        "remaining_sec",
+        "cap_sec",
+        "entry_elapsed_sec",
+        "cumulative_elapsed_sec"
+      ],
+      "properties": {
+        "remaining_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cap_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "entry_elapsed_sec": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cumulative_elapsed_sec": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "prelude_inputs": {
+      "type": "object",
+      "required": [
+        "failure_streak",
+        "warm_replay_status",
+        "measure_round_dropped",
+        "tput",
+        "session_usable_sec",
+        "phase_spent_sec",
+        "runtime_sec",
+        "post_ready_runtime_sec",
+        "warm_runtime_sec",
+        "double_run"
+      ],
+      "properties": {
+        "failure_streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warm_replay_status": {
+          "type": "string"
+        },
+        "measure_round_dropped": {
+          "type": "boolean"
+        },
+        "tput": {
+          "type": "number"
+        },
+        "session_usable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "phase_spent_sec": {
+          "type": "number",
+          "minimum": 0
+        },
+        "runtime_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "post_ready_runtime_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warm_runtime_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "double_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "enablement_baseline": {
+      "type": "object",
+      "required": [
+        "tput"
+      ],
+      "properties": {
+        "tput": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "enablement_pending": {
+      "type": "object",
+      "required": [
+        "validation_pending",
+        "enablement_in_flight"
+      ],
+      "properties": {
+        "validation_pending": {
+          "type": "boolean"
+        },
+        "enablement_in_flight": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "framework_plateau": {
+      "type": "object",
+      "required": [
+        "recent_keep_gain_pct",
+        "keep_gain_threshold_pct",
+        "empty_streak",
+        "empty_streak_threshold",
+        "lookback",
+        "source_consecutive_no_keep",
+        "source_threshold",
+        "source_candidates_exhausted",
+        "attempt_count",
+        "specialist_round_count"
+      ],
+      "properties": {
+        "recent_keep_gain_pct": {
+          "type": "number"
+        },
+        "keep_gain_threshold_pct": {
+          "type": "number"
+        },
+        "empty_streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "empty_streak_threshold": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lookback": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_consecutive_no_keep": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_threshold": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_candidates_exhausted": {
+          "type": "boolean"
+        },
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "specialist_round_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "kernel_pending": {
+      "type": "object",
+      "required": [
+        "kernel_work_pending",
+        "kernel_agent_in_flight",
+        "optimizer",
+        "controller_cycle",
+        "controller_status",
+        "controller_patch_count",
+        "controller_task_count",
+        "controller_reason"
+      ],
+      "properties": {
+        "kernel_work_pending": {
+          "type": "boolean"
+        },
+        "kernel_agent_in_flight": {
+          "type": "boolean"
+        },
+        "optimizer": {
+          "type": "string"
+        },
+        "controller_cycle": {
+          "type": "integer"
+        },
+        "controller_status": {
+          "type": "string"
+        },
+        "controller_patch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "controller_task_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "controller_reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "kernel_plateau": {
+      "type": "object",
+      "required": [
+        "idle_ticks",
+        "idle_since_unix",
+        "idle_max_ticks",
+        "idle_min_seconds",
+        "rejected_kernel_count"
+      ],
+      "properties": {
+        "idle_ticks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "idle_since_unix": {
+          "type": "number"
+        },
+        "idle_max_ticks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idle_min_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rejected_kernel_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "sweep_reloop": {
+      "type": "object",
+      "required": [
+        "current_gain_pct",
+        "gain_at_cycle_start_pct",
+        "min_gain_pct",
+        "prior_no_gain_cycle_streak",
+        "max_cycles",
+        "no_gain_cycles",
+        "saturated_directions",
+        "session_remaining_sec",
+        "min_remaining_sec"
+      ],
+      "properties": {
+        "current_gain_pct": {
+          "type": "number"
+        },
+        "gain_at_cycle_start_pct": {
+          "type": "number"
+        },
+        "min_gain_pct": {
+          "type": "number"
+        },
+        "prior_no_gain_cycle_streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_cycles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "no_gain_cycles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "saturated_directions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "session_remaining_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "min_remaining_sec": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "sweep_inputs": {
+      "type": "object",
+      "required": [
+        "status",
+        "was_skipped",
+        "budget_exhausted",
+        "skip_reason",
+        "successful_pairs",
+        "summary_present",
+        "reloop"
+      ],
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "was_skipped": {
+          "type": "boolean"
+        },
+        "budget_exhausted": {
+          "type": "boolean"
+        },
+        "skip_reason": {
+          "type": "string"
+        },
+        "successful_pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary_present": {
+          "type": "boolean"
+        },
+        "reloop": {
+          "$ref": "#/$defs/sweep_reloop"
+        }
+      },
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "required": [
+        "stage",
+        "error_class",
+        "message"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "phase_segment": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "from_phase",
+        "entered_at",
+        "entered_unix",
+        "entered_reason",
+        "entered_evidence"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "from_phase": {
+          "type": "string"
+        },
+        "entered_at": {
+          "type": "string"
+        },
+        "entered_unix": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "entered_reason": {
+          "type": "string"
+        },
+        "entered_evidence": {
+          "type": "object"
+        },
+        "to_phase": {
+          "type": "string"
+        },
+        "exited_at": {
+          "type": "string"
+        },
+        "exited_unix": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exit_reason": {
+          "type": "string"
+        },
+        "exit_evidence": {
+          "type": "object"
+        },
+        "duration_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "exited_at": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "exited_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "to_phase",
+              "exited_unix",
+              "exit_reason",
+              "exit_evidence",
+              "duration_sec"
+            ],
+            "properties": {
+              "exit_evidence": {
+                "type": "object",
+                "required": [
+                  "predicate_inputs"
+                ],
+                "properties": {
+                  "predicate_inputs": {
+                    "$ref": "#/$defs/predicate_inputs"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

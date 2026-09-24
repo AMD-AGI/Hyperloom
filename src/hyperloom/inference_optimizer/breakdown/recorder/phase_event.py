@@ -77,6 +77,9 @@ SECTION_MARKER = "phase_marker"
 #: and the ruling would otherwise have no subject to be filed against.
 SECTION_PROPOSAL = "phase_proposal"
 
+#: One row per PolicyGate denial, including intents that never became proposals.
+SECTION_DENIAL = "phase_denial"
+
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_DEGRADED = "degraded"
@@ -278,18 +281,15 @@ def record_specialist_round(
     """Merge what a specialist round produced onto the action row that ordered it.
 
     Merged onto the action row the dispatcher already opened for ``task_id``,
-    not added as a second one. ``phase`` and ``macro_cycle`` are the fallback
-    for when no dispatch row exists.
+    not added as a second one. Missing dispatch evidence is left missing rather
+    than reconstructed after the fact with guessed provenance.
     """
     key = str(task_id or "")
     if not key:
         return
     event = _action_event(key)
     if event is None:
-        if not str(phase or ""):
-            return
-        event = phase_event_id(phase, macro_cycle)
-        record_dispatch(action="specialist", task_id=key, phase=phase, macro_cycle=macro_cycle)
+        return
     sink = _sink(event)
     if sink is None:
         return
@@ -320,6 +320,9 @@ def record_dispatch(
     phase: str,
     macro_cycle: int,
     tick: int = 0,
+    dispatch_class: str | None = None,
+    allowed: bool | None = True,
+    denial_rule: str | None = None,
     dispatched_at: str = "",
     dispatched_unix: float | None = None,
 ) -> None:
@@ -336,19 +339,57 @@ def record_dispatch(
     if sink is None:
         return
     _open(event, phase=phase, macro_cycle=macro_cycle)
+    row: dict[str, Any] = {
+        "action": str(action or ""),
+        "task_id": str(task_id),
+        "phase": str(phase or "").strip().upper(),
+        "macro_cycle": int(macro_cycle or 0),
+        "tick": int(tick or 0),
+        "dispatched_at": str(dispatched_at or "") or _now(),
+        "dispatched_unix": _float_or_none(dispatched_unix),
+    }
+    if dispatch_class is not None:
+        row.update(
+            dispatch_class=str(dispatch_class),
+            allowed=bool(allowed),
+            denial_rule=_text_or_none(denial_rule),
+        )
     sink.record(
         SECTION_ACTION,
-        {
-            "action": str(action or ""),
-            "task_id": str(task_id),
-            "phase": str(phase or "").strip().upper(),
-            "macro_cycle": int(macro_cycle or 0),
-            "tick": int(tick or 0),
-            "dispatched_at": str(dispatched_at or "") or _now(),
-            "dispatched_unix": _float_or_none(dispatched_unix),
-        },
+        row,
         row_type="action",
         natural_ids=str(task_id),
+    )
+
+
+def record_denial(
+    *,
+    actor: str,
+    proposal_msg_id: str | None,
+    action: str,
+    phase: str,
+    macro_cycle: int,
+    rule: str,
+    hint: str = "",
+    denied_at: str = "",
+) -> None:
+    """Record one PolicyGate denial at the point the decision is made."""
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return
+    _open(event, phase=phase, macro_cycle=macro_cycle)
+    sink.append(
+        SECTION_DENIAL,
+        {
+            "actor": str(actor or ""),
+            "proposal_msg_id": _text_or_none(proposal_msg_id),
+            "action": str(action or ""),
+            "phase": str(phase or "").strip().upper(),
+            "rule": str(rule or ""),
+            "hint": str(hint or ""),
+            "denied_at": str(denied_at or "") or _now(),
+        },
     )
 
 
@@ -515,24 +556,14 @@ def record_settle(
     """Settle a dispatched action's row with the verdict it got. Never raises.
 
     The row settled is the one the dispatch opened, found by reading the spool
-    back: the dispatching phase is not in scope at the settle, and a resumed
-    process holds no memory of it. The other arguments are only the fallback.
+    back: the dispatching phase is not in scope at the settle. Missing dispatch
+    evidence is left missing rather than reconstructed with guessed provenance.
     """
     if not str(task_id or ""):
         return
     event = _action_event(str(task_id))
     if event is None:
-        # No dispatch row: a task settled by a path that never went through
-        # the runner, or an unreadable spool. Better placed than dropped.
-        if not str(phase or ""):
-            return
-        event = phase_event_id(phase, macro_cycle)
-        record_dispatch(
-            action=action,
-            task_id=str(task_id),
-            phase=phase,
-            macro_cycle=macro_cycle,
-        )
+        return
     sink = _sink(event)
     if sink is None:
         return
@@ -677,6 +708,13 @@ def assemble_phase_ext(
         ),
         drop=("event_id",),
     )
+    denials = wire_rows(
+        sort_rows(
+            rows_for_event(parts.get(SECTION_DENIAL) or [], event),
+            keys=("denied_at", "proposal_msg_id", "action"),
+        ),
+        drop=("event_id",),
+    )
     # Summed over the entries, not measured first to last: a phase re-entered
     # inside one cycle did not own the time the run spent elsewhere in between.
     measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
@@ -699,6 +737,7 @@ def assemble_phase_ext(
             "rows": actions,
         },
         "markers": {"count": len(markers), "rows": markers},
+        "denials": {"count": len(denials), "rows": denials},
         "proposals": {
             "count": len(proposals),
             # The gap to ``count`` is the ones the Critic never reached, which
@@ -752,6 +791,7 @@ __all__ = [
     "PHASE_EVENT_SECTIONS",
     "PRODUCER",
     "SECTION_ACTION",
+    "SECTION_DENIAL",
     "SECTION_EVENT",
     "SECTION_MARKER",
     "SECTION_SEGMENT",
@@ -762,6 +802,7 @@ __all__ = [
     "assemble_phase_ext",
     "is_phase_transition_row",
     "phase_event_id",
+    "record_denial",
     "record_dispatch",
     "record_entry",
     "record_exit",
