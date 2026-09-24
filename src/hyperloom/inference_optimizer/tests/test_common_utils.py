@@ -1039,6 +1039,7 @@ def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypa
 def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import isolation
     from hyperloom.agents.framework.models import Candidate
+    from hyperloom.common.env import EnvValueError
 
     repo_url = "https://github.com/sgl-project/sglang.git"
     candidate = Candidate(ref="PR:42", repo=repo_url)
@@ -1046,15 +1047,15 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
     assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url)) == "main"
 
-    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
-    assert isolation._resolve_min_free_gb(None) == pytest.approx(20.0)
-    assert isolation._resolve_min_free_gb(3.5) == pytest.approx(3.5)
-
     usage = SimpleNamespace(free=2 * 1024**3)
     monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)
-    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, min_free_gb=1.0, per_candidate_gb=0.5)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
+    with pytest.raises(EnvValueError, match="FRAMEWORK_EXPLORER_DISK_MIN_GB"):
+        isolation.disk_preflight(tmp_path / "typo", n_candidates=1)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "1.0")
+    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, per_candidate_gb=0.5)
     with pytest.raises(isolation.DiskPreflightError, match="insufficient disk"):
-        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, min_free_gb=1.0, per_candidate_gb=1.0)
+        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, per_candidate_gb=1.0)
 
     git_calls: list[tuple[list[str], Path | None]] = []
     monkeypatch.setattr(isolation, "_run_git", lambda args, cwd=None, timeout_sec=1800: git_calls.append((args, cwd)))
