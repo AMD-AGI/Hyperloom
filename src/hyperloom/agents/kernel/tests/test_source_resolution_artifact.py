@@ -194,6 +194,40 @@ def test_written_artifact_satisfies_its_own_contract(tmp_path):
     assert doc["framework"] == "sglang"
 
 
+def test_collective_symbol_index_row_does_not_suppress_the_artifact(tmp_path):
+    """A collective row resolved by device-symbol scan is in-vocabulary.
+
+    Its ``symbol_index`` method carries a real source, so the projected entry
+    validates and the whole file is written rather than suppressed.
+    """
+    out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
+    tl.write_source_resolution_artifact(
+        [
+            {
+                "kernel_id": "k1",
+                "name": "cross_device_reduce_2stage",
+                "gpu_pct": 12.0,
+                "source_file": "/csrc/custom_all_reduce.cuh",
+                "source_resolution_method": "symbol_index",
+            },
+            {
+                "kernel_id": "k2",
+                "name": "fused_moe",
+                "gpu_pct": 8.0,
+                "source_file": "/x/moe.py",
+                "source_resolution_method": "triton_ast",
+            },
+        ],
+        out,
+    )
+    assert out.is_file()
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert ksc.validate_document(doc) == []
+    by_id = {e["kernel_id"]: e for e in doc["entries"]}
+    assert by_id["k1"]["method"] == ksc.METHOD_SYMBOL_INDEX
+    assert by_id["k1"]["source_file"] == "/csrc/custom_all_reduce.cuh"
+
+
 # --- degrade, don't abort, against an older installed contract module -------
 
 

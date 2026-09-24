@@ -40,8 +40,8 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
 
     Args:
         analysis_json: Path to the ``analysis.json`` TraceLens wrote.
-        framework: Optional serving framework, forwarded to the resolver's
-            search-path discovery when it steers routing.
+        framework: Optional serving framework. Accepted but not yet forwarded to
+            the resolver; reserved for a future TraceLens per-call search-path filter.
 
     Returns:
         Candidate rows in TraceLens' task/member order. Empty when the file is

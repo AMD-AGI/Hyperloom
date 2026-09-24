@@ -3648,6 +3648,8 @@ def _finalize_candidates(
     # no Input Dims) once from the sidecar and graft onto candidates lacking shapes.
     _fused_moe_shapes: list[str] | None = None
     _fused_moe_invocation_cases: list[dict[str, Any]] | None = None
+    # Denominator for the duration-derived gpu_pct fallback below.
+    sum_dur = sum(float(it.get("duration_us") or 0.0) for it in top) or 1.0
     for idx, item in enumerate(top, 1):
         item.pop("_extracted_source_checked", None)
         item.setdefault("source_file", "")
@@ -3707,6 +3709,11 @@ def _finalize_candidates(
                 item["raw_arg_spec"] = raw_spec
         item["kernel_id"] = f"k{idx:03d}"
         item["duration_us"] = round(item["duration_us"], 3)
+        # Keep TraceLens' authoritative pct_e2e when present, including a real
+        # 0.0; derive from the duration share only when it is absent/None (e.g.
+        # collectives and null-pct_e2e members).
+        if item.get("gpu_pct") is None:
+            item["gpu_pct"] = round(float(item.get("duration_us") or 0.0) / sum_dur * 100.0, 3)
         # source_file was already resolved by the analysis.json reader through
         # TraceLens' resolve_kernel_source; classify its type host-side and record
         # the repo it lives in for the invocation spec.
@@ -4014,7 +4021,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "9fc0dc6487bde554c6ed314a15b61022e5ec62ea"
+_TRACELENS_REF_DEFAULT = "staging_agent"
 
 
 def _default_tracelens_root() -> Path:

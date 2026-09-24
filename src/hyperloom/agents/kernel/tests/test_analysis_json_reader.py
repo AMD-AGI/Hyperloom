@@ -101,6 +101,43 @@ def test_stage_a_lifts_metrics_and_maps_gpu_pct(tmp_path, monkeypatch):
     assert row["impact_score"] == 3.5
 
 
+def test_finalize_derives_gpu_pct_from_duration_when_absent():
+    """A row missing gpu_pct gets its duration share; an authoritative one stays.
+
+    Collective rows and null-pct members reach finalize with gpu_pct unset; the
+    duration-share fallback keeps their ROI ranking non-zero without displacing
+    TraceLens' pct_e2e where it is present.
+    """
+    rows = tla._finalize_candidates(
+        [
+            {"name": "collective_a", "duration_us": 50.0},
+            {"name": "compute_b", "duration_us": 100.0, "gpu_pct": 25.0},
+        ]
+    )
+    by_name = {r["name"]: r for r in rows}
+    # 50 of 150 total us -> 33.333%.
+    assert by_name["collective_a"]["gpu_pct"] == 33.333
+    assert by_name["compute_b"]["gpu_pct"] == 25.0
+
+
+def test_finalize_preserves_an_authoritative_zero_gpu_pct():
+    """A real pct_e2e of 0.0 is authoritative, not absent -- it must survive.
+
+    A kernel present in the window with no measured wall-time share reads 0.0;
+    replacing it with a duration-derived share would inflate its ROI ranking.
+    """
+    rows = tla._finalize_candidates(
+        [
+            {"name": "idle_a", "duration_us": 100.0, "gpu_pct": 0.0},
+            {"name": "collective_b", "duration_us": 50.0},
+        ]
+    )
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["idle_a"]["gpu_pct"] == 0.0
+    # The absent-gpu_pct sibling still receives its duration share: 50 of 150.
+    assert by_name["collective_b"]["gpu_pct"] == 33.333
+
+
 def test_resolve_result_fields_map_onto_the_candidate(tmp_path, monkeypatch):
     """The six ResolveResult fields map to the six HL candidate keys (patchable case)."""
     monkeypatch.setattr(
