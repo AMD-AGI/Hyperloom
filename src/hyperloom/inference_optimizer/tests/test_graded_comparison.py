@@ -14,7 +14,6 @@ import pytest
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
     GRADED_ERROR_RATE,
-    GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_KEEP,
@@ -684,8 +683,6 @@ def test_graded_axes_stamp_the_comparability_inputs_onto_a_winner():
     assert axes[GRADED_INTVTY_P50] == 56.55
     assert axes[GRADED_DURATION] == 924.98
     assert axes[GRADED_ERROR_RATE] == 0.0
-
-
 
 
 def test_agentx_revert_when_the_windows_differ(monkeypatch):

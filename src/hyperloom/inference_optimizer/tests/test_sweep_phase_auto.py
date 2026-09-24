@@ -352,7 +352,17 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
     ),
     [
         pytest.param(
-            "agentx", 130.0, 18000.0, 410.0, None, True, "REVERT", GRADED_INTVTY_P50, 2.5, "REVERT", id="median-below-bar"
+            "agentx",
+            130.0,
+            18000.0,
+            410.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY_P50,
+            2.5,
+            "REVERT",
+            id="median-below-bar",
         ),
         pytest.param(
             "agentx",
@@ -498,6 +508,8 @@ async def test_stack_validation_preserves_actual_measurement(
         total_throughput=20000.0,
         e2e_norm_intvty_p90=400.0,
         e2e_norm_intvty_p50=400.0,
+        duration_seconds=900.0,
+        request_error_rate=0.0,
         extra_server_args="--max-model-len 8192",
     )
     stack = c._stack_entries_for_validation(["k001", "k004"])
@@ -517,6 +529,8 @@ async def test_stack_validation_preserves_actual_measurement(
         "total_token_throughput": total,
         GRADED_INTVTY: intvty,
         GRADED_INTVTY_P50: intvty,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "completed_requests": 64,
         "submission_valid": submission_valid,
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],

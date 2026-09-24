@@ -360,6 +360,8 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
         "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     state.current_best.update(state.baseline_perf)
     state.geak_result = _ok_result(final=150.0)
@@ -386,7 +388,17 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
 
     def fake_measure(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=132.0, perf_axes={"total_token_throughput": 900.0, "e2e_norm_intvty_p90": 50.0, "e2e_norm_intvty_p50": 50.0})
+        _fake_workspace(
+            slot,
+            tput=132.0,
+            perf_axes={
+                "total_token_throughput": 900.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 50.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     async def must_not_replay(**kwargs):
@@ -424,6 +436,8 @@ async def test_explore_missing_axes_fails_closed(
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
         "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     base_tput = state.baseline_tput
     if missing_from == "current_best":
@@ -433,7 +447,8 @@ async def test_explore_missing_axes_fails_closed(
             "total_token_throughput": 25000.0,
             "e2e_norm_intvty_p90": 300.0,
             "e2e_norm_intvty_p50": 300.0,
-        "e2e_norm_intvty_p50": 300.0,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         base_tput = 250.0
     candidate_axes = {
@@ -441,6 +456,8 @@ async def test_explore_missing_axes_fails_closed(
         "total_token_throughput": 40000.0,
         "e2e_norm_intvty_p90": 300.0,
         "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     incomplete = {
         "candidate": candidate_axes,
@@ -521,6 +538,8 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
         "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
@@ -542,6 +561,8 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
             "total_token_throughput": total,
             "e2e_norm_intvty_p90": intvty,
             "e2e_norm_intvty_p50": intvty,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         if name == "v01_v_incomplete":
             for key in (

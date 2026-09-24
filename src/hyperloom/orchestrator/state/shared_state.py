@@ -137,7 +137,6 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
-        intvty_of,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,

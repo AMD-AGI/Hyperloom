@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from ..state.shared_state import resolve_graded_comparison
 
 
