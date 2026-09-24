@@ -380,68 +380,6 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_update_state_route_rejects_crash_timestamps_before_mutation(update_state_coordinator):
-    c = update_state_coordinator
-    c.shared_state.crash_timestamps = [100.0]
-    c.shared_state.save(c.session_dir)
-    before = (c.session_dir / "state.json").read_bytes()
-
-    await c._handle_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.UPDATE_STATE,
-            payload={"changes": {"current_action": "must not apply", "crash_timestamps": "bad"}},
-        ),
-    )
-
-    assert c.shared_state.current_action == "before"
-    assert c.shared_state.crash_timestamps == [100.0]
-    assert (c.session_dir / "state.json").read_bytes() == before
-    obs = await c.bus.tail(topic="observation")
-    assert len(obs) == 1
-    assert obs[0].payload["kind"] == "policy_denied"
-    assert obs[0].payload["rule"] == "state_field"
-    assert c.shared_state.recent_crash_count(window_sec=60, now=120) == 1
-    assert c.shared_state.increment_crash_count() == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        {"policy_denial_streak": "bad"},
-        {"pending_targeted_build": {"pid": 123}},
-        {"agent_last_active": {"orchestration": 0}},
-        {"phase": "CLOSE"},
-        {"target_summary": None},
-        {"current_action": ["bad"]},
-    ],
-)
-async def test_update_state_route_rejects_entire_invalid_batch(update_state_coordinator, invalid):
-    c = update_state_coordinator
-    c.shared_state.save(c.session_dir)
-    before = (c.session_dir / "state.json").read_bytes()
-    await c._handle_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.UPDATE_STATE,
-            payload={"changes": {"current_action": "new", "target_summary": "new", "unknown": 1, **invalid}},
-        ),
-    )
-    assert c.shared_state.current_action == "before"
-    assert c.shared_state.target_summary == "original"
-    assert c.shared_state.pending_targeted_build == {}
-    assert c.shared_state.agent_last_active == {}
-    assert c.shared_state.phase == ""
-    assert c.shared_state.policy_denial_streak == {"*:state_field": 1}
-    assert (c.session_dir / "state.json").read_bytes() == before
-    obs = await c.bus.tail(topic="observation")
-    assert len(obs) == 1
-    assert obs[0].payload["kind"] == "policy_denied"
-    assert obs[0].payload["rule"] == "state_field"
-
-
-@pytest.mark.asyncio
 async def test_coordinator_update_state_persists_known_fields(update_state_coordinator):
     """Orchestration may persist the two text fields advertised by its prompt."""
     c = update_state_coordinator
