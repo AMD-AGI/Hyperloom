@@ -926,7 +926,6 @@ def _upgrade_eval_unbound_outputs_block(src: Path) -> bool:
     if not atomic_write_text(
         src,
         rewritten,
-        tmp_prefix=".lm_eval_sitecustomize.unbound_outputs_upgrade_",
         log_prefix="_inferencex_patcher",
     ):
         return False
@@ -947,7 +946,6 @@ def _apply_eval_unbound_outputs_atomic(src: Path) -> bool:
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=".lm_eval_sitecustomize.unbound_outputs_",
         log_prefix="_inferencex_patcher",
     ):
         return False
