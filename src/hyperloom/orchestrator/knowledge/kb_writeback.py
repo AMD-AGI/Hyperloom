@@ -9,27 +9,35 @@ import asyncio
 import time
 from pathlib import Path
 
+from hyperloom.agents.framework.kb import LESSONS_FILE, framework_optimization_root
 from hyperloom.common.io import append_jsonl
 
 
 def _default_kb_root() -> Path:
     """Resolve the framework-PR lessons directory."""
-    from hyperloom.agents.framework.kb import framework_optimization_root
-
     return framework_optimization_root()
 
 
-# PR ledger vocabulary is defined in agents/framework/kb so that the fa CLI
-# (which cannot import orchestrator) and the writeback path share one source.
-from hyperloom.agents.framework.kb import (
-    ALLOWED_OUTCOMES,
-    LESSONS_FILE,
-    OUTCOME_ALREADY_PRESENT,
-    OUTCOME_INTEGRATED,
-    OUTCOME_REJECTED_APPLY_FAIL,
-    OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
-    OUTCOME_REVERTED_SMOKE_FAIL,
-    OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+#: Allowed ``outcome`` values; keep stable (downstream readers match exact strings).
+OUTCOME_INTEGRATED: str = "integrated"
+OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
+OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
+# Candidate skipped: semantic audit found it already in the live tree.
+OUTCOME_ALREADY_PRESENT: str = "already_present"
+# An env-gated rewrite whose switch-off parity leg measured a behavioural change: with every switch unset the patch
+# did not reproduce the base.
+OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
+# The parity leg produced no usable measurement, so the invariant was never tested.
+OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
+ALLOWED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        OUTCOME_INTEGRATED,
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        OUTCOME_REJECTED_APPLY_FAIL,
+        OUTCOME_ALREADY_PRESENT,
+        OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+        OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
+    }
 )
 
 
