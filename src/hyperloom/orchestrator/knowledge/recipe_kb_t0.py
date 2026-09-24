@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
@@ -600,12 +601,9 @@ def _build_t0_trace_extras(
     return _extras
 
 
-_GPU_ISA_BY_SKU = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
+#: SKU -> ISA family. Derived from the board identity table, so a new board becomes a
+#: fallback donor for its own ISA in the commit that adds it.
+_GPU_ISA_BY_SKU = {sku: arch for sku, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items()}
 #: ``ep`` and the partition mode suffix at any node count, so they appear both inside a cluster suffix and on their
 #: own. Kept as a named fragment rather than repeated, so the two forms cannot drift.
 _SHAPE_SUFFIX = r"(?:_ep[1-9]\d*)?(?:_(?:dpx|qpx|cpx))?"

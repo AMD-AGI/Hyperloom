@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES, gfx_arch_for_gpu_type
+from hyperloom.common.gpu_identity import (
+    AMD_GPU_DISPATCH_IDENTITIES,
+    gfx_arch_for_gpu_type,
+    is_gfx_arch,
+)
 from hyperloom.inference_optimizer.gpu_types import (
     _AMD_GPU_TYPES,
     _PRODUCT_TAGS,
@@ -87,3 +91,53 @@ def test_the_build_path_reads_the_table_rather_than_its_own_copy():
     from hyperloom.orchestrator.enablement import build
 
     assert build.gfx_arch_for_gpu_type is gfx_arch_for_gpu_type
+
+
+def test_an_arch_names_itself_and_every_board_that_dispatches_to_it():
+    for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        assert is_gfx_arch(board, arch)
+        assert is_gfx_arch(board.upper(), arch)
+        assert is_gfx_arch(arch, arch)
+
+
+@pytest.mark.parametrize("gpu_type", [None, "", "   ", "auto", "unknown_gpu", "mi250x"])
+def test_an_unresolvable_gpu_type_names_no_arch(gpu_type):
+    assert not is_gfx_arch(gpu_type, "gfx950")
+    assert not is_gfx_arch(gpu_type, "gfx942")
+
+
+def test_a_board_never_answers_to_another_boards_arch():
+    for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        for other in {a for a, _c in AMD_GPU_DISPATCH_IDENTITIES.values()} - {arch}:
+            assert not is_gfx_arch(board, other), f"{board} answered to {other}"
+
+
+def test_the_t0_recipe_isa_map_is_the_table():
+    """T0 warm-start offers a recipe across same-ISA boards, so its map has to be the table's."""
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+
+    assert recipe_kb_t0._GPU_ISA_BY_SKU == {b: a for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items()}
+
+
+def test_every_board_falls_back_to_exactly_its_same_isa_siblings():
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+
+    for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        expected = [b for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items() if a == arch]
+        assert recipe_kb_t0._hardware_fallback_values(board) == expected
+        assert recipe_kb_t0._hardware_fallback_values(f"{board}_ws2_tp8") == [f"{b}_ws2_tp8" for b in expected]
+
+
+def test_the_aiter_per_token_gate_is_every_gfx942_board():
+    """The kernel ships per arch, so a new gfx942 board has to be gated in with its siblings."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import _GFX942_GPU_TYPES
+
+    assert _GFX942_GPU_TYPES == frozenset(b for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items() if a == "gfx942")
+
+
+def test_the_fp8_dense_quant_type_reads_gfx950_from_the_table():
+    from hyperloom.orchestrator.kernel.request_handlers import _is_gfx950
+
+    for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        assert _is_gfx950(board) is (arch == "gfx950"), board
+    assert _is_gfx950("gfx950") is True
