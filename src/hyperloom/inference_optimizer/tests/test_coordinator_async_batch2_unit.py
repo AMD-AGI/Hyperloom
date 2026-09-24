@@ -64,7 +64,7 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     restores: list[tuple[str, str]] = []
     kernel_restores: list[dict] = []
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
         baseline_module,
@@ -72,7 +72,7 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
         lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
-        kernel_handlers,
+        kernel_agent_tool,
         "_maybe_revert_kernel_patch",
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
@@ -106,10 +106,10 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel_restores: list[dict] = []
-    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
-        kernel_handlers,
+        kernel_agent_tool,
         "_maybe_revert_kernel_patch",
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
@@ -1613,13 +1613,13 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
         },
     )
     monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
-    from hyperloom.orchestrator.state import shared_state as ss_mod
+    from hyperloom.orchestrator.state._shared_state import render as render_mod
 
-    monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
-    from hyperloom.orchestrator.framework import paths as fp
+    monkeypatch.setattr(render_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     monkeypatch.setattr(fp, "resolve_kernel_search_roots", lambda: ["/src/root"])
     monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
@@ -2126,7 +2126,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
 
 # -- _materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     return PendingProposal(
         proposal_msg_id=msg_id,
@@ -2379,7 +2379,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     sid = "spec-inflight"
     _make_real_patch(coord, sid)
@@ -2568,7 +2568,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 @pytest.mark.asyncio
 async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
@@ -2591,7 +2591,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
 @pytest.mark.asyncio
 async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
     """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     enq: list = []
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace import _row_utils, llm_trace
+from hyperloom.inference_optimizer.trace import _row_utils, llm_trace
 
 
 def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monkeypatch):
@@ -178,7 +178,7 @@ def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
 def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
-    import hyperloom.orchestrator.trace.langfuse_emitter as le
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
         raise RuntimeError("langfuse down")

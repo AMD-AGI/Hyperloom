@@ -40,10 +40,55 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from ..state.shared_state import inject_stack_base_params
+from ..state.shared_state import (
+    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    inject_stack_base_params,
+    is_valid_escalate_hint,
+)
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+
+# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
+_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
+    "trace_input",
+    "trace_dir",
+    "candidates_path",
+    "analysis_md_path",
+    "kernel_candidates",
+    "best_artifact_path",
+    "patch_path",
+    "target_file",
+    "workspace",
+    "workspace_path",
+    "out_dir",
+    "output_dir",
+    "run_dir",
+    "report_path",
+    "json_path",
+    "md_path",
+    "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler.
+    "trace_report_path",
+    "analysis_report_path",
+    "tracelens_summary_path",
+    "kernel_roofline_path",
+    "cli_log_path",
+)
+
+
+def _lifecycle_paths(payload: Any) -> dict[str, str]:
+    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _LIFECYCLE_PATH_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -539,7 +584,7 @@ class IntentRouter:
             {**payload, "needs_review": True},
         )
         await self.bus.append_and_seq(msg)
-        from .coordinator import PendingProposal
+        from .proposals import PendingProposal
 
         pending = PendingProposal(
             proposal_msg_id=msg.msg_id,
@@ -1042,8 +1087,6 @@ class IntentRouter:
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
-        from .coordinator import _lifecycle_paths
-
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
         denied = self._sequence_denial_for_request(target_agent, kind)
@@ -1388,12 +1431,9 @@ class IntentRouter:
             )
         )
         from ..phases.machine_state import (
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_valid_escalate_hint,
         )
 
         hint = str(payload.get("next_action_hint") or "").strip()

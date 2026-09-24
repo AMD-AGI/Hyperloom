@@ -365,7 +365,7 @@ class KernelStackPhase(CoordinatorCollaborator):
 
     def _unwind_stack_patches(self, stack: list[dict[str, Any]]) -> None:
         """Revert every checkpointed apply in reverse order, or halt with the checkpoints intact."""
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+        from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
         partial_applies = self.shared_state.pending_stack_validation_apply_results
@@ -476,6 +476,8 @@ class KernelStackPhase(CoordinatorCollaborator):
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _grade_integrate_accuracy,
+        )
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             _maybe_finalize_kernel_patch,
             _maybe_revert_kernel_patch,

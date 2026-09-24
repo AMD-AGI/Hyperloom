@@ -34,7 +34,6 @@ from ..state.kernel_decision_settings import (
     resolve_hot_kernel_min_gpu_pct,
 )
 
-
 log = logging.getLogger(__name__)
 
 #: Stack labels whose KEEP overwrote a whole kernel source file, so a queued

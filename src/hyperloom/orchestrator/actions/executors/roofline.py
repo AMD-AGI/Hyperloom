@@ -19,8 +19,9 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
+from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
-from ...trace.task_progress import report_progress
+from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
@@ -521,7 +522,7 @@ class RooflineExecutor:
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
         # atom: the profile sub-step produces *.pt.trace.json.gz that TraceLens consumes unchanged.
-        from ...kernel.request_handlers import trace_analyze_handler
+        from .trace_analyze import trace_analyze_handler
         from .profile import profile_executor
 
         # Every sub-step below goes through this, so a call site added later cannot silently be the one that reports
@@ -547,7 +548,8 @@ class RooflineExecutor:
         # Emit a paired START so the auto-roofline path (which bypasses Coordinator._handle_request) does not show a
         # lone END.
         try:
-            self.shared_state.record_lifecycle_event(
+            record_lifecycle_event(
+                self.shared_state,
                 step="roofline",
                 status="START",
                 detail="auto-roofline: profile + TraceLens",
@@ -1448,7 +1450,8 @@ class RooflineExecutor:
         # The auto-roofline TraceLens run does NOT pass through Coordinator._handle_request, so emit its lifecycle
         # event here.
         try:
-            self.shared_state.record_lifecycle_event(
+            record_lifecycle_event(
+                self.shared_state,
                 step="roofline",
                 status="END",
                 artifacts={

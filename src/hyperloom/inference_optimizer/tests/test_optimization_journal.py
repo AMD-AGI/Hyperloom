@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``orchestrator.state.optimization_journal``."""
+"""Tests for ``inference_optimizer.session.optimization_journal``."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     JOURNAL_FILENAME,
     Journal,
     JournalEntry,
@@ -273,7 +273,7 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
 
 def test_append_entry_dedupe_per_task_id(session_dir: Path):
     """``task_id`` breaks the dedupe tie for two same-kind tasks in one tick."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         KIND_KERNEL_FILE,
     )
 
@@ -351,8 +351,43 @@ def test_update_baseline_ignores_non_positive(session_dir: Path):
     assert j.baseline_throughput == 600.0
     j.update_baseline(-5.0)
     assert j.baseline_throughput == 600.0
+    j.update_baseline(None)
+    assert j.baseline_throughput == 600.0
     j.update_baseline(700.0)
     assert j.baseline_throughput == 700.0
+
+
+@pytest.mark.parametrize("never_anchored", [0.0, None])
+def test_a_run_that_anchors_no_baseline_reports_no_baseline(session_dir: Path, never_anchored):
+    """A run whose baseline never promotes has nothing to report.
+
+    Reporting ``0.0`` there reads as a measurement, and a consumer computing
+    ``(final - baseline) / baseline`` from it gets a silently wrong number
+    instead of an obviously missing one.
+    """
+    j = Journal.load_or_create(
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
+        baseline_throughput=never_anchored,
+    )
+    j.update_baseline(never_anchored)
+
+    assert j.baseline_throughput is None
+    j.finalize(final_throughput=674.97)
+    assert json.loads(j.path.read_text(encoding="utf-8"))["baseline_throughput"] is None
+
+
+def test_a_journal_on_disk_without_a_baseline_stays_without_one(session_dir: Path):
+    """Resume reads the same absence back rather than minting a zero for it."""
+    j1 = Journal.load_or_create(session_dir, session_id="s", model="m", hardware="h")
+    j1.finalize(total_gain_pct=None)
+    assert j1.path.exists()
+
+    j2 = Journal.load_or_create(session_dir, session_id="", model="", hardware="")
+
+    assert j2.baseline_throughput is None
 
 
 def test_to_dict_strips_none_in_entries(session_dir: Path):
@@ -447,7 +482,7 @@ def test_derive_journal_outcome_integrate_patch_kept_is_keep():
 
 def test_derive_journal_outcome_refused_promotion_is_no_promote():
     """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
-    from hyperloom.orchestrator.state.optimization_journal import PROMOTION_REFUSED_KEY
+    from hyperloom.inference_optimizer.session.optimization_journal import PROMOTION_REFUSED_KEY
 
     out = derive_journal_outcome(
         "integrate_patch",
@@ -517,7 +552,7 @@ def test_a_stray_was_skipped_cannot_demote_a_kept_patch():
 
 
 def test_operation_kind_for_maps_kind_and_action():
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         operation_kind_for,
     )
 
@@ -535,7 +570,7 @@ def test_operation_kind_for_maps_kind_and_action():
 
 
 def test_proposer_for_resolves_provenance():
-    from hyperloom.orchestrator.state.optimization_journal import proposer_for
+    from hyperloom.inference_optimizer.session.optimization_journal import proposer_for
 
     assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
     assert proposer_for("llm_direct") == "orchestration"
@@ -545,7 +580,7 @@ def test_proposer_for_resolves_provenance():
 
 
 def test_journal_entry_roundtrips_proposer_and_metrics():
-    from hyperloom.orchestrator.state.optimization_journal import JournalEntry
+    from hyperloom.inference_optimizer.session.optimization_journal import JournalEntry
 
     e = JournalEntry(
         phase="EXPLORE",
@@ -580,7 +615,7 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
 
 
 def test_journal_entry_roundtrips_predicted_gain():
-    from hyperloom.orchestrator.state.optimization_journal import JournalEntry
+    from hyperloom.inference_optimizer.session.optimization_journal import JournalEntry
 
     e = JournalEntry(
         phase="EXPLORE",

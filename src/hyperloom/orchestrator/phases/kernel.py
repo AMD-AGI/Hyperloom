@@ -39,12 +39,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     reject_geak_attempts,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
     JournalEntry,
 )
-from ..state.shared_state import resolve_graded_comparison
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
@@ -1052,7 +1052,7 @@ class KernelPhase(CoordinatorCollaborator):
                 }
             )
             # Persist the wind-down hint durably.
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
         cb = state.current_best or {}
@@ -1150,14 +1150,14 @@ class KernelPhase(CoordinatorCollaborator):
             )
         # Reuse baseline server settings so GEAK measures the same engine config.
         try:
-            from ..kernel.roofline_ceiling import read_baseline_server_args
+            from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
         _current_best_server_args = str(spec_config.get("server_launch_flags") or "")
         if not _current_best_server_args:
-            from ..actions.executors._grid_server_args import compose_server_args
+            from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
             _current_best_server_args = compose_server_args(
                 inherited_args=_baseline_srv_args,
@@ -1281,7 +1281,7 @@ class KernelPhase(CoordinatorCollaborator):
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
 
-        from ..kernel.request_handlers import _kernel_agent_tool_path
+        from ..actions.executors._kernel_agent_tool import _kernel_agent_tool_path
 
         def _read_geak_result(path: Path) -> dict[str, Any]:
             if not path.is_file():
@@ -1337,7 +1337,7 @@ class KernelPhase(CoordinatorCollaborator):
                 evidence["runner_timeout_s"] = runner_timeout_s
             self._record_phase_entry_evidence(geak=evidence)
             # Set the wind-down hint BEFORE the durable save (it is in-memory only).
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
             return True
 
@@ -1793,7 +1793,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
-        state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
@@ -2085,8 +2085,8 @@ class KernelPhase(CoordinatorCollaborator):
             from hyperloom.common.coerce import to_str_list
             from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
-            from ..actions.executors._grid_server_args import compose_server_args, remove_server_args
+            from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+            from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
 
             accepted_controls = _accepted_config_controls(result.get("accepted_config"))
             prior_controls = _accepted_config_controls(cb_now)
@@ -3337,7 +3337,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..kernel.request_handlers import integrate_handler
-        from ..loop.writeback import _integrate_measurement_fields
+        from ..measurement.integrate_performance import integrate_measurement_fields
         from hyperloom.common.model_paths import resolve_session_model_path
 
         backend = str(result.get("backend") or "geak").strip().lower()
@@ -3376,7 +3376,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
         # non-128-aligned intermediate_size_per_partition.
-        from hyperloom.inference_optimizer.cli.model_gate import (
+        from hyperloom.inference_optimizer.model_config_utils import (
             model_supports_aiter_ck_fused_moe,
         )
 
@@ -3652,7 +3652,7 @@ class KernelPhase(CoordinatorCollaborator):
                         "candidate_extra_server_args": extra_server_args,
                         "extra_envs": dict(env),
                         "source_phase": "KERNEL_AGENT",
-                        **_integrate_measurement_fields(measurement),
+                        **integrate_measurement_fields(measurement),
                     },
                     entry_extra={
                         "tuned_file": tuned_file,
@@ -3945,7 +3945,7 @@ class KernelPhase(CoordinatorCollaborator):
                     },
                 )
         self.shared_state.set_pending_escalate_hint(
-            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
+            ESCALATE_HINT_SKIP_TO_SWEEP,
         )
         self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(

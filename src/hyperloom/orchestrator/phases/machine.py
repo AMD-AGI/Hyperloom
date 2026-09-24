@@ -9,10 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging as _logging
 from typing import Any
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
@@ -69,7 +72,8 @@ class MachinePhase(CoordinatorCollaborator):
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
         # Fresh start; pre-phase-machine resume state is treated as fresh.
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "fresh_session"},
@@ -87,7 +91,8 @@ class MachinePhase(CoordinatorCollaborator):
             "reopening at PRELUDE so the new budget can be spent on the work "
             "the earlier leg stopped short of."
         )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "resumed_from_close"},
@@ -214,8 +219,7 @@ class MachinePhase(CoordinatorCollaborator):
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
-            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
@@ -237,7 +241,7 @@ class MachinePhase(CoordinatorCollaborator):
             and isinstance(evidence, dict)
             and evidence.get("terminal")
             and reason
-            and _phase_state.is_valid_stop_reason(reason)
+            and is_valid_stop_reason(reason)
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
@@ -293,14 +297,16 @@ class MachinePhase(CoordinatorCollaborator):
                     "detail": f"kind not allowed in {target}; re-dispatch if still needed",
                 },
             )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=target,
             reason=reason,
             evidence=evidence,
         )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
-        state.record_lifecycle_event(
+        _phase_state.record_lifecycle_event(
+            state,
             step=target,
             status=_phase_state.LIFECYCLE_STATUS_ENTER,
             phase=target,

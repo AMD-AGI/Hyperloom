@@ -23,7 +23,7 @@ from hyperloom.common.gpu_identity import is_gfx_arch
 from ._grid_base import (
     GridVariant,
 )
-from ._grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
 log = logging.getLogger(__name__)
 

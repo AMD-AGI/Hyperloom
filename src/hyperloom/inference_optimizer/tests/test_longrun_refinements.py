@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -144,9 +145,9 @@ def test_bounded_explore_does_not_hit_absolute_cap():
 
 # Vocab: the leverage reasons close a phase, they never stop the run
 def test_leverage_reasons_are_not_stop_reasons():
-    assert not ps.is_valid_stop_reason("no_more_leverage")
-    assert not ps.is_valid_stop_reason("optimize_no_more_leverage")
-    assert not ps.is_valid_stop_reason("kernel_no_more_leverage")
+    assert not is_valid_stop_reason("no_more_leverage")
+    assert not is_valid_stop_reason("optimize_no_more_leverage")
+    assert not is_valid_stop_reason("kernel_no_more_leverage")
 
 
 # Trailing-window crash rate

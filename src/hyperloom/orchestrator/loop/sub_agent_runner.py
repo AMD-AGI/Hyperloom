@@ -30,7 +30,7 @@ from ..bus.resource_lock import (
 )
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
-from ..trace.task_progress import ProgressReporter, progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate

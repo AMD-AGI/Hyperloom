@@ -388,20 +388,20 @@ class TestRooflineSnapshotUnits:
     """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
         assert rs._fmt_tput(None, "vllm") == "—"
 
     def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         out = rs._fmt_tput(0.15528, "xdit")
         assert out == "6440.0 ms"
         assert "tok/s" not in out
 
     def test_build_snapshot_carries_framework(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
@@ -409,7 +409,7 @@ class TestRooflineSnapshotUnits:
         assert snap["framework"] == "xdit"
 
     def test_metrics_table_scriptable_achieved_is_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
@@ -421,7 +421,7 @@ class TestRooflineSnapshotUnits:
 
     def test_snapshot_carries_latency_siblings_and_within(self):
         """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -441,7 +441,7 @@ class TestRooflineSnapshotUnits:
 
     def test_metrics_table_scriptable_shows_compute_ceiling(self):
         """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -461,7 +461,7 @@ class TestRooflineSnapshotUnits:
 
     def test_serving_snapshot_latency_siblings_are_none(self):
         """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,

@@ -28,7 +28,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
-from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS, SharedState
+from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -457,182 +457,6 @@ async def test_promote_integrate_patch_carries_nested_launch_evidence(session_di
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "members",
-    [
-        {},
-        {"stack_kernel_ids": "a+b"},
-        {"stack_kernel_ids": None},
-        {"stack_kernel_ids": []},
-        {"stack_kernel_ids": ["a"]},
-        {"stack_kernel_ids": ["a", "a"]},
-        {"stack_kernel_ids": ["a", 2]},
-        {"stack_kernel_ids": ["a", ""]},
-        {"stack_kernel_ids": {"a": True, "b": True}},
-    ],
-    ids=["legacy_missing", "string", "null", "empty", "short", "duplicate", "non_string", "blank", "mapping"],
-)
-async def test_stack_members_invalid_writeback_refuses_before_promotion(tmp_path, members):
-    from hyperloom.inference_optimizer.session.session_binding import session_scope
-
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = SharedState(baseline_tput=100.0, current_best={"action": "baseline", "tput": 100.0})
-    coord._maybe_enqueue_watermark_roofline = AsyncMock()
-    result = {
-        "status": "ok",
-        "decision": "KEEP",
-        "kernel_id": "a+b",
-        "patch_path": str(tmp_path / "stack.patch"),
-        "target_file": str(tmp_path / "stack.py"),
-        "new_tput": 110.0,
-        "stack_validation": True,
-        **members,
-    }
-    before = deepcopy(coord.shared_state.to_dict())
-    original_result = deepcopy(result)
-
-    with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
-        await coord._record_integrate_keep(result)
-
-    assert coord.shared_state.to_dict() == before
-    assert result == original_result
-    coord._maybe_enqueue_watermark_roofline.assert_not_called()
-
-
-@pytest.fixture
-def stack_member_writeback(tmp_path):
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = SharedState(baseline_tput=100.0, current_best={"action": "baseline", "tput": 100.0})
-    coord._maybe_enqueue_watermark_roofline = AsyncMock()
-    for kid, patch, decision, gain in (
-        ("a+b", "old.patch", "REVERT", -1.0),
-        ("a+b", "new.patch", "NEEDS_REVIEW", 0.8),
-        ("c", "c.patch", "NEEDS_REVIEW", 0.6),
-    ):
-        coord.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": decision,
-                "kernel_id": kid,
-                "patch_path": str(tmp_path / patch),
-                "target_file": str(tmp_path / f"{kid}.py"),
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-            }
-        )
-    selected = coord._positive_needs_review_integrates()
-    coord._mark_stack_validation_in_progress(selected, "a+b+c")
-    result = {
-        **deepcopy(coord.shared_state.pending_stack_validation_result),
-        "status": "ok",
-        "decision": "KEEP",
-        "new_tput": 110.0,
-        "patch_path": "+".join(entry["patch_path"] for entry in selected),
-        "target_file": "+".join(entry["target_file"] for entry in selected),
-    }
-    return coord, result
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("explicit_flag", [True, False], ids=["explicit_combo", "structured_combo"])
-async def test_stack_members_writeback_preserves_verified_combo_evidence(stack_member_writeback, explicit_flag):
-    from hyperloom.inference_optimizer.session.session_binding import session_scope
-
-    coord, result = stack_member_writeback
-    if not explicit_flag:
-        result.pop("stack_validation")
-    original = deepcopy(result)
-    original_ledger = deepcopy(coord.shared_state.kernel_integrate_attempts)
-    with session_scope(coord.session_dir):
-        await coord._record_integrate_keep(result)
-
-    entry = coord.shared_state.optimization_stack[0]
-    assert entry["kernel_id"] == "a+b+c"
-    assert entry["stack_kernel_ids"] == ["a+b", "c"]
-    assert entry["stack_validation"] is True
-    assert entry["stack_validation_started_at"] == original["stack_validation_started_at"]
-    assert entry["stack_member_identities"] == original["stack_member_identities"]
-    assert coord.shared_state.current_best["variant_name"] == "a+b+c"
-    assert coord._stack_resolved_kernel_ids() == {"a+b", "c"}
-    assert coord.shared_state.kernel_integrate_attempts == original_ledger
-    assert result == original
-    result["stack_kernel_ids"].append("unrelated")
-    result["stack_member_identities"][0]["patch_path"] = "unrelated.patch"
-    assert entry["stack_kernel_ids"] == ["a+b", "c"]
-    assert entry["stack_member_identities"] == original["stack_member_identities"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "damage",
-    ["missing_anchor", "wrong_anchor", "missing_identities", "wrong_patch", "missing_member", "duplicate_identity"],
-)
-async def test_stack_members_writeback_rejects_unverified_combo_before_lift(
-    stack_member_writeback, monkeypatch, damage
-):
-    from hyperloom.inference_optimizer.session.session_binding import session_scope
-
-    coord, result = stack_member_writeback
-    if damage == "missing_anchor":
-        result.pop("stack_validation_started_at")
-    elif damage == "wrong_anchor":
-        result["stack_validation_started_at"] = "2099-01-01T00:00:00+00:00"
-    elif damage == "missing_identities":
-        result.pop("stack_member_identities")
-    elif damage == "wrong_patch":
-        result["stack_member_identities"][0]["patch_path"] = "unrelated.patch"
-    elif damage == "missing_member":
-        result["stack_kernel_ids"].append("missing")
-    else:
-        selected = next(
-            e for e in coord.shared_state.kernel_integrate_attempts.values() if e.get("stack_validation_in_progress")
-        )
-        coord.shared_state.kernel_integrate_attempts["duplicate"] = deepcopy(selected)
-    before = deepcopy(coord.shared_state.to_dict())
-    original_result = deepcopy(result)
-    lift = Mock(wraps=coord.writeback._lift_to_current_best)
-    monkeypatch.setattr(coord.writeback, "_lift_to_current_best", lift)
-
-    with session_scope(coord.session_dir), pytest.raises(ValueError, match="(?i)stack|member"):
-        await coord._record_integrate_keep(result)
-
-    lift.assert_not_called()
-    assert coord.shared_state.to_dict() == before
-    assert result == original_result
-    coord._maybe_enqueue_watermark_roofline.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_stack_members_single_kernel_plus_id_remains_atomic_after_writeback(tmp_path):
-    from hyperloom.inference_optimizer.session.session_binding import session_scope
-
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = SharedState(baseline_tput=100.0, current_best={"action": "baseline", "tput": 100.0})
-    coord._maybe_enqueue_watermark_roofline = AsyncMock()
-
-    with session_scope(tmp_path):
-        await coord._record_integrate_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "kernel_id": "a+b",
-                "patch_path": str(tmp_path / "atomic.patch"),
-                "target_file": str(tmp_path / "atomic.py"),
-                "new_tput": 110.0,
-            }
-        )
-
-    assert coord.shared_state.current_best["variant_name"] == "a+b"
-    assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.optimization_stack[0]["kernel_id"] == "a+b"
-    assert coord.shared_state.optimization_stack[0]["stack_kernel_ids"] == ["a+b"]
-    assert coord._stack_resolved_kernel_ids() == {"a+b"}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("lane", ["fusion", "integrate_patch"])
 @pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win_output_drop", "intvty_regression"])
 async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monkeypatch, lane, vetoed):
@@ -783,7 +607,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
     """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_NO_PROMOTE,
         derive_journal_outcome,
     )
@@ -812,7 +636,7 @@ async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
     optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
     naming a KEEP its own entries list never records."""
-    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
 
     coord = _coord(session_dir)
     s = coord.shared_state

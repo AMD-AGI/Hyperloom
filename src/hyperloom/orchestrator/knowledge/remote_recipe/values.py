@@ -367,7 +367,7 @@ def _apply_recipe_delta(
     config: dict[str, Any],
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from ...actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
     from ...loop.coordinator_helpers import _dedupe_extra_server_args
 
     mode = str(delta.get("args_mode") or "append").strip().lower()

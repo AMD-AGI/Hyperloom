@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, shape_manifest as _sm
+from .tuners.base import published_metric
 from .utils import sha256_file
 
 TUNING_ARTIFACT_SCHEMA_VERSION = 1
@@ -87,8 +88,8 @@ def build_artifact_manifest(
                 "csv_sha256": sha256_file(r.artifact_path),
                 "total_shapes": r.total_shapes,
                 "improved_shapes": r.improved_shapes,
-                "best_micro_speedup": round(r.best_micro_speedup, 4),
-                "avg_micro_speedup": round(r.avg_micro_speedup, 4),
+                "best_micro_speedup": published_metric(r.best_micro_speedup),
+                "avg_micro_speedup": published_metric(r.avg_micro_speedup),
                 "shape_results": r.shape_results,
             }
         )

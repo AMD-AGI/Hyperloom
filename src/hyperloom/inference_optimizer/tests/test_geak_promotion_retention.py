@@ -406,8 +406,8 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     ],
 )
 def test_legacy_readdition_survives_retention_and_rematerialization(promotion, explicit_append, readded, removal):
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
-    from hyperloom.orchestrator.actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
     coord, result, _ = promotion
     state = coord.shared_state

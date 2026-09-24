@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
 
@@ -336,17 +336,10 @@ class FmoeCKTuner(BaseTuner):
         # mirrored here.
 
         # Compute metrics.
-        improved = [r for r in shape_results if r.get("improved")]
-        # Guard against a present-but-None speedup (mirrors the dense path): a candidate-CSV fallback row has
-        # speedup=None, and `None > 1.0` raises TypeError, so filter to real numbers before comparing.
-        speedups = [
-            r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
-        ]
+        metrics = micro_metrics(shape_results)
 
         total = len(shape_results)
-        n_improved = len(improved)
-        best_speedup = max(speedups) if speedups else 1.0
-        avg_speedup = sum(speedups) / len(speedups) if speedups else 1.0
+        n_improved = len([r for r in shape_results if r.get("improved")])
 
         if total == 0:
             status = "empty_output"
@@ -366,9 +359,9 @@ class FmoeCKTuner(BaseTuner):
             error=f"Unusable MoE compare artifact: {artifact_problem}" if status == "failed" else "",
             error_class="missing_artifact" if status == "failed" else "",
             total_shapes=total,
-            improved_shapes=n_improved,
-            best_micro_speedup=best_speedup,
-            avg_micro_speedup=avg_speedup,
+            improved_shapes=metrics.improved,
+            best_micro_speedup=metrics.best,
+            avg_micro_speedup=metrics.avg,
             shape_results=shape_results,
             key_source=key_source,
         )

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.common.jsonio import iter_sse_objects
 
 from hyperloom.agents.framework import pr_kb, pr_kb_slug
@@ -246,9 +247,17 @@ def test_enumerate_pr_kb_index_skips_list_pages_fallback(monkeypatch):
     assert [c.ref for c in out] == ["PR:101"]
 
 
-def test_enumerate_pr_kb_disabled(monkeypatch):
-    monkeypatch.setenv("PR_KB_ENABLE", "0")
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off"])
+def test_enumerate_pr_kb_disabled(monkeypatch, raw):
+    monkeypatch.setenv("PR_KB_ENABLE", raw)
     assert pr_kb_source.enumerate_pr_kb(_req()) == []
+
+
+def test_an_unreadable_pr_kb_switch_is_not_silently_on(monkeypatch):
+    """One variable, one vocabulary: ``kernelforge.cli`` already refuses the same token."""
+    monkeypatch.setenv("PR_KB_ENABLE", "maybe")
+    with pytest.raises(EnvValueError, match="PR_KB_ENABLE"):
+        pr_kb_source.enumerate_pr_kb(_req())
 
 
 def test_enumerate_pr_kb_unconfigured(monkeypatch):

@@ -398,7 +398,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
 def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
     """``resolve_session_framework_root`` answers "which tree is this session
     optimising", which is a different question from "what may be edited"."""
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         _scriptable_frameworks,
         resolve_session_framework_root,
     )
@@ -430,7 +430,7 @@ def test_session_framework_root_ignores_other_framework_env(
     tmp_path: Path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator.framework.paths import resolve_session_framework_root
+    from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
 
     active = tmp_path / "active-sglang"
     stale = tmp_path / "stale-vllm"
