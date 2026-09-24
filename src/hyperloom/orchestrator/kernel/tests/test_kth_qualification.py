@@ -200,6 +200,7 @@ def test_kth_stopping_before_binding_is_inconclusive_not_a_provider_failure(tmp_
     ("mode", "scenario", "reason"),
     [
         ("reviewed", {"exit": 1, "write": False}, "exit 1"),
+        ("reviewed", {"exit": 7}, "exit 7"),
         ("reviewed", {"raw": "{not json"}, "missing or malformed"),
         ("reviewed", {"raw": "[]"}, "not a JSON object"),
         ("reviewed", {"write": False, "exit": 0}, "missing or malformed"),
