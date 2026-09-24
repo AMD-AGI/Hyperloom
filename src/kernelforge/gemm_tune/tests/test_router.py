@@ -360,6 +360,15 @@ class TestOnlyTheMeasuredPrecisionIsTuned:
             ({"quant_method": "gptq"}, {"precision": "bf16", "quant_type": "auto"}, "gptq"),
             ({}, {"precision": "bf16", "quant_type": "awq"}, "awq"),
             ({}, {"precision": "bf16", "quant_type": "gptq_marlin"}, "gptq"),
+            # Hyperloom hands the router the runtime's own --quantization value, so an MXFP4 server arrives spelled
+            # exactly like this; a w8a8-int8 checkpoint arrives as int8 with nothing in the quant type to show for it.
+            ({}, {"precision": "mxfp4", "quant_type": "auto"}, "mxfp4"),
+            ({}, {"precision": "fp4", "quant_type": "auto"}, "fp4"),
+            ({}, {"precision": "int8", "quant_type": "auto"}, "int8"),
+            ({"quant_method": "compressed-tensors"}, {"precision": "bf16", "quant_type": "auto"}, "compressed-tensors"),
+            # An unstated precision is not a bf16 one: it leaves the quant type to say what the experts run.
+            ({}, {"precision": "auto", "quant_type": "awq"}, "awq"),
+            ({}, {"precision": "", "quant_type": "fp4"}, "fp4"),
         ],
     )
     def test_a_quantized_moe_is_not_ordered_a_bf16_sweep(self, profile_kwargs, select_kwargs, named):
@@ -367,6 +376,15 @@ class TestOnlyTheMeasuredPrecisionIsTuned:
 
         assert not spec.should_run
         assert named in spec.skip_reason
+
+    @pytest.mark.parametrize("precision", ["bf16", "fp16", "bfloat16", "float16", "auto", "", "  BF16 "])
+    def test_every_spelling_of_an_unquantized_deployment_keeps_the_sweep(self, precision):
+        # The refusal is an allow-list, so the precisions that do run bf16 experts have to survive every spelling a
+        # caller uses: "auto" and "" from an unstated runtime, the torch dtype names from a checkpoint config.json.
+        spec = self._triton_spec(self._moe_profile(), precision=precision, quant_type="auto")
+
+        assert spec.should_run
+        assert spec.estimated_minutes == 30
 
     def test_a_refused_sweep_advertises_no_runtime(self):
         # The 30 minutes it would have booked stays in the lane's budget for a tuner that can run.
