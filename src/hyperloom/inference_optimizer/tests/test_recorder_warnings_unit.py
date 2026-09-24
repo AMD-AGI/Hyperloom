@@ -78,3 +78,42 @@ def test_noting_a_failure_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(sbd_v6, "record_write_warning", _boom)
     with session_scope(tmp_path):
         rw.note_failure(section="phase_event", error=OSError("disk full"))
+
+
+def test_recording_errors_are_the_spool_and_binding_failures_only():
+    """A TypeError projecting a row is a recorder defect, not a lost write."""
+    assert Exception not in rw.RECORDING_ERRORS
+    assert BaseException not in rw.RECORDING_ERRORS
+    assert OSError in rw.RECORDING_ERRORS
+
+
+def test_recorder_parks_a_spool_failure(tmp_path, caplog):
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
+
+    rec = Recorder(tmp_path / "parts", producer="test")
+    rec.parts_dir.mkdir(parents=True, exist_ok=True)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    rec._write = _boom  # type: ignore[method-assign]
+    with session_scope(tmp_path), caplog.at_level(logging.WARNING):
+        assert rec.record_singleton("session", {"session_id": "x"}) is None
+
+    parked = sbd_v6.read_write_warnings(tmp_path)
+    assert any("recorder.session" in w for w in parked)
+    assert any("disk full" in w for w in parked)
+
+
+def test_a_projection_bug_in_record_raises(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
+
+    rec = Recorder(tmp_path / "parts", producer="test")
+    rec.parts_dir.mkdir(parents=True, exist_ok=True)
+
+    def _boom(*_args, **_kwargs):
+        raise TypeError("shape changed")
+
+    rec._write = _boom  # type: ignore[method-assign]
+    with pytest.raises(TypeError, match="shape changed"):
+        rec.record_singleton("session", {"session_id": "x"})
