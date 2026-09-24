@@ -312,8 +312,8 @@ class KernelPhase(PhaseHandler):
                 )
                 return
             # An idempotent reuse can return a task that already reached a terminal state (its snapshot from a prior
-            # cycle is still valid). run_task would then attempt succeeded->running -> IllegalTransition, so reuse the
-            # existing snapshot instead of re-running.
+            # cycle is still valid). execute_covered would then attempt succeeded->running -> IllegalTransition, so
+            # reuse the existing snapshot instead of re-running.
             if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
                 log.info(
                     "kernel-entry reprofile reuses terminal analysis task (state=%s); the phase targets the existing snapshot",
@@ -328,7 +328,9 @@ class KernelPhase(PhaseHandler):
                     snapshot_id_before=snapshot_id_before,
                 )
                 return
-            await self.run_task_registered(reprofile_task)
+            # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile runs under
+            # that task's lease instead of taking its own.
+            await self.sub.execute_covered(reprofile_task)
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
@@ -663,27 +665,58 @@ class KernelPhase(PhaseHandler):
         )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """Run deterministic KERNEL-entry optimization and re-profile gates."""
+        """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
+        state = self.shared_state
         if not self._kernel_enabled():
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 from_phase or "<unknown>",
             )
             return
-        geak_enabled = self._geak_enabled()
         self._open_kernel_timeline(
-            route=ROUTE_GEAK if geak_enabled else ROUTE_FORGE,
-            route_reason=f"kernel_optimizer={str(getattr(self.shared_state, 'kernel_optimizer', '') or '')}",
+            route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
+            route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
             from_phase=from_phase,
         )
-        if geak_enabled:
+        lanes, catalogue_ttl = self._registry_lanes_ttl("kernel_agent")
+        # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
+        remaining = _phase_state.phase_budget_remaining_seconds(state, budget_pct=self._phase_budget_pct)
+        ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
+        # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
+        base_key = f"kernel_agent_c{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        attempt = 0
+        while True:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="kernel_agent",
+                params={"from_phase": str(from_phase or "")},
+                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+            )
+            if not (was_existing and task.state in TERMINAL_STATES):
+                break
+            attempt += 1
+        log.info("KERNEL entry: kernel_agent task=%s (%s)", task.task_id, task.state)
+
+    async def _run_kernel_agent(self, ctx: Any) -> dict[str, Any]:
+        """Run the KERNEL_AGENT phase's work under the ``kernel_agent`` task's lanes.
+
+        Args:
+            ctx: The runner context; ``ctx.task.params["from_phase"]`` names the
+                phase the KERNEL entry came from.
+
+        Returns:
+            A result payload naming the route that ran.
+        """
+        from_phase = str((ctx.task.params or {}).get("from_phase") or "")
+        if self._geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
-            return
+            return {"status": "ok", "route": "geak"}
         if not self._gemm_tuning_required_before_kernel_opt():
             await self._finish_kernel_entry()
-            return
+            return {"status": "ok", "route": "forge_no_gemm"}
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
         await self._maybe_reprofile_for_kernel()
@@ -742,6 +775,7 @@ class KernelPhase(PhaseHandler):
         )
         # Capture explore + GEMM-tuning gains before the entry batch.
         await self._finish_kernel_entry()
+        return {"status": "ok", "route": "forge_gemm"}
 
     @staticmethod
     def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
@@ -3823,8 +3857,6 @@ class KernelPhase(PhaseHandler):
         baselines: dict[str, object] | None = None,
     ) -> None:
         """Run one Controller attempt without preselecting operators."""
-        from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
-
         from ..kernel.controller_submit import (
             record_controller_llm_usage,
             run_controller_subprocess,
@@ -3833,96 +3865,84 @@ class KernelPhase(PhaseHandler):
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
 
-        def _stamp(when: float) -> None:
-            self.shared_state.kernel_inline_step_seen_unix = when
-
-        def _clear() -> None:
-            self.shared_state.kernel_inline_step_seen_unix = 0.0
-
-        # The heartbeat spans patch integration as well as the subprocess.
-        async with inline_step_heartbeat(
-            stamp=_stamp,
-            interval_sec=_phase_state.KERNEL_HEARTBEAT_SEC,
-            clear=_clear,
-        ):
-            if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+        if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+            result = {
+                "status": "no_result",
+                "reason": "no KERNEL phase budget remains for the rewrite controller",
+                "patch_count": 0,
+                "task_count": 0,
+                "output_dir": str(output_dir),
+            }
+        else:
+            try:
+                result = await asyncio.to_thread(
+                    run_controller_subprocess,
+                    handoff_dir=handoff_dir,
+                    output_dir=output_dir,
+                    budget_minutes=controller_budget_sec / 60.0,
+                    hard_timeout_sec=hard_timeout_sec,
+                )
+            except Exception as error:
+                log.exception("KERNEL entry: kernel rewrite controller failed")
                 result = {
-                    "status": "no_result",
-                    "reason": "no KERNEL phase budget remains for the rewrite controller",
+                    "status": "failed",
+                    "reason": f"controller invocation failed: {error}",
                     "patch_count": 0,
                     "task_count": 0,
                     "output_dir": str(output_dir),
                 }
-            else:
-                try:
-                    result = await asyncio.to_thread(
-                        run_controller_subprocess,
-                        handoff_dir=handoff_dir,
-                        output_dir=output_dir,
-                        budget_minutes=controller_budget_sec / 60.0,
-                        hard_timeout_sec=hard_timeout_sec,
-                    )
-                except Exception as error:
-                    log.exception("KERNEL entry: kernel rewrite controller failed")
-                    result = {
-                        "status": "failed",
-                        "reason": f"controller invocation failed: {error}",
-                        "patch_count": 0,
-                        "task_count": 0,
-                        "output_dir": str(output_dir),
-                    }
 
-            result = {
-                **result,
-                "macro_cycle": cycle,
-                "handoff_dir": str(handoff_dir),
-                "budget_minutes": controller_budget_sec / 60.0,
-                "hard_timeout_sec": hard_timeout_sec,
-            }
-            # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
-            # now that the child has exited.
-            record_controller_llm_usage(result=result, session_dir=self.session_dir)
-            # Before integration reads any HEAD. A hard timeout kills the process
-            # tree, so a borrowed repository can still be sitting on a campaign
-            # branch, and integration refuses a publication whose base commit is
-            # not the HEAD it finds -- which would discard exactly the patches
-            # incremental publication saved from the kill.
+        result = {
+            **result,
+            "macro_cycle": cycle,
+            "handoff_dir": str(handoff_dir),
+            "budget_minutes": controller_budget_sec / 60.0,
+            "hard_timeout_sec": hard_timeout_sec,
+        }
+        # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
+        # now that the child has exited.
+        record_controller_llm_usage(result=result, session_dir=self.session_dir)
+        # Before integration reads any HEAD. A hard timeout kills the process
+        # tree, so a borrowed repository can still be sitting on a campaign
+        # branch, and integration refuses a publication whose base commit is
+        # not the HEAD it finds -- which would discard exactly the patches
+        # incremental publication saved from the kill.
+        try:
+            from ..kernel.campaign_baseline import reclaim_campaign_repositories
+
+            reclaimed = reclaim_campaign_repositories(baselines or {})
+            if reclaimed:
+                result["reclaimed_repositories"] = reclaimed
+        except Exception:
+            log.exception("KERNEL entry: reclaiming the campaign repositories failed")
+        if int(result.get("patch_count") or 0) > 0:
             try:
-                from ..kernel.campaign_baseline import reclaim_campaign_repositories
+                from ..kernel.controller_patch_integration import (
+                    integrate_controller_patches,
+                )
 
-                reclaimed = reclaim_campaign_repositories(baselines or {})
-                if reclaimed:
-                    result["reclaimed_repositories"] = reclaimed
-            except Exception:
-                log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-            if int(result.get("patch_count") or 0) > 0:
-                try:
-                    from ..kernel.controller_patch_integration import (
-                        integrate_controller_patches,
-                    )
-
-                    integration = await integrate_controller_patches(
-                        patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                        session_dir=self.session_dir,
-                        shared_state=self.shared_state,
-                        record_keep=self._record_integrate_keep,
-                    )
-                    result["integration"] = integration.to_dict()
-                except Exception as error:
-                    log.exception("KERNEL entry: Controller patch integration failed")
-                    result["integration"] = {
-                        "status": "failed",
-                        "reason": str(error),
-                        "kept_count": 0,
-                    }
-            else:
+                integration = await integrate_controller_patches(
+                    patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                    session_dir=self.session_dir,
+                    shared_state=self.shared_state,
+                    record_keep=self._record_integrate_keep,
+                )
+                result["integration"] = integration.to_dict()
+            except Exception as error:
+                log.exception("KERNEL entry: Controller patch integration failed")
                 result["integration"] = {
-                    "status": "not_run",
-                    "reason": "Controller published no patches",
+                    "status": "failed",
+                    "reason": str(error),
                     "kept_count": 0,
-                    "reverted_count": 0,
-                    "skipped_count": 0,
                 }
+        else:
+            result["integration"] = {
+                "status": "not_run",
+                "reason": "Controller published no patches",
+                "kept_count": 0,
+                "reverted_count": 0,
+                "skipped_count": 0,
+            }
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result

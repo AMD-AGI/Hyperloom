@@ -350,17 +350,7 @@ class SubAgentRunner:
             # Workspace prep is inside the terminal-writing block: an ENOSPC
             # there is a task that failed, not a task still running.
             try:
-                workspace = self._pre_mkdir_workspace(task)
-                extra: dict = {}
-                if workspace is not None:
-                    extra["workspace"] = str(workspace)
-                if self.session_dir is not None:
-                    extra["session_dir"] = str(self.session_dir)
-                if self.shared_state is not None:
-                    extra["shared_state"] = self.shared_state
-                if extra_context:
-                    extra.update(dict(extra_context))
-                ctx = RunnerContext(task=task, lease=lease, extra=extra)
+                ctx = self._context_for(task, lease=lease, extra_context=extra_context)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -450,6 +440,63 @@ class SubAgentRunner:
                         raise ExecutionCleanupUnconfirmed(
                             f"task={task.task_id}: physical cleanup unconfirmed", result=outcome
                         ) from cleanup_error
+
+    def _context_for(self, task: Task, *, lease: Lease | None, extra_context: dict | None) -> RunnerContext:
+        """Build the executor context: workspace, session dir, live state, then the caller's extras."""
+        workspace = self._pre_mkdir_workspace(task)
+        extra: dict = {}
+        if workspace is not None:
+            extra["workspace"] = str(workspace)
+        if self.session_dir is not None:
+            extra["session_dir"] = str(self.session_dir)
+        if self.shared_state is not None:
+            extra["shared_state"] = self.shared_state
+        if extra_context:
+            extra.update(dict(extra_context))
+        return RunnerContext(task=task, lease=lease, extra=extra)
+
+    async def execute_covered(self, task: Task) -> dict:
+        """Run a queued row as a step of the task that is running this call.
+
+        The calling task's lease and cancel scope cover this work, so no lane is
+        taken or released here: acquiring its own would conflict with the lanes
+        the caller already holds. Only the row's lifecycle is recorded.
+
+        Args:
+            task: A queued row whose executor is registered.
+
+        Returns:
+            The executor's result payload.
+
+        Raises:
+            LookupError: No executor is registered for ``task.kind``.
+            IllegalTransition: The row is no longer queued.
+        """
+        runner = self.executor_registry.get(task.kind)
+        if runner is None:
+            raise LookupError(f"no runner registered for kind={task.kind!r}")
+        await self.tasks.transition(task.task_id, "running")
+        try:
+            ctx = self._context_for(task, lease=None, extra_context=None)
+            with progress_scope(self._progress_reporter(task.task_id)):
+                result = await runner(ctx)
+        except FuturesCancelledError as exc:
+            await self._write_terminal(
+                task.task_id, "cancelled", evidence={"reason": str(exc)}, context="covered_cancelled"
+            )
+            raise
+        except Exception as exc:
+            await self._write_terminal(
+                task.task_id, "failed", evidence={"error": repr(exc)}, context="covered_exception"
+            )
+            raise
+        await self._write_terminal(
+            task.task_id,
+            "succeeded",
+            evidence={"result_keys": sorted(result.keys())},
+            context="covered_success",
+        )
+        return result
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

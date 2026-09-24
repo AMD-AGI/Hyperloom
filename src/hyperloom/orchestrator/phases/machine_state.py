@@ -107,6 +107,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "specialist",
             "roofline",
             "profile",
+            # Coordinator-internal: the phase's whole pipeline, enqueued once at entry.
+            "kernel_agent",
         }
     ),
     # No specialist below: SWEEP is the validation window and CLOSE only reports.
@@ -141,16 +143,6 @@ def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
     """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
     reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
     return (action_name or "").strip() in reserved
-
-
-# Task kinds that mean the KERNEL lane is busy, which is a wider question than what a model may propose: a
-# Coordinator-owned lane is dispatched without ever being proposable, and its task occupies the phase just the same.
-KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
-    {
-        "kernel_opt",
-        "gemm_tuning",
-    }
-)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
@@ -1417,8 +1409,46 @@ def exit_normal_kernel(
     *,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
+    kernel_work_in_flight: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit."""
+    """KERNEL normal exit.
+
+    Args:
+        state: The session state the exit rules read.
+        budget_pct: Per-phase budget shares.
+        now_unix: Clock override for the wall-clock rules.
+        kernel_work_in_flight: Whether the ``kernel_agent`` task is queued or
+            running. It owns the phase until it returns, so only the budget
+            exits can end the phase under it.
+    """
+    if not kernel_work_in_flight:
+        leverage_exit = _kernel_leverage_exit(state, now_unix=now_unix)
+        if leverage_exit is not None:
+            return leverage_exit
+    rejected = getattr(state, "rejected_kernel_ids", None) or []
+    rejected_count = len(rejected) if isinstance(rejected, list) else 0
+    remaining = phase_budget_remaining_seconds(
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    if remaining is not None and remaining <= 0:
+        return "kernel_phase_budget_exhausted", {
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "kernel_budget_cap", {
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    return None
+
+
+def _kernel_leverage_exit(state: Any, *, now_unix: float | None) -> tuple[str, dict[str, Any]] | None:
+    """The KERNEL exits that say the phase ran out of work rather than out of time."""
     # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
     # so asking it here keeps this exit from stepping over an unintegrated KEEP.
     if _controller_phase_terminal(state) and not kernel_work_pending(state):
@@ -1451,25 +1481,6 @@ def exit_normal_kernel(
                 "idle_seconds": round(idle_seconds, 3),
                 "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
             }
-    rejected = getattr(state, "rejected_kernel_ids", None) or []
-    rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if remaining is not None and remaining <= 0:
-        return "kernel_phase_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "kernel_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
     return None
 
 
@@ -1707,6 +1718,7 @@ def compute_next_phase(
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
     enablement_in_flight: bool = False,
+    kernel_work_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``."""
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
@@ -1794,6 +1806,7 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
+            kernel_work_in_flight=kernel_work_in_flight,
         )
         if norm is not None:
             return PHASE_SWEEP, norm[0], norm[1]

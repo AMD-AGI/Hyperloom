@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +32,22 @@ def _coordinator(session_dir: Path):
             payload={"topic": "heartbeat", "body_md": "ok"},
         ),
     )
-    return Coordinator(
+    coord = Coordinator(
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="orch"),
             "critic": MockCriticBackend(),
         },
     )
+    coord.sub.register_executor("kernel_agent", coord._run_kernel_agent)
+    return coord
+
+
+async def _settle_unjoined_actions(coord: Any) -> None:
+    """Let the actions the pump dispatched without joining run to completion."""
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
+    if handles:
+        await asyncio.gather(*handles)
 
 
 def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
@@ -142,8 +152,8 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
 
         for tick in range(1, 12):
             await coord.tick(tick)
-            # KERNEL entry runs out of band and holds the phase until it returns.
-            await coord._await_kernel_entry_task()
+            # The kernel_agent task is not joined by the pump and holds the phase until it returns.
+            await _settle_unjoined_actions(coord)
 
         assert state.phase == ps.PHASE_CLOSE
         assert getattr(state, result_field)[result_key] == expected
