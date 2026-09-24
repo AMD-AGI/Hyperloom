@@ -1,11 +1,11 @@
-# Framework Agent — Sibling Skill
+# Framework Agent — `fa` CLI Skill
 
 > **Purpose**: vllm/sglang source-layer optimisation companion for
 > `inference_optimizer`. It discovers framework / ref candidates
 > (via PR Monitor + GitHub Search), optionally builds/benchmarks
-> them in isolated worktrees, and serves the Coordinator's
-> FRAMEWORK_AGENT phase. Exposed through the `fa` / `framework-agent`
-> console entry points.
+> them in isolated worktrees. Exposed through the `fa` / `framework-agent`
+> console entry points. The in-loop FRAMEWORK_AGENT phase uses a separate
+> LLM specialist (candidate_discovery_specialist) rather than calling this CLI.
 
 ## Layout
 
@@ -14,11 +14,10 @@ This skill lives in the `hyperloom` src-layout distribution:
 ```
 src/hyperloom/agents/framework/     # hyperloom.agents.framework
 ├── runtime/cli.py                 # fa schema / candidates / explore / kb
-├── runtime/tools_api.py           # library API behind the CLI verbs
 ├── explorer.py                    # explore loop (libcst-free)
 ├── isolation.py                   # per-candidate worktree + venv
 ├── decision.py                    # 3-gate winner decision
-├── kb.py                          # knowledge-base operations
+├── kb.py                          # knowledge-base ops + PR ledger vocab
 ├── repo_map.py                    # framework -> canonical repo URL
 ├── keywords.py / models.py        # request models + keyword helpers
 ├── logging_setup.py               # shared: structured logging
@@ -34,8 +33,10 @@ set, else `<workspace>/framework-kb` (`USER_DATA_PATH` or the pod-local
 default). It is deliberately not `<workspace>/kb`, the legacy recipe root:
 every directory under this root is reported as a framework domain. The
 orchestrator's writeback resolves the same root, so both halves move together.
-The runtime partition written under it is `framework_optimization/<framework>/`.
-Read-only seed data shipped in the wheel lives separately under the package.
+The runtime partition written under it is `framework_optimization/`.
+The PR outcome ledger (`lessons.jsonl`) lives in that partition; both the
+`fa` CLI and the orchestrator writeback resolve it through the constants
+exported from `kb.py` (`LESSONS_FILE`, `OUTCOME_*`).
 
 ## Subcommands
 
