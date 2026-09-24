@@ -1502,26 +1502,14 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
     """Persist the gate stop reason to state.json and the final session report files."""
     try:
         from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
+        from hyperloom.orchestrator.actions.executors.report import write_stop_report
 
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3.
         state.set_stop_reason(stop_reason)
         state.closing_phase = True
         state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+        write_stop_report(session_dir, state, stop_detail=reason)
     except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
