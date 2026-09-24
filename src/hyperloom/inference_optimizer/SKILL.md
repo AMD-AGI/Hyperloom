@@ -566,8 +566,8 @@ Experiences explicitly marked `verified_for_scope` by a human for
 evidence, not instructions. A read failure soft degrades to the original
 prompt; it must not block optimization.
 
-The Slack launcher also injects `HYPERLOOM_FLEET_KB_WORKER_TOKEN`,
-`HYPERLOOM_FLEET_KB_ID`, scope/worker/job/thread identities, and a durable
+The controller launcher also injects `HYPERLOOM_FLEET_KB_WORKER_TOKEN`,
+`HYPERLOOM_FLEET_KB_ID`, scope/worker/job/correlation identities, and a durable
 `HYPERLOOM_FLEET_KB_SPOOL`. Rendered Experience refs are stamped on proposals,
 carried into SBD V6, and written into the measured Experience. Complete writes
 are idempotent, cataloged as unverified, and unavailable to other runs until
@@ -579,6 +579,17 @@ GPU, TP/EP, concurrency, ISL/OSL, precision, target, budget, Docker, launch,
 resume, and monitoring behavior. Never ask for or maintain a duplicate Fleet
 copy of those parameters.
 
+In the actual Worker process/container, install the matching SDK only when the
+controller supplied a Fleet URL and the package is absent:
+
+```bash
+if [ -n "${HYPERLOOM_FLEET_KB_URL:-}" ] &&
+   ! python3 -c 'import hyperloom_kb' 2>/dev/null; then
+  python3 -m pip install --upgrade \
+    "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
+fi
+```
+
 Before launch, require these platform-injected values in the actual Worker
 process/container:
 
@@ -588,15 +599,15 @@ export HYPERLOOM_KB_DECL="$REPO_ROOT/examples/hyperloom-kb-inference.yaml"
 export HYPERLOOM_FLEET_KB_URL=...
 export HYPERLOOM_FLEET_KB_WORKER_TOKEN=...
 export HYPERLOOM_FLEET_KB_ID=...
-export HYPERLOOM_FLEET_KB_SCOPE_ID="$SLACK_JOB_ID"
-export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
-export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
+export HYPERLOOM_FLEET_KB_SCOPE_ID=...
+export HYPERLOOM_FLEET_KB_JOB_ID=...
+export HYPERLOOM_FLEET_KB_THREAD_ID=...
 export HYPERLOOM_FLEET_KB_WORKER_ID="$(hostname)"
-export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH}/fleet-kb-spool/$SLACK_JOB_ID"
+export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH}/fleet-kb-spool/<scope-id>"
 ```
 
-Only the Worker token belongs in the Worker environment. Bot credentials stay
-inside the Slack tool process. Preserve a platform-provided
+Only the Worker token belongs in the Worker environment. Controller credentials
+stay inside the controller tool process. Preserve a platform-provided
 `TARGET_GPU_TYPE`; do not turn a Magpie `GPU_TYPE` runner label into the
 Experience's real board identity.
 
@@ -616,7 +627,7 @@ to the existing `optimize` command so Recipe KB cannot independently
 warm-start the Run; this flag does not disable Fleet Experience read/write.
 Do not force `--degraded-pr` for Fleet.
 
-At CLOSE, use Fleet events for the exact scope/thread to confirm:
+At CLOSE, use Fleet events for the exact scope/correlation to confirm:
 
 - every measured attempt that published created an unverified
   `kb.experience.cataloged` record;

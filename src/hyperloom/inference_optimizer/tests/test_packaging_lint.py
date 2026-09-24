@@ -91,12 +91,15 @@ def test_existing_skills_own_fleet_setup_and_runtime_contracts() -> None:
     setup = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
     optimizer = (_REPO_ROOT / "src/hyperloom/inference_optimizer/SKILL.md").read_text(encoding="utf-8")
 
-    assert "SlackFleetTools" in setup
-    assert "do not write Fleet token placeholders" in setup
+    assert "import hyperloom_kb" in setup
+    assert "never ask the user for them or write token placeholders" in setup
     assert "Fleet is a runtime overlay" in optimizer
+    assert "import hyperloom_kb" in optimizer
     assert "--require-experience-kb" in optimizer
     assert "HYPERLOOM_FLEET_KB_BOT_TOKEN=<PLEASE_FILL_IN>" not in setup
     assert "HYPERLOOM_FLEET_KB_WORKER_TOKEN=<PLEASE_FILL_IN>" not in setup
+    assert "Slack" not in setup
+    assert "Slack" not in optimizer
     destinations = _pyproject()["tool"]["setuptools"]["data-files"]
     assert not any(
         "fleet-kb-" in destination or "hyperloom-fleet-worker" in destination for destination in destinations
