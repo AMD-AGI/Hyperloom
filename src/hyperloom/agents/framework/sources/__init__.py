@@ -134,22 +134,18 @@ def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[G
 
 
 def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
-    """Query pr_monitor with gap-aware ranking."""
+    """Query pr_monitor, reranking by the request keywords."""
     cfg = request.pr_monitor
     if cfg is None:
-        raise SourceConfigError(
-            "search_modes contains 'pr_monitor', but PR Monitor is unavailable; "
-            "provide pr_monitor.base_url (remote mode requires KB_STORE_URL) or "
-            "remove 'pr_monitor' from search_modes"
-        )
+        raise SourceConfigError("search_modes contains 'pr_monitor' but the request carries no pr_monitor config")
     requested = max(1, request.max_search_candidates)
 
-    # Step 4: optionally broaden PR-state coverage. merged/closed PRs are the backport-relevant ones that may already
-    # be in the local dev build; semantic audit downstream judges + dedups them.
+    # Merged/closed PRs are the backport-relevant ones that may already be in the local dev build; semantic audit
+    # downstream judges + dedups them.
     states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"
-    # Only forward ``state`` to the label-only list endpoint when broadening.
+    # Only forward ``state`` to the listing endpoint when broadening.
     list_state_kwargs: dict[str, str] = {"state": search_state} if broad else {}
 
     keywords = _resolve_keywords(request)
@@ -176,7 +172,7 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
             timeout_sec=cfg.timeout_sec,
         )
     except PRMonitorError:
-        # Service may not implement /v1/search/prs; fall back to label-only listing.
+        # Service may not implement /v1/search/prs; fall back to the plain listing.
         prs = list_perf_prs(
             request.repo_url,
             base_url=cfg.base_url,
@@ -185,7 +181,7 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # /v1/search/prs uses word-AND matching; a long query can filter the pool to zero, so fall back to label-only
+    # /v1/search/prs uses word-AND matching; a long query can filter the pool to zero, so fall back to the plain
     # listing + client rerank.
     if not prs:
         prs = list_perf_prs(

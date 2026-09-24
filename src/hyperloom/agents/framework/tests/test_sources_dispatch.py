@@ -105,10 +105,8 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
     assert any(c.source == "pr_monitor" for c in out)
 
 
-def test_dispatch_pr_monitor_missing_remote_config_raises(monkeypatch) -> None:
-    """Remote Recipe mode does not synthesize a missing KB Service URL."""
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.delenv("KB_STORE_URL", raising=False)
+def test_dispatch_pr_monitor_without_config_raises() -> None:
+    """Asking for pr_monitor without its config is a configuration error, not an empty result."""
     req = _minimal_request(search_modes=("pr_monitor",))
     with pytest.raises(src.SourceConfigError, match="pr_monitor"):
         src.enumerate_candidates(req)
