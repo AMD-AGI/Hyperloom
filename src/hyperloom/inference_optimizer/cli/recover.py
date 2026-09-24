@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 
-    from ..breakdown import BREAKDOWN_FILENAME
+    from ..session.session_paths import BREAKDOWN_FILENAME
 
     state_path = session_dir / "state.json"
     close_done = False
@@ -31,7 +31,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
     breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
 
-    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
+    from ..trace.langfuse_emitter import read_receipt
 
     receipt = read_receipt(session_dir) or {}
     counts = receipt.get("counts") or {}
@@ -103,7 +103,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from ..trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )

@@ -430,7 +430,7 @@ def main() -> int:
         }
     achievable = args.achievable_tflops or None
     if achievable is None and args.target_platform:
-        from hyperloom.orchestrator.kernel.roofline_ceiling import _resolve_achievable_tflops
+        from hyperloom.inference_optimizer.roofline_ceiling import _resolve_achievable_tflops
 
         resolved = _resolve_achievable_tflops(args.target_platform, "bf16")
         achievable = resolved if resolved and resolved > 0 else None

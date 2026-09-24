@@ -26,8 +26,8 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     _format_progress,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.orchestrator.trace import task_progress
-from hyperloom.orchestrator.trace.task_progress import (
+from hyperloom.inference_optimizer.trace import task_progress
+from hyperloom.inference_optimizer.trace.task_progress import (
     OutputActivity,
     heartbeat_while_output_flows,
     progress_scope,

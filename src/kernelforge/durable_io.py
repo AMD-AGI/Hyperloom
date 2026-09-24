@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -49,14 +50,38 @@ def atomic_write_text(path: str | Path, content: str) -> None:
     atomic_write_bytes(path, content.encode("utf-8"))
 
 
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _walk_depth_first(root: Path) -> Iterator[tuple[Path, list[str]]]:
+    """Yield ``(directory, filenames)`` under ``root``, children before parents.
+
+    A directory that cannot be enumerated raises rather than being skipped: the
+    caller is about to rename this tree into place and its durability claim only
+    holds if the whole tree was visited.
+    """
+
+    def _reraise(error: OSError) -> None:
+        raise error
+
+    for directory, _subdirectories, filenames in os.walk(root, topdown=False, onerror=_reraise):
+        yield Path(directory), filenames
+
+
 def fsync_tree(root: Path) -> None:
     """Flush every file and directory under ``root`` before it is renamed."""
-    for directory, _subdirectories, filenames in os.walk(root):
-        current = Path(directory)
+    for directory, filenames in _walk_depth_first(root):
         for filename in filenames:
-            descriptor = os.open(str(current / filename), os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        fsync_directory(current)
+            _fsync_file(directory / filename)
+        fsync_directory(directory)
+
+
+def fsync_tree_directories(root: Path) -> None:
+    """Flush every directory under ``root`` for a tree whose files were fsynced as they were written."""
+    for directory, _filenames in _walk_depth_first(root):
+        fsync_directory(directory)

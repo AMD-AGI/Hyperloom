@@ -132,6 +132,7 @@ def test_a_shape_whose_baseline_never_ran_is_not_reported_as_a_win(tmp_path):
 
     assert kept == {}
     assert summary["shape_details"] == []
-    assert summary["best_speedup"] == 1.0
+    # No shape was timed, so the sweep reports no speedup rather than a 1.00x that reads as a measurement.
+    assert summary["best_speedup"] is None
     assert any("did not benchmark" in e for e in summary["errors"])
     assert rc == 1

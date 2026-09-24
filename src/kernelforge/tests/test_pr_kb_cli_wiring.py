@@ -8,6 +8,7 @@ import subprocess
 import pytest
 from click.testing import CliRunner
 
+from hyperloom.common.env import EnvValueError
 from kernelforge.cli import (
     _collect_pr_references,
     _git_remote_url,
@@ -39,11 +40,19 @@ def test_environment_fallback_accepts_common_truthy_spellings(monkeypatch, raw):
     assert _pr_kb_enabled(None) is True
 
 
-@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "maybe"])
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
 def test_environment_fallback_rejects_everything_else(monkeypatch, raw):
     monkeypatch.setenv("PR_KB_ENABLE", raw)
 
     assert _pr_kb_enabled(None) is False
+
+
+def test_an_unreadable_environment_fallback_is_not_silently_off(monkeypatch):
+    """Whether the loop writes to the KB is not a question to answer by guessing."""
+    monkeypatch.setenv("PR_KB_ENABLE", "maybe")
+
+    with pytest.raises(EnvValueError, match="PR_KB_ENABLE"):
+        _pr_kb_enabled(None)
 
 
 def test_both_switch_forms_are_exposed():

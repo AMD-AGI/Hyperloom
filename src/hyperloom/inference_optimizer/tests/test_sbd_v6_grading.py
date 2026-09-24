@@ -33,9 +33,10 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sin
 from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION as METADATA_SECTION
 from hyperloom.inference_optimizer.breakdown.session_facts import grading_block
 from hyperloom.inference_optimizer.cli.bootstrap import seed_grading
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.state.shared_state import SharedState, resolved_grading
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 #: The AgentX axes a measured round carries, on the keys grading itself reads them from.
 AGENTX_AXES: dict[str, Any] = {

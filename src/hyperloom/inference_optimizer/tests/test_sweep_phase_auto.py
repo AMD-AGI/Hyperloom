@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -94,6 +95,7 @@ class _StubTaskRegistry:
             state="queued",
             params=dict(params),
             idempotency_key=idempotency_key,
+            requires_lanes=list(requires_lanes) if requires_lanes else [],
         )
         self._tasks[idempotency_key] = task
         return task, False
@@ -223,7 +225,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
     """Stub apply/revert/bench so the real stack-validation decision path runs."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
@@ -246,8 +248,8 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
                 "workspace": "/tmp/workspace",
             }
 
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply)
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", _fake_revert)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_apply_kernel_patch", _fake_apply)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_revert_kernel_patch", _fake_revert)
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", _FakeBaselineExecutor)
     monkeypatch.setattr(br, "is_valid_measurement", lambda result: True)
 
@@ -478,8 +480,8 @@ async def test_stack_validation_preserves_actual_measurement(
     verdict,
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
-    import hyperloom.orchestrator.kernel.request_handlers as krh
 
     agentx = grading_mode != "synthetic"
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
@@ -489,7 +491,9 @@ async def test_stack_validation_preserves_actual_measurement(
     monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    monkeypatch.setattr(
+        kernel_agent_tool._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"}
+    )
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
@@ -1178,7 +1182,8 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
-    coord.shared_state.record_phase_transition(
+    machine_state.record_phase_transition(
+        coord.shared_state,
         to_phase="SWEEP",
         reason="plateau_kernel",
         evidence={"trigger": "test_e2e"},
@@ -1347,7 +1352,7 @@ async def test_stack_validation_keep_calls_finalize(
     monkeypatch,
 ):
     """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     finalize_calls: list[dict] = []
 
@@ -1355,7 +1360,7 @@ async def test_stack_validation_keep_calls_finalize(
         finalize_calls.append(apply_result)
         return {"status": "ok", "manifest_path": str(apply_result.get("manifest_path") or "")}
 
-    monkeypatch.setattr(krh, "_maybe_finalize_kernel_patch", _spy_finalize)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_finalize_kernel_patch", _spy_finalize)
 
     def _fake_apply_with_manifest(payload, *, session_dir, kernel_id):
         return {
@@ -1364,7 +1369,7 @@ async def test_stack_validation_keep_calls_finalize(
             "manifest_path": f"/tmp/{kernel_id}.manifest",
         }
 
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply_with_manifest)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_apply_kernel_patch", _fake_apply_with_manifest)
 
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
@@ -1385,15 +1390,15 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
     monkeypatch,
 ):
     """KEEP + partial finalize must ask for recovery, not report cleanup complete."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
-        krh,
+        kernel_agent_tool,
         "_maybe_finalize_kernel_patch",
         lambda apply_result: {"status": "partial", "issues": [{"kind": "multinode_finalize"}]},
     )
     monkeypatch.setattr(
-        krh,
+        kernel_agent_tool,
         "_maybe_apply_kernel_patch",
         lambda payload, *, session_dir, kernel_id: {
             "status": "ok",
@@ -1511,3 +1516,21 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_conc_sweep_task_carries_catalogue_lanes(coord):
+    """_enqueue_internal_conc_sweep_task must forward the catalogue requires_lanes so
+    lane serialization and the admission gate both apply to conc_sweep."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 300.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    expected_lanes = sorted(ACTION_CATALOGUE["conc_sweep"].requires_lanes)
+    assert sorted(task.requires_lanes or []) == expected_lanes

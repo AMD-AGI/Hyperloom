@@ -142,9 +142,11 @@ class SweepPhase(PhaseHandler):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
+        lanes, _ = self._registry_lanes_ttl("conc_sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="conc_sweep",
             params=params,
+            requires_lanes=lanes,
             idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
         )

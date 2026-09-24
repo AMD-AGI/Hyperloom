@@ -55,7 +55,7 @@ write source patches. The new contract is:
 
 ## When to delegate
 
-Specialist is available in `FRAMEWORK_AGENT` and `KERNEL_AGENT`.
+Specialist is available in `FRAMEWORK_AGENT` and `ENABLEMENT`.
 Inside FRAMEWORK_AGENT the Orchestration LLM should dispatch
 specialists as the **primary** entry into a round:
 

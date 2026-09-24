@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,8 +15,6 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
-
-SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
 TASK_STATES = (
     "queued",
@@ -449,34 +447,21 @@ class TaskRegistry:
                 cancelled.append(task_id)
         return cancelled
 
-    async def cancel_queued_not_allowed(
+    async def cancel_queued(
         self,
         *,
         allowed_kinds: set[str] | frozenset[str],
         reason: str,
-        spare_queued: SpareQueuedFn | None = None,
     ) -> list[str]:
-        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary."""
+        """Bulk-cancel queued tasks whose kind is not in ``allowed_kinds``."""
         allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
         cancelled: list[str] = []
         async with self.db.transaction() as cur:
-            cur.execute("SELECT task_id, kind, params, history FROM tasks WHERE state='queued'")
-            rows = [(r["task_id"], r["kind"], r["params"], r["history"]) for r in cur.fetchall()]
+            cur.execute("SELECT task_id, kind, history FROM tasks WHERE state='queued'")
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
             now = now_iso()
-            for task_id, kind, params_json, history_json in rows:
+            for task_id, kind, history_json in rows:
                 if str(kind or "").strip() in allowed:
-                    continue
-                try:
-                    params = json.loads(params_json) if params_json else {}
-                except json.JSONDecodeError:
-                    params = {}
-                if not isinstance(params, dict):
-                    params = {}
-                if spare_queued is not None and spare_queued(
-                    str(task_id or "").strip(),
-                    str(kind or "").strip(),
-                    params,
-                ):
                     continue
                 history = json.loads(history_json)
                 history.append(

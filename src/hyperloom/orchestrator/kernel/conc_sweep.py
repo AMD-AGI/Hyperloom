@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import json
 import logging
@@ -31,11 +30,11 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
 )
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
-    _kill_stale_servers,
     run_grid,
     session_grid_bounds,
     variant_conc,
@@ -48,13 +47,13 @@ from ..actions.executors._workload_envs import (
     materialize_config_with_envs,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
-from .roofline_ceiling import (
+from hyperloom.inference_optimizer.roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
     select_peak_and_bound,
 )
-from ..state.shared_state import SharedState, resolved_grading
+from ..state.shared_state import SharedState
 from ..loop.coordinator_helpers import baseline_benchmark_script
 
 
@@ -313,7 +312,7 @@ def _build_roofline_ceiling(
         )
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
         # Local import avoids a module-level import cycle.
-        from .roofline_snapshot import within_roofline_pct
+        from hyperloom.inference_optimizer.roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
             """Express a measured throughput as a percent of peak."""
@@ -693,7 +692,6 @@ async def _sweep_one_arm_single_server(
                 base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
                 server_lifecycle=server_lifecycle_boot,
                 server_already_ready=False,
-                preclean_before_run=True,
                 warmup_before_measure=False,
                 lifecycle_boot_only=True,
             )
@@ -886,7 +884,6 @@ async def _sweep_one_arm_single_server(
                     serving_lease=arm_lease,
                     server_lifecycle=server_lifecycle_reuse,
                     server_already_ready=True,
-                    preclean_before_run=False,
                     warmup_before_measure=False,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1302,7 +1299,6 @@ async def run_conc_sweep(
         ("optimized", opt_args, dict(opt_envs)),
         ("baseline", "", {}),
     ]
-    cleanup_error: Exception | None = None
     if recorder is not None:
         recorder.record_plan(
             concs_requested=concs,
@@ -1312,43 +1308,25 @@ async def run_conc_sweep(
             variant_timeout_sec=benchmark_timeout_sec,
             arms_order=[name for name, _args, _envs in arms_order],
         )
-    try:
-        for arm_name, arm_args, arm_envs in arms_order:
-            if run.budget["budget_exhausted"] and run.budget["budget_skip_reason"] != "session_deadline_reserve":
-                results.extend(
-                    _deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm_name, arm_args, arm_envs)
-                )
-                if recorder is not None:
-                    recorder.record_arm_refused(
-                        arm_name,
-                        reason=run.budget["budget_skip_reason"],
-                        remaining_sec=run.budget["budget_remaining_sec"],
-                    )
-                continue
-            if run.session_closing():
-                results.extend(_budget_skip_result(v) for v in run.arm_grid(arm_name, arm_args, arm_envs))
-                if recorder is not None:
-                    recorder.record_arm_refused(arm_name, reason="session_deadline_reserve", remaining_sec=0.0)
-                continue
-
+    for arm_name, arm_args, arm_envs in arms_order:
+        if run.budget["budget_exhausted"] and run.budget["budget_skip_reason"] != "session_deadline_reserve":
+            results.extend(_deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm_name, arm_args, arm_envs))
             if recorder is not None:
-                recorder.open_arm(arm_name, extra_server_args=arm_args, extra_envs=arm_envs)
-            await _sweep_one_arm_single_server(run, arm_name, arm_args=arm_args, arm_envs=arm_envs)
-    finally:
-        # Safety net, independent of each arm's own per-variant teardown: by the time both arms have run (or one
-        # raised/was cut short), nothing this conc_sweep started should still be alive -- each arm's own server is
-        # only ever kept warm *between* its own CONC-ladder rounds, never past the arm itself.
-        if not os.environ.get("PYTEST_CURRENT_TEST"):
-            try:
-                await asyncio.to_thread(_kill_stale_servers)
-            except Exception as exc:
-                # Recorded below rather than here: servers this sweep may have
-                # left alive outlive the sweep, and a log line does not.
-                cleanup_error = exc
-                log.warning(
-                    "conc_sweep: post-run _kill_stale_servers failed",
-                    exc_info=True,
+                recorder.record_arm_refused(
+                    arm_name,
+                    reason=run.budget["budget_skip_reason"],
+                    remaining_sec=run.budget["budget_remaining_sec"],
                 )
+            continue
+        if run.session_closing():
+            results.extend(_budget_skip_result(v) for v in run.arm_grid(arm_name, arm_args, arm_envs))
+            if recorder is not None:
+                recorder.record_arm_refused(arm_name, reason="session_deadline_reserve", remaining_sec=0.0)
+            continue
+
+        if recorder is not None:
+            recorder.open_arm(arm_name, extra_server_args=arm_args, extra_envs=arm_envs)
+        await _sweep_one_arm_single_server(run, arm_name, arm_args=arm_args, arm_envs=arm_envs)
 
     budget_exhausted = run.budget["budget_exhausted"]
     budget_skip_reason = run.budget["budget_skip_reason"]
@@ -1436,8 +1414,6 @@ async def run_conc_sweep(
         report_error = _flush_conc_sweep_report(payload, session_dir)
 
     if recorder is not None:
-        if cleanup_error is not None:
-            recorder.record_fault(stage="kill_stale_servers", exc=cleanup_error)
         if report_error is not None:
             recorder.record_fault(stage="report_write", exc=report_error)
         recorder.record_progress(comparison=comparison, summary=summary)

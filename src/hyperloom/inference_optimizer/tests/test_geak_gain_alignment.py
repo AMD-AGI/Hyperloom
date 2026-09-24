@@ -583,35 +583,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_2b_rebench_of_a_stack_that_moved_since_enqueue_is_dropped(tmp_path: Path) -> None:
-    base, measured = 2844.209, 3270.0
-    coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    ss = coord.shared_state
-    ss.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
-    ss.resume_pending_revalidation = True
-    ss.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
-    ss.working_recipe_generation = 3
-    prior_best = dict(ss.current_best)
-
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("a stale 2b result must not fall back to the GEAK harness")
-
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
-
-    result = {"output_throughput": measured, "best_variant": {"fingerprint": "abc"}, "winners": []}
-    await coord._promote_to_shared_state(
-        "explore", result, task=_revalidate_task(expected_hash="abc", recipe_generation=2)
-    )
-
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.current_best == prior_best
-    assert ss.working_recipe_generation == 3
-    assert ss.geak_pending["status"] == "rebench_unavailable"
-    assert ss.geak_pending["revalidation_error"] == "stale_recipe_generation"
-    assert ss.resume_pending_revalidation is True
-
-
-@pytest.mark.asyncio
 async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> None:
     """decision==fallback (config drift) → NO validated stamp; 2a is invoked."""
     base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match

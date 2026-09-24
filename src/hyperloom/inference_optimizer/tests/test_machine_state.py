@@ -12,13 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, is_valid_escalate_hint
 
 
 def test_is_valid_escalate_hint() -> None:
-    assert ps.is_valid_escalate_hint("not-a-real-hint") is False
+    assert is_valid_escalate_hint("not-a-real-hint") is False
     # at least one vocab member should validate
-    some_vocab = next(iter(ps.ESCALATE_HINT_VOCAB))
-    assert ps.is_valid_escalate_hint(some_vocab) is True
+    some_vocab = next(iter(ESCALATE_HINT_VOCAB))
+    assert is_valid_escalate_hint(some_vocab) is True
 
 
 def test_normalize_budget_pct_defaults_and_filters() -> None:
@@ -61,7 +62,7 @@ def test_phase_started_unix_bad_value() -> None:
 
 
 def test_pending_escalate_hint() -> None:
-    valid = next(iter(ps.ESCALATE_HINT_VOCAB))
+    valid = next(iter(ESCALATE_HINT_VOCAB))
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint=valid)) == valid
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="garbage")) == ""
     assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="")) == ""

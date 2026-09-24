@@ -155,7 +155,7 @@ def _pump_then_materialize(stub: _Stub) -> None:
 
 
 def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m-fpr",
@@ -713,7 +713,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 def test_config_levers_helper_extracts_from_proposal_set():
     """Proposal args and envs retain separate channels; patches take precedence."""
-    from hyperloom.orchestrator.loop.coordinator import (
+    from hyperloom.orchestrator.phases.framework import (
         _framework_config_levers_from_done,
     )
 

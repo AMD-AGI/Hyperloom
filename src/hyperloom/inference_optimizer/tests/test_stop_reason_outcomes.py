@@ -87,7 +87,7 @@ def test_the_projection_derives_the_outcome_from_the_shared_mapping():
 
 def test_every_classified_terminal_is_one_the_state_machine_can_actually_write():
     """A classified reason outside the vocabulary is a rule for a dead terminal."""
-    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB
 
     classified = (
         sr.SUCCESS_STOP_REASONS | sr.ABORTED_STOP_REASONS | sr.INFRASTRUCTURE_STOP_REASONS | sr.MODEL_GATE_STOP_REASONS

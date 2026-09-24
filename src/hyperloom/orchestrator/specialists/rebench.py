@@ -95,7 +95,6 @@ async def run_specialist_rebench(
             benchmark_script=benchmark_script or None,
             magpie_python=magpie_python or None,
             server_lifecycle=server_lifecycle,
-            preclean_before_run=False,
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
         return {
