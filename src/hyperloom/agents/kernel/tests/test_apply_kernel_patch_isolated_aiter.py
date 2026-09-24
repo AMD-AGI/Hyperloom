@@ -311,31 +311,22 @@ def test_jit_transaction_restores_top_level_modules_and_build_for_known_layouts(
     assert not candidate_build.exists()
 
 
-@pytest.mark.parametrize(
-    "relative",
-    (
-        "csrc/kernels/gen_instances.py",
-        "csrc/cpp_itfs/mha_fwd.py",
-    ),
-)
-def test_editable_aiter_csrc_python_keeps_source_only_strategy(
-    akp,
-    monkeypatch,
-    relative,
-):
+def test_editable_aiter_python_outside_csrc_keeps_source_only_strategy(akp, monkeypatch):
     monkeypatch.setattr(
         akp,
         "_CACHED_KNOWN_TARGET_ROOTS",
         ("/sgl-workspace/aiter/",),
     )
 
-    strategy = akp._detect_strategy(Path("/sgl-workspace/aiter") / relative)
+    strategy = akp._detect_strategy(Path("/sgl-workspace/aiter/aiter/ops/triton/kernel.py"))
 
     assert strategy["compiled"] is False
     assert strategy["root"] == "/sgl-workspace/aiter"
     assert strategy["rebuild_mode"] == "none"
     assert strategy["rebuild_command"] == []
     assert strategy["artifact_roots"] == []
+    assert strategy["jit_build_dir"] == ""
+    assert strategy["import_probes"] == []
 
 
 def test_rebuild_strategy_uses_target_parent_for_legacy_strategy(
@@ -1242,6 +1233,35 @@ def _make_importable_checkout(akp, tmp_path, monkeypatch):
     monkeypatch.setattr(akp, "_is_multi_node", lambda: False)
     monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "ok"})
     return checkout, package
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "csrc/kernels/gen_instances.py",
+        "csrc/cpp_itfs/mha_fwd.py",
+    ),
+)
+def test_aiter_csrc_python_codegen_invalidates_jit_in_every_layout(akp, tmp_path, monkeypatch, relative):
+    """Codegen is a JIT input, so the legacy and discovered layouts must agree."""
+    checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+
+    discovered = akp._detect_strategy(checkout / relative)
+
+    monkeypatch.setattr(akp.aiter_jit_cache.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(akp, "_CACHED_KNOWN_TARGET_ROOTS", ("/sgl-workspace/aiter/",))
+
+    legacy = akp._detect_strategy(Path("/sgl-workspace/aiter") / relative)
+
+    for field in ("compiled", "rebuild_mode", "rebuild_command", "artifact_roots", "import_probes"):
+        assert legacy[field] == discovered[field], field
+    assert discovered["compiled"] is True
+    assert discovered["rebuild_mode"] == "runtime_jit"
+    assert discovered["rebuild_command"] == []
+    assert discovered["artifact_roots"] == []
+    assert discovered["import_probes"] == []
+    assert discovered["jit_build_dir"] == str(package / "jit" / "build")
+    assert legacy["jit_build_dir"] == "/sgl-workspace/aiter/aiter/jit/build"
 
 
 @pytest.mark.parametrize("relative", ("csrc/kernels/quant_kernels.cu", "csrc/kernels/gen_instances.py"))

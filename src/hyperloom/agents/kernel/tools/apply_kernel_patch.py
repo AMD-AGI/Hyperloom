@@ -1429,11 +1429,11 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
 
     Matches known framework roots and the installed AITER runtime's checkout
     to select rebuild commands and artifact roots. Python codegen under AITER
-    ``csrc`` in wheel or discovered-checkout runtime-JIT strategies invalidates
-    build state and serving modules like native source. The legacy
-    ``/sgl-workspace/aiter`` strategy keeps Python patches source-only. Native
-    SGLang ``kernels/jit`` sources use a source-hashed cache, deferring compilation
-    to the runtime instead of rebuilding.
+    ``csrc`` invalidates build state and serving modules like native source in
+    every AITER layout, and recompiles on the next runtime import instead of
+    through a framework reinstall. Python patches elsewhere stay source-only.
+    Native SGLang ``kernels/jit`` sources use a source-hashed cache, deferring
+    compilation to the runtime instead of rebuilding.
 
     Args:
         target_file (Path): The file being patched.
@@ -1517,13 +1517,19 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     # repo-relative descriptors against it, so a guessed parent writes the
     # optimized bytes beside the target instead of into it.
 
+    # Codegen under AITER csrc feeds the JIT compile, so every strategy owning an
+    # AITER JIT build invalidates it and lets the runtime recompile; no reinstall
+    # republishes a generated kernel, so there is nothing to run or import-probe.
     if (
         suffix in PYTHON_SOURCE_SUFFIXES
-        and (installed_aiter_root is not None or checkout_root is not None)
-        and rebuild_mode == _REBUILD_MODE_RUNTIME_JIT
+        and (rebuild_mode == _REBUILD_MODE_RUNTIME_JIT or jit_build_dir)
         and _target_is_in_aiter_csrc(target_file)
     ):
         compiled = True
+        rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        rebuild_command = []
+        artifact_roots = []
+        import_probes = []
     elif suffix in PYTHON_SOURCE_SUFFIXES:
         compiled = False
         rebuild_mode = _REBUILD_MODE_NONE
