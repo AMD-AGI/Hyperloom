@@ -1744,6 +1744,9 @@ async def prepare_task(
     unrestored_sources: set[Path] = set()
 
     def _restore_protected() -> None:
+        # Every round attempts the whole snapshot, so the latest round is the complete answer and a path that came
+        # back on a retry is no longer unrestored.
+        unrestored_sources.clear()
         unrestored_sources.update(_restore(src_snapshot))
 
     def _unrestored_message() -> str:
@@ -1752,11 +1755,6 @@ async def prepare_task(
             f"could not restore the protected source after preparation: {named}; the workspace still holds "
             "the prep agent's edits to it, so the task was not prepared"
         )
-
-    def _restore_sources() -> None:
-        _restore_protected()
-        if prep_base_sha:
-            _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
 
     def _restore_kernel_workspace() -> None:
         # Undo everything the agent did while preserving the caller's pre-prep state: reset tracked files to HEAD,
@@ -1880,7 +1878,7 @@ async def prepare_task(
             _restore_kernel_workspace()
             external_transaction.restore_passthroughs()
         else:
-            _restore_sources()
+            _restore_protected()
         _safe_rmtree(ref_dir)
         if ref_dir is not None and ref_dir.exists():
             # A partial removal leaves both halves of the invariant broken at once and neither is visible later:

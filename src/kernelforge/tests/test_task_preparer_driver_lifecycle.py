@@ -541,6 +541,112 @@ def test_a_source_the_rollback_cannot_put_back_fails_the_preparation(tmp_path, m
     assert survivor.as_posix() not in result.message
 
 
+def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_path, monkeypatch):
+    """Every rollback attempts the whole snapshot, so the latest one is the answer, not the union of all of them."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _init_repo(workspace)
+    kernel = workspace / "kernel.py"
+    original = "def hipb_mm(a, b):\n    return a @ b\n"
+    kernel.write_text(original, encoding="utf-8")
+    driver = workspace / "driver.py"
+
+    real_write_bytes = Path.write_bytes
+    refused: list[Path] = []
+
+    def refuse_only_the_first_rollback(self, data):
+        if self == kernel and not refused:
+            refused.append(self)
+            raise PermissionError(f"cannot write {self}")
+        return real_write_bytes(self, data)
+
+    async def agent_that_edits_the_kernel(**_kwargs):
+        driver.write_text("print('ok')\n", encoding="utf-8")
+        kernel.write_text("def hipb_mm(a, b):\n    return 0\n", encoding="utf-8")
+        return "prepared"
+
+    verdicts = [False, True]
+
+    async def preflight_that_passes_on_the_retry(*_args, **_kwargs):
+        ok = verdicts.pop(0)
+        return task_preparer.PreflightResult(
+            ok=ok,
+            correctness_ok=ok,
+            bench_ok=ok,
+            graph_ok=ok,
+            profile_ok=ok,
+        )
+
+    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", agent_that_edits_the_kernel)
+    monkeypatch.setattr(task_preparer, "_preflight_async", preflight_that_passes_on_the_retry)
+    monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(Path, "write_bytes", refuse_only_the_first_rollback)
+
+    result = asyncio.run(
+        task_preparer.prepare_task(
+            config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+            workspace_dir=str(workspace),
+            kernel=str(kernel),
+            driver=str(driver),
+            program_md="# Task",
+            target_functions=["hipb_mm"],
+            source_files=[str(kernel)],
+        )
+    )
+
+    assert refused == [kernel]
+    assert kernel.read_text(encoding="utf-8") == original
+    assert result.ok is True
+    assert "could not restore" not in (result.message or "")
+
+
+def test_preparation_gives_back_the_source_the_caller_had_not_the_one_head_holds(tmp_path, monkeypatch):
+    """The snapshot records the caller's working tree, and that is what a protected source is restored to."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def hipb_mm(a, b):\n    return a @ b\n", encoding="utf-8")
+    _init_repo(workspace)
+    uncommitted = "def hipb_mm(a, b):\n    return (a @ b).contiguous()\n"
+    kernel.write_text(uncommitted, encoding="utf-8")
+    driver = workspace / "driver.py"
+
+    async def agent_that_edits_the_kernel(**_kwargs):
+        driver.write_text("print('ok')\n", encoding="utf-8")
+        kernel.write_text("def hipb_mm(a, b):\n    return 0\n", encoding="utf-8")
+        return "prepared"
+
+    async def passing_preflight(*_args, **_kwargs):
+        return task_preparer.PreflightResult(
+            ok=True,
+            correctness_ok=True,
+            bench_ok=True,
+            graph_ok=True,
+            profile_ok=True,
+        )
+
+    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", agent_that_edits_the_kernel)
+    monkeypatch.setattr(task_preparer, "_preflight_async", passing_preflight)
+    monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
+
+    result = asyncio.run(
+        task_preparer.prepare_task(
+            config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+            workspace_dir=str(workspace),
+            kernel=str(kernel),
+            driver=str(driver),
+            program_md="# Task",
+            target_functions=["hipb_mm"],
+            source_files=[str(kernel)],
+        )
+    )
+
+    assert result.ok is True
+    assert kernel.read_text(encoding="utf-8") == uncommitted
+
+
 def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeypatch):
     """An external bundle already ships the spec next to the driver."""
     output_dir = tmp_path / "forge_attempt"
