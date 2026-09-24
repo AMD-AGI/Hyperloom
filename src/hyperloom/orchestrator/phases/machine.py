@@ -59,7 +59,17 @@ class MachinePhase(PhaseHandler):
             state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
-            evidence={"trigger": "fresh_session"},
+            evidence={
+                "trigger": "fresh_session",
+                "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
+                    state,
+                    current_phase="",
+                    budget_pct=dict(self._phase_budget_pct),
+                    kernel_enabled=self._kernel_enabled(),
+                    optimize_enabled=self._optimize_enabled(),
+                    enablement_enabled=self._enablement_admitted(),
+                ),
+            },
         )
         try:
             state.save(self.session_dir)
@@ -78,7 +88,17 @@ class MachinePhase(PhaseHandler):
             state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
-            evidence={"trigger": "resumed_from_close"},
+            evidence={
+                "trigger": "resumed_from_close",
+                "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
+                    state,
+                    current_phase=_phase_state.PHASE_CLOSE,
+                    budget_pct=dict(self._phase_budget_pct),
+                    kernel_enabled=self._kernel_enabled(),
+                    optimize_enabled=self._optimize_enabled(),
+                    enablement_enabled=self._enablement_admitted(),
+                ),
+            },
         )
         # Locked True by the CLOSE sequencer and read by the end-of-run safety nets as "the sequencer already wrote
         # the breakdown".
@@ -181,13 +201,14 @@ class MachinePhase(PhaseHandler):
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         in_kernel = str(state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
+        enablement_in_flight = in_enablement and await self._enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             optimize_enabled=optimize_enabled,
             enablement_enabled=self._enablement_admitted(),
-            enablement_in_flight=in_enablement and await self._enablement_in_flight(),
+            enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=in_kernel and await self._kernel_agent_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
