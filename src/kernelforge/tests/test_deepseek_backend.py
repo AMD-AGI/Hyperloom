@@ -520,3 +520,26 @@ def test_a_missing_sdk_reports_provider_unavailability(monkeypatch: pytest.Monke
 
     with pytest.raises(DeepSeekHarnessUnavailableError, match="not installed"):
         _backend().preflight()
+
+
+def test_a_timed_out_session_is_stopped_before_its_edits_are_rolled_back(tmp_path: Path) -> None:
+    """The SDK has no per-turn cancel: an abandoned turn keeps editing the workspace the guard just restored."""
+    import threading
+
+    repo, kernel = _make_repo(tmp_path)
+    release = threading.Event()
+
+    def _stall(harness: _FakeHarness, _prompt: str, _session_id: object) -> None:
+        if harness is _FakeHarness.instances[0]:
+            release.wait(timeout=5)
+
+    backend = _backend()
+    first = backend._harness_for(_spec(repo, kernel))
+    first.on_run = _stall
+    first.close = lambda: (setattr(first, "closed", True), release.set())
+
+    with pytest.raises(DeepSeekHarnessExecutionError, match="timed out"):
+        asyncio.run(backend.run(_spec(repo, kernel, timeout_sec=0.05)))
+
+    assert first.closed
+    assert backend._harness_for(_spec(repo, kernel)) is not first

@@ -404,6 +404,15 @@ class DeepSeekHarnessBackend:
         except Exception as exc:
             raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
 
+    def _discard_harness(self, spec: AgentRunSpec, harness: Any) -> None:
+        """Close one runtime and stop serving ``spec`` from it."""
+        key = self._runtime_key(spec)
+        with self._runtimes_lock:
+            if self._runtimes.get(key) is harness:
+                del self._runtimes[key]
+        with contextlib.suppress(Exception):
+            harness.close()
+
     def close(self) -> None:
         """Shut down every harness runtime this backend started."""
         with self._runtimes_lock:
@@ -431,6 +440,9 @@ class DeepSeekHarnessBackend:
             try:
                 sdk_result = await asyncio.wait_for(run, timeout=spec.timeout_sec)
             except asyncio.TimeoutError as exc:
+                # The SDK has no per-turn cancel, so the turn is still editing the workspace the guard is about to
+                # restore. Closing its runtime is the only way to stop it first.
+                await asyncio.to_thread(self._discard_harness, spec, harness)
                 raise DeepSeekHarnessExecutionError(
                     f"DeepSeek Harness timed out after {spec.timeout_sec}s",
                     session_id=session_id,
