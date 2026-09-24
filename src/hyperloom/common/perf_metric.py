@@ -262,7 +262,7 @@ def holds_within_band(
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
 
-    ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry the guard axis and are 0.0 off
+    ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
     """
 

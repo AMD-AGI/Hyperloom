@@ -183,6 +183,8 @@ def report_performance_state(monkeypatch):
         "total_throughput": 1000.0,
         GRADED_INTVTY: 100.0,
         GRADED_INTVTY_P50: 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {
         "action": "integrate",
@@ -193,6 +195,8 @@ def report_performance_state(monkeypatch):
         # different figure (50%) rather than hiding behind a coincidence.
         GRADED_INTVTY: 120.0,
         GRADED_INTVTY_P50: 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "extra_envs": {"RECIPE": "measured"},
     }
     state.optimization_stack = [{"action": "integrate"}]

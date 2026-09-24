@@ -378,8 +378,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append(f"- verdict             : `{comparison['verdict']}`")
         lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
         if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
+            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
         return
 
     from hyperloom.common.gain_math import gain_pct
@@ -409,7 +409,7 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
             lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (diagnostic, neither objective nor guard)")
     grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
     objective = str(grading.get("objective") or "").strip()
     if objective == GRADED_INTVTY:
@@ -496,8 +496,8 @@ def _build_summary_dict(
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,
-            # The guard axis is snapshotted alongside the objective so a re-rendered report can say what the 2-D
-            # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
+            # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
+            # actually measured, instead of a ``current_best`` that has since moved on.
             "tput_reference": graded.tput_reference,
             "tput_candidate": graded.tput_candidate,
         },
