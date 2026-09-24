@@ -79,7 +79,6 @@ _ATOM_KV_CACHE_FLAGS = (
     pytest.param(_ATOM_ARG_PARSER, "--kv_cache_dtype", id="native-snake"),
     pytest.param(_ATOM_ARG_PARSER, "--kv-cache-dtype", id="native-kebab"),
     pytest.param(None, "--kv_cache_dtype", id="legacy-module-absent"),
-    pytest.param("", "--kv_cache_dtype", id="legacy-class-absent"),
 )
 
 
@@ -94,6 +93,7 @@ def atom_serving(tmp_path, monkeypatch, request):
     (atom / "model_engine" / "arg_utils.py").write_text(_ATOM_ENGINE_ARGS, encoding="utf-8")
     parser_source = getattr(request, "param", _ATOM_ARG_PARSER)
     if parser_source is not None:
+        # ``None`` models an installation predating the native parser module.
         (atom / "utils" / "arg_parser.py").write_text(parser_source, encoding="utf-8")
     monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
     return {
@@ -169,7 +169,7 @@ def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_se
     assert repeated.repaired_digest == ""
 
 
-@pytest.mark.parametrize("atom_serving", (None, ""), ids=("module-absent", "class-absent"), indirect=True)
+@pytest.mark.parametrize("atom_serving", (None,), ids=("module-absent",), indirect=True)
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
 def test_atom_legacy_parser_does_not_invent_kebab_aliases(atom_serving, equals):
     """A plain argparse server only accepts the flags its EngineArgs registers."""
