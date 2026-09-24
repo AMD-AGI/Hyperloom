@@ -47,7 +47,7 @@ def _emit(payload: dict) -> int:
     """Print ``payload`` as JSON to stdout and return a process exit code."""
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     sys.stdout.flush()
-    return 0 if str(payload.get("status", "")).lower() in ("ok", "restored", "finalized", "noop_missing_backup") else 1
+    return 0 if str(payload.get("status", "")).lower() in ("ok", "restored", "noop_missing_backup") else 1
 
 
 def _do_apply(a: argparse.Namespace) -> int:

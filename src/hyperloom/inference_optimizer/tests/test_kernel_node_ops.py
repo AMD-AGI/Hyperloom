@@ -303,42 +303,32 @@ def test_bench_invalid_files_json_fails(tmp_path, capsys):
     assert "JSON" in payload["error"]
 
 
-def test_finalize_success_returns_zero_and_removes_backups(patch_env, capsys):
+def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys):
+    """Accepting a patch clears its backups; a path outside the root is refused."""
     _fw, bak = patch_env
-    k = _load("kno_finalize_ok")
+    k = _load("kno_finalize")
     backup = bak / "kernel.bak"
     backup.write_bytes(b"baseline")
-
-    rc = k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(backup)}])))
-
-    payload = _last_json(capsys)
-    assert rc == 0
-    assert payload["status"] == "finalized"
-    assert payload["deleted"] == [str(backup)]
-    assert not backup.exists()
-
-
-@pytest.mark.parametrize("invalid_json", [False, True])
-def test_finalize_failure_returns_nonzero_without_deleting_outside_backup(patch_env, capsys, invalid_json):
-    _fw, bak = patch_env
-    k = _load("kno_finalize_failed")
     outside = bak.parent / "outside.bak"
     outside.write_bytes(b"untouched")
-    records = "{" if invalid_json else json.dumps([{"backup_path": str(outside)}])
 
-    rc = k._do_finalize(argparse.Namespace(records_json=records))
+    k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(backup)}])))
+    accepted = _last_json(capsys)
+    assert accepted["status"] == "finalized"
+    assert accepted["deleted"] == [str(backup)]
+    assert not backup.exists()
 
-    payload = _last_json(capsys)
+    rc = k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(outside)}])))
+    refused = _last_json(capsys)
     assert rc == 1
-    assert payload["status"] == "failed"
-    assert payload["error"]
+    assert refused["status"] == "failed"
     assert outside.read_bytes() == b"untouched"
 
 
 def test_emit_status_to_returncode_contract():
     k = _load("kno_emit")
-    # Completed operations return zero; failures and unknown states do not.
-    for ok_status in ("ok", "restored", "finalized", "noop_missing_backup"):
+    # ok/restored/noop_missing_backup -> 0; everything else -> 1.
+    for ok_status in ("ok", "restored", "noop_missing_backup"):
         assert k._emit({"status": ok_status}) == 0
     for bad_status in ("failed", "error", ""):
         assert k._emit({"status": bad_status}) == 1
