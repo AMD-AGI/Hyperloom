@@ -254,6 +254,11 @@ def codex_agent_sdk_installed() -> bool:
     return find_spec("openai_codex") is not None
 
 
+#: Every published SDK release is a pre-release, so the floor names one: pip
+#: admits a pre-release only when the specifier itself does.
+DEEPSEEK_HARNESS_SDK_SPEC = "deepseek-harness-sdk>=0.1.5rc1"
+
+
 def deepseek_harness_sdk_installed() -> bool:
     """Return whether the optional DeepSeek Harness SDK is installed."""
     from importlib.util import find_spec

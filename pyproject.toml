@@ -40,7 +40,7 @@ llm = [
 # out of ``llm`` because no role selects it on credentials alone: it is reachable
 # only by naming it, so a deployment that does not is not made to carry it.
 deepseek = [
-    "deepseek-harness-sdk>=0.1.5",
+    "deepseek-harness-sdk>=0.1.5rc1",
 ]
 # Critic-agent web tools (web_search / web_fetch).
 web = [

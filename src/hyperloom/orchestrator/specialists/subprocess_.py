@@ -49,6 +49,7 @@ from hyperloom.common.llm_attribution import inject_env as inject_attribution_en
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
+    AGENT_BACKEND_DEEPSEEK,
 )
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
@@ -1186,26 +1187,30 @@ class SpecialistSubprocessDispatcher:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`preferred_agent_backend`).
+        selection decides (:func:`resolve_agent_backend`).
 
         Returns:
             str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
 
         Raises:
-            SpecialistAgentUnavailableError: If the configured backend is not
+            SpecialistAgentUnavailableError: If the selected backend is not
                 one this dispatcher can spawn.
         """
-        pinned = (self.config.agent_backend or "").strip().lower()
-        if not pinned:
-            from hyperloom.common.llm_config import resolve_agent_backend
+        from hyperloom.common.llm_config import resolve_agent_backend
 
-            return resolve_agent_backend()
-        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        pinned = (self.config.agent_backend or "").strip().lower()
+        backend = pinned or resolve_agent_backend()
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            raise SpecialistAgentUnavailableError(
+                "the DeepSeek Harness has no specialist CLI launch; run specialists with "
+                "specialist_dispatch_mode=inprocess"
+            )
+        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
                 f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
             )
-        return pinned
+        return backend
 
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may write, in precedence order.
