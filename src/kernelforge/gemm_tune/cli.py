@@ -218,13 +218,16 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
     Unverified artifacts return nothing. Marking the result as a candidate
     forces normal e2e validation; microbenchmark speedup is not an e2e claim.
     """
-    from .tuners.base import TuneResult
+    from .tuners.base import TuneResult, micro_metrics
 
     if not outcome.ok or not outcome.output_csv:
         return None
-    best = max(
-        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
-        default=None,
+    micro = micro_metrics(
+        {
+            "speedup": float(j.best_timing.speedup) if j.best_timing and j.best_timing.usable else None,
+            "improved": j.improved,
+        }
+        for j in outcome.judgements
     )
     return TuneResult(
         tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
@@ -234,8 +237,9 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
         env_value=outcome.output_csv,
         candidate=True,
         total_shapes=len(outcome.judgements),
-        improved_shapes=outcome.improved_shapes,
-        best_micro_speedup=None if best is None else float(best),
+        improved_shapes=micro.improved,
+        best_micro_speedup=micro.best,
+        avg_micro_speedup=micro.avg,
         key_source="runtime_observed",
     )
 
