@@ -13,13 +13,7 @@ import pytest
 from hyperloom.agents.framework.kb import (
     read_pr_ledger,
 )
-from hyperloom.agents.framework.models import (
-    Candidate,
-    ExploreRequest,
-    _parse_keywords,
-    _parse_pr_states,
-    _parse_search_modes,
-)
+from hyperloom.agents.framework.models import Candidate
 
 
 # kb.py
@@ -106,81 +100,9 @@ def test_legacy_kb_dirname_agrees_with_the_recipe_side(monkeypatch, tmp_path: Pa
     assert _legacy_recipe_root(os.environ).name == fa_kb._LEGACY_WORKSPACE_KB_DIRNAME
 
 
-
-
 # models.py
-def test_parse_pr_states() -> None:
-    assert _parse_pr_states(None) == ("open",)
-    assert _parse_pr_states("open") == ("open",)
-    assert _parse_pr_states(["open"]) == ("open",)
-    with pytest.raises(ValueError):
-        _parse_pr_states(123)
-    with pytest.raises(ValueError):
-        _parse_pr_states(["bogus-state"])
-
-
-def test_parse_keywords() -> None:
-    assert _parse_keywords(None) == ()
-    assert _parse_keywords("decode, throughput  moe") == ("decode", "throughput", "moe")
-    assert _parse_keywords([" x ", "y", ""]) == ("x", "y")
-    with pytest.raises(ValueError):
-        _parse_keywords(123)
-
-
-def test_parse_search_modes() -> None:
-    assert _parse_search_modes(None) == ("pr_monitor", "github")
-    assert _parse_search_modes("github") == ("github",)
-    with pytest.raises(ValueError):
-        _parse_search_modes(123)
-    with pytest.raises(ValueError):
-        _parse_search_modes(["not-a-source"])
-
-
-def test_explore_request_from_dict_valid() -> None:
-    req = ExploreRequest.from_dict(
-        {
-            "framework": "VLLM",
-            "repo_url": "https://github.com/acme/x",
-            "work_dir": "/tmp/fa",
-            "baseline": {"throughput": 100.0},
-            "commands": {"build": {"command": "make"}},
-            "outputs": {"summary": "out.json"},
-            "pr_monitor": {"base_url": "http://pr_monitor"},
-            "pr_filter": {"require_labels": ["perf"]},
-            "search_modes": ["github"],
-            "pr_states": ["open"],
-            "keywords": "decode",
-        }
-    )
-    assert req.framework == "vllm"
-    assert req.repo_url == "https://github.com/acme/x"
-    assert "build" in req.commands
-    assert req.pr_monitor is not None
-
-
-def test_explore_request_from_dict_validation_errors() -> None:
-    base = {
-        "framework": "vllm",
-        "repo_url": "https://github.com/acme/x",
-        "baseline": {"throughput": 100.0},
-    }
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({"repo_url": "r", "baseline": {"throughput": 1.0}})  # no framework
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({"framework": "vllm", "baseline": {"throughput": 1.0}})  # no repo
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({**base, "baseline": "x"})
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({**base, "commands": "x"})
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({**base, "outputs": "x"})
-    with pytest.raises(ValueError):
-        ExploreRequest.from_dict({**base, "pr_monitor": "x"})
-
-
-def test_candidate_slug_and_pr_number() -> None:
+def test_candidate_slug() -> None:
     assert Candidate(ref="feature/Foo@1", repo="r").slug == "feature-foo-1"
+    assert Candidate(ref="PR:123", repo="r").slug == "pr-123"
+    assert Candidate(ref="release/v0.8.x", repo="r").slug == "release-v0.8.x"
     assert Candidate(ref="!!!", repo="r").slug == "candidate"
-    assert Candidate(ref="PR:42", repo="r").pr_number == 42
-    assert Candidate(ref="branch-x", repo="r").pr_number is None
-    assert Candidate(ref="PR:notanum", repo="r").pr_number is None

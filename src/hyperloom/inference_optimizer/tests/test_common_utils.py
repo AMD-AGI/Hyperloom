@@ -1041,10 +1041,10 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     from hyperloom.agents.framework.models import Candidate
 
     repo_url = "https://github.com/sgl-project/sglang.git"
-    candidate = Candidate(ref="PR:42", repo=repo_url, head_sha="")
+    candidate = Candidate(ref="PR:42", repo=repo_url)
     assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
     assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url, head_sha="abc123")) == "abc123"
+    assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url)) == "main"
 
     monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
     assert isolation._resolve_min_free_gb(None) == pytest.approx(20.0)
@@ -1064,11 +1064,10 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isolation.prepare_repo_cache(repo_url, tmp_path) == repo_dir
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
 
-    isolation.fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=repo_url))
+    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=repo_url))
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-    isolation.fetch_candidate_ref(repo_dir, candidate)
+    isolation._fetch_candidate_ref(repo_dir, candidate)
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
-
 
 
 def test_kb_writeback_default_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

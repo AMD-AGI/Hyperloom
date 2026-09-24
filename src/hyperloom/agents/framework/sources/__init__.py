@@ -5,15 +5,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from ..logging_setup import get_logger
-from ..keywords import (
-    extract_keywords,
-    score_title_with_anti_signal,
-)
-from ..models import Candidate, ExploreRequest
+from ..keywords import score_title_with_anti_signal
+from ..models import Candidate, CandidateSearchRequest
 from ._shared import GitHubPr
 from . import github as github_backend
 from .pr_monitor import (
@@ -57,7 +54,7 @@ def _pr_to_candidate(
     )
 
 
-_log = get_logger(__name__)
+_log = logging.getLogger(__name__)
 
 
 # Error policies for a search backend.
@@ -70,10 +67,10 @@ class BackendSpec:
     """A PR-source backend: its mode name, runner, and error policy."""
 
     name: str
-    run: Callable[[ExploreRequest], list[Candidate]]
+    run: Callable[[CandidateSearchRequest], list[Candidate]]
     error_policy: str
 
-    def invoke(self, request: ExploreRequest) -> list[Candidate]:
+    def invoke(self, request: CandidateSearchRequest) -> list[Candidate]:
         """Run the backend under its error policy."""
         if self.error_policy == _BEST_EFFORT:
             try:
@@ -90,20 +87,9 @@ _SEARCH_BACKENDS: dict[str, BackendSpec] = {
 }
 
 
-def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
+def enumerate_candidates(request: CandidateSearchRequest) -> list[Candidate]:
     """Enumerate candidates per ``request.search_modes`` and union the results."""
     out: list[Candidate] = []
-
-    for ref in request.candidate_refs:
-        out.append(Candidate(ref=ref, repo=request.repo_url, source="explicit"))
-
-    if not request.search_perf_prs:
-        _log.info(
-            "enumerate_candidates: search_perf_prs=False; explicit_refs=%d",
-            len(request.candidate_refs),
-        )
-        return _dedupe(out)
-
     for mode in request.search_modes:
         spec = _SEARCH_BACKENDS.get(mode)
         if spec is None:
@@ -117,33 +103,23 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         out.extend(found)
 
     deduped = _dedupe(out)
-    _log.info(
-        "enumerate_candidates: total=%d after dedup (explicit=%d, searched=%d)",
-        len(deduped),
-        len(request.candidate_refs),
-        len(out) - len(request.candidate_refs),
-    )
+    _log.info("enumerate_candidates: total=%d after dedup (searched=%d)", len(deduped), len(out))
     return deduped
 
 
-def _run_github(request: ExploreRequest) -> list[Candidate]:
+def _run_github(request: CandidateSearchRequest) -> list[Candidate]:
     """Query anonymous GitHub Search; best-effort - empty list on failure."""
     prs = github_backend.search_perf_prs(
         request.repo_url,
-        gap_description=request.gap_description,
         limit=request.max_search_candidates,
         states=request.pr_states,
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 
 
-def _resolve_keywords(request: ExploreRequest) -> list[str]:
+def _resolve_keywords(request: CandidateSearchRequest) -> list[str]:
     """Resolve the keyword list for pr_monitor search + client rerank."""
-    if request.keywords:
-        return [k.lower() for k in request.keywords if k.strip()]
-    if (request.gap_description or "").strip():
-        return extract_keywords(request.gap_description)
-    return []
+    return [k.lower() for k in request.keywords if k.strip()]
 
 
 def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[GitHubPr]:
@@ -157,7 +133,7 @@ def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[G
     )
 
 
-def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
+def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     """Query pr_monitor with gap-aware ranking."""
     cfg = request.pr_monitor
     if cfg is None:
@@ -166,7 +142,6 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
             "provide pr_monitor.base_url (remote mode requires KB_STORE_URL) or "
             "remove 'pr_monitor' from search_modes"
         )
-    label = cfg.default_label
     requested = max(1, request.max_search_candidates)
 
     # Step 4: optionally broaden PR-state coverage. merged/closed PRs are the backport-relevant ones that may already
@@ -184,7 +159,6 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
             request.repo_url,
             base_url=cfg.base_url,
             limit=requested,
-            label=label,
             timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
@@ -207,7 +181,6 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
             request.repo_url,
             base_url=cfg.base_url,
             limit=over_fetch,
-            label=label,
             timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
@@ -219,7 +192,6 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
             request.repo_url,
             base_url=cfg.base_url,
             limit=over_fetch,
-            label=label,
             timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )

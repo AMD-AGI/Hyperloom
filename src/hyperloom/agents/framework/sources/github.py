@@ -10,8 +10,9 @@ import os
 import urllib.parse
 import urllib.request
 
-from ..keywords import extract_keywords
-from ._shared import GitHubPr, _repo_slug
+from hyperloom.common.github_urls import repo_slug as parse_repo_slug
+
+from ._shared import GitHubPr
 
 
 def _auth_headers(accept: str) -> dict[str, str]:
@@ -40,35 +41,29 @@ def _state_qualifier(states: tuple[str, ...]) -> str:
     return "" if broad else "is:open"
 
 
-def _build_query(repo: str, gap_description: str, states: tuple[str, ...] = ("open",)) -> str:
-    """Compose a GitHub Search query string from gap_description + repo scope."""
-    keywords = extract_keywords(gap_description) if gap_description else []
-    if not keywords:
-        terms = PERF_TERMS
-    else:
-        terms = tuple(keywords)
+def _build_query(repo: str, states: tuple[str, ...] = ("open",)) -> str:
+    """Compose a GitHub Search query string scoped to ``repo`` and the perf terms."""
     parts = [f"repo:{repo}", "is:pr"]
     state_q = _state_qualifier(states)
     if state_q:
         parts.append(state_q)
-    parts.append("(" + " OR ".join(terms) + ")")
+    parts.append("(" + " OR ".join(PERF_TERMS) + ")")
     return " ".join(parts)
 
 
 def search_perf_prs(
     repo_url: str,
     *,
-    gap_description: str = "",
     limit: int = 5,
     states: tuple[str, ...] = ("open",),
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """Return perf-ish PRs via the GitHub Search API (open-only by default)."""
     try:
-        repo = _repo_slug(repo_url)
+        repo = parse_repo_slug(repo_url)
     except ValueError:
         return []
-    query = _build_query(repo, gap_description, states)
+    query = _build_query(repo, states)
     url = "https://api.github.com/search/issues?" + urllib.parse.urlencode(
         {"q": query, "sort": "updated", "order": "desc", "per_page": str(limit)}
     )
