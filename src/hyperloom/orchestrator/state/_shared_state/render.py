@@ -170,7 +170,7 @@ class _RenderMixin:
             phase_cumulative_seconds,
             phase_elapsed_seconds,
             session_remaining_seconds,
-            should_reloop_to_explore,
+            should_open_macro_cycle,
         )
 
         phase = (self.phase or "").strip().upper() or "UNSET"
@@ -203,7 +203,7 @@ class _RenderMixin:
         ]
         # Whether deferring work to a later cycle is still a real option.
         if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
+            reloop, evidence = should_open_macro_cycle(self, now_unix=now_unix)
             feasible = reloop and self.framework_agent_phase_enabled
             reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
             threshold = evidence.get("min_remaining_sec_effective")

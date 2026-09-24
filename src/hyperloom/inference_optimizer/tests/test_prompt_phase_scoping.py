@@ -501,7 +501,7 @@ def test_reloop_is_a_projection_before_sweep():
 
 def test_reloop_feasibility_matches_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
-    reloop, _ = _ps.should_reloop_to_explore(s)
+    reloop, _ = _ps.should_open_macro_cycle(s)
     expected = "true" if reloop else "false"
     assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
