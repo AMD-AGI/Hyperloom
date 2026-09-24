@@ -55,9 +55,14 @@ def stub_install_steps(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _restore_environ():
-    """Roll back direct ``os.environ`` writes after every test in this module."""
+def _restore_environ(tmp_path):
+    """Roll back direct ``os.environ`` writes after every test in this module.
+
+    ``Path.home()`` reads ``USERPROFILE`` before ``HOME`` on Windows, so the
+    credential writers reach the real home directory unless both are redirected.
+    """
     snapshot = dict(os.environ)
+    os.environ["USERPROFILE"] = str(tmp_path)
     try:
         yield
     finally:
@@ -92,164 +97,6 @@ def clean_url_env(monkeypatch):
     finally:
         os.environ.clear()
         os.environ.update(snapshot)
-
-
-class _ReachedAfterAgentCli(Exception):
-    pass
-
-
-@pytest.fixture
-def offline_forge_preflight(monkeypatch, tmp_path, clean_url_env):
-    from hyperloom.agents.framework import kb
-    from kernelforge.agent_backends import claude as forge_claude
-
-    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
-    for key in ("FRAMEWORK", "KERNEL_OPT_BACKEND_ORDER", "FORGE_AGENT_CLI", "HYPERLOOM_KERNEL_AGENT_ROOT"):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("FORGE_AGENT_BACKEND", "claude")
-    runtime = tmp_path / "kernel-agent.env.sh"
-    runtime.write_text("HYPERLOOM_KERNEL_AGENT_ROOT=/existing/kernel\n", encoding="utf-8")
-    monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
-
-    def no_sdk_or_probe(*args, **kwargs):
-        raise AssertionError("startup CLI validation must not construct an SDK or probe a model")
-
-    monkeypatch.setattr(forge_claude, "_load_claude_sdk", no_sdk_or_probe)
-    monkeypatch.setattr(forge_claude, "_prepare_claude_environment", no_sdk_or_probe)
-    monkeypatch.setattr(forge_claude.ClaudeBackend, "probe", no_sdk_or_probe)
-    monkeypatch.setattr(cli_preflight, "_ensure_python_sdks", no_sdk_or_probe)
-
-    def reached_next_step():
-        raise _ReachedAfterAgentCli
-
-    monkeypatch.setattr(kb, "prepare_kb_environment", reached_next_step)
-    return forge_claude
-
-
-def _offline_cli(tmp_path, output="2.1.0 (Claude Code)", returncode=0, name="selected-cli"):
-    cli_file = tmp_path / (f"{name}.cmd" if os.name == "nt" else name)
-    if os.name == "nt":
-        text = f"@echo off\r\necho {output}\r\nexit /b {returncode}\r\n"
-    else:
-        text = f"#!/bin/sh\nprintf '%s\\n' '{output}'\nexit {returncode}\n"
-    cli_file.write_text(text, encoding="utf-8")
-    cli_file.chmod(0o755)
-    return str(cli_file)
-
-
-@pytest.mark.parametrize("framework,backend", [("vllm", "forge"), ("atom", "forge"), ("atom", "")])
-@pytest.mark.parametrize("failure", ["missing-default", "missing-pin", "wrong-tool", "nonzero"])
-def test_forge_startup_rejects_bad_cli_before_coordinator(
-    monkeypatch, tmp_path, offline_forge_preflight, framework, backend, failure, capsys
-):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend)
-    if failure == "missing-default":
-        monkeypatch.setattr(offline_forge_preflight.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(offline_forge_preflight.os.path, "isfile", lambda _path: False)
-    else:
-        selected = (
-            str(tmp_path / "missing-cli")
-            if failure == "missing-pin"
-            else _offline_cli(
-                tmp_path,
-                output="other-tool" if failure == "wrong-tool" else "Claude Code",
-                returncode=1 if failure == "nonzero" else 0,
-            )
-        )
-        monkeypatch.setenv("FORGE_AGENT_CLI", selected)
-
-    with pytest.raises(SystemExit) as failure_info:
-        cli_preflight._preflight(argparse.Namespace(framework=framework, no_kernel=False))
-
-    assert failure_info.value.code == 2
-    assert "Claude" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("source", ["shell", "dotenv", "runtime"])
-def test_forge_startup_reuses_existing_runtime_and_checks_selected_cli(
-    monkeypatch, tmp_path, offline_forge_preflight, source
-):
-    cli_path = _offline_cli(tmp_path)
-    assignment = "KERNEL_OPT_BACKEND_ORDER=forge\n"
-    if source == "shell":
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    elif source == "dotenv":
-        (tmp_path / ".env").write_text(assignment, encoding="utf-8")
-    else:
-        (tmp_path / "kernel-agent.env.sh").write_text(
-            "HYPERLOOM_KERNEL_AGENT_ROOT=/existing/kernel\n" + assignment, encoding="utf-8"
-        )
-    monkeypatch.setenv("FORGE_AGENT_CLI", cli_path)
-    calls = []
-    real_run = subprocess.run
-
-    def record_local_version(argv, **kwargs):
-        calls.append(argv)
-        assert argv == [cli_path, "--version"]
-        return real_run(argv, **kwargs)
-
-    monkeypatch.setattr(offline_forge_preflight.subprocess, "run", record_local_version)
-    with pytest.raises(_ReachedAfterAgentCli):
-        cli_preflight._preflight(argparse.Namespace(framework="vllm", no_kernel=False))
-
-    assert calls == [[cli_path, "--version"]]
-
-
-@pytest.mark.parametrize("provider", ["claude", "auto"])
-def test_forge_startup_checks_the_discovered_default_cli(monkeypatch, tmp_path, offline_forge_preflight, provider):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.setenv("FORGE_AGENT_BACKEND", provider)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid/anthropic")
-    executable = _offline_cli(tmp_path, name="claude")
-    monkeypatch.setenv("PATH", str(tmp_path))
-    calls = []
-    real_run = subprocess.run
-
-    def record_local_version(argv, **kwargs):
-        calls.append(argv)
-        assert os.path.normcase(argv[0]) == os.path.normcase(executable)
-        assert argv[1:] == ["--version"]
-        return real_run(argv, **kwargs)
-
-    monkeypatch.setattr(offline_forge_preflight.subprocess, "run", record_local_version)
-    with pytest.raises(_ReachedAfterAgentCli):
-        cli_preflight._preflight(argparse.Namespace(framework="atom", no_kernel=False))
-
-    assert len(calls) == 1
-
-
-@pytest.mark.parametrize(
-    "framework,backend,provider,no_kernel",
-    [
-        ("atom", "forge", "claude", True),
-        ("atom", "", "claude", True),
-        ("atom", "geak", "claude", False),
-        ("vllm", "forge,geak", "claude", False),
-        ("vllm", "", "claude", False),
-        (None, "", "claude", False),
-        ("atom", "forge", "codex", False),
-    ],
-)
-def test_forge_startup_does_not_check_unselected_claude(
-    monkeypatch, offline_forge_preflight, framework, backend, provider, no_kernel
-):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend)
-    monkeypatch.setenv("FORGE_AGENT_BACKEND", provider)
-
-    def no_subprocess(*args, **kwargs):
-        raise AssertionError("unselected Claude runtime must not be checked")
-
-    monkeypatch.setattr(offline_forge_preflight.subprocess, "run", no_subprocess)
-    with pytest.raises(_ReachedAfterAgentCli):
-        cli_preflight._preflight(argparse.Namespace(framework=framework, no_kernel=no_kernel))
 
 
 _RUNTIME_PYTHON_KEYS = ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON")

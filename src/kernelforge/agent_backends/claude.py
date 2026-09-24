@@ -137,10 +137,12 @@ class ClaudeTimeoutError(ClaudeBackendError):
 
 
 def resolve_claude_cli(explicit: str = "") -> str:
-    """Select the Claude CLI, preserving explicit and environment pins even if invalid."""
-    selected = explicit.strip() or os.environ.get("FORGE_AGENT_CLI", "").strip()
-    if selected:
-        return selected
+    """Locate the Claude CLI for SDK subprocess execution."""
+    if explicit.strip():
+        return explicit.strip()
+    candidate = os.environ.get("FORGE_AGENT_CLI", "").strip()
+    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
     found = shutil.which("claude")
     if found:
         return found
@@ -289,7 +291,9 @@ class ClaudeBackend:
         self.fallback_reason = ""
 
     def preflight(self) -> None:
-        """Validate this backend's selected CLI without contacting a model."""
+        """Validate that an explicitly configured executable is Claude CLI."""
+        if not self.runtime.executable.strip():
+            return
         self.validate_runtime(self.runtime)
 
     @staticmethod

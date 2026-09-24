@@ -1536,26 +1536,7 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
 
 
 def _check_node_claude_cli() -> None:
-    """Validate Forge's selected Claude CLI; other agent CLIs retain presence warnings."""
-    from hyperloom.common.env import forge_explicitly_enabled
-
-    backend = os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip()
-    atom_default = not backend and os.environ.get("FRAMEWORK", "").strip().lower() == "atom"
-    if forge_explicitly_enabled() or atom_default:
-        from kernelforge.config import Config
-
-        runtime = Config.from_env().agent_runtime()
-        if runtime.provider == "claude":
-            from kernelforge.agent_backends.claude import ClaudeBackend, ClaudeUnavailableError
-
-            try:
-                ClaudeBackend.validate_runtime(runtime)
-            except ClaudeUnavailableError as exc:
-                print(f"Preflight: ERROR — Forge Claude runtime unavailable: {exc}", file=sys.stderr)
-                raise SystemExit(2) from exc
-            print("Preflight: Forge Claude CLI verified (--version)")
-        return
-
+    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
     if missing:
         print(
@@ -2078,14 +2059,6 @@ def _preflight(
         detail={"exit_code": 0},
     )
 
-    if not getattr(args, "no_kernel", False):
-        _run_install_step(
-            install_event,
-            step_id="check_node_claude_cli",
-            category="check",
-            action=_check_node_claude_cli,
-        )
-
     # Same timing, same reason: run after the loaders so a withdrawn KB override set in ``.env`` is caught, and before
     # any KB read happens.
     from hyperloom.agents.framework.kb import prepare_kb_environment
@@ -2485,6 +2458,9 @@ def _preflight(
             "inferencex_patch_anchors_ok": anchors_ok,
         },
     )
+
+    # --- node / claude / codex CLI presence (WARN-only) ---
+    _check_node_claude_cli()
 
     # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) --- Catches launchers that skip
     # install.sh before a missing CLI surfaces mid-run.
