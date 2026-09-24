@@ -467,9 +467,9 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert "manifest.json" in out
 
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    assert cb._resolve_session_dir_for_summary(None) == tmp_path
+    assert cb._session_dir_from_env() == tmp_path
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
-    assert cb._resolve_session_dir_for_summary(None) is None
+    assert cb._session_dir_from_env() is None
 
 
 def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget() -> None:
