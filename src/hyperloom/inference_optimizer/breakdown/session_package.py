@@ -616,10 +616,10 @@ def package_session_artifacts(
                     len(copied),
                     root,
                 )
-            except Exception:  # noqa: BLE001 — loose copy must not mask the zip
+            except Exception:
                 log.exception("session package: loose copy failed (non-fatal)")
 
         return target
-    except Exception:  # noqa: BLE001 — never let packaging mask stop_reason
+    except Exception:
         log.exception("session package failed (non-fatal)")
         return None

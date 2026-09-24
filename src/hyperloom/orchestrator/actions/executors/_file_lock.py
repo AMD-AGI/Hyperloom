@@ -21,7 +21,7 @@ def best_effort_file_lock(lock_path: str, *, label: str = "file_lock") -> Iterat
         yield
         return
     try:
-        fp = open(lock_path, "w")  # noqa: SIM115
+        fp = open(lock_path, "w")
     except OSError as e:
         log.warning(
             "%s: cannot open lock file %s (%s); proceeding without exclusion",

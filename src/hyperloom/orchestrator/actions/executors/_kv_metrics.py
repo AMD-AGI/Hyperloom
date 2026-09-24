@@ -1074,7 +1074,7 @@ class KvMetricsRecorder:
         start_unix = time.time()
         try:
             sample = self._poller.sample()
-        except Exception:  # noqa: BLE001 - collection must never fail a round
+        except Exception:
             log.debug("kv_metrics: sample failed", exc_info=True)
             return None
         end_mono = time.monotonic()
@@ -1109,7 +1109,7 @@ class KvMetricsRecorder:
             return None
         try:
             phases = self._progress.poll()
-        except Exception:  # noqa: BLE001 - collection must never fail a round
+        except Exception:
             log.debug("kv_metrics: progress poll failed", exc_info=True)
             return None
         if not phases:
@@ -1285,7 +1285,7 @@ class KvMetricsRecorder:
             # at its first periodic sample and the increment in between would be credited to neither.
             self._rebuild_counter_windows()
             return str(export)
-        except Exception:  # noqa: BLE001 - a better source that cannot be read is not a reason to fail a round
+        except Exception:
             log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
             return None
 
@@ -1422,7 +1422,7 @@ class KvMetricsRecorder:
             summary["path"] = path.name if write_timeline(path, events) else None
             summary["source"] = str(export)
             return summary
-        except Exception:  # noqa: BLE001 - a timeline must never fail a round
+        except Exception:
             log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
             return None
 
@@ -1505,7 +1505,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:  # noqa: BLE001 - an unwritten artifact must not fail a round
+        except Exception:
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

@@ -18,11 +18,11 @@ _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import tracelens_analysis as tla  # noqa: E402
-import _bypass_report as bypass_report  # noqa: E402
-import _idle_gate as idle_gate  # noqa: E402
-import _task_group_contract as task_group_contract  # noqa: E402
-import tracelens_skill_runner as tlr  # noqa: E402
+import tracelens_analysis as tla
+import _bypass_report as bypass_report
+import _idle_gate as idle_gate
+import _task_group_contract as task_group_contract
+import tracelens_skill_runner as tlr
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):

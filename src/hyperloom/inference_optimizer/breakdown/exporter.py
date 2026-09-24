@@ -17,6 +17,7 @@ from hyperloom.common.jsonio import read_json
 
 from . import collectors
 from .recorder.event_finalize import finalize_events
+from .recorder.recorder_warnings import RECORDING_ERRORS
 from .schema import SCHEMA_VERSION_V6
 from ..session.session_paths import manifest_path, state_path
 
@@ -36,15 +37,24 @@ def _recorded_session_value(value: Any) -> bool:
     return value is not None and value != ""
 
 
+_COLLECTOR_OWNED_SESSION = frozenset({"stop_reason", "ended_at_utc", "elapsed_minutes"})
+
+
 def _merge_session(fragment: Any, collector_value: Any) -> Any:
-    """Overlay the recorder's live ``session`` fields on the collected section."""
+    """Overlay the recorder's live ``session`` fields on the collected section.
+
+    Lifecycle fields the collector derives from CLOSE and timestamps stay
+    collector-owned when the collector actually produced a value. A degraded
+    collect (``None`` / empty) keeps the recorder fragment.
+    """
     if not isinstance(fragment, dict) or not fragment:
         return collector_value
     merged = dict(collector_value) if isinstance(collector_value, dict) else {}
     for key, value in fragment.items():
+        if key in _COLLECTOR_OWNED_SESSION and _recorded_session_value(merged.get(key)):
+            continue
         if _recorded_session_value(value) or key not in merged:
             merged[key] = value
-    merged["elapsed_minutes"] = collectors.session_elapsed_minutes(merged)
     return merged
 
 
@@ -118,9 +128,18 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
         default={},
     )
-    # Events whose phase was killed before it could close them are closed here, before the timeline is read: their
-    # fragments are on disk, and an event left open would otherwise be read back as still running.
-    _safe_collect("timeline_finalize", lambda: finalize_events(sd), warnings, default=[])
+    # Events whose phase was killed before it could close them are closed here,
+    # before the timeline is read: their fragments are on disk, and an event
+    # left open would otherwise be read back as still running. Programming
+    # errors in finalize are left to raise; spool failures are a dedicated
+    # warning rather than a generic collector miss.
+    try:
+        closed = finalize_events(sd)
+    except RECORDING_ERRORS as exc:
+        warnings.append(f"timeline_finalize: {type(exc).__name__}: {exc}")
+        closed = []
+    if closed:
+        log.info("timeline_finalize: closed %s orphan event(s)", len(closed))
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(sd, warnings),
@@ -146,6 +165,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             close=v6_close,
             state=state,
             timeline=timeline,
+            warnings=warnings,
         ),
         warnings,
         default={},
@@ -165,18 +185,8 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
         default={},
     )
-    v6_critic = _safe_collect(
-        "critic",
-        lambda: collectors.collect_v6_critic(assembled.get("critic")),
-        warnings,
-        default={},
-    )
-    v6_robustness = _safe_collect(
-        "robustness",
-        lambda: collectors.collect_v6_robustness(assembled.get("robustness")),
-        warnings,
-        default={},
-    )
+    v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
+    v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces. An export used to also carry
     # a top-level copy taken partway through, which was a strict subset and so
@@ -204,6 +214,7 @@ def _load_assembled(
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
     if env_bool("INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER"):
+        warnings.append("recorder: disabled by INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER")
         return {}
     try:
         from .recorder import assemble_parts, has_parts
@@ -212,7 +223,7 @@ def _load_assembled(
             return {}
         out = assemble_parts(session_dir, warnings=warnings)
         return out if isinstance(out, dict) else {}
-    except Exception as exc:  # noqa: BLE001
+    except RECORDING_ERRORS as exc:
         log.exception("recorder: assemble_parts failed")
         warnings.append(f"recorder: assemble_parts failed: {type(exc).__name__}: {exc}")
         return {}
@@ -225,10 +236,15 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default``."""
+    """Run a collector; any failure becomes a warning plus ``default``.
+
+    Collectors are allowed to see drifted session artifacts, so an unexpected
+    shape must not abort the rest of the export. The assembler and event
+    finalize paths are narrower: they catch :data:`RECORDING_ERRORS` only.
+    """
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("collector %s failed", name)
         warnings.append(f"collector:{name} failed: {type(exc).__name__}: {exc}")
         if default is not None:
@@ -273,7 +289,7 @@ def write_breakdown_json(
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # The trace is a side artifact; losing it must not fail the breakdown
         # write, but it is scored downstream so a silent loss has to be visible.
         log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
@@ -304,7 +320,7 @@ def _patch_breakdown(
         atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
         log.info("session_breakdown: refreshed %s section in %s", section, target)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("session_breakdown: %s patch failed (non-fatal)", section, exc_info=True)
         return False
 

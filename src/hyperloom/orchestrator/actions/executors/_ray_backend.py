@@ -59,7 +59,7 @@ def serving_slot_busy() -> bool:
     if not ray_gpu_specialist_exec_enabled():
         return False
     try:
-        import ray  # noqa: PLC0415
+        import ray
 
         if not ray.is_initialized():
             return False
@@ -198,7 +198,7 @@ def get_ray_backend() -> RayExecutionBackend:
 def mark_ray_backend_unhealthy() -> None:
     """Disconnect the current Ray driver and force the next use to re-ensure."""
     try:
-        import ray  # noqa: PLC0415
+        import ray
 
         ray.shutdown()
     except Exception:  # noqa: BLE001 - recovery must never raise

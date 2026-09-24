@@ -640,7 +640,7 @@ class PlanCriticAgent:
             detail,
         )
         return PlanCriticOutcome(
-            verdict="ACCEPT",
+            verdict="NOT_REVIEWED",
             error=detail,
             duration_sec=duration_sec,
             verdict_source="error",

@@ -22,19 +22,19 @@ from typing import Any
 
 # Sibling modules live next to this tool (invoked by absolute path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _bypass_report as _report  # noqa: E402
-import _bypass_trace_reader as _reader  # noqa: E402
-import _trace_shape_manifest as _tsm  # noqa: E402
+import _bypass_report as _report
+import _bypass_trace_reader as _reader
+import _trace_shape_manifest as _tsm
 
-from hyperloom.common.provenance import build_provenance as _shared_build_provenance  # noqa: E402
-from hyperloom.inference_optimizer import framework_registry  # noqa: E402
-from _idle_gate import (  # noqa: E402
+from hyperloom.common.provenance import build_provenance as _shared_build_provenance
+from hyperloom.inference_optimizer import framework_registry
+from _idle_gate import (
     build_graph_under_recorded_warning,
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
-from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: E402
-from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
+from _denoise_steps import count_profiler_steps, resolve_perstep_divisor
+from _io_utils import atomic_write_json, utc_now, write_text
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -156,8 +156,6 @@ _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 #: rather than unsetting it, and a bare ``{"0","false","no","off"}`` check read
 #: every one of those as "enabled" -- the opposite of what was written.
 _SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disable", "disabled"})
-#: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
-_GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
 #: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
 #: Searched rather than matched from the start: an SGLang without the profiler
@@ -268,33 +266,7 @@ def _shard_order_key(shard: tuple[Path, str, str | None]) -> tuple[int, str, str
 
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance block for the TraceShapeManifest."""
-    try:
-        return _shared_build_provenance(args, env=os.environ, probe=True)
-    except Exception:  # noqa: BLE001 — provenance must never break the manifest.
-        pass
-
-    def _env(*names: str) -> Any:
-        for n in names:
-            v = os.environ.get(n)
-            if v:
-                return v
-        return None
-
-    return {
-        "_provenance_source": "wp1_stub",
-        "model_name": args.model_name or None,
-        "model_path": getattr(args, "model_path", "") or None,
-        "framework": args.framework or None,
-        "target_platform": args.target_platform or None,
-        "gfx_arch": _env(_GFX_ENV),
-        "dtype": args.precision or _env("PRECISION"),
-        "tp": _env("TP"),
-        "ep": _env("EP"),
-        "concurrency": _env("CONC", "CONCURRENCY"),
-        "isl": _env("ISL"),
-        "osl": _env("OSL"),
-        "graph_mode": _env("HYPERLOOM_GRAPH_MODE"),
-    }
+    return _shared_build_provenance(args, env=os.environ, probe=True)
 
 
 def _maybe_build_shape_manifest(
@@ -811,7 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     diffusion_roofline_path: str | None = None
     if framework_registry.is_scriptable(args.framework):
         try:
-            from diffusion_roofline import build_report_from_bypass  # noqa: E402
+            from diffusion_roofline import build_report_from_bypass
 
             _diff_steps = resolve_perstep_divisor(
                 requested_steps=requested_denoise_steps,

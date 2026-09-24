@@ -132,7 +132,7 @@ def _call_site() -> str:
     """Locate the code responsible for a write, on both sides of the SDK."""
     via = ""
     try:
-        frame: Any = sys._getframe(1)  # noqa: SLF001 - cheap, and guarded by the level check
+        frame: Any = sys._getframe(1)
     except (ValueError, AttributeError):
         return "via=? from=?"
     while frame is not None:
@@ -188,7 +188,7 @@ def trace_write(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(section, fields)
-    except Exception:  # noqa: BLE001 - a trace must never break a recording
+    except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -217,7 +217,7 @@ def trace_skip(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(section, fields)
-    except Exception:  # noqa: BLE001 - a trace must never break a recording
+    except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 

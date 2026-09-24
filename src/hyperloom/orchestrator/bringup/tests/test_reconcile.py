@@ -511,3 +511,90 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
         (BRINGUP_ROUND_LANE, "round-spec-1"),
         ("server_lifecycle", "h1"),
     }
+
+
+async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: bool) -> str:
+    """Open a round whose holder ends still owning lane rows, and give it a successor.
+
+    Reproduces the shape the sweep meets in a live session: the lanes are taken
+    by a real acquire, so the rows carry this process's own pid and owner scope
+    and no liveness probe can refute them.
+
+    Args:
+        db: The session database.
+        rounds: The round store to open the round in.
+        tasks: The registry the holder and successor rows live in.
+        cleanup_confirmed: What the holder's terminal evidence claims. Both the
+            lane sweep and :func:`_terminal_by_observation` read it, for their
+            two different questions.
+
+    Returns:
+        str: The successor task's id.
+    """
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    await _open_round(rounds, tasks, holder="spec-1")
+    await locks.acquire_many(["server_lifecycle"], holder_id="h1", task_id="spec-1", action="explore", ttl_sec=7200)
+    await tasks.transition("spec-1", "running")
+    await tasks.transition(
+        "spec-1",
+        "succeeded",
+        evidence={"outcome": {"state": "succeeded"}, "cleanup_confirmed": cleanup_confirmed},
+    )
+    successor = await tasks.create(
+        kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
+    )
+    # Nothing here is reclaimable by liveness: the pid on the rows is this test.
+    assert await locks.reap_dead_holders() == []
+    return successor.task_id
+
+
+@pytest.mark.asyncio
+async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db):
+    """The bound on the rule above: nothing is freed and nothing is advanced.
+
+    This is the shape of the 2026-09-21 rows. Nothing resolves them, by design:
+    no probe decides that a lane is free, because every identity available here
+    is one a served process can leave. The holder also fails
+    ``_terminal_by_observation``, which asks the stricter question of whether it
+    ended cleanly enough to move a round on. A pass that freed these lanes would
+    be freeing a lane whose work may still be running.
+    """
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
+
+    report = await rec.run(_NOW + 10.0)
+
+    assert report.leases_reaped == 0
+    assert (report.handed_off, report.settled) == ([], [])
+    assert {r["lane"] for r in await db.fetchall("SELECT lane FROM leases")} == {
+        BRINGUP_ROUND_LANE,
+        "server_lifecycle",
+        "benchmark_lane",
+        "profile_lane",
+        "gpu_research_lane",
+    }
+    assert (await rounds.get("round-spec-1")).holder_task_id == "spec-1"
+    assert (await rounds.get("round-spec-1")).state == OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
+    """The cost of refusing to guess, pinned one level up.
+
+    A holder that ended with its cleanup unconfirmed keeps its lane, so a round
+    whose only remaining obstacle is that lane no longer resolves itself. Seven
+    rounds of review showed every cheap proof of "the lane is free" to be a
+    proxy a served process slips out of, and releasing a lane wrongly puts two
+    rounds on the same cards. So the round waits, and the operator is told which
+    lane to look at.
+    """
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=True)
+
+    report = await rec.run(_NOW + 10.0)
+
+    assert report.leases_reaped == 0
+    assert (report.handed_off, report.settled) == ([], [])
+    assert (await rounds.get("round-spec-1")).state == OPEN
+    # The lane rows are still there, and counted for the operator.
+    assert report.leases_unverifiable >= 1

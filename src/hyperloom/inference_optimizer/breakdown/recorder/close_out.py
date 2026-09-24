@@ -11,13 +11,12 @@ knows the sequence finished. Until it writes, the section stands at
 fragment (the close-out was never reached), ``running`` (the mid-sequence
 snapshot, or a process that died), and any other status (the verdict).
 
-Recording is best-effort: a failure here must never propagate into the
-wind-down it is describing.
+Recording is best-effort: spool failures are parked by :class:`Recorder`
+and must not propagate into the wind-down they describe.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,10 +25,8 @@ from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 from .trace import trace_skip
-from .recorder_warnings import note_failure
-
-log = logging.getLogger(__name__)
 
 SECTION = "close"
 STEP_SECTION = "close_step"
@@ -82,18 +79,14 @@ def _stamp(ts: str) -> str:
 
 
 def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
-    """Deep-merge ``payload`` into the ``close`` singleton. Never raises."""
+    """Deep-merge ``payload`` into the ``close`` singleton."""
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
     if not payload:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    try:
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001 — the wind-down outranks its own record
-        log.debug("record close failed", exc_info=True)
-        trace_skip(reason="writer raised", section=SECTION, error=exc)
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
 
 
 def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None:
@@ -141,11 +134,7 @@ def record_close_step(
         row["task_id"] = str(task_id)
     if detail:
         row["detail"] = str(detail)
-    try:
-        recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record close step failed", exc_info=True)
-        trace_skip(reason="writer raised", section=STEP_SECTION, error=exc)
+    recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
 
 
 def record_close_artifacts(
@@ -215,7 +204,7 @@ def record_final_recipe(
     extra_server_args: str = "",
     extra_envs: Mapping[str, Any] | None = None,
 ) -> None:
-    """Record the configuration the session ended on. Never raises.
+    """Record the configuration the session ended on.
 
     No event holds the terminal recipe: a revert takes a layer off the stack
     without retracting the ledger row that adopted it. ``action_path`` is the
@@ -392,16 +381,19 @@ def record_close_settled(
     ``degraded`` when any recorded step reported ``failed``, ``succeeded``
     otherwise: reaching this function is itself the evidence that the sequence
     ran to the end, so an un-settled step does not count against the verdict.
+    An unreadable spool is also ``degraded``: the sequence finished, but the
+    step rows cannot be used to prove it was clean.
     ``stop_reason`` is recorded so the escalation verdict stays auditable.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
     reason = str(stop_reason or "").strip()
+    step_failed = _any_step_failed(session_dir)
     _write(
         session_dir,
         {
-            "status": "degraded" if _any_step_failed(session_dir) else "succeeded",
+            "status": "succeeded" if step_failed is False else "degraded",
             "end_time": _stamp(ts),
             "close_sequence_done": True,
             "stop_reason": reason,
@@ -513,31 +505,23 @@ def record_write_back_settled(
 
 
 def _write_arc(session_dir: Path | str, payload: Mapping[str, Any]) -> None:
-    """Deep-merge ``payload`` into the write-back singleton. Never raises."""
-    try:
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(
-            WRITE_BACK_SECTION,
-            dict(payload),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record write-back failed", exc_info=True)
-        trace_skip(reason="writer raised", section=WRITE_BACK_SECTION, error=exc)
+    """Deep-merge ``payload`` into the write-back singleton."""
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(
+        WRITE_BACK_SECTION,
+        dict(payload),
+    )
 
 
 def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping[str, Any]) -> None:
-    """Upsert one attempt row, keyed by its number. Never raises."""
+    """Upsert one attempt row, keyed by its number."""
     if not session_dir:
         trace_skip(reason="no session_dir", section=WRITE_BACK_ATTEMPT_SECTION)
         return
-    try:
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
-            WRITE_BACK_ATTEMPT_SECTION,
-            dict(row),
-            key=str(int(attempt)),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record write-back attempt failed", exc_info=True)
-        trace_skip(reason="writer raised", section=WRITE_BACK_ATTEMPT_SECTION, error=exc)
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
+        WRITE_BACK_ATTEMPT_SECTION,
+        dict(row),
+        key=str(int(attempt)),
+    )
 
 
 def _queue_depth(session_dir: Path | str) -> dict[str, int]:
@@ -569,16 +553,20 @@ def _count_lines(path: Path) -> int:
         return 0
 
 
-def _any_step_failed(session_dir: Path | str) -> bool:
-    """Whether any close step this session recorded reported a failure."""
+def _any_step_failed(session_dir: Path | str) -> bool | None:
+    """Whether any close step this session recorded reported a failure.
+
+    ``None`` when the spool cannot be read, so the verdict cannot treat
+    silence as a clean close.
+    """
     try:
         # Deferred: the assembler imports this package's recorder module.
         from .assembler import close_steps
 
         return any(str(row.get("status") or "") == _FAILED for row in close_steps(session_dir))
-    except Exception as exc:  # noqa: BLE001 — an unreadable spool must not block the close
+    except RECORDING_ERRORS as exc:
         note_failure(section="close", error=exc, detail="close verdict: step readback failed")
-        return False
+        return None
 
 
 def _rel(path: Path, session_dir: Path) -> str:

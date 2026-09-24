@@ -271,7 +271,7 @@ def _reap_stale_engine_ports() -> None:
     try:
         import re as _re
         import signal as _signal
-    except Exception:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         return
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     for port in _REAP_PORTS:
@@ -282,7 +282,7 @@ def _reap_stale_engine_ports() -> None:
                 text=True,
                 timeout=15,
             ).stdout
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             continue
         for m in _re.finditer(r"pid=(\d+)", out or ""):
             try:
@@ -668,7 +668,7 @@ def main() -> int:
                 int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
             )
             summary["gpu_metrics_csv"] = _samp_csv
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
             _log(f"GPU sampler start failed: {exc}")
 
     # Only the leader serves a local HTTP endpoint; workers have none.

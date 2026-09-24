@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.llm_headers import expand_env_refs, format_custom_headers, parse_custom_headers
 from kernelforge.llm import (
     LlmGateway,
-    expand_env_refs,
-    format_custom_headers,
     normalize_anthropic_base_url,
-    parse_custom_headers,
     resolve_anthropic_gateway,
     resolve_openai_gateway,
 )
@@ -136,19 +134,19 @@ def test_parse_custom_headers_lines_json_and_envref(monkeypatch):
 
 def test_comma_separated_pairs_are_not_split(caplog):
     """A header value may contain commas, so one line stays one header."""
-    with caplog.at_level("WARNING", logger="kernelforge.llm"):
+    with caplog.at_level("WARNING", logger="hyperloom.common.llm_headers"):
         parsed = parse_custom_headers("user: alice, x-foo: bar")
     assert parsed == {"user": "alice, x-foo: bar"}
     assert "packs more headers on one line" in caplog.text
 
     caplog.clear()
-    with caplog.at_level("WARNING", logger="kernelforge.llm"):
+    with caplog.at_level("WARNING", logger="hyperloom.common.llm_headers"):
         parse_custom_headers("Accept: text/html, application/json")
     assert "packs more headers" not in caplog.text
 
 
 def test_header_line_without_a_colon_is_reported(caplog):
-    with caplog.at_level("WARNING", logger="kernelforge.llm"):
+    with caplog.at_level("WARNING", logger="hyperloom.common.llm_headers"):
         assert parse_custom_headers("user: alice\nnonsense") == {"user": "alice"}
     assert "without a 'Name: value' colon" in caplog.text
 

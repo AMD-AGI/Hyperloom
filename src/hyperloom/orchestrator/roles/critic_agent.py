@@ -834,7 +834,7 @@ class CriticAgentBackend:
                         "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
                     },
                 )
-        except Exception:  # noqa: BLE001 — trace must never break the review
+        except Exception:
             log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
 
     def _record_review_evidence(
@@ -868,54 +868,51 @@ class CriticAgentBackend:
             workdir (Path): This turn's workdir, holding the artifacts.
             kb_priors (dict[str, Any]): The priors trace for the turn.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
-            context = request.get("context") if isinstance(request.get("context"), dict) else {}
-            macro_cycle = context.get("macro_cycle")
-            if macro_cycle is None:
-                return
-            subjects = _review_subjects(judge_bundle)
-            writes: dict[str, dict[str, Any]] = {}
-            for write in emit.get("kb_writes") or []:
-                if not isinstance(write, dict):
-                    continue
-                target = str(write.get("target_proposal_msg_id") or "")
-                result = write.get("result") if isinstance(write.get("result"), dict) else {}
-                if target:
-                    writes[target] = {
-                        "trigger": str(write.get("trigger") or ""),
-                        "status": str(result.get("status") or ""),
-                        "detail": str(result.get("detail") or result.get("error") or ""),
-                    }
-            artifacts = {
-                name: str(workdir / filename)
-                for name, filename in (
-                    ("request_path", "request.json"),
-                    ("judge_bundle_path", "judge_bundle.json"),
-                    ("review_path", "review.json"),
-                    ("emit_path", "emit.json"),
-                )
-            }
-            for verdict in (review or {}).get("review_verdicts") or []:
-                if not isinstance(verdict, dict):
-                    continue
-                target = str(verdict.get("target_proposal_msg_id") or "")
-                if not target:
-                    continue
-                kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
-                if kb_priors:
-                    kb["priors"] = kb_priors
-                if target in writes:
-                    kb["write"] = writes[target]
-                record_review_evidence(
-                    macro_cycle=macro_cycle,
-                    proposal_id=subjects.get(target) or target,
-                    artifacts=artifacts,
-                    kb=kb,
-                )
-        except Exception:  # noqa: BLE001 — observability cannot break the review
-            log.debug("critic_agent: review evidence record failed", exc_info=True)
+        context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        macro_cycle = context.get("macro_cycle")
+        if macro_cycle is None:
+            return
+        subjects = _review_subjects(judge_bundle)
+        writes: dict[str, dict[str, Any]] = {}
+        for write in emit.get("kb_writes") or []:
+            if not isinstance(write, dict):
+                continue
+            target = str(write.get("target_proposal_msg_id") or "")
+            result = write.get("result") if isinstance(write.get("result"), dict) else {}
+            if target:
+                writes[target] = {
+                    "trigger": str(write.get("trigger") or ""),
+                    "status": str(result.get("status") or ""),
+                    "detail": str(result.get("detail") or result.get("error") or ""),
+                }
+        artifacts = {
+            name: str(workdir / filename)
+            for name, filename in (
+                ("request_path", "request.json"),
+                ("judge_bundle_path", "judge_bundle.json"),
+                ("review_path", "review.json"),
+                ("emit_path", "emit.json"),
+            )
+        }
+        for verdict in (review or {}).get("review_verdicts") or []:
+            if not isinstance(verdict, dict):
+                continue
+            target = str(verdict.get("target_proposal_msg_id") or "")
+            if not target:
+                continue
+            kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
+            if kb_priors:
+                kb["priors"] = kb_priors
+            if target in writes:
+                kb["write"] = writes[target]
+            record_review_evidence(
+                macro_cycle=macro_cycle,
+                proposal_id=subjects.get(target) or target,
+                artifacts=artifacts,
+                kb=kb,
+            )
 
     @staticmethod
     def _build_kb_priors_trace(
@@ -1081,7 +1078,7 @@ class CriticAgentBackend:
                 operation="review",
                 **kwargs,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
@@ -1113,7 +1110,7 @@ class CriticAgentBackend:
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
@@ -1202,7 +1199,7 @@ class CriticAgentBackend:
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call append failed",
                 exc_info=True,
@@ -1238,7 +1235,7 @@ class CriticAgentBackend:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call failure append failed",
                 exc_info=True,
@@ -1253,25 +1250,19 @@ class CriticAgentBackend:
         call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a critic reasoning loop."""
-        try:
-            prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                call_id=call_id,
-                model=self._review_model,
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
-            log.debug(
-                "full-trace: critic conversation append failed",
-                exc_info=True,
-            )
+        prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="critic",
+            role="critic",
+            call_id=call_id,
+            model=self._review_model,
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     def _load_skill_preamble(self) -> str:
         """Load and cache the critic-agent skill/action markdown preamble."""

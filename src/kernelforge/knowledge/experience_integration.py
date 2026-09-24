@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import json
 import os
 import re
@@ -926,7 +925,7 @@ def _try_apply_candidate(
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - scoring is third-party; worktree is discarded
         _git_discard_worktree(
             workspace_dir,
             pre_untracked=pre_untracked,
@@ -1044,28 +1043,23 @@ def kb_warmstart(
             "read_error": "",
         }
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         try:
-            read_kwargs = {
-                "config": config,
-                "kernel_path": kernel,
-                "kernel_source": kernel_source,
-                "kernel_backend": kernel_backend,
-                "target_functions": target_functions,
-                "framework": framework,
-                "top_k": warmstart_policy.top_k(),
-                "source_files": source_files,
-                "workspace": workspace_dir,
-                "operator_name": operator_name,
-            }
-            reader_parameters = inspect.signature(read_top_solutions).parameters
-            if "read_status" in reader_parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in reader_parameters.values()
-            ):
-                read_kwargs["read_status"] = read_status
-            sols = read_top_solutions(**read_kwargs)
+            sols = read_top_solutions(
+                config=config,
+                kernel_path=kernel,
+                kernel_source=kernel_source,
+                kernel_backend=kernel_backend,
+                target_functions=target_functions,
+                framework=framework,
+                top_k=warmstart_policy.top_k(),
+                source_files=source_files,
+                workspace=workspace_dir,
+                operator_name=operator_name,
+                read_status=read_status,
+            )
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
@@ -1333,18 +1327,13 @@ def _cheap_summary(archive: Any) -> dict:
     """Build a non-LLM experience summary from the on-disk candidate archive."""
     strategy = ""
     if archive is not None:
-        try:
-            index = archive.load_index()
-            keeps = [
-                entry
-                for entry in index
-                if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
-            ]
-            if keeps:
-                best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
-                strategy = (best.get("plan") or "").strip()
-        except Exception:  # noqa: BLE001 - best-effort; empty summary is acceptable
-            pass
+        index = archive.load_index()
+        keeps = [
+            entry for entry in index if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
+        ]
+        if keeps:
+            best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
+            strategy = (best.get("plan") or "").strip()
     return {"category": "", "strategy": strategy, "recipe": "", "lessons": ""}
 
 
@@ -1390,7 +1379,7 @@ def write_experience_to_kb(
         digest = ""
         archive = getattr(loop_runner, "archive", None)
         if archive is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError, ValueError, KeyError):
                 keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
                 scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
                 if scored_keeps:
@@ -1404,7 +1393,7 @@ def write_experience_to_kb(
             snr_db = snr_db_override
 
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)

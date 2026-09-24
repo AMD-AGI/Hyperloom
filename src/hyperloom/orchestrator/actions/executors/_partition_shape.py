@@ -98,11 +98,7 @@ def per_stream_footprint_gib(
     # in play or not.
     from hyperloom.orchestrator.kernel.roofline_ceiling import load_model_meta
 
-    try:
-        meta = load_model_meta(model_path, precision_hint=precision)
-    except Exception as exc:  # noqa: BLE001 — an unreadable checkpoint is "unknown", not fatal
-        log.debug("cannot size partitions from %s: %s", model_path, exc)
-        return 0.0, ""
+    meta = load_model_meta(model_path, precision_hint=precision)
     if meta is None or meta.weight_bytes <= 0:
         return 0.0, ""
     return meta.weight_bytes / float(1024**3), "weights"

@@ -169,6 +169,73 @@ def test_integrated_kernel_classifies_correctly(tmp_path: Path) -> None:
     assert "integrated" in out["by_kernel"][0]["summary"].lower()
 
 
+def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tmp_path: Path) -> None:
+    """Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
+    kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
+    ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"). It never wrote
+    kernel_opt_task_attempts and never shares a kernel_id/source_file with the roofline trace's k001.
+    Without operator-name reconciliation, this kernel falsely reports as "never attempted" even though it
+    is the exact kernel that landed the session's validated gain."""
+    state = _make_state(
+        top15=[
+            _top15_entry(
+                "k001",
+                name="_fwd_grouped_kernel_stage1",
+                source_file="/sgl-workspace/aiter/op_tests/triton_tests/utils/mla_decode_ref.py",
+            )
+        ],
+    )
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "target_file": "/sgl-workspace/sglang/python/sglang/kernels/ops/attention/decode_attention.py",
+            "ts": "2026-09-21T18:30:06.535892+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "k001"
+    assert row["category"] == CATEGORY_INTEGRATED
+    # This kernel's real gain is recorded elsewhere in optimization_stack -- this row must never
+    # print a fabricated "measured 0.000x" for a micro benchmark that never ran.
+    assert "0.000x" not in row["summary"]
+    assert "micro_speedup=" not in row["summary"]
+    # The raw field must agree with the summary text: absent, not 0.0, so nothing reading the JSON
+    # directly (bypassing the rendered string) sees a fabricated zero either.
+    assert row["last_micro_speedup"] is None
+
+
+def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> None:
+    """Reproduces a real session: the winning optimization was a gemm_tuning KEEP (one campaign
+    retuning 14 GEMM shapes through a CSV), which never writes kernel_opt_task_attempts and has no
+    single roofline top15 kernel_id to match against. Without a standalone entry, this session's
+    kernel_optimization_summary.json reports attempted:0 / kernel_opt_outcome:skip even though the
+    session's current_best came from exactly this KEEP."""
+    state = _make_state(top15=[])
+    state.optimization_stack = [
+        {
+            "action": "gemm_tuning",
+            "variant_name": "forge_fmoe_ck",
+            "gain_pct": 6.957474814637951,
+            "tput": 1263.3585977736439,
+            "ts": "2026-09-18T14:19:56.765419+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "forge_fmoe_ck"
+    assert row["category"] == CATEGORY_INTEGRATED
+    assert "micro_speedup=" not in row["summary"]
+    assert row["last_micro_speedup"] is None
+
+
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],

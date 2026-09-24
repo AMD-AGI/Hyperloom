@@ -36,6 +36,7 @@ from hyperloom.common import codex_session, llm_config
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
@@ -128,7 +129,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     if not logs:
         try:
             logs = sorted(ws.rglob("server.log"))[:1]
-        except Exception:
+        except OSError:
             logs = []
     if not logs:
         return None
@@ -137,7 +138,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
         return None
     try:
         text = logs[0].read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    except OSError:
         return None
     if stem not in text:
         return False
@@ -740,7 +741,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:  # noqa: BLE001 — fall back so apply surfaces the real failure.
+    except Exception:
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -1628,8 +1629,8 @@ def _gemm_router_targets(
             which leaves the lane ceiling on its own per-target default.
     """
     try:
-        from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
-        from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
+        from kernelforge.gemm_tune.model_analyzer import analyze_model
+        from kernelforge.gemm_tune.router import select_tuners
 
         specs = select_tuners(
             analyze_model(model_path),
@@ -1642,7 +1643,7 @@ def _gemm_router_targets(
             has_shapes_json=has_shapes_json,
             has_tunableop_input=has_tunableop_input,
         )
-    except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
+    except Exception:
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
         return ()
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
@@ -1700,7 +1701,7 @@ def _fusion_session_serve_args(
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
     if block_size <= 0 and "vllm" in (framework or "").strip().lower():
-        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+        from hyperloom.inference_optimizer.model_config_utils import (
             _sparse_kv_block_size,
         )
 
@@ -2669,13 +2670,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     return "per_token"
 
 
-_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
-
-
 def _is_gfx950(gpu_type: str) -> bool:
     """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
     key = (gpu_type or "").strip().lower()
-    if key in _GFX950_GPU_TYPES:
+    if is_gfx_arch(key, "gfx950"):
         return True
     if not key or key == "auto":
         return _is_gfx950_rocminfo()
@@ -3306,10 +3304,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
             'an incomplete install; reinstall with pip install -e ".[forge]"'
         )
         return
-    try:
-        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
-        return
+    moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
     if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
         log.warning(
             "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
@@ -4453,7 +4448,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             shutil.copy2(src_path, dst)
             updated[env_key] = str(dst)
             rel_paths.append(rel)
-    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
+    except Exception:
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
@@ -4475,7 +4470,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
-    except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
+    except Exception:
         log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
     return updated, snap_dir
 
@@ -4672,38 +4667,46 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_fusion_decode_trace(state, payload: dict) -> str:
-    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
+def _resolve_fusion_decode_trace(state) -> str:
+    """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
-    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
-    re-profiling. Explicit ``payload['trace_path']`` wins.
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace.
+    PRELUDE/roofline already captured one and promoted it into
+    ``state.last_profile_trace`` alongside the workload it was measured on
+    (``SharedState.record_profile_workload``), so the lane reuses that rather than
+    re-profiling. ``state.last_profile_trace`` is the only source: the fusion
+    opportunities discovered below are attributed to the run that produced the trace,
+    and a caller-supplied path would file this run's decisions under another workload.
+
+    ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
+    round that merged its ranks, and the capture directory otherwise --
+    ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
+    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
+    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    newest capture in it, which is this run's too: the directory is the round's own
+    ``trace_dir``.
+
+    Args:
+        state: The session ``SharedState``.
+
+    Returns:
+        str: The decode trace file to discover against, or ``""`` when this run has
+            no usable trace yet.
     """
-
-    def _trace_file(path_str: str) -> str:
-        path = Path(path_str)
-        if path.is_file():
-            return str(path)
-        if not path.is_dir():
-            return ""
-        candidates = sorted(
-            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return str(candidates[0]) if candidates else ""
-
-    explicit = str(payload.get("trace_path") or "").strip()
-    if explicit:
-        resolved = _trace_file(explicit)
-        if resolved:
-            return resolved
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace:
-        resolved = _trace_file(trace)
-        if resolved:
-            return resolved
-    return ""
+    if not trace:
+        return ""
+    path = Path(trace)
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(
+        list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(captures[0]) if captures else ""
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -4860,8 +4863,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = _resolve_fusion_decode_trace(state, payload)
+    trace_path = _resolve_fusion_decode_trace(state)
     if not trace_path:
+        recorded = str(getattr(state, "last_profile_trace", "") or "").strip()
         return {
             "status": "skipped",
             "backend": "forge",
@@ -4869,7 +4873,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "error_class": "decode_trace_missing",
             "error": (
                 "no decode trace available for fusion discovery "
-                "(state.last_profile_trace empty; run profile/roofline first)"
+                f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)"
             ),
             "decision": "REVERT",
             "kept": False,
@@ -4952,7 +4956,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (  # noqa: PLC0415
+        from hyperloom.agents.kernel.tools.forge_fusion import (
             salvage_forge_fusion_from_workspace,
         )
 
@@ -5965,7 +5969,7 @@ def _grade_integrate_accuracy(
         from ..state.shared_state import SharedState
 
         baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:  # noqa: BLE001 - an unresolvable baseline degrades, never raises
+    except Exception:
         log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
 
     measured = bench_result.get("accuracy")
@@ -5974,16 +5978,13 @@ def _grade_integrate_accuracy(
     metric = str(bench_result.get("accuracy_metric") or "")
     source_file = str(bench_result.get("accuracy_source") or "")
     if new_accuracy is None:
-        try:
-            eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-            parsed = eval_out.get("accuracy")
-            if isinstance(parsed, (int, float)):
-                new_accuracy = float(parsed)
-                task = str(eval_out.get("task") or "")
-                metric = str(eval_out.get("metric") or "")
-                source_file = str(eval_out.get("source_file") or "")
-        except Exception:  # noqa: BLE001 - a failed parse degrades to "no verdict"
-            log.debug("integrate_handler: accuracy re-parse failed", exc_info=True)
+        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            new_accuracy = float(parsed)
+            task = str(eval_out.get("task") or "")
+            metric = str(eval_out.get("metric") or "")
+            source_file = str(eval_out.get("source_file") or "")
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:

@@ -1135,9 +1135,17 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
     return missing
 
 
-# The harness the single-node path ends up on: InferenceX's benchmark_lib.sh force-reinstalls this commit over
-# whatever pip resolved.
-_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+# Pin consulted on multi-node preflight only: ``_ensure_lm_eval_dep`` skips single-node
+# installs (``single_node_runtime_install``) because InferenceX's ``benchmark_lib.sh``
+# reinstalls its own hardcoded pre-#3293 ref before every accuracy round there. This
+# constant therefore does *not* decide which harness a single-node round runs; the guard
+# appended to ``lm_eval_sitecustomize.py`` in ``_inferencex_patcher.py`` does.
+#
+# v0.4.13 (``ddd6722``). The previous pin matched InferenceX's reinstall ref
+# (2025-12-02, ``b315ef3``): its failure handler logs bare ``outputs``, so a refused
+# connection raises ``UnboundLocalError`` over the real error
+# (EleutherAI/lm-evaluation-harness#3293, fixed upstream 2026-02-24).
+_LM_EVAL_PINNED_REF = "ddd67220430a2470529f25fd5c05a576ca1057a0"
 _LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
 # git first, then the archive, because the sandbox may not ship a git binary.
 _LM_EVAL_PINNED_SPECS = (
@@ -1820,7 +1828,7 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
         from ..session.sbd_v6 import set_pending_install_event
 
         set_pending_install_event(args, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to initialize SBD V6 install event", exc_info=True)
     return event
 
@@ -1890,7 +1898,7 @@ def _mark_pending_install_event_failed(
                 exc=exc,
             )
         return event
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to finalize SBD V6 install failure", exc_info=True)
         return None
 
@@ -1909,26 +1917,23 @@ def _run_install_step(
     except BaseException as exc:
         try:
             _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:  # noqa: BLE001 — preserve the original preflight exception
+        except Exception:
             log.warning("failed to record SBD V6 install-step failure", exc_info=True)
         raise
-    try:
-        outcome = dict(result) if isinstance(result, dict) else {}
-        status = str(outcome.pop("status", success_status) or success_status)
-        skip_reason = outcome.pop("skip_reason", None)
-        message = outcome.pop("message", None)
-        fields = {**success_fields, **outcome}
-        _record_install_step(
-            event,
-            step_id=step_id,
-            category=category,
-            status=status,
-            skip_reason=skip_reason,
-            message=message,
-            **fields,
-        )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
-        log.warning("failed to record SBD V6 install step", exc_info=True)
+    outcome = dict(result) if isinstance(result, dict) else {}
+    status = str(outcome.pop("status", success_status) or success_status)
+    skip_reason = outcome.pop("skip_reason", None)
+    message = outcome.pop("message", None)
+    fields = {**success_fields, **outcome}
+    _record_install_step(
+        event,
+        step_id=step_id,
+        category=category,
+        status=status,
+        skip_reason=skip_reason,
+        message=message,
+        **fields,
+    )
     return result
 
 
@@ -1984,7 +1989,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
 
     try:
         path = persist_pending_install_event(args, session_dir)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("failed to persist SBD V6 install event", exc_info=True)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
             log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
@@ -2521,7 +2526,7 @@ def _preflight(
             inferencex_path=inferencex_path,
             resolved_urls=resolved_urls,
         )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to finalize SBD V6 install event", exc_info=True)
 
     return resolved_urls

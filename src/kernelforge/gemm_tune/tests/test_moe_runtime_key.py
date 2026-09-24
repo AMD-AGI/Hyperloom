@@ -318,7 +318,8 @@ class TestFmoeCkAcceptsIt:
         rows = path.read_text(encoding="utf-8").strip().splitlines()[1:]
         assert [r.split(",")[0] for r in rows] == ["1", "8", "64"]
 
-    def test_provenance_is_reported_as_runtime_observed(self, tmp_path):
+    def test_the_logged_key_is_the_one_handed_to_the_tuner(self, tmp_path):
         tuner = self._tuner(tmp_path, self._demand(tmp_path))
-        _, source = tuner._resolve_untuned_csv()
+        resolved, source = tuner._resolve_untuned_csv()
         assert source == "runtime_observed"
+        assert [row.split(",")[2] for row in resolved.read_text(encoding="utf-8").splitlines()[1:]] == ["384"]

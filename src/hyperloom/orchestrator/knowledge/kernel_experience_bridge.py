@@ -102,11 +102,7 @@ class KernelExperienceBridge:
     def _emit(self, event: dict[str, Any]) -> None:
         if not callable(self.audit_hook):
             return
-        try:
-            self.audit_hook(event)
-        except Exception:
-            # Audit is observational and cannot break a forge attempt.
-            return
+        self.audit_hook(event)
 
 
 __all__ = ["KernelExperienceBridge", "KernelExperienceStatus"]

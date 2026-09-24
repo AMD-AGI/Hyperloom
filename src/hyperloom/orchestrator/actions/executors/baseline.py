@@ -105,6 +105,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
     failed_patch_anchors_in,
@@ -1650,15 +1651,8 @@ class BaselineExecutor:
 
     def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
         """Peek the one-shot eager fallback flag WITHOUT consuming it."""
-        try:
-            state = self._resolve_shared_state(shared_state)
-            return bool(getattr(state, "baseline_eager_fallback", False))
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
-            log.debug(
-                "baseline_executor: eager-fallback flag peek failed",
-                exc_info=True,
-            )
-            return False
+        state = self._resolve_shared_state(shared_state)
+        return bool(getattr(state, "baseline_eager_fallback", False))
 
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
@@ -1669,7 +1663,7 @@ class BaselineExecutor:
             state.baseline_eager_fallback = False
             state.save(self.session_dir)
             return True
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
+        except Exception:
             log.debug(
                 "baseline_executor: eager-fallback flag check failed",
                 exc_info=True,
@@ -1771,6 +1765,10 @@ class BaselineExecutor:
             # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
             # rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
+            # Best-effort, unlike the probe below: without it a refused connection ends the round on
+            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+            # was already going to fail -- not a reason to refuse to start one.
+            ensure_eval_unbound_outputs_patched(probe_root)
             if not ensure_eval_probe_patched(probe_root):
                 msg = (
                     "the generation-pathology probe is not installed "
@@ -1794,12 +1792,8 @@ class BaselineExecutor:
             # stops the whole session.
             try:
                 compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
-            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
-                log.error(
-                    "baseline_executor: eval-concurrency compat patch raised for %s: %s",
-                    ix_root,
-                    exc,
-                )
+            except OSError as exc:
+                log.error("baseline_executor: eval-concurrency compat patch failed for %s: %s", ix_root, exc)
                 compat_ok = False
             if not compat_ok:
                 msg = (
@@ -1942,7 +1936,7 @@ class BaselineExecutor:
                         measured,
                     )
             result["baseline_convergence"] = record
-        except Exception:  # noqa: BLE001 - observability must never break a baseline
+        except Exception:
             log.debug("baseline convergence record failed", exc_info=True)
 
     @staticmethod
@@ -2030,7 +2024,7 @@ class BaselineExecutor:
         # Only a context that names its session binds one.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -2069,30 +2063,22 @@ class BaselineExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "baseline timeline: no session bound; this measurement's whole event will "
-                    "be missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            if inline:
-                return make_sink(inline, producer=_RECORDER_PRODUCER)
-            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
-            event = baseline_event_id(
-                str(getattr(state, "phase", "") or "unphased"),
-                int(getattr(state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+        if not session_is_bound():
             log.warning(
-                "baseline timeline: could not resolve an event to record into; this "
-                "measurement's whole event will be missing from the breakdown",
-                exc_info=True,
+                "baseline timeline: no session bound; this measurement's whole event will "
+                "be missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        if inline:
+            return make_sink(inline, producer=_RECORDER_PRODUCER)
+        state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+        event = baseline_event_id(
+            str(getattr(state, "phase", "") or "unphased"),
+            int(getattr(state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
 
     def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
         """The session's baseline failure counts as this measurement starts.
@@ -2109,7 +2095,7 @@ class BaselineExecutor:
             tuple[int | None, int | None]: The consecutive-failure streak and
                 the session total, or ``(None, None)`` when no state is bound.
         """
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return (
                 int(getattr(state, "baseline_failure_streak", 0) or 0),
@@ -2120,7 +2106,7 @@ class BaselineExecutor:
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Name the serving framework this measurement runs against."""
         params = ctx.task.params or {}
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return str(
                 params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
@@ -2516,10 +2502,7 @@ class BaselineExecutor:
             result.setdefault("nonfatal_warnings", [])
             result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
-            try:
-                shared_state.baseline_accuracy = acc_val
-            except Exception:  # noqa: BLE001 — salvage must never break baseline
-                log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            shared_state.baseline_accuracy = acc_val
         return acc_val
 
     def _salvage_sibling_baseline_accuracy(
@@ -2538,7 +2521,7 @@ class BaselineExecutor:
             from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
-        except Exception:  # noqa: BLE001 — salvage must never break the stop path
+        except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
         if _finite_score(eval_data.get("accuracy")) is None:
@@ -2684,7 +2667,7 @@ class BaselineExecutor:
                 _cfg_envs = _cfg_bench.setdefault("envs", {})
                 apply_runtime_override(_cfg_envs, _rt_from_params)
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+            except Exception:
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
@@ -2692,16 +2675,15 @@ class BaselineExecutor:
         # their say by here, and after the launch the same answer can only be
         # guessed at by parsing the server's own log back.
         if recorder is not None:
-            with suppress(Exception):
-                recorder.record_invocation(
-                    run_index=run_index,
-                    framework_args=effective_extra_server_args,
-                    extra_envs=base_extra_envs,
-                    config_path=materialized_config_path,
-                    framework=fw,
-                    model_path=resolved_model,
-                    args_mode=str(params.get("args_mode") or "append"),
-                )
+            recorder.record_invocation(
+                run_index=run_index,
+                framework_args=effective_extra_server_args,
+                extra_envs=base_extra_envs,
+                config_path=materialized_config_path,
+                framework=fw,
+                model_path=resolved_model,
+                args_mode=str(params.get("args_mode") or "append"),
+            )
         # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
         # capability-preflight aiperf before Magpie runs the materialized config.
         # Baseline/profile shell out here (not via _run_magpie), so without this the
@@ -2818,7 +2800,7 @@ class BaselineExecutor:
             live_shared_state.warm_replay_pending = pending
             try:
                 live_shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "combined warm replay recipe snapshot persist failed",
                     exc_info=True,
@@ -2888,7 +2870,7 @@ class BaselineExecutor:
                             live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.warning(
                             "combined warm replay cleanup persist failed",
                             exc_info=True,
@@ -2920,7 +2902,7 @@ class BaselineExecutor:
                 live_shared_state.warm_replay_pending = pending
                 try:
                     live_shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.debug(
                         "combined warm replay pending persist failed",
                         exc_info=True,
@@ -3356,7 +3338,7 @@ class BaselineExecutor:
             session_dir = Path(str(extra.get("session_dir") or self.session_dir))
             state = SharedState.load_or_init(session_dir)
             return bool(getattr(state, "baseline_double_run", False))
-        except Exception:  # noqa: BLE001 - keep baseline fallback double-run.
+        except Exception:
             log.debug(
                 "baseline_executor: could not resolve baseline_double_run from session state",
                 exc_info=True,

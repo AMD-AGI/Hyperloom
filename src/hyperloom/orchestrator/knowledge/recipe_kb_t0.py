@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
@@ -317,7 +318,7 @@ def _settle_warm_start_event(
     lessons: list[dict[str, Any]],
     pitfalls: list[dict[str, Any]],
 ) -> None:
-    """Close the warm_start event. Best-effort: the anchor outranks its record.
+    """Close the warm_start event.
 
     Args:
         recorder (Any): The open warm-start recorder.
@@ -332,23 +333,20 @@ def _settle_warm_start_event(
         lessons (list[dict[str, Any]]): The record's lessons.
         pitfalls (list[dict[str, Any]]): The record's pitfalls.
     """
-    try:
-        matched = None
-        if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
-            replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
-            matched = _warm_start_event.matched_block(
-                tier=tier,
-                confidence=confidence,
-                source=source,
-                canonical_id=canonical_id,
-                recipe=recipe,
-                expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-                lessons=lessons,
-                pitfalls=pitfalls,
-            )
-        recorder.finish(match_status=match_status, matched=matched)
-    except Exception:  # noqa: BLE001 — defensive; the record is advisory
-        log.debug("warm_start event settle failed", exc_info=True)
+    matched = None
+    if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
+        replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
+        matched = _warm_start_event.matched_block(
+            tier=tier,
+            confidence=confidence,
+            source=source,
+            canonical_id=canonical_id,
+            recipe=recipe,
+            expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
+            lessons=lessons,
+            pitfalls=pitfalls,
+        )
+    recorder.finish(match_status=match_status, matched=matched)
 
 
 def _find_config_donor(
@@ -603,12 +601,9 @@ def _build_t0_trace_extras(
     return _extras
 
 
-_GPU_ISA_BY_SKU = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
+#: SKU -> ISA family. Derived from the board identity table, so a new board becomes a
+#: fallback donor for its own ISA in the commit that adds it.
+_GPU_ISA_BY_SKU = {sku: arch for sku, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items()}
 #: ``ep`` and the partition mode suffix at any node count, so they appear both inside a cluster suffix and on their
 #: own. Kept as a named fragment rather than repeated, so the two forms cannot drift.
 _SHAPE_SUFFIX = r"(?:_ep[1-9]\d*)?(?:_(?:dpx|qpx|cpx))?"
@@ -1152,7 +1147,7 @@ def run_t0_anchor(
                     "details": {"sid": sid},
                 },
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("T0 anchor put_recipe raised unexpectedly")
 
     else:
@@ -1256,20 +1251,17 @@ def run_t0_anchor(
     else:
         wsc_status = "hit"
     warm_source = _warm_recipe_source(warm_point, kb)
-    try:
-        shared_state.warm_start_context = _build_warm_start_context(
-            config_donor=config_donor,
-            config_donor_tier=config_donor_tier,
-            config_donor_confidence=config_donor_conf,
-            status=wsc_status,
-            tier=warm_tier,
-            confidence=warm_conf,
-            canonical_id=cid,
-            source=warm_source,
-            recipe=warm_point or None,
-        )
-    except Exception:  # noqa: BLE001 — defensive; context is advisory
-        log.exception("warm_start_context build failed")
+    shared_state.warm_start_context = _build_warm_start_context(
+        config_donor=config_donor,
+        config_donor_tier=config_donor_tier,
+        config_donor_confidence=config_donor_conf,
+        status=wsc_status,
+        tier=warm_tier,
+        confidence=warm_conf,
+        canonical_id=cid,
+        source=warm_source,
+        recipe=warm_point or None,
+    )
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     exact_history = warm_point.get("exact_history")
@@ -1335,7 +1327,7 @@ def run_t0_anchor(
     if save_state:
         try:
             shared_state.save(sd)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)",
                 sid,

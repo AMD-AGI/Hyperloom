@@ -14,6 +14,7 @@ import pytest
 from kernelforge.gemm_tune import utils
 from kernelforge.gemm_tune.tier3 import gate, ledger, sandbox
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.gemm_tune.tier3.referee import CaptureFailed
 from kernelforge.gemm_tune.tier3.runner import attempt_generated_tuner
 
 
@@ -522,7 +523,18 @@ class TestTheWholeChain:
     _ROWS = _HDR + "\n16,1536,7168,x,c=1,10.0,5.0,True\n"
     _CANDS = {"16x1536x7168": [{"backend": "x", "config": "c=1"}]}
 
-    def _run(self, tmp_path, monkeypatch, *, rows, cands, dispatch_cost=1e-6, correct=True, with_dispatch=True):
+    def _run(
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        rows,
+        cands,
+        dispatch_cost=1e-6,
+        correct=True,
+        with_dispatch=True,
+        uncapturable_shapes=(),
+    ):
         _, _, fake_gen = self._writes(tmp_path, rows, cands)
         monkeypatch.setattr("kernelforge.gemm_tune.tier3.runner.generate_tuner", fake_gen)
         monkeypatch.setattr(
@@ -540,10 +552,15 @@ class TestTheWholeChain:
 
             return _fn
 
+        def _baseline(shape):
+            if shape in uncapturable_shapes:
+                raise CaptureFailed("graph capture failed: RuntimeError('capture unsupported here')")
+            return _call(2e-6)
+
         kwargs = {}
         if with_dispatch:
             kwargs = {
-                "make_baseline": lambda shape: _call(2e-6),
+                "make_baseline": _baseline,
                 "make_dispatch": lambda shape: lambda c: _call(dispatch_cost),
                 "make_correctness": lambda shape: lambda call: correct,
             }
@@ -577,6 +594,19 @@ class TestTheWholeChain:
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, correct=False)
         assert not out.ok
         assert out.judgements[0].rejected_incorrect == 1
+
+    def test_a_shape_whose_baseline_cannot_be_captured_is_skipped_not_the_whole_attempt(
+        self, tmp_path, monkeypatch, open_gate
+    ):
+        cands = {**self._CANDS, "32x1536x7168": [{"backend": "x", "config": "c=1"}]}
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=cands, uncapturable_shapes={"32x1536x7168"})
+
+        by_shape = {j.shape: j for j in out.judgements}
+        assert by_shape["16x1536x7168"].improved
+        skipped = by_shape["32x1536x7168"]
+        assert not skipped.improved and not skipped.timings
+        assert "baseline not timed" in skipped.reason
+        assert out.ok and out.improved_shapes == 1
 
     def test_without_a_dispatch_nothing_is_emitted(self, tmp_path, monkeypatch, open_gate):
         # An unverified generated tuner is exactly what this tier must not emit.

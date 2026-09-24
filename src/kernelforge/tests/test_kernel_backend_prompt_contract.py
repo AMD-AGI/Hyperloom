@@ -355,7 +355,7 @@ class TestDocumentedSweepHelper:
         blocks = re.findall(r"```python\n(.*?)```", card.read_text(encoding="utf-8"), re.DOTALL)
         assert len(blocks) == 1, f"{_SWEEP_CARD}: expected exactly one python block to lock, found {len(blocks)}"
         namespace: dict = {"os": os}
-        exec(compile(blocks[0], str(card), "exec"), namespace)  # noqa: S102
+        exec(compile(blocks[0], str(card), "exec"), namespace)
         assert "_sweep_const" in namespace, f"{_SWEEP_CARD}: the documented block no longer defines _sweep_const"
         return namespace["_sweep_const"]
 

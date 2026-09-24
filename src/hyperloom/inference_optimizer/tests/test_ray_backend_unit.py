@@ -7,7 +7,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import gc
 import sys
+import weakref
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -632,7 +634,7 @@ class _FakeActor:
 class _LeaseFakeRay:
     """Minimal fake ``ray`` for ServingLease: get() unwraps refs, kill() records."""
 
-    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -644,6 +646,7 @@ class _LeaseFakeRay:
 
     def __init__(self):
         self.killed: list = []
+        self.cancelled: list = []
         self.shutdown_called = 0
 
     def cluster_resources(self) -> dict:
@@ -657,8 +660,11 @@ class _LeaseFakeRay:
             raise ref
         return ref
 
-    def wait(self, refs, num_returns=1, timeout=None):
+    def wait(self, refs, *, num_returns=1, timeout=None):
         return list(refs)[:num_returns], list(refs)[num_returns:]
+
+    def cancel(self, ref, **_kw):
+        self.cancelled.append(ref)
 
     def kill(self, actor):
         self.killed.append(actor)
@@ -726,6 +732,178 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     assert "ray_actor_error" in err
     assert fake.shutdown_called == 1
     assert backend._ensured is False
+
+
+class _StepMethod(_FakeMethod):
+    """``_FakeMethod`` that also records the fact of the call, for ordering assertions."""
+
+    def __init__(self, ret, steps: list[str], name: str):
+        super().__init__(ret)
+        self._steps = steps
+        self._name = name
+
+    def remote(self, *a, **kw):
+        self._steps.append(self._name)
+        return super().remote(*a, **kw)
+
+
+class _CooperativeFakeActor(_FakeActor):
+    """Actor that answers ``cancel_round``, so the submitter's cooperative step is observable."""
+
+    def __init__(self, ret, steps: list[str]):
+        super().__init__(ret)
+        self.cancel_round = _StepMethod(True, steps, "ask_actor_to_cancel")
+
+
+class _PendingFakeRay(_LeaseFakeRay):
+    """Fake ``ray`` whose submitted round never becomes ready -- the PENDING_NODE_ASSIGNMENT case."""
+
+    #: Poll budget, so a submitter with no deadline fails this test instead of hanging it forever.
+    _MAX_POLLS = 50
+
+    def __init__(self):
+        super().__init__()
+        self.polls = 0
+        #: Teardown steps, in the order the submitter took them.
+        self.steps: list[str] = []
+
+    def wait(self, refs, *, num_returns=1, timeout=None):
+        self.polls += 1
+        assert self.polls <= self._MAX_POLLS, "the submitter is still polling a round that will never be ready"
+        time.sleep(timeout or 0)
+        return [], list(refs)
+
+    def cancel(self, ref, **_kw):
+        self.steps.append("cancel_ref")
+        super().cancel(ref, **_kw)
+
+    def kill(self, actor):
+        self.steps.append("kill_actor")
+        super().kill(actor)
+
+
+def test_serving_lease_round_that_never_schedules_times_out(monkeypatch: pytest.MonkeyPatch):
+    """A round Ray never schedules is abandoned, not waited on forever (2026-09-21 stall)."""
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    # Shortened so the test spends its time on the order of the steps, not on their real budgets.
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+
+    assert time.monotonic() - started < 30.0
+    assert "ray_round_wait_timeout" in (excinfo.value.stderr or "")
+    # The headline number names the ceiling that was crossed, not the round's own (larger, uncrossed) cap.
+    assert excinfo.value.timeout == pytest.approx(0.2)
+    # Cooperative stop first, then the round is dropped -- but the actor is NOT killed.
+    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so a round that really is
+    # still running keeps its server subprocesses; killing the actor would hand their GPUs
+    # back to the scheduler and let the next round be placed on cards a live server maps.
+    # Keeping the actor alive keeps those devices reserved. A stuck resource is recoverable,
+    # a shared one is not.
+    assert fake.steps == ["ask_actor_to_cancel", "cancel_ref"]
+    assert actor not in fake.killed
+    assert lease._actor is actor
+    assert fake.cancelled
+
+
+def test_a_timed_out_lease_stays_quarantined_through_the_callers_teardown(monkeypatch: pytest.MonkeyPatch):
+    """The quarantine has to survive the caller's finally:, or it is not a quarantine.
+
+    A prior revision kept the actor alive inside ``_await_or_cancel`` and stopped
+    there. Every real caller — baseline, explore, integrate_patch — closes the
+    lease in a ``finally``, and ``close()`` kills the actor once its stop request
+    fails, handing those GPUs straight back to the scheduler while the served
+    tree may still map them. run_grid then moves to the next variant and is
+    placed on them. So the state is declared at the timeout and honoured at
+    every entry point: ensure, run_session_kill and close.
+    """
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+
+    assert lease._quarantined  # the round's label, whatever it is
+    # 1. The caller's teardown must not undo it.
+    lease.close()
+    assert actor not in fake.killed
+    assert lease._actor is actor
+    # 2. A second round on the same lease is refused, not attempted.
+    rc, _, err = lease.run_session_kill(["sleep", "1"], timeout=5)
+    assert rc == 1
+    assert "ray_lease_quarantined" in err
+    assert actor not in fake.killed
+    # 3. And nothing re-creates an actor behind its back.
+    with pytest.raises(rs.ServingLeaseQuarantined):
+        lease.ensure()
+
+
+def test_a_quarantined_actor_outlives_the_lease_that_declared_it(monkeypatch: pytest.MonkeyPatch):
+    """Refusing to kill the actor is not enough; the handle has to survive the lease.
+
+    A Ray actor lives as long as a handle to it does. Every real owner keeps its
+    lease in an action-local variable, closes it in a ``finally`` and drops it —
+    so if the quarantine lived only on that object, the last reference would go
+    with it and Ray would collect the actor, returning its GPUs exactly as
+    ``ray.kill`` would have. The handle is therefore parked at module scope,
+    which for these purposes is session scope.
+    """
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    monkeypatch.setattr(rs, "_QUARANTINED_ACTORS", [])
+
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+    actor_ref = weakref.ref(actor)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+    lease.close()
+
+    # The owner drops its lease, as every real caller does.
+    del lease, actor
+    gc.collect()
+
+    assert actor_ref() is not None, "the quarantined actor was collected; its GPUs went back to the scheduler"
+    assert rs._QUARANTINED_ACTORS and rs._QUARANTINED_ACTORS[0] is actor_ref()
+
+
+def test_round_wait_ceiling_derives_from_the_rounds_own_cap(monkeypatch: pytest.MonkeyPatch):
+    """Unset env must not cut a legitimately slow round short, nor invent a cap the caller declined."""
+    monkeypatch.delenv(rs.ROUND_WAIT_TIMEOUT_ENV, raising=False)
+    assert rs._round_wait_timeout_sec(1800) == 1800 + rs.ROUND_WAIT_SLACK_SEC
+    # An uncapped round gets no ceiling: "no limit" must not quietly become "killed after the slack".
+    assert rs._round_wait_timeout_sec(None) == 0.0
+    assert rs._round_wait_timeout_sec(0) == 0.0
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "not-a-number"])
+def test_round_wait_ceiling_rejects_values_that_would_disable_it(raw: str, monkeypatch: pytest.MonkeyPatch):
+    """``nan > 0`` is False, so a nan override would silently restore the unbounded wait."""
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, raw)
+    with pytest.raises(ValueError, match=rs.ROUND_WAIT_TIMEOUT_ENV):
+        rs._round_wait_timeout_sec(60)
+
+
+def test_await_or_cancel_requires_an_explicit_round_cap():
+    """A caller that forgets the cap must fail loudly, not inherit a ceiling it never asked for."""
+    with pytest.raises(TypeError):
+        ServingLease(num_gpus=1)._await_or_cancel(object(), cmd=["x"], cancel_scope=None)
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
@@ -982,7 +1160,7 @@ class _FakeGpuActor:
 
 
 class _FakeRayP2:
-    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -1327,7 +1505,7 @@ class _RaisingActor:
 
 
 class _RaisingRay:
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayError(RuntimeError):
             pass
 
@@ -1719,7 +1897,7 @@ def test_managed_process_start_with_log_path(tmp_path: Path):
 class _InfeasibleFakeRay:
     """Fake ray for infeasibility tests: cluster_resources returns no serving_slot."""
 
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -1791,7 +1969,7 @@ def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch)
 class _PendingAcquireFakeRay:
     """Leave the actor pending once, then expose the benchmark result."""
 
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayTaskError(Exception):
             pass
 

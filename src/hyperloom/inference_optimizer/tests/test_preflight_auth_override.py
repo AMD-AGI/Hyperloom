@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env, parse_custom_headers
+from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight

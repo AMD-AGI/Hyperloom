@@ -16,25 +16,10 @@ from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
 
-# Precision -> (q_dtype_a, q_dtype_w, q_type) mapping
-_PRECISION_MAP: dict[str, tuple[str, str, str]] = {
-    "bf16": ("torch.bfloat16", "torch.bfloat16", "QuantType.No"),
-    "fp16": ("torch.float16", "torch.float16", "QuantType.No"),
-    "fp8_per_token": ("torch.float8_e4m3fnuz", "torch.float8_e4m3fnuz", "QuantType.per_Token"),
-    "fp8_blockscale": ("torch.float8_e4m3fnuz", "torch.float8_e4m3fnuz", "QuantType.per_1x128"),
-    "fp4": ("torch.float8_e4m3fnuz", "torch.float8_e4m3fnuz", "QuantType.per_1x32"),
-    "mxfp4": ("torch.float8_e4m3fnuz", "torch.float8_e4m3fnuz", "QuantType.per_1x32"),
-    "a8w4": ("torch.float8_e4m3fnuz", "torch.float4_e2m1fn_x2", "QuantType.per_1x32"),
-}
-
-# Precision -> the aiter ``dtypes`` aliases the tuner expects, as an (activation, weight) pair.
-_AITER_DTYPE_ALIAS: dict[str, tuple[str, str]] = {
-    "fp8_per_token": ("fp8", "fp8"),
-    "fp8_blockscale": ("fp8", "fp8"),
-    "fp4": ("fp4x2", "fp4x2"),
-    "mxfp4": ("fp4x2", "fp4x2"),
-    "a8w4": ("fp8", "fp4x2"),
-}
+_NO_RUNTIME_KEY = (
+    "no runtime-observed MoE miss available (neither moe_untuned_csv nor a serving log with a missed aiter "
+    "fused_moe dispatch key); refusing to tune a key inferred from the model config"
+)
 
 # CSV header for untuned fmoe config
 _FMOE_CSV_HEADER = (
@@ -71,28 +56,6 @@ class FmoeCKTuner(BaseTuner):
     name = "fmoe_ck"
     env_var = TUNER_ENV_VARS["fmoe_ck"]
 
-    def _precision_key(self) -> str:
-        """Map CLI precision + quant_type to internal key."""
-        p = self.ctx.precision.lower()
-        qt = self.ctx.quant_type.lower()
-        if qt in ("a8w4", "w4a8", "mxfp4_w4a8"):
-            return "a8w4"
-        if p in ("bf16", "fp16"):
-            return p
-        if p == "fp8":
-            if qt == "per_token":
-                return "fp8_per_token"
-            return "fp8_blockscale"
-        if p in ("fp4", "mxfp4"):
-            return "fp4"
-        return "bf16"
-
-    def _per_partition_inter_dim(self) -> int:
-        """Return the MoE intermediate width of a single tensor-parallel rank."""
-        full = self.ctx.profile.effective_moe_intermediate
-        tp = max(1, int(self.ctx.tp or 1))
-        return full // tp
-
     def validate(self) -> str | None:
         script = find_tuner_script("fmoe_ck")
         if script is None:
@@ -102,24 +65,8 @@ class FmoeCKTuner(BaseTuner):
             return "Model is not MoE; fmoe_ck tuner not applicable"
         if profile.num_experts < 1:
             return "num_experts < 1"
-        if profile.effective_moe_intermediate < 1:
-            return "moe_intermediate_size not set in model config"
-        tp = max(1, int(self.ctx.tp or 1))
-        if profile.effective_moe_intermediate % tp:
-            # A non-divisible width means the serving shard size cannot be derived here; emitting a truncated one
-            # would key the table on a shape the runtime never asks for.
-            return (
-                f"moe_intermediate_size {profile.effective_moe_intermediate} is not "
-                f"divisible by tp {tp}; cannot derive the per-partition inter_dim"
-            )
         if getattr(self.ctx, "moe_untuned_csv", None) is None and not self._demand_key():
-            # Refuse rather than tune a guessed key.
-            return (
-                "no runtime-observed MoE miss available (neither "
-                "moe_untuned_csv nor a serving log with a missed aiter "
-                "fused_moe dispatch key); refusing to tune a key inferred "
-                "from the model config"
-            )
+            return _NO_RUNTIME_KEY
         return None
 
     def _demand_key(self) -> dict[str, Any] | None:
@@ -182,8 +129,8 @@ class FmoeCKTuner(BaseTuner):
                     "none of the %d observed MoE token count(s) appear in the "
                     "CK 2-stage token hint %s" % (len(tokens), sorted(allowed)[:8])
                 )
-        # Without a restrictive token hint, honour the caller's token-list length as a budget, the same way the
-        # derived path does.
+        # The length of ``ctx.tokens`` is the caller's coverage budget: at most that many rows, thinned out across
+        # the observed range rather than truncated at either end.
         budget = len(self.ctx.tokens) if self.ctx.tokens else 0
         if budget and len(tokens) > budget:
             observed = len(tokens)
@@ -217,55 +164,22 @@ class FmoeCKTuner(BaseTuner):
         )
         return csv_path
 
-    def _generate_untuned_csv(self) -> Path:
-        """Generate untuned CSV from model profile and token coverage."""
-        profile = self.ctx.profile
-        prec_key = self._precision_key()
-        q_dtype_a, q_dtype_w, q_type = _PRECISION_MAP.get(prec_key, _PRECISION_MAP["bf16"])
-        # Every quantized entry in ``_PRECISION_MAP`` hardcodes the CDNA3 (gfx942) fnuz FP8 value.
-        alias_pair = _AITER_DTYPE_ALIAS.get(prec_key)
-        if alias_pair:
-            from ._aiter_dense_common import _aiter_dtype_str
-
-            q_dtype_a = _aiter_dtype_str(alias_pair[0])
-            q_dtype_w = _aiter_dtype_str(alias_pair[1])
-
-        inter_dim = self._per_partition_inter_dim()
-        rows = []
-        for token in self.ctx.tokens:
-            rows.append(
-                f"{token},{profile.hidden_size},{inter_dim},"
-                f"{profile.num_experts},{profile.num_experts_per_tok},"
-                f"{profile.activation_type_str},torch.bfloat16,"
-                f"{q_dtype_a},{q_dtype_w},{q_type},"
-                f"{1 if profile.use_g1u1 else 0},0"
-            )
-
-        csv_path = self.work_dir / "untuned_fmoe.csv"
-        with csv_path.open("w", encoding="utf-8") as f:
-            f.write(_FMOE_CSV_HEADER + "\n")
-            for row in rows:
-                f.write(row + "\n")
-
-        log.info("Generated untuned CSV with %d shapes at %s", len(rows), csv_path)
-        return csv_path
-
     def _resolve_untuned_csv(self) -> tuple[Path, str]:
         """Return the untuned CSV to tune, and where its key came from."""
         external = getattr(self.ctx, "moe_untuned_csv", None)
         if external is None:
             key = self._demand_key()
-            if key is not None:
-                return self._untuned_csv_from_demand(key), "runtime_observed"
-            return self._generate_untuned_csv(), "config_derived"
+            if key is None:
+                raise ValueError(_NO_RUNTIME_KEY)
+            return self._untuned_csv_from_demand(key), "runtime_observed"
 
         path = Path(external)
         if not path.is_file():
             raise FileNotFoundError(f"moe_untuned_csv does not exist: {path}")
         problem = _validate_fmoe_csv(path)
         if problem:
-            # Refusing beats silently derived shapes: the caller asked for a specific key, and quietly tuning a
-            # different one is what makes a tuned table unreachable at run time.
+            # The caller asked for a specific key; quietly tuning a different one is what makes a tuned table
+            # unreachable at run time.
             raise ValueError(f"unusable moe_untuned_csv {path}: {problem}")
         log.info("Using caller-supplied untuned CSV at %s", path)
         return path, "runtime_observed"

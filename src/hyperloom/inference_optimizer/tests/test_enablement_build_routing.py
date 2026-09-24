@@ -11,16 +11,14 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
-from hyperloom.orchestrator.enablement.build import (
-    _derive_gpu_arch,
-    _repo_matches_targeted_build_component,
-)
+from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -66,29 +64,6 @@ def coord(build_coord):
     return build_coord
 
 
-# _derive_gpu_arch
-
-
-def test_derive_gpu_arch_mi355x():
-    assert _derive_gpu_arch("mi355x") == "gfx950"
-
-
-def test_derive_gpu_arch_mi300x():
-    assert _derive_gpu_arch("mi300x") == "gfx942"
-
-
-def test_derive_gpu_arch_unknown():
-    assert _derive_gpu_arch("unknown_gpu") == ""
-
-
-def test_derive_gpu_arch_empty():
-    assert _derive_gpu_arch("") == ""
-
-
-def test_derive_gpu_arch_case_insensitive():
-    assert _derive_gpu_arch("MI355X") == "gfx950"
-
-
 def test_targeted_build_repo_match_ignores_origin():
     assert _repo_matches_targeted_build_component("https://example.test/forks/aiter.git", "aiter")
     assert _repo_matches_targeted_build_component("git@example.test:team/vllm.git", "vllm_source")
@@ -105,8 +80,10 @@ def test_targeted_build_repo_match_rejects_wrong_component():
 
 
 @pytest.mark.asyncio
-async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch):
-    coord.shared_state.gpu_type = "mi355x"
+@pytest.mark.parametrize(("gpu_type", "arch"), sorted((b, a) for b, (a, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items()))
+async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, arch):
+    """A build with no arch is refused at preflight, so every accepted board has to carry one."""
+    coord.shared_state.gpu_type = gpu_type
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -120,7 +97,7 @@ async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch):
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
     assert action.component == "aiter"
-    assert action.gpu_arch == "gfx950"
+    assert action.gpu_arch == arch
 
 
 @pytest.mark.asyncio
