@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +30,7 @@ _TRANSITIONS = TRANSITIONS
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
+_DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 
 
 @dataclass
@@ -66,6 +67,82 @@ class Task:
         )
 
 
+def _validate_dispatch_class(dispatch_class: str | None) -> None:
+    if dispatch_class is not None and dispatch_class not in _DISPATCH_CLASSES:
+        raise ValueError(f"unknown dispatch_class: {dispatch_class!r}")
+
+
+def task_dispatch_record(task: Task) -> dict[str, Any] | None:
+    """Return complete author-time dispatch evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        phase = str(entry.get("phase") or "").strip().upper()
+        if not phase or "macro_cycle" not in entry or "tick" not in entry:
+            return None
+        return {
+            "dispatch_class": value,
+            "allowed": bool(entry.get("allowed")),
+            "denial_rule": str(entry.get("denial_rule") or "") or None,
+            "phase": phase,
+            "macro_cycle": int(entry["macro_cycle"]),
+            "tick": int(entry["tick"]),
+        }
+    return None
+
+
+def task_dispatch_evidence(task: Task) -> tuple[str, bool, str | None] | None:
+    """Return persisted dispatch admission evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        return value, bool(entry.get("allowed")), str(entry.get("denial_rule") or "") or None
+    return None
+
+
+def task_dispatch_origin(state: Any) -> dict[str, Any]:
+    """Freeze the phase coordinates that own a task when its row is created."""
+    return {
+        "phase": str(getattr(state, "phase", "") or "").strip().upper(),
+        "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        "tick": int(getattr(state, "tick", 0) or 0),
+    }
+
+
+def _validated_dispatch_origin(origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    if origin is None:
+        raise ValueError("dispatch_origin is required when dispatch_class is set")
+    phase = str(origin.get("phase") or "").strip().upper()
+    macro_cycle = int(origin.get("macro_cycle", 0) or 0)
+    tick = int(origin.get("tick", 0) or 0)
+    if not phase:
+        raise ValueError("dispatch_origin.phase is required")
+    if macro_cycle < 0 or tick < 0:
+        raise ValueError("dispatch_origin macro_cycle and tick must be non-negative")
+    return {"phase": phase, "macro_cycle": macro_cycle, "tick": tick}
+
+
+def task_dispatch_class(task: Task) -> str | None:
+    """Return explicit dispatch provenance, never a guess for legacy rows."""
+    evidence = task_dispatch_evidence(task)
+    return evidence[0] if evidence is not None else None
+
+
+def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
+    _validate_dispatch_class(requested)
+    if requested is None:
+        return
+    existing = task_dispatch_class(task)
+    if existing is None:
+        return
+    if existing != requested:
+        raise ValueError(f"idempotent task dispatch_class mismatch: existing={existing!r}, requested={requested!r}")
+
+
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
@@ -92,6 +169,8 @@ def _insert_queued_task(
     side_effects: list[str] | None,
     lease_ttl_sec: int,
     task_id: str | None,
+    dispatch_class: str | None,
+    dispatch_origin: Mapping[str, Any] | None,
 ) -> Task:
     """INSERT one ``queued`` row on ``cur`` and return the task it holds.
 
@@ -100,6 +179,18 @@ def _insert_queued_task(
     ``cur`` belongs to the caller's write transaction.
     """
     now = now_iso()
+    _validate_dispatch_class(dispatch_class)
+    initial_history: list[dict[str, Any]] = []
+    if dispatch_class:
+        initial_history.append(
+            {
+                "dispatch_class": dispatch_class,
+                "allowed": True,
+                "denial_rule": None,
+                **_validated_dispatch_origin(dispatch_origin),
+                "ts": now,
+            }
+        )
     task = Task(
         task_id=task_id or uuid.uuid4().hex,
         kind=kind,
@@ -109,7 +200,7 @@ def _insert_queued_task(
         requires_lanes=[] if requires_lanes is None else list(requires_lanes),
         side_effects=[] if side_effects is None else list(side_effects),
         lease_ttl_sec=lease_ttl_sec,
-        history=[],
+        history=initial_history,
         created_at=now,
         updated_at=now,
     )
@@ -127,7 +218,7 @@ def _insert_queued_task(
             json.dumps(task.requires_lanes),
             json.dumps(task.side_effects),
             task.lease_ttl_sec,
-            "[]",
+            json.dumps(task.history),
             task.created_at,
             task.updated_at,
         ),
@@ -145,6 +236,8 @@ def create_in_cursor(
     side_effects: list[str] | None = None,
     lease_ttl_sec: int = 0,
     task_id: str | None = None,
+    dispatch_class: str | None = None,
+    dispatch_origin: Mapping[str, Any] | None = None,
 ) -> tuple[Task, bool]:
     """Create (or adopt) a task row on a cursor the caller already owns.
 
@@ -168,10 +261,12 @@ def create_in_cursor(
         TerminalTaskReuse: When the key already names a task in a terminal
             state.
     """
+    _validate_dispatch_class(dispatch_class)
     cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
         task = Task.from_row(existing)
+        _validate_dispatch_reuse(task, dispatch_class)
         if task.state in TERMINAL_STATES:
             raise TerminalTaskReuse(f"idempotency key {idempotency_key!r} already names a {task.state} task")
         return task, True
@@ -186,6 +281,8 @@ def create_in_cursor(
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         ),
         False,
     )
@@ -213,9 +310,21 @@ def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks."""
 
-    def __init__(self, db: SqliteConnection):
-        """Initialise the registry."""
+    def __init__(
+        self,
+        db: SqliteConnection,
+        *,
+        dispatch_origin_provider: Callable[[], Mapping[str, Any]] | None = None,
+    ):
+        """Initialise the registry.
+
+        A registry without an origin provider retains the legacy task shape
+        unless a caller supplies ``dispatch_origin`` explicitly. Production
+        coordinators install the provider so every fresh dispatched task gets
+        complete author-time evidence.
+        """
         self.db = db
+        self._dispatch_origin_provider = dispatch_origin_provider
 
     async def create_or_return_existing(
         self,
@@ -227,12 +336,22 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
+        _validate_dispatch_class(dispatch_class)
         existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
         if existing is not None:
-            return Task.from_row(existing), True
+            task = Task.from_row(existing)
+            _validate_dispatch_reuse(task, dispatch_class)
+            return task, True
 
+        if dispatch_class is not None and dispatch_origin is None:
+            if self._dispatch_origin_provider is None:
+                dispatch_class = None
+            else:
+                dispatch_origin = self._dispatch_origin_provider()
         async with self.db.transaction() as cur:
             task = _insert_queued_task(
                 cur,
@@ -243,6 +362,8 @@ class TaskRegistry:
                 side_effects=side_effects,
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=task_id,
+                dispatch_class=dispatch_class,
+                dispatch_origin=dispatch_origin,
             )
         return task, False
 
@@ -256,6 +377,8 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> Task:
         """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
         task, _was_existing = await self.create_or_return_existing(
@@ -266,6 +389,8 @@ class TaskRegistry:
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         )
         return task
 

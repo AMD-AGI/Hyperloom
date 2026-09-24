@@ -591,6 +591,21 @@ class WritebackCollaborator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = intent.payload or {}
+        proposal_msg_id = (
+            payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
+        )
+        phase_event.record_denial(
+            actor=source,
+            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
+            action=resolved_action,
+            phase=str(getattr(self.shared_state, "phase", "") or ""),
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
+        )
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         """Append a broadcast observation message to the bus.
@@ -6095,6 +6110,7 @@ class WritebackCollaborator:
             idempotency_key=idempotency_key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 

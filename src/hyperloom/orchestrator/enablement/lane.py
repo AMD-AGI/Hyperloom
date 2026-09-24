@@ -28,7 +28,7 @@ from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
-from ..state.task_registry import create_in_cursor
+from ..state.task_registry import create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 from .recipe.setup_ledger import mark_round_disposition
 
@@ -290,6 +290,8 @@ class EnablementLane(CoordinatorCollaborator):
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=holder,
+                dispatch_class="coordinator",
+                dispatch_origin=task_dispatch_origin(self.shared_state),
             )
 
         acquired = await self.rounds.open(

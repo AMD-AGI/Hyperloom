@@ -641,6 +641,7 @@ class ClosePhase(PhaseHandler):
                 requires_lanes=[],
                 side_effects=["writes_results"],
                 lease_ttl_sec=120,
+                dispatch_class="coordinator",
             )
             if not was_existing:
                 return task
@@ -914,6 +915,7 @@ class ClosePhase(PhaseHandler):
             requires_lanes=[],
             side_effects=["writes_results"],
             lease_ttl_sec=120,
+            dispatch_class="coordinator",
         )
         task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id

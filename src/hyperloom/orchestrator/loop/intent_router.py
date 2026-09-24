@@ -969,6 +969,7 @@ class IntentRouter:
                 idempotency_key=idempotency_key,
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="llm",
             )
             if not was_existing:
                 break
