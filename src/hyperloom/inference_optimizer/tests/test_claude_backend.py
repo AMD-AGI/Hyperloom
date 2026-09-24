@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -525,6 +526,72 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
     assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
+    """A string-wrapped fallback dedupes exactly like the dict-wrapped one.
+
+    Behind an OpenAI-compatible / litellm proxy the wrapper arrives inside a
+    JSON *string*. Without wrapper detection accepting that shape, two
+    identical retries would each yield an intent and the duplicate action
+    would be dispatched twice.
+    """
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = json.dumps({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
+    other_raw = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    other = json.dumps({"__unparsedToolInput": {"raw": other_raw, "len": len(other_raw)}})
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=other),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_empty_string_tool_input_reports_decode_error(tool_name):
+    """An empty-string input reports a decode error, not a missing intent_type.
+
+    ``input or {}`` used to swallow ``""`` into ``{}``, which decoded cleanly
+    and surfaced later as ``intent_type None not in allowed set`` — pointing a
+    reader at the model rather than at the undecodable envelope.
+    """
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=""),
+            ToolUseBlock(
+                name=tool_name,
+                input={"intent_type": "send_message", "payload": {"topic": "heartbeat"}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    # The empty-string block is dropped; the rest of the turn is unaffected.
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 1
+    parse_errors = backend.get_turn_diagnostic()["parse_errors"]
+    assert parse_errors == ["emit_intent tool input string is not valid JSON"]
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])

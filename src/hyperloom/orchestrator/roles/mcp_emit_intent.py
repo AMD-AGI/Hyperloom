@@ -195,7 +195,19 @@ def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None
 
 
 def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
-    """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object."""
+    """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object.
+
+    The wrapper also arrives inside the JSON-*string* envelope that
+    OpenAI-compatible / litellm style proxies emit. Decoding that envelope here
+    keeps fallback detection — and therefore the retry deduplication in
+    :meth:`ClaudeBackend._invoke_and_collect` — in step with
+    :func:`decode_emit_intent_input`, which already accepts both shapes.
+    """
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except (TypeError, ValueError):
+            return False
     if not isinstance(raw_input, dict):
         return False
     if "intent_type" in raw_input:
