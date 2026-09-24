@@ -113,7 +113,7 @@ from ._inferencex_patcher import (
 from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
-    _patch_touched_paths_from_text as _patch_touched_paths,
+    _patch_touched_paths_from_text,
     _restore_patch_snapshot,
 )
 from .benchmark_result import (
@@ -1171,7 +1171,7 @@ def _apply_warm_patches(
             reason = "unsafe_or_non_text_diff"
         elif patch_escapes_tree(content) is not None:
             reason = "path_escapes_tree"
-        elif not _patch_touched_paths(content):
+        elif not _patch_touched_paths_from_text(content):
             reason = "missing_touched_paths"
         if reason:
             if required_timeline:
@@ -1395,7 +1395,7 @@ def _apply_warm_patches(
                             else "present_in_dirty_worktree"
                         )
                     else:
-                        touched = _patch_touched_paths(patch_content)
+                        touched = _patch_touched_paths_from_text(patch_content)
                         before_residue = _three_way_residue_snapshot(
                             target_repo,
                             touched,
