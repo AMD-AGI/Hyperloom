@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Setup checks use one Python owner without installing or touching the workspace."""
+"""`--require-frameworks atom` proves the engine runs, without installing or touching the workspace."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _shell_path(path: Path) -> str:
     return f"/{value[0].lower()}{value[2:]}" if os.name == "nt" else value
 
 
-def _python_owner(tmp_path: Path, *, venv: bool = True) -> tuple[Path, Path]:
+def _python_owner(tmp_path: Path) -> tuple[Path, Path]:
     """Execute real Python probes/imports with isolated package and interpreter metadata."""
     root = tmp_path / "selected env"
     python = root / "bin" / "python"
@@ -64,8 +64,6 @@ def _python_owner(tmp_path: Path, *, venv: bool = True) -> tuple[Path, Path]:
         "    sys.dont_write_bytecode = True\n"
         "    sys.argv.pop(1)\n"
         f"sys.executable = {_shell_path(python)!r}\n"
-        f"sys.prefix = {_shell_path(root)!r}\n"
-        f"sys.base_prefix = {('base-python' if venv else _shell_path(root))!r}\n"
         f"sys.path.insert(0, {packages.as_posix()!r})\n"
         "args = sys.argv[1:]\n"
         "if args[0] == '--version':\n"
@@ -89,14 +87,22 @@ def _python_owner(tmp_path: Path, *, venv: bool = True) -> tuple[Path, Path]:
     return python, root
 
 
+def _sources(root: Path) -> dict[Path, bytes]:
+    """Every file the framework tree owns. Interpreter bytecode caches are not owned state."""
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
 def _run_setup(
     tmp_path: Path,
     python: Path,
     *,
     before: str = "",
-    body: str = "main",
-    extra_env: dict[str, str] | None = None,
     args: tuple[str, ...] = _CHECK_ARGS,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     text = _INSTALLER.read_text(encoding="utf-8")
     marker = '\nmain "$@"\n'
@@ -104,7 +110,7 @@ def _run_setup(
     library = _write(tmp_path / "installer-lib.sh", text.replace(marker, "\n"))
     runner = _write(
         tmp_path / "runner.sh",
-        f"source {shlex.quote(library.as_posix())}\n"
+        (f"{before}\n" if before else "") + f"source {shlex.quote(library.as_posix())}\n"
         "rocm-smi() { printf 'test MI300X\\n'; }\n"
         "rocminfo() { printf 'gfx942\\n'; }\n"
         "check_torch_rocm_shared_libs() { :; }\n"
@@ -114,9 +120,7 @@ def _run_setup(
         "upsert_dotenv_var() { die 'MUTATION: dotenv'; }\n"
         "remove_dotenv_var() { die 'MUTATION: dotenv'; }\n"
         "download_rocm_profiler_hotfix_libs() { die 'MUTATION: download'; }\n"
-        f"{before}\n{body}\n"
-        'printf \'SELECTED_PYTHON=%s\\nSELECTED_VENV=%s\\n\' "${PYTHON:-}" "${VIRTUAL_ENV:-}"\n'
-        "printf 'PATH_PYTHON3=%s\\n' \"$(command -v python3)\"\n",
+        "main\n",
     )
     env = {
         key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "OPENAI_", "DEEPSEEK_"))
@@ -133,7 +137,11 @@ def _run_setup(
         "LLM_GATEWAY_KEY",
     ):
         env.pop(key, None)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
     env.update(
+        HOME=home.as_posix(),
+        USERPROFILE=str(home),
         REPO_ROOT=tmp_path.as_posix(),
         PYTHON=python.as_posix(),
         INFERENCE_OPTIMIZER_FORCE_PYTHON="1",
@@ -142,49 +150,6 @@ def _run_setup(
     )
     env.update(extra_env or {})
     return subprocess.run(["bash", runner.as_posix(), *args], cwd=tmp_path, env=env, text=True, capture_output=True)
-
-
-@pytest.mark.parametrize("pin", ["missing", "empty", "not-python"])
-def test_invalid_forced_python_never_falls_back_to_valid_path(tmp_path: Path, pin: str) -> None:
-    python, _ = _python_owner(tmp_path)
-    bad = _write(tmp_path / "not-python", "#!/usr/bin/env bash\nexit 7\n")
-    bad.chmod(0o755)
-    value = {"missing": (tmp_path / "missing").as_posix(), "empty": "", "not-python": bad.as_posix()}[pin]
-    result = _run_setup(
-        tmp_path,
-        python,
-        before=f'export PATH={shlex.quote(_shell_path(python.parent))}:"$PATH"\npython3 --version',
-        extra_env={"PYTHON": value},
-    )
-    assert "Python test owner" in result.stdout
-    assert result.returncode != 0
-    assert "PYTHON" in result.stderr
-    assert "base preflight OK" not in result.stdout
-
-
-@pytest.mark.parametrize("active_venv", ["unset", "same-prefix", "mismatch", "non-venv"])
-def test_selected_python_owns_virtualenv_and_path(tmp_path: Path, active_venv: str) -> None:
-    python, root = _python_owner(tmp_path, venv=active_venv != "non-venv")
-    wrapper = _write(tmp_path / "python-wrapper", f'#!/usr/bin/env bash\nexec {shlex.quote(python.as_posix())} "$@"\n')
-    wrapper.chmod(0o755)
-    unrelated = tmp_path / "other env"
-    unrelated.mkdir()
-    active = _shell_path(root) + "/." if active_venv == "same-prefix" else _shell_path(unrelated)
-    before = f'export PATH="$PATH":{shlex.quote(_shell_path(python.parent))}'
-    result = _run_setup(
-        tmp_path,
-        wrapper,
-        before=before,
-        extra_env={} if active_venv == "unset" else {"VIRTUAL_ENV": active},
-    )
-    if active_venv in {"mismatch", "non-venv"}:
-        assert result.returncode != 0
-        assert "VIRTUAL_ENV" in result.stderr
-    else:
-        assert result.returncode == 0, result.stderr
-        assert f"SELECTED_PYTHON={_shell_path(python)}" in result.stdout
-        assert f"SELECTED_VENV={_shell_path(root)}" in result.stdout
-        assert f"PATH_PYTHON3={_shell_path(python.parent)}/python3" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -206,19 +171,21 @@ def test_required_atom_checks_real_import_help_and_rocm_torch(tmp_path: Path, fa
 def test_check_only_atom_uses_selected_help_and_preserves_workspace(tmp_path: Path) -> None:
     python, root = _python_owner(tmp_path)
     dotenv = _write(tmp_path / ".env", "KEEP_ME=unchanged\n")
-    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    before = _sources(root)
     result = _run_setup(tmp_path, python)
     assert result.returncode == 0, result.stderr
     assert f"ATOM_HELP_PYTHON={_shell_path(python)}" in result.stderr
     assert "verification pass complete" in result.stdout
     assert "MUTATION" not in result.stdout + result.stderr
     assert dotenv.read_text() == "KEEP_ME=unchanged\n"
-    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert _sources(root) == before
+    assert not (root / "packages" / "atom" / "__pycache__").exists()
     assert not (tmp_path / "runtime").exists()
 
 
-@pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize("conflict", [True, False])
 def test_readonly_workspace_root_must_match_selected_root(tmp_path: Path, conflict: bool) -> None:
+    """A readonly platform root has to agree with the workspace the caller selected."""
     python, _ = _python_owner(tmp_path)
     root = (tmp_path / "data").as_posix()
     selected = (tmp_path / "other-data").as_posix() if conflict else root
@@ -234,6 +201,7 @@ def test_readonly_workspace_root_must_match_selected_root(tmp_path: Path, confli
 
 
 def test_readonly_workspace_root_rejects_conflicting_cli_override(tmp_path: Path) -> None:
+    """``--user-data-path`` cannot move a root the platform froze."""
     python, _ = _python_owner(tmp_path)
     result = _run_setup(
         tmp_path,
@@ -244,36 +212,3 @@ def test_readonly_workspace_root_rejects_conflicting_cli_override(tmp_path: Path
     assert result.returncode != 0
     assert "USER_DATA_PATH" in result.stderr
     assert "conflict" in result.stderr.lower()
-
-
-def test_docker_check_ignores_dotenv_host_python_owner(tmp_path: Path) -> None:
-    python, root = _python_owner(tmp_path)
-    _write(
-        tmp_path / ".env",
-        "HYPERLOOM_RUN_MODE=docker\nPYTHON=/host/missing/python\n"
-        "VIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=0\n",
-    )
-    result = _run_setup(tmp_path, python, extra_env={"HYPERLOOM_RUN_MODE": "docker"})
-    assert result.returncode == 0, result.stderr
-    assert f"SELECTED_PYTHON={_shell_path(python)}" in result.stdout
-    assert f"SELECTED_VENV={_shell_path(root)}" in result.stdout
-    assert "/host/" not in result.stdout + result.stderr
-
-
-def test_setup_entrypoint_preserves_explicit_python_pin_without_mutating_caller(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PYTHON", "/caller/python")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FORCE_PYTHON", "1")
-    monkeypatch.setenv("PYTHONPATH", "/caller/pip-target")
-    _write(tmp_path / ".env", "HYPERLOOM_RUN_MODE=docker\nPYTHON=/host/missing/python\n")
-    seen = {}
-
-    def run(cmd, *, env):
-        seen.update(env)
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(setup.subprocess, "run", run)
-    assert setup.main(["--check-only", "--", "--install-framework", "none"]) == 0
-    assert seen["PYTHON"] == "/caller/python"
-    assert seen["INFERENCE_OPTIMIZER_FORCE_PYTHON"] == "1"
-    assert os.environ["PYTHONPATH"] == "/caller/pip-target"

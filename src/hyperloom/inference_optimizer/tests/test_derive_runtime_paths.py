@@ -17,8 +17,13 @@ from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 
 
 @pytest.fixture(autouse=True)
-def _restore_environment():
+def _restore_environment(tmp_path):
     snapshot = dict(os.environ)
+    # Preflight resolves credential/config files under the home directory; keep it off the operator's.
+    home = tmp_path / "home"
+    home.mkdir()
+    os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
     yield
     os.environ.clear()
     os.environ.update(snapshot)

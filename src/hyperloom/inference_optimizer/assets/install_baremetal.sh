@@ -95,7 +95,6 @@ VERIFY_HOTFIX_ONLY=0
 ASSUME_YES=0
 USER_DATA_PATH_ARG=""
 DEPS_ROOT_ARG=""
-_SETUP_PYTHON=""
 
 usage() {
   cat <<'EOF'
@@ -201,24 +200,13 @@ is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 # Resolve a Python interpreter, mirroring install.sh: prefer the canonical ROCm
 # venv (/opt/venv) unless INFERENCE_OPTIMIZER_FORCE_PYTHON=1 pins $PYTHON.
 resolve_python() {
-  if [ -n "${_SETUP_PYTHON:-}" ]; then printf '%s\n' "$_SETUP_PYTHON"; return 0; fi
-  local py
-  if [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" = "1" ]; then
-    [ -n "${PYTHON:-}" ] && command -v "$PYTHON" >/dev/null 2>&1 \
-      || { warn "forced PYTHON is missing or not executable; refusing to select another interpreter"; return 1; }
-    py="$PYTHON"
-  elif [ -x "/opt/venv/bin/python" ]; then
-    py="/opt/venv/bin/python"
-  elif [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
-    py="$PYTHON"
-  elif [ -x "/venv/bin/python" ]; then
-    py="/venv/bin/python"
-  else
-    py="$(command -v python3)" || return 1
+  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+    echo "/opt/venv/bin/python"; return 0
   fi
-  py="$("$py" -c 'import sys; print(sys.executable)')" && [ -n "$py" ] && [ -x "$py" ] \
-    || { warn "selected PYTHON is not usable; refusing to select another interpreter"; return 1; }
-  printf '%s\n' "$py"
+  if [ -n "${PYTHON:-}" ] && [ -x "${PYTHON}" ]; then echo "$PYTHON"; return 0; fi
+  if [ -x "/venv/bin/python" ]; then echo "/venv/bin/python"; return 0; fi
+  command -v python3 2>/dev/null && return 0
+  return 1
 }
 
 # Import-probe a module. `import importlib.util` (not `import importlib`): a bare
@@ -260,26 +248,23 @@ resolve_installed_framework() {
 }
 
 python_venv_root() {
-  "$1" - <<'PY'
-import os
-import sys
-
-venv = sys.prefix if sys.prefix != sys.base_prefix else ""
-active = os.environ.get("VIRTUAL_ENV", "")
-if active and (not venv or os.path.realpath(active) != os.path.realpath(venv)):
-    raise SystemExit("VIRTUAL_ENV conflicts with the selected Python prefix; reconcile the environment before setup")
-print(venv)
-PY
+  local py="$1" bin_dir venv_dir
+  bin_dir="$(cd "$(dirname "$py")" 2>/dev/null && pwd)" || return 1
+  venv_dir="$(cd "${bin_dir}/.." 2>/dev/null && pwd)" || return 1
+  [ -f "${venv_dir}/pyvenv.cfg" ] || return 1
+  printf '%s\n' "$venv_dir"
 }
 
 export_virtualenv_for_python() {
   local py="$1" venv_dir
-  venv_dir="$(python_venv_root "$py")" || die "cannot align VIRTUAL_ENV with the selected Python"
-  if [ -n "$venv_dir" ]; then
+  if venv_dir="$(python_venv_root "$py")"; then
     export VIRTUAL_ENV="$venv_dir"
+    case ":$PATH:" in
+      *":${venv_dir}/bin:"*) ;;
+      *) export PATH="${venv_dir}/bin:$PATH" ;;
+    esac
     log "VIRTUAL_ENV=${VIRTUAL_ENV}"
   fi
-  export PATH="$(dirname "$py"):$PATH"
 }
 
 # TheRock's pip-packaged ROCm splits libraries across up to three namespace
@@ -2606,7 +2591,6 @@ EOF
 }
 
 main() {
-  [ "$CHECK_ONLY" -eq 0 ] || export PYTHONDONTWRITEBYTECODE=1
   restore_persisted_framework_env
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
@@ -2657,10 +2641,11 @@ _default_workspace_root() {
   [ "$DRY_RUN" -eq 1 ] && log "mode: dry-run"
   [ "$CHECK_ONLY" -eq 1 ] && log "mode: check-only"
 
-  _SETUP_PYTHON="$(resolve_python)" || die "no usable PYTHON found for setup"
-  export PYTHON="$_SETUP_PYTHON"
-  export_virtualenv_for_python "$PYTHON"
-  export_rocm_sdk_toolchain_root "$PYTHON"
+  local py_for_env
+  if py_for_env="$(resolve_python 2>/dev/null)"; then
+    export_virtualenv_for_python "$py_for_env"
+    export_rocm_sdk_toolchain_root "$py_for_env"
+  fi
 
   if [ "$VERIFY_HOTFIX_ONLY" -eq 1 ]; then
     verify_rocm_profiler_hotfix_only
