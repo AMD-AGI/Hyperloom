@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom in the current agent workspace after pip install --target . by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
+description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, writing .env, running the setup backend when appropriate, and automatically installing preconfigured product integrations such as Fleet KB without extra user questions.
 ---
 
 # Hyperloom Setup
@@ -239,6 +239,7 @@ Skip this key entirely when the selected Anthropic base URL host is not
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
 Then read `.env` back and confirm:
+
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
@@ -298,6 +299,7 @@ Do **not** run `hyperloom.inference_optimizer.setup` on the host.
 The example (workload) skill will start the container and run setup inside it.
 
 After writing `.env`, tell the user:
+
 - setup on the host is skipped in docker mode;
 - the demo skill will `docker run` + `docker exec` setup inside the ROCm container;
 - `FRAMEWORK` being unset after this skill is expected.
@@ -326,15 +328,60 @@ mode, skip this until the demo skill runs setup inside the container. Read
   with `--install-framework vllm` or `sglang`. Do not invent a `FRAMEWORK`
   value.
 
+## Fleet KB capability (automatic, no questions)
+
+Fleet KB is a capability supplied by the Slack environment, not another setup
+choice. Do not ask whether to enable it, do not ask for Fleet URL/ID/token, and
+do not write Fleet token placeholders into `.env`.
+
+When `HYPERLOOM_FLEET_KB_URL` is already supplied by the Slack environment,
+install the matching Fleet SDK into the current target workspace if
+`SlackFleetTools` is not already importable. When the URL is absent, report
+Fleet as not configured and continue without asking a question.
+
+```bash
+if [ -n "${HYPERLOOM_FLEET_KB_URL:-}" ]; then
+  if ! PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -c \
+    'from hyperloom_kb import SlackFleetTools' 2>/dev/null; then
+    python3 -m pip install --upgrade --target . \
+      "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
+  fi
+else
+  echo "fleet_kb_tools=not_configured"
+fi
+```
+
+When configured, verify the product surface without printing credentials:
+
+```bash
+if [ -n "${HYPERLOOM_FLEET_KB_URL:-}" ]; then
+  PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -c \
+    'from hyperloom_kb import SlackFleetTools; print("fleet_kb_tools=ready")'
+fi
+```
+
+Bot and Worker credentials stay in the Slack secret store. The Slack tool
+process receives the Bot token; the remote Worker launcher injects the Worker
+token, scope, job, thread, and spool values for each Run. Setup never copies
+those secrets into an LLM prompt.
+
+The importable `SlackFleetTools` methods are the product API. If the Slack
+runtime needs CLI wrappers, use `hyperloom-kb-slack-tools`. If it needs the
+standalone event consumer, supervise exactly one
+`hyperloom-kb-slack-bridge` process.
+
 ## Step 6: Report Result
 
 Report:
+
 - The `.env` path.
 - The run mode (`baremetal` or `docker`).
 - The Docker target host when `HYPERLOOM_RUN_MODE=docker`.
 - The setup command that was run (or that host setup was skipped in `docker` mode).
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
+- Fleet tool status: `ready` when configured, otherwise `not_configured`.
+- That Fleet secrets remain platform-managed and were not written to `.env`.
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.
@@ -349,6 +396,23 @@ which option:
 - `12h` — medium-length Qwen3-14B-FP8 run.
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
+
+When Fleet tools are available, apply this handoff to whichever demo the user
+chooses:
+
+1. Reuse the selected demo/custom parameters; do not ask for a second Fleet
+   copy of model or workload fields.
+2. Allocate one fresh Run scope from the Slack job ID.
+3. Page through `SlackFleetTools.list_kb_experiences()` until
+   `has_more=false` and show all unverified Experiences.
+4. Ask only which displayed Experiences should be used for this scope.
+5. Record the explicit choices with
+   `verify_kb_experiences_for_scope()`. An ambiguous acknowledgement is not
+   consent.
+6. Hand the exact scope and platform-managed Worker credential to the Run.
+
+If the user explicitly chooses no prior Experience, continue with an empty
+scope; runtime read must then remain empty.
 
 ### Kernel backend follow-up (only for `12h`)
 

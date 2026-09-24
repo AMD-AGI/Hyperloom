@@ -86,18 +86,21 @@ def test_data_files_sources_exist():
     assert not missing, f"data-files entries point at missing sources: {missing}"
 
 
-def test_fleet_demo_skills_install_for_every_agent() -> None:
-    data_files = _pyproject()["tool"]["setuptools"]["data-files"]
-    skills = (
-        "fleet-kb-slack-toolbox",
-        "fleet-kb-observability",
-        "hyperloom-fleet-worker-run",
+def test_existing_skills_own_fleet_setup_and_runtime_contracts() -> None:
+    assert _REPO_ROOT is not None
+    setup = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
+    optimizer = (_REPO_ROOT / "src/hyperloom/inference_optimizer/SKILL.md").read_text(encoding="utf-8")
+
+    assert "SlackFleetTools" in setup
+    assert "do not write Fleet token placeholders" in setup
+    assert "Fleet is a runtime overlay" in optimizer
+    assert "--require-experience-kb" in optimizer
+    assert "HYPERLOOM_FLEET_KB_BOT_TOKEN=<PLEASE_FILL_IN>" not in setup
+    assert "HYPERLOOM_FLEET_KB_WORKER_TOKEN=<PLEASE_FILL_IN>" not in setup
+    destinations = _pyproject()["tool"]["setuptools"]["data-files"]
+    assert not any(
+        "fleet-kb-" in destination or "hyperloom-fleet-worker" in destination for destination in destinations
     )
-    for root in (".agents", ".claude", ".cursor"):
-        for skill in skills:
-            destination = f"{root}/skills/{skill}"
-            assert destination in data_files
-            assert any(source.endswith(f"/{skill}/SKILL.md") for source in data_files[destination])
 
 
 def _module_path(dotted: str) -> Path | None:

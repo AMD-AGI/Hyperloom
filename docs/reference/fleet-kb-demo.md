@@ -38,16 +38,16 @@ python3 -m pip install --upgrade --target . \
   "git+https://github.com/AMD-AGI/Hyperloom.git@demo/fleet-kb-integration"
 ```
 
-Restart Claude in that workspace. The wheel installs these directly into its
-discovery directory:
+Restart Claude in that workspace and run the existing setup entry point:
 
 ```text
-.claude/skills/fleet-kb-slack-toolbox/
-.claude/skills/fleet-kb-observability/
-.claude/skills/hyperloom-fleet-worker-run/
+/hyperloom-setup
 ```
 
-The same files are installed for Cursor and Agents-compatible runtimes.
+Setup installs/verifies the Hyperloom-KB product tools automatically when
+needed. It does not ask for Fleet configuration and does not write Fleet token
+placeholders. The existing optimizer Skill at `HYPERLOOM_SKILL_PATH` supplies
+the per-Run Fleet overlay to every selected workload Skill.
 
 ## Worker launch
 
