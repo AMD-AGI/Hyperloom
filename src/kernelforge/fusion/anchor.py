@@ -20,6 +20,7 @@ from .discover import (
     fusion_constraints,
     kernel_names_from_trace,
     parse_discovered_recipes,
+    render_repo_scope_brief,
     render_source_files,
     stream_ordered_kernels,
 )
@@ -337,17 +338,37 @@ def build_anchored_discovery_prompt(
     source_files: Sequence[str],
     report: AnchorReport,
     shapes: dict[str, Any],
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> str:
     """Assemble a discovery prompt whose target is fixed and whose fusion is not."""
     multi_file = len(source_files) > 1
-    source_block = render_source_files(source_files, model_type=model_type, framework=framework)
-    reach = (
-        "If the anchor's neighbours are not reachable from ANY of these files, say so\n"
-        "by proposing the largest fusion that IS reachable and including the anchor."
-        if multi_file
-        else "If the anchor's neighbours are not reachable from this source file, say so\n"
-        "by proposing the largest fusion that IS reachable and including the anchor."
-    )
+    if repo_scope:
+        source_block = render_repo_scope_brief(
+            repo_root,
+            source_files,
+            model_type=model_type,
+            framework=framework,
+        )
+        # Under repo scope an unreachable neighbour is a search result, not a fact:
+        # the file that issues it exists somewhere in the tree, so "I could not
+        # reach it" has to mean "I looked and it is not there".
+        reach = (
+            "The kernels above are issued by code that EXISTS in this repository. Find\n"
+            "the file(s) that issue them and list every one your fusion would edit.\n"
+            "Only shrink the chain after searching has shown the rest is unreachable,\n"
+            "and say what you searched for when you do."
+        )
+    else:
+        source_block = render_source_files(source_files, model_type=model_type, framework=framework)
+        reach = (
+            "If the anchor's neighbours are not reachable from ANY of these files, say so\n"
+            "by proposing the largest fusion that IS reachable and including the anchor."
+            if multi_file
+            else "If the anchor's neighbours are not reachable from this source file, say so\n"
+            "by proposing the largest fusion that IS reachable and including the anchor."
+        )
+    read_verb = "Explore the repository described below" if repo_scope else "Read the source below"
     return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
 to find a SOURCE-LEVEL KERNEL FUSION built around ONE kernel the operator named.
 Analyze only; do not edit anything. Return your answer as JSON (schema below).
@@ -368,15 +389,15 @@ only when that kernel is not a tuned library call (see the constraints below).
 Representative decode shapes: {shapes}
 
 ## Your task
-Read the source below and propose the fusion (or at most 2 alternatives) that
+{read_verb} and propose the fusion (or at most 2 alternatives) that
 collapses this anchor into its neighbours. Name the exact call site you would
 replace. {reach}
 
-{fusion_constraints(multi_file)}
+{fusion_constraints(multi_file, repo_scope=repo_scope)}
 - The anchor kernel must be part of every proposal. A proposal that does not
   include it answers a question nobody asked.
 
-{_output_schema_block(model_type, multi_file=multi_file)}
+{_output_schema_block(model_type, multi_file=multi_file, repo_scope=repo_scope)}
 
 {source_block}
 """
@@ -394,6 +415,8 @@ def discover_anchored_recipes(
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
     extra_source_files: Sequence[str] = (),
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> list[Recipe]:
     """Propose fusions built around one named kernel.
 
@@ -406,15 +429,27 @@ def discover_anchored_recipes(
     file often reaches it through a single opaque call whose operands are not
     local names there -- and a prompt showing only the model file forces the
     answer to be a smaller chain that happens to be local to it.
+
+    ``repo_scope`` turns those files into mere entry points: nothing is embedded,
+    the whole repository is proposable, and a proposal may name several files.
+    That is the difference between needing to know where the chain lives and
+    being able to go and find out.
     """
     in_scope: list[str] = []
     for path in [source_file, *extra_source_files]:
         if path and path not in in_scope and Path(path).is_file():
             in_scope.append(path)
-    if not in_scope:
+    if not in_scope and not repo_scope:
         log.warning("anchored discovery: model source unreadable (%s); cannot propose a fusion", source_file)
         return []
-    if len(in_scope) > 1:
+    if repo_scope:
+        log.info(
+            "anchored discovery: repo scope over %s (entry point%s: %s)",
+            repo_root or "the working directory",
+            "" if len(in_scope) == 1 else "s",
+            ", ".join(Path(p).name for p in in_scope) or "none resolved",
+        )
+    elif len(in_scope) > 1:
         log.info(
             "anchored discovery: %d in-scope file(s): %s",
             len(in_scope),
@@ -427,6 +462,8 @@ def discover_anchored_recipes(
         source_files=in_scope,
         report=report,
         shapes=shapes,
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
     recipes = parse_discovered_recipes(
         llm_fn(prompt),
@@ -439,6 +476,8 @@ def discover_anchored_recipes(
         framework_root=framework_root,
         explicit_target=True,
         in_scope_files=in_scope,
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
     evidence = anchor_trace_evidence(report)
     for recipe in recipes:

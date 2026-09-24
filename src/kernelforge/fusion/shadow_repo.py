@@ -10,9 +10,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 from kernelforge.llm.git import git
-from kernelforge.loop.path_ownership import runtime_gitignore_globs
+from kernelforge.loop.path_ownership import PRODUCER_PATH_PATTERNS, runtime_gitignore_globs
 
 log = logging.getLogger("forge_fusion")
 
@@ -22,9 +23,22 @@ _GIT_TIMEOUT_SEC = 120
 #: unnamed, ``main`` or ``master`` branch, and a fresh repository is on one.
 SHADOW_BRANCH = "forge-fusion"
 
+#: forge-fuse's own in-worktree staging directory (see ``author.FUSION_SCRATCH_DIRNAME``).
+#: Named here rather than imported to keep this module free of the authoring stack.
+_FUSION_SCRATCH_DIRNAME = ".forge_fusion"
+
 # Whitelist: exclude every top-level entry, then re-admit the indexed ones.
 _EXCLUDE_HEADER = "/*\n"
-_EXCLUDE_ARTIFACTS = "".join(f"{glob}\n" for glob in runtime_gitignore_globs())
+# Re-excluded AFTER the admissions, because a widened scope can admit a package that
+# contains the loop's own state, and gitignore gives the last match.
+_EXCLUDE_ARTIFACTS = "".join(
+    f"{glob}\n"
+    for glob in (
+        *runtime_gitignore_globs(),
+        *(f"{pattern}/" for pattern in PRODUCER_PATH_PATTERNS),
+        f"{_FUSION_SCRATCH_DIRNAME}/",
+    )
+)
 
 
 def _git(repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC) -> subprocess.CompletedProcess:
@@ -51,6 +65,24 @@ def _index_scope(repo_root: str, source_file: str) -> str:
     except (OSError, ValueError):
         return ""
     return rel.parts[0] if rel.parts else ""
+
+
+def _index_scopes(repo_root: str, source_files: Sequence[str]) -> list[str]:
+    """Every top-level entry that has to be indexed for this fusion.
+
+    A repo-scope fusion may edit files in more than one package, and an edit to a
+    file the index never admitted is neither keepable nor revertible -- the loop
+    would silently drop it. The union of the files' own top-level entries is taken
+    rather than the whole root on purpose: a framework checkout routinely carries
+    multi-gigabyte sibling trees (build output, vendored toolchains) that no fusion
+    touches and that would dominate every git operation the campaign runs.
+    """
+    scopes: list[str] = []
+    for source_file in source_files:
+        scope = _index_scope(repo_root, source_file)
+        if scope and scope not in scopes:
+            scopes.append(scope)
+    return scopes
 
 
 @dataclass
@@ -90,13 +122,23 @@ class ShadowRepo:
 
 
 def ensure_git_workspace(
-    repo_root: str, source_file: str, *, git_dir: str, extra_paths: tuple[str, ...] = ()
+    repo_root: str,
+    source_file: str,
+    *,
+    git_dir: str,
+    extra_paths: tuple[str, ...] = (),
+    scope_files: Sequence[str] = (),
 ) -> ShadowRepo | None:
-    """Build a repository over ``repo_root`` whose git data lives in ``git_dir``."""
+    """Build a repository over ``repo_root`` whose git data lives in ``git_dir``.
+
+    ``scope_files`` names further files the campaign may edit, so their packages
+    are indexed too; without them an edit outside ``source_file``'s package is
+    invisible to keep and revert alike.
+    """
     if not repo_root or not Path(repo_root).is_dir():
         return None
-    scope = _index_scope(repo_root, source_file)
-    if not scope:
+    scopes = _index_scopes(repo_root, [source_file, *scope_files])
+    if not scopes:
         log.error("%s does not live under %s; no shadow workspace", source_file, repo_root)
         return None
 
@@ -124,7 +166,7 @@ def ensure_git_workspace(
             placeholder.write_text("", encoding="utf-8")
         # A placeholder normally sits inside the package the scope admits, but a framework whose source is directly in
         # the export root has no such package, so each is named too.
-        indexed = list(dict.fromkeys([scope, *(_relative(root, p) for p in extra_paths)]))
+        indexed = list(dict.fromkeys([*scopes, *(_relative(root, p) for p in extra_paths)]))
 
         # The exclude goes into the git dir, which only exists once init has run.
         result = _git(str(root), *init, env=env)

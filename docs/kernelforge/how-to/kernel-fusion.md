@@ -97,6 +97,32 @@ model file only delegates to -- the agent is asked to say so and propose the
 largest fusion that is reachable and still contains the anchor, rather than
 returning nothing.
 
+## Giving it the whole repository
+
+Everything above assumes one implementation file: the run resolves the model's
+source, embeds it in the discovery prompt, and the author may edit that file
+plus the fused module. When the interesting chain is not in that file,
+`--repo-scope` removes the assumption:
+
+```bash
+kernelforge forge-fuse ... --discover anchored --repo-scope \
+    --fuse-kernel '...'
+```
+
+Discovery is then given the framework checkout and its read and search tools
+rather than a pre-selected file, and must locate the call site itself; nothing
+is embedded in the prompt. A proposal names the call site it found in
+`source_file`, and any further files the same fusion has to change -- a runtime
+and the selector that routes to it, say -- in `additional_files`. Every path it
+returns is checked against the tree, and a proposal naming a file that does not
+exist is dropped rather than quietly retargeted at the model file. Authoring
+receives that whole set as editable and the wiring gate accepts the call
+reached from any of them.
+
+It costs discovery turns, since the agent is searching instead of reading, and
+it only applies to `--discover llm` and `--discover anchored`; pattern
+discovery has no agent to give a repository to.
+
 ## What happens
 
 1. **Diagnose** the trace into a launch-bound share and a predicted gain.
@@ -138,10 +164,17 @@ your own checkout keeps its history and its branches untouched. Only the
 framework package is indexed — not the wheels installed beside it — and the run
 restores the tree to the state it found before exporting its patch.
 
+Under `--repo-scope` the indexed set is the union of the top-level trees the
+recipe's files live in, which for an SGLang checkout is `python/` and not the
+multi-gigabyte gateway and Rust trees beside it. Indexing is what makes a file
+keepable and revertible, so an edit outside those trees would be neither, and
+export sweeps the whole changed set rather than the files named on the recipe.
+
 Because the loop can only commit files that were already tracked, the pipeline
 also decides where the fused kernel goes: it creates that module empty, commits
-it into the baseline, and names it in the task document as the only file the
-author may write. A kernel written anywhere else would be scored and then lost.
+it into the baseline, and names it in the task document as the file to write the
+kernel into. A kernel written to a path created mid-campaign would be scored and
+then lost. Repo scope changes which *other* files may be edited, not this.
 
 ## What the agent is told
 

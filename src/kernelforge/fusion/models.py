@@ -90,6 +90,12 @@ class Recipe:
     compile_pass_note: str = ""
     # Which mechanism located ``source_file``.
     source_resolution_note: str = ""
+    # Further framework files this ONE fusion also has to edit. A chain is regularly
+    # split across a model file, the runtime it delegates to, and the selector that
+    # picks a kernel, and delivering only the call-site edit leaves it unwired. Only
+    # repo-scope discovery fills this in; every other path leaves it empty, so the
+    # single-file behaviour is unchanged by construction.
+    extra_files: list[str] = field(default_factory=list)
     # The GPU kernels the trace actually recorded around the anchor, as
     # ``{"anchor": str, "before": [...], "after": [...], "span": [...]}``. This is
     # the only ground truth about WHICH framework code path runs: a source file can
@@ -99,12 +105,28 @@ class Recipe:
     # pinned neighbourhood to compare against.
     trace_kernels: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def edit_files(self) -> list[str]:
+        """Every framework file this fusion edits, the call site first.
+
+        Downstream stages (snapshot, index, export, wiring check, cleanup) each used
+        to derive their own file set from ``source_file`` alone. They read this
+        instead so a multi-file fusion cannot be half-tracked by one of them and
+        fully tracked by another.
+        """
+        files = [self.source_file] if self.source_file else []
+        for path in self.extra_files:
+            if path and path not in files:
+                files.append(path)
+        return files
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "pattern": self.pattern_id,
             "description": self.description,
             "env_flag": self.env_flag,
             "source_file": self.source_file,
+            "extra_files": list(self.extra_files),
             "source_hints": list(self.source_hints),
             "fusion_math": self.fusion_math,
             "eager_reference_hint": self.eager_reference_hint,

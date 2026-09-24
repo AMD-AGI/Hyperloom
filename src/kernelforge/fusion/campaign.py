@@ -15,6 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from kernelforge.fusion.driver_shim import write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
@@ -242,13 +243,15 @@ def build_forge_loop_command(
     extra_source_files: tuple[str, ...] = (),
 ) -> list[str]:
     """Assemble the forge-loop invocation for one recipe."""
-    # ``extra_source_files`` widens the fusion beyond the single call-site file when
-    # the correct fix legitimately spans more than one file (e.g. a kernel-selector
-    # that chooses the output-dtype template). They are TRACKED by the shadow repo
-    # so an edit there is kept/revertible like the primary file. Deduplicate while
-    # preserving order; never let one displace the primary kernel or fused module.
+    # ``recipe.extra_files`` are the further call-site files discovery itself found;
+    # ``extra_source_files`` are the ones the operator named on the command line.
+    # Both widen the fusion beyond a single call-site file when the correct fix
+    # legitimately spans more than one (e.g. a kernel-selector that chooses the
+    # output-dtype template). All are TRACKED by the shadow repo so an edit there is
+    # kept/revertible like the primary file. Deduplicate while preserving order;
+    # never let one displace the primary kernel or fused module.
     source_files = [recipe.source_file]
-    for extra in extra_source_files:
+    for extra in (*recipe.extra_files, *extra_source_files):
         if extra and extra not in source_files:
             source_files.append(extra)
     if fused_module and fused_module not in source_files:
@@ -327,6 +330,8 @@ def run_recipe_campaign(
     shadow_env: dict[str, str] | None = None,
     fused_module: str = "",
     extra_source_files: tuple[str, ...] = (),
+    repo_scope: bool = False,
+    tracked_roots: Sequence[str] = (),
 ) -> CampaignOutcome:
     """Author and validate one recipe by running a forge-loop campaign."""
     out = Path(output_dir)
@@ -355,6 +360,8 @@ def run_recipe_campaign(
             experience=experience,
             fused_module=fused_module,
             extra_source_files=extra_source_files,
+            repo_scope=repo_scope,
+            tracked_roots=tracked_roots,
         ),
         encoding="utf-8",
     )
@@ -436,6 +443,8 @@ def build_campaign_program_md(
     experience: str = "",
     fused_module: str = "",
     extra_source_files: tuple[str, ...] = (),
+    repo_scope: bool = False,
+    tracked_roots: Sequence[str] = (),
 ) -> str:
     """The task document handed to the loop's implementer for one recipe."""
     hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
@@ -445,16 +454,32 @@ def build_campaign_program_md(
     # because the correct fix legitimately spans them (e.g. the kernel-selector that
     # picks the output-dtype template). "Tracked" below must reflect them, or the
     # loop would silently revert an edit the fix depends on.
-    extra_editable = [e for e in extra_source_files if e and e != recipe.source_file]
-    tracked_phrase = "this file and the framework source file above"
-    if extra_editable:
+    extra_editable = [
+        path for path in (*recipe.extra_files, *extra_source_files) if path and path != recipe.source_file
+    ]
+    if repo_scope:
+        tracked_phrase = "this file and every file under the tracked root(s) named below"
+    elif extra_editable:
         tracked_phrase = "this file, the framework source file above, and the additional in-scope file(s) listed below"
+    else:
+        tracked_phrase = "this file and the framework source file above"
+    # Under repo scope a new helper may legitimately have to sit somewhere else (a
+    # shared package several call sites can import), so the blanket ban becomes a
+    # default plus the one rule that actually binds: the loop commits new files only
+    # where it was told to look.
+    other_modules_rule = (
+        "You MAY add further helper modules when several call sites need to import "
+        "them; put each one inside a tracked root below, and be aware that a KEEP "
+        "commits a new file only alongside a tracked edit."
+        if repo_scope
+        else "Do NOT create any other new module."
+    )
     module_block = (
         f"""
 ## Where the fused kernel goes (MANDATORY)
 Write the fused kernel into exactly this file, which already exists and is empty:
     {fused_module}
-Do NOT create any other new module. Only {tracked_phrase} are tracked, and the
+{other_modules_rule} Only {tracked_phrase} are tracked, and the
 loop can neither keep nor revert anything else — a kernel written elsewhere scores
 as a validated candidate that then vanishes.
 
@@ -495,6 +520,22 @@ call — it will score your fusion as absent.
         if fused_module
         else ""
     )
+    repo_block = (
+        (
+            "\n## Repo scope: the framework tree is yours to edit (tracked & keepable)\n"
+            "This fusion was NOT localized to one file. The call sites it replaces may\n"
+            "sit in several modules, and you may edit any file under the tracked root(s)\n"
+            "below — edits there are kept and reverted with the fusion like the call-site\n"
+            "file itself. Anything OUTSIDE them is untracked: the loop can neither keep\n"
+            "nor revert it, so an edit there vanishes along with the score it earned.\n"
+            "Tracked root(s):\n"
+            + "\n".join(f"    {root}" for root in tracked_roots)
+            + "\nChange only what the fusion needs, leave the flag-off path byte-identical,\n"
+            "and do not touch unrelated call sites.\n"
+        )
+        if (repo_scope and tracked_roots)
+        else ""
+    )
     extra_block = (
         (
             "\n## Additional in-scope files you MAY edit (tracked & keepable)\n"
@@ -525,18 +566,28 @@ the in-session gate — any attempt to edit it will be rejected.
         if harness_path
         else ""
     )
+    call_site_line = (
+        f"- Primary call site to edit: {recipe.source_file}"
+        if extra_editable
+        else f"- Framework source file to edit: {recipe.source_file}"
+    )
+    localize_intro = (
+        "Grep these files for the anchors below and fuse the chain they mark:"
+        if extra_editable
+        else "Grep the file for these anchors and fuse the chain they mark:"
+    )
     return f"""# Fuse the {recipe.pattern_id} chain
 
 ## Target
-- Framework source file to edit: {recipe.source_file}
+{call_site_line}
 - Env flag gating the fusion: {recipe.env_flag}
 - {recipe.description}
-{trace_kernels_block(recipe.trace_kernels)}{module_block}{extra_block}{harness_block}
+{trace_kernels_block(recipe.trace_kernels)}{module_block}{repo_block}{extra_block}{harness_block}
 ## What to fuse
 {recipe.fusion_math}
 
 ## How to localize it in the source
-Grep the file for these anchors and fuse the chain they mark:
+{localize_intro}
 {hints}
 
 ## Representative decode shapes

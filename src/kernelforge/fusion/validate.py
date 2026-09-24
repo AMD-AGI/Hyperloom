@@ -1135,7 +1135,55 @@ class WiringEvidence:
     reason: str
 
 
-def fused_symbol_invocation_evidence(source_file: str) -> WiringEvidence:
+def _file_invocation_evidence(source_file: str) -> tuple[Optional[bool], str]:
+    """One file's verdict: ``True`` wired, ``False`` dead import, ``None`` no evidence."""
+    from .emit import _is_fused_module_name
+
+    label = Path(source_file).name
+    try:
+        tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return None, f"{label} unchecked ({type(exc).__name__}: {exc})"
+
+    # Names the wiring edit binds from a fused-kernel module, at any nesting
+    # depth: a lazy import inside ``forward`` is a legitimate wiring style.
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            leaf = (node.module or "").rsplit(".", 1)[-1]
+            if leaf and _is_fused_module_name(f"{leaf}.py"):
+                bound.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
+                    bound.add(alias.asname or alias.name.split(".")[0])
+    if not bound:
+        # A fusion authored INLINE in the framework file imports nothing, and is
+        # wired by construction. Only a bound-but-unused import is provable, so
+        # this branch yields no evidence rather than a verdict.
+        return None, f"{label} imports no fused-kernel module"
+
+    # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
+    # load of a bound identifier is by construction a use outside the import.
+    used = sorted(
+        {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in bound
+        }
+    )
+    if used:
+        return True, f"{label} references {', '.join(used)}"
+    return False, (
+        f"{label} imports {', '.join(sorted(bound))} from a fused-kernel "
+        f"module and never references it -- the fused kernel is dead code in the served model"
+    )
+
+
+def fused_symbol_invocation_evidence(
+    source_file: str,
+    extra_files: Sequence[str] = (),
+) -> WiringEvidence:
     """Whether the framework edit CALLS the fused module, or only imports it.
 
     A fusion is delivered as two edits: a new fused-kernel module, and a wiring
@@ -1157,48 +1205,27 @@ def fused_symbol_invocation_evidence(source_file: str) -> WiringEvidence:
     fusion (the fused call written straight into the framework file) legitimately
     looks like. The gate exists to catch one provable defect, not to demote a KEEP
     it could not inspect, and equally not to claim it inspected one it did not.
+
+    ``extra_files`` are the other files a multi-file fusion edits. The fused module
+    only has to be called from ONE of them, so a single file's dead import is not
+    the fusion's verdict: the check passes as soon as any file references it, and
+    fails only when every file that imports it leaves it unused.
     """
-    from .emit import _is_fused_module_name
+    files = [p for p in [source_file, *extra_files] if p]
+    if not files:
+        return WiringEvidence("unchecked", "unchecked (no framework file recorded)")
 
-    try:
-        tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
-    except (OSError, SyntaxError, ValueError) as exc:
-        return WiringEvidence("unchecked", f"{type(exc).__name__}: {exc}")
+    dead: list[str] = []
+    silent: list[str] = []
+    for path in files:
+        verdict, reason = _file_invocation_evidence(path)
+        if verdict is True:
+            return WiringEvidence("wired", reason)
+        (dead if verdict is False else silent).append(reason)
+    if dead:
+        return WiringEvidence("not_wired", "; ".join(dead))
+    return WiringEvidence("unchecked", f"unchecked ({'; '.join(silent)})")
 
-    # Names the wiring edit binds from a fused-kernel module, at any nesting
-    # depth: a lazy import inside ``forward`` is a legitimate wiring style.
-    bound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            leaf = (node.module or "").rsplit(".", 1)[-1]
-            if leaf and _is_fused_module_name(f"{leaf}.py"):
-                bound.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
-                    bound.add(alias.asname or alias.name.split(".")[0])
-    if not bound:
-        # A fusion authored INLINE in the framework file imports nothing, so
-        # there is no import to prove unused -- indistinguishable here from a
-        # wiring edit that was never made.
-        return WiringEvidence("unchecked", f"{Path(source_file).name} imports no fused-kernel module")
-
-    # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
-    # load of a bound identifier is by construction a use outside the import.
-    used = sorted(
-        {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in bound
-        }
-    )
-    if used:
-        return WiringEvidence("wired", f"{Path(source_file).name} references {', '.join(used)}")
-    return WiringEvidence(
-        "not_wired",
-        f"{Path(source_file).name} imports {', '.join(sorted(bound))} from a fused-kernel "
-        f"module and never references it -- the fused kernel is dead code in the served model",
-    )
 
 
 def validate_recipe(

@@ -22,6 +22,11 @@ it.
 
 ### Added
 
+- **`--repo-scope` / `--no-repo-scope` for `forge-fuse`.** Give discovery and
+  authoring the whole framework repository instead of one resolved file.
+  Requires `--discover llm` or `--discover anchored`. Use when the fusion chain
+  is not in the arch-class model file and you do not want to name its location.
+
 - **`--fuse-kernel` / `--fuse-kernel-ts` for `forge-fuse`.** Name the GPU
   kernel a fusion is built around (full trace spelling); neighbours are taken
   from the trace and aggregated by op category. Implies `--discover anchored`.

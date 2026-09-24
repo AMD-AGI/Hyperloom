@@ -17,7 +17,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import click
 
@@ -196,6 +196,42 @@ def _author_module_dirs(source_files: list[str]) -> list[str]:
         if parent not in dirs:
             dirs.append(parent)
     return dirs
+
+
+def _discovery_root(source_file: str, framework_root: str) -> str:
+    """The directory a discovery session runs in, and repo scope searches within."""
+    return (
+        _framework_repo_root(source_file, framework_root)
+        or framework_root
+        or str(Path(source_file).parent if source_file else Path.cwd())
+    )
+
+
+def _recipe_files(recipes) -> list[str]:
+    """Every framework file the given recipes edit, order-stable and de-duplicated."""
+    files: list[str] = []
+    for recipe in recipes:
+        for path in recipe.edit_files:
+            if path and path not in files:
+                files.append(path)
+    return files
+
+
+def _tracked_roots(repo_root: str, source_files: list[str]) -> list[str]:
+    """The top-level trees the shadow repo indexes, as the author is told them."""
+    if not repo_root:
+        return []
+    root = Path(repo_root).resolve()
+    roots: list[str] = []
+    for source_file in source_files:
+        with contextlib.suppress(OSError, ValueError):
+            rel = Path(source_file).resolve().relative_to(root)
+            if not rel.parts:
+                continue
+            entry = str(root / rel.parts[0])
+            if entry not in roots:
+                roots.append(entry)
+    return roots
 
 
 def _prepare_author_harness(
@@ -539,6 +575,16 @@ def _verdict_override(
     default="",
     help="Explicit framework source root (else auto-detect the installed package).",
 )
+@click.option(
+    "--repo-scope/--no-repo-scope",
+    "repo_scope",
+    default=False,
+    help="Give discovery and authoring the whole framework repository instead of one "
+    "resolved model file. Discovery embeds no source and explores the tree with its own "
+    "read/search tools, may return a fusion whose call sites span several files, and "
+    "authoring may edit all of them. Use when the chain is not in the arch-class model "
+    "file and you do not want to name its location.",
+)
 @click.option("--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes.")
 @click.option(
     "--decode-steps",
@@ -663,6 +709,7 @@ def run(
     harness_noise_repeat: int,
     harness_noise_env: tuple[str, ...],
     framework_root: str,
+    repo_scope: bool,
     decode_batch: int,
     decode_steps: int,
     discover_mode: str,
@@ -761,10 +808,14 @@ def run(
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
-    # Without --source-file, extras stay empty here; --repo-scope (later) fills
-    # multi-file scope from discovery instead.
+    # Multi-file extras come from discovery under --repo-scope; there is no
+    # --source-file override on this branch.
     _primary_override = ""
     extra_source_files: tuple[str, ...] = ()
+    if repo_scope and discover_mode == "patterns":
+        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
+        # nothing in it that could explore a repository.
+        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
     llm_error: LlmUnavailableError | None = None
     anchor_report = None
     if discover_mode == "anchored":
@@ -791,6 +842,7 @@ def run(
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )
+        discovery_root = _discovery_root(source_file, framework_root)
         if dry_run:
             # Resolution is the whole point of a dry run here: the operator has to see which launches were
             # selected before an agent or a GPU is paid for.
@@ -808,13 +860,16 @@ def run(
                     report=anchor_report,
                     framework_root=framework_root,
                     category_shares=diagnosis.category_shares,
+                    repo_scope=repo_scope,
+                    repo_root=discovery_root,
                     llm_fn=registered_agent_llm_fn(
                         discovery_agent,
                         model=discovery_agent.runtime.model,
-                        workdir=_framework_repo_root(source_file, framework_root)
-                        or str(Path(source_file).parent if source_file else Path.cwd()),
+                        workdir=discovery_root,
                         # Discovery is read-only, so every file it is shown is
-                        # snapshotted and restored, not just the primary.
+                        # snapshotted and restored, not just the primary. Under repo
+                        # scope no file is shown and the whole tree is off limits, so
+                        # the session's own read-only spec carries that instead.
                         protected_files=[p for p in (source_file, *extra_source_files) if p],
                         log_path=str(out / "discovery_llm.txt"),
                     ),
@@ -837,9 +892,7 @@ def run(
         )
         try:
             discovery_agent = require_agent_backend()
-            discovery_workdir = _framework_repo_root(source_file, framework_root) or str(
-                Path(source_file).parent if source_file else Path.cwd()
-            )
+            discovery_workdir = _discovery_root(source_file, framework_root)
             recipes = discover_recipes(
                 diagnosis,
                 model_type=model_type,
@@ -850,6 +903,8 @@ def run(
                 # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
                 # compile-pass config, and that verdict rewrites the pattern id.
                 framework_root=framework_root,
+                repo_scope=repo_scope,
+                repo_root=discovery_workdir,
                 llm_fn=registered_agent_llm_fn(
                     discovery_agent,
                     model=discovery_agent.runtime.model,
@@ -975,7 +1030,9 @@ def run(
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
         # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
         # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
-        pristine_dir = _snapshot_fusion_source(repo_root, top_recipe.source_file, out)
+        pristine_dir = _snapshot_fusion_source(
+            repo_root, top_recipe.source_file, out, extra_files=top_recipe.extra_files
+        )
         # combine folds every recipe into one unit; multi-patch authors each non-claim recipe as its own sibling and
         # runs any claims separately.
         authored = recipes if fuse_all_confirmed else (deferred if multi_patch else [top_recipe])
@@ -1022,6 +1079,8 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
+                extra_source_files=extra_source_files,
+                repo_scope=repo_scope,
                 agent_factory=require_agent_backend,
                 publish=publish,
             )
@@ -1091,6 +1150,8 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
+                extra_source_files=extra_source_files,
+                repo_scope=repo_scope,
             )
             validation = loop_result.best
             loop_manifest = loop_result.to_dict()
@@ -1117,7 +1178,9 @@ def run(
                 log.error("author harness preparation failed: %s", harness_error)
             else:
                 prompt_harness_path = author_harness_path or harness_path
-                author_sources = [r.source_file for r in authored if r.source_file]
+                # Every call-site file, not just the primary: the author transaction treats this list as its exact
+                # write allowlist, so a multi-file fusion whose second file is missing here cannot be delivered.
+                author_sources = _recipe_files(authored)
                 prompt = build_multi_author_prompt(
                     [r.to_dict() for r in authored],
                     framework=framework,
@@ -1163,7 +1226,14 @@ def run(
         # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
         # serving survived).
         if repo_root and exported_ok and compile_pass_outcome is None and not did_multi_patch:
-            artifacts = export_artifacts(repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir)
+            artifacts = export_artifacts(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir=pristine_dir,
+                extra_files=top_recipe.extra_files,
+                repo_scope=repo_scope,
+            )
 
         # The exported patch is taken back out of the framework.
         if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None and not did_multi_patch:
@@ -1179,7 +1249,13 @@ def run(
         ):
             # Nothing usable came out, so leave the framework exactly as found rather than carrying unvalidated code
             # into whatever runs next.
-            _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
+            _discard_failed_attempt(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir,
+                extra_files=top_recipe.extra_files,
+            )
 
     manifest, path = publish(
         patches_out,
@@ -1401,6 +1477,8 @@ def _run_multi_patch_nomination(
     block_size: int,
     max_model_len: int,
     agent_factory,
+    extra_source_files: tuple[str, ...] = (),
+    repo_scope: bool = False,
     publish=None,
 ) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
     """Run BOTH pipelines and collect every keeper as an independent sibling."""
@@ -1451,6 +1529,8 @@ def _run_multi_patch_nomination(
             tp=tp,
             block_size=block_size,
             max_model_len=max_model_len,
+            extra_source_files=extra_source_files,
+            repo_scope=repo_scope,
             publish=publish,
         )
         for patch in loop_result.patches:
@@ -1514,6 +1594,10 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
         description="; ".join(r.description for r in recipes),
         env_flag=" ".join(flags),
         source_file=base.source_file,
+        # The union, minus whichever file became the combined call site: every folded
+        # recipe's files must stay tracked or combining would silently narrow the
+        # edit scope to the first recipe's.
+        extra_files=[path for path in _recipe_files(recipes) if path != base.source_file],
         source_hints=[h for r in recipes for h in r.source_hints],
         fusion_math="\n".join(f"[{r.pattern_id}] {r.fusion_math}" for r in recipes),
         eager_reference_hint="; ".join(r.eager_reference_hint for r in recipes),
@@ -1550,11 +1634,17 @@ def _run_fusion_autoloop(
     tp: int = 1,
     block_size: int = 0,
     max_model_len: int = 0,
+    extra_source_files: tuple[str, ...] = (),
+    repo_scope: bool = False,
     publish=None,
 ):
     """Try each ranked recipe as one forge-loop campaign."""
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
+    # Every file any recipe edits, plus the ones the operator named: the shadow index has to admit all of them up
+    # front, because it is built once and shared by every campaign below.
+    campaign_files = list(dict.fromkeys([*_recipe_files(loop_recipes), *(p for p in extra_source_files if p)]))
+    tracked_roots = _tracked_roots(repo_root, campaign_files)
 
     # Per-recipe pristine snapshots for the multi-patch export.
     multi_patch = not combine
@@ -1562,7 +1652,11 @@ def _run_fusion_autoloop(
     if multi_patch and repo_root:
         for r in loop_recipes:
             snap = _snapshot_fusion_source(
-                repo_root, r.source_file, out, subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}"
+                repo_root,
+                r.source_file,
+                out,
+                subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}",
+                extra_files=r.extra_files,
             )
             if snap:
                 recipe_pristine[r.pattern_id] = snap
@@ -1581,6 +1675,9 @@ def _run_fusion_autoloop(
             loop_recipes[0].source_file,
             git_dir=str(out / "shadow.git"),
             extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
+            # A fusion whose call sites span packages is keepable only if every one of
+            # those packages is in the index.
+            scope_files=campaign_files,
         )
         if shadow is None:
             log.error(
@@ -1655,6 +1752,9 @@ def _run_fusion_autoloop(
             agent_sandbox_mode=agent_sandbox_mode,
             shadow_env=shadow.env,
             fused_module=fused_module_path(recipe),
+            extra_source_files=extra_source_files,
+            repo_scope=repo_scope,
+            tracked_roots=tracked_roots,
         )
         if outcome.experiment_id:
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id
@@ -1683,6 +1783,8 @@ def _run_fusion_autoloop(
             pristine_dir=pristine,
             patch_name=patch_name,
             fused_module=fused_module_path(recipe),
+            extra_files=recipe.extra_files,
+            repo_scope=repo_scope,
         )
         if not (arts and arts.patch):
             log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
@@ -1872,7 +1974,10 @@ def _run_serving_smoke(
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Cheapest gate first, and the only one that catches a fusion nothing calls: the smoke would boot, decode and
     # PASS, because stock code is what ran.
-    wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
+    wiring = fused_symbol_invocation_evidence(
+        getattr(recipe, "source_file", ""),
+        getattr(recipe, "extra_files", ()),
+    )
     if wiring.verdict == "not_wired":
         log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
         note = (
@@ -2262,12 +2367,20 @@ def _needs_discard(exported_ok: bool, artifacts) -> bool:
     return not (artifacts and artifacts.patch)
 
 
-def _discard_failed_attempt(repo_root: str, source_file: str, out: Path, pristine_dir: str) -> None:
+def _discard_failed_attempt(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    pristine_dir: str,
+    extra_files: Sequence[str] = (),
+) -> None:
     """Put the framework back as it was after a run that produced nothing usable."""
     if not repo_root or not source_file or not pristine_dir:
         return
-    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed")
-    _reset_fusion_source(repo_root, source_file, pristine_dir=pristine_dir)
+    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed", extra_files=extra_files)
+    for path in [source_file, *extra_files]:
+        if path:
+            _reset_fusion_source(repo_root, path, pristine_dir=pristine_dir)
 
     for candidate in _author_created_modules(source_file, pristine_dir):
         with contextlib.suppress(OSError):
@@ -2298,8 +2411,19 @@ def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
     return found
 
 
-def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir: str = ".pristine") -> str:
-    """Copy the pristine model source (pre-authoring) into ``out/<subdir>/<rel>``."""
+def _snapshot_fusion_source(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    subdir: str = ".pristine",
+    extra_files: Sequence[str] = (),
+) -> str:
+    """Copy the pristine framework source (pre-authoring) into ``out/<subdir>/<rel>``.
+
+    ``extra_files`` are the further call-site files a multi-file fusion edits. They
+    are snapshotted too so the non-git export can diff them; without a snapshot
+    such a file diffs against nothing and exports as a bogus whole-file creation.
+    """
     if not source_file or not Path(source_file).is_file():
         return ""
     pdir = out / subdir
@@ -2326,6 +2450,12 @@ def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir:
     src = Path(source_file)
     if not _snap(src):
         return ""
+
+    # The same reasoning applies to every other file this fusion edits, but one of them failing is not fatal: the
+    # primary is what decides whether a patch can be produced at all.
+    for path in extra_files:
+        if path and Path(path).is_file() and Path(path).resolve() != src.resolve():
+            _snap(Path(path))
 
     # Also snapshot any pre-existing *_fused*/*_fusion* module beside it, so export can tell an author-created NEW
     # module from a pre-existing framework file that merely matches the marker.
