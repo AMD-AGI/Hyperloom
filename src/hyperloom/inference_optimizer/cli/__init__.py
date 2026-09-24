@@ -1086,6 +1086,18 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
     return float(baseline_accuracy or 0.0) <= 0.0
 
 
+def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) -> str:
+    """Label the orchestration backend with the model it runs, for the launch banner."""
+    if backend is None:
+        return "DISABLED"
+    name = str(getattr(backend, "name", "") or "").strip().lower()
+    if name == "claude":
+        return f"Claude({claude_model})"
+    if name == "codex":
+        return f"Codex({codex_model})"
+    return f"{backend.__class__.__name__}({getattr(backend, 'model', '') or codex_model})"
+
+
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -2694,21 +2706,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
     )
 
-    def _backend_kind(role: str) -> str:
-        backend = backends.get(role)
-        name = str(getattr(backend, "name", "") or "").strip().lower()
-        if name == "claude":
-            return "Claude"
-        if name == "codex":
-            return "Codex"
-        if backend is None:
-            return "DISABLED"
-        return backend.__class__.__name__
-
-    orchestration_str = (
-        f"Claude({args.claude_model})"
-        if _backend_kind("orchestration") == "Claude"
-        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    orchestration_str = _orchestration_banner(
+        backends.get("orchestration"),
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
     )
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
