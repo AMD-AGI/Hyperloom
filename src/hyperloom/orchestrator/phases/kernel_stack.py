@@ -413,6 +413,7 @@ class KernelStackPhase(PhaseHandler):
                 )
             )
             graded = None
+            accuracy_gate = None
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
                 graded_verdict = VERDICT_REVERT
@@ -423,6 +424,16 @@ class KernelStackPhase(PhaseHandler):
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
+                from hyperloom.common.perf_metric import agentx_active
+
+                if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
+                    accuracy_gate = _grade_integrate_accuracy(
+                        bench_result,
+                        session_dir=self.session_dir,
+                        workspace=workspace,
+                        server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                    )
+                    bench_result["accuracy_passed"] = accuracy_gate.get("accuracy_pass")
                 # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
                 # current_best rather than the total gain over the baseline.
                 # The verdict is the chokepoint's: it already applies the AgentX keep-threshold floor and the
@@ -432,6 +443,8 @@ class KernelStackPhase(PhaseHandler):
                     bench_result,
                     keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
                 )
+                if graded.graded_on_intvty:
+                    bench_result["agentx_policy"] = graded.policy_evidence()
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
@@ -461,7 +474,7 @@ class KernelStackPhase(PhaseHandler):
                     decision = "KEEP"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
-            if decision == "KEEP" and isinstance(bench_result, dict):
+            if decision == "KEEP" and isinstance(bench_result, dict) and accuracy_gate is None:
                 accuracy_gate = _grade_integrate_accuracy(
                     bench_result,
                     session_dir=self.session_dir,

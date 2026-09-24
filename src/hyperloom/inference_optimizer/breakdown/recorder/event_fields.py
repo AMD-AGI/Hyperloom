@@ -108,15 +108,15 @@ def text_or_none(value: Any) -> str | None:
 
 
 def graded_axes(source: Any) -> dict[str, Any]:
-    """The four graded axes a measurement carries, as explicit nulls where it carries none.
+    """The seven AgentX display metrics, as explicit nulls where absent.
 
     A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
     reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
-    and it was zero", so all four are always present.
+    and it was zero", so all seven are always present.
 
     Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
-    slow-tail interactivity percentile with total throughput held as a guard, and none of that is recoverable from
-    the output axis -- on the canonical corpus the two throughputs differ by roughly two orders of magnitude.
+    P50 interactivity is the promotion objective, while P90 interactivity and
+    per-GPU output throughput are the official plot axes.
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
 

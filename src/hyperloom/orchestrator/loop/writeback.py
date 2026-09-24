@@ -180,16 +180,22 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
 
 def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
     """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
+    from hyperloom.common.perf_metric import agentx_snapshot_of
 
     return {
-        **graded_axes_of(measurement),
+        **agentx_snapshot_of(measurement),
         **{
             key: measurement[key]
             for key in (
                 "ttft_mean_ms",
                 "e2el_mean_ms",
                 "tpot_mean_ms",
+                "input_throughput",
+                "total_throughput",
+                "total_token_throughput",
+                "e2e_norm_intvty_p90",
+                "submission_invalid_reasons",
+                "agentx_policy",
                 "workspace",
                 "raw_result_path",
                 "report_path",
@@ -424,6 +430,15 @@ def _record_config_attempts(
                 "gain_pct": metrics.get("gain_pct"),
                 "runtime_sec": metrics.get("runtime_sec"),
                 "estimated_output_throughput": metrics.get("estimated_output_throughput"),
+                "e2e_intvty_p50": metrics.get("e2e_intvty_p50"),
+                "e2e_intvty_p90": metrics.get("e2e_intvty_p90"),
+                "output_tput_per_gpu": metrics.get("output_tput_per_gpu"),
+                "ttft_p50_ms": metrics.get("ttft_p50_ms"),
+                "ttft_p90_ms": metrics.get("ttft_p90_ms"),
+                "tpot_p50_ms": metrics.get("tpot_p50_ms"),
+                "tpot_p90_ms": metrics.get("tpot_p90_ms"),
+                "duration_s": metrics.get("duration_s"),
+                "request_error_rate": metrics.get("request_error_rate"),
             },
             config_delta={
                 "extra_server_args": variant.get("extra_server_args"),
@@ -452,6 +467,10 @@ def _record_config_attempts(
             measured_against=row.get("measured_against") or {},
             # What stood behind the verdict. Absent when nothing ruled.
             validation_basis=str(row.get("validation_basis") or ""),
+            agentx_policy=row.get("agentx_policy") or {},
+            submission_valid=row.get("submission_valid"),
+            submission_invalid_reasons=row.get("submission_invalid_reasons") or [],
+            accuracy_passed=row.get("accuracy_passed"),
             # A pair is what makes a gain addable, so eligibility follows
             # the pair being present rather than the outcome being a KEEP.
             attribution_eligible=(
@@ -930,6 +949,7 @@ class WritebackCollaborator:
                 # The figures grading actually read, not the raw measurement: the caller's resolved output
                 # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
                 measurement=graded_source,
+                agentx_policy=graded.policy_evidence() if graded.graded_on_intvty else None,
                 ts=ts,
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
@@ -3133,7 +3153,7 @@ class WritebackCollaborator:
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, agentx_snapshot_of
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -3258,6 +3278,7 @@ class WritebackCollaborator:
                     # so CLOSE reads one place instead of reconstructing which
                     # lane promoted the champion. ``None`` means "not gated".
                     "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
+                    "agentx_policy": dict(bv.get("agentx_policy") or {}) if isinstance(bv, dict) else {},
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -3412,8 +3433,16 @@ class WritebackCollaborator:
         # The axes of the measurement this KEEP was graded on. Without them the
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
-        current_best.update(graded_axes_of(cand_source))
+        current_best.update(agentx_snapshot_of(cand_source))
         if isinstance(bv, dict):
+            for _legacy_metric in (
+                "input_throughput",
+                "total_throughput",
+                "total_token_throughput",
+                "e2e_norm_intvty_p90",
+            ):
+                if bv.get(_legacy_metric) is not None:
+                    current_best[_legacy_metric] = bv.get(_legacy_metric)
             for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
@@ -3717,15 +3746,12 @@ class WritebackCollaborator:
                 "total_throughput": result.get("total_token_throughput"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
                 "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
+                "accuracy_passed": True if isinstance(result.get("accuracy"), (int, float)) else None,
                 "workspace": result.get("workspace"),
             }
             snap = self.shared_state.baseline_perf
             if snap:
-                current_best["total_throughput"] = snap["total_throughput"]
-                current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
-                for _axis in ("input_throughput", "tpot_p90_ms"):
-                    if snap.get(_axis) is not None:
-                        current_best[_axis] = snap[_axis]
+                current_best.update(snap)
             # The measured corpus shape replaces the canonical seed. Only an
             # aiperf result carries the distributions, so their presence is
             # what marks the measurement as AgentX-produced.
@@ -4411,7 +4437,18 @@ class WritebackCollaborator:
                         "input_throughput",
                         "total_throughput",
                         "total_token_throughput",
+                        "e2e_intvty_p50",
+                        "e2e_intvty_p90",
                         "e2e_norm_intvty_p90",
+                        "output_tput_per_gpu",
+                        "duration_s",
+                        "duration_seconds",
+                        "request_error_rate",
+                        "accuracy_passed",
+                        "accuracy_pass",
+                        "ttft_p50_ms",
+                        "ttft_p90_ms",
+                        "tpot_p50_ms",
                         "tpot_p90_ms",
                         "submission_valid",
                         "submission_invalid_reasons",
@@ -5485,7 +5522,7 @@ class WritebackCollaborator:
             provenance = str(result.get("provenance") or "").strip()
             if domain and not provenance.startswith("specialist:"):
                 provenance = f"specialist:{domain}"
-            from hyperloom.common.perf_metric import graded_axes_of
+            from hyperloom.common.perf_metric import agentx_snapshot_of
 
             bv = {
                 "name": sid,
@@ -5500,7 +5537,7 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
-                **graded_axes_of(result.get("bench_result") or result),
+                **agentx_snapshot_of(result.get("bench_result") or result),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

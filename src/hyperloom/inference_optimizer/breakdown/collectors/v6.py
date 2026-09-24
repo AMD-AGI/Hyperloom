@@ -339,6 +339,15 @@ def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, An
 #: own measurement block names them so the read is a straight lift.
 _BASELINE_OUTCOME_FIELDS = (
     "throughput_tok_s_per_gpu",
+    "e2e_intvty_p50",
+    "e2e_intvty_p90",
+    "output_tput_per_gpu",
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "tpot_p50_ms",
+    "tpot_p90_ms",
+    "duration_s",
+    "request_error_rate",
     "accuracy",
     "ttft_mean_ms",
     "e2el_mean_ms",
@@ -352,9 +361,9 @@ _ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 
 def _graded_axes(recorded: Any) -> dict[str, Any]:
-    """Publish the four graded axes a recorder projected, absent ones as explicit nulls.
+    """Publish the seven AgentX display metrics, absent ones as explicit nulls.
 
-    The recorder already filled all four, so this only has to hold the shape for a session recorded before it did.
+    The recorder already filled all seven, so this only has to hold the shape for a session recorded before it did.
     All four are always present because absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero".
 
@@ -387,8 +396,8 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
 
     Returns:
-        dict[str, Any]: The four baseline figures, each ``None`` when the
-            timeline holds no anchoring measurement.
+        dict[str, Any]: The baseline figures, each ``None`` when the timeline
+            holds no anchoring measurement.
     """
     anchors: list[tuple[str, dict[str, Any]]] = []
     for event in timeline:
@@ -405,12 +414,21 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             # no chronology of its own.
             anchors.append((str(action.get("end_time") or action.get("start_time") or ""), action))
     if not anchors:
-        return {**dict.fromkeys(_BASELINE_OUTCOME_FIELDS), "perf": _graded_axes(None)}
+        return {
+            **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
+            "perf": _graded_axes(None),
+            "submission_valid": None,
+            "submission_invalid_reasons": [],
+            "accuracy_passed": None,
+        }
     anchors.sort(key=lambda row: row[0])
     measurement = _mapping(anchors[-1][1].get("measurement"))
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
         "perf": _graded_axes(measurement.get("perf")),
+        "submission_valid": _optional_bool(measurement.get("submission_valid")),
+        "submission_invalid_reasons": [str(reason) for reason in measurement.get("submission_invalid_reasons") or []],
+        "accuracy_passed": _optional_bool(measurement.get("accuracy_passed")),
     }
 
 
@@ -467,6 +485,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
+        "agentx_policy": dict(_mapping(settled.get("agentx_policy"))),
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
@@ -638,6 +657,8 @@ def collect_v6_outcome(
             # and every other throughput field in this document is the output axis by construction.
             "graded_on": validation.get("graded_on"),
             "perf": validation.get("perf"),
+            **dict(_mapping(validation.get("perf"))),
+            "agentx_policy": dict(_mapping(validation.get("agentx_policy"))),
             "action_path": [str(step) for step in recipe.get("action_path") or []],
             "extra_envs": dict(_mapping(recipe.get("extra_envs"))),
             "extra_server_args": str(recipe.get("extra_server_args") or ""),

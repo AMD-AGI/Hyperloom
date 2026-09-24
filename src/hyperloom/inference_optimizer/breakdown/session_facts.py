@@ -97,7 +97,7 @@ def grading_block(state: Any) -> dict[str, Any]:
     recorded axis is absence, not the exporting process's environment. A live
     object without a recorded axis still uses :func:`resolved_grading`.
     """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_policy_config
     from hyperloom.orchestrator.state.shared_state import resolved_grading
 
     recorded = _field(state, "grading", None)
@@ -107,15 +107,20 @@ def grading_block(state: Any) -> dict[str, Any]:
         noise_pct = recorded.get("noise_pct")
         on_intvty = objective == GRADED_INTVTY
         noise = float(noise_pct) if isinstance(noise_pct, (int, float)) else None
+        policy = dict(recorded.get("policy") or {}) if isinstance(recorded.get("policy"), dict) else {}
     elif isinstance(state, Mapping):
         return {}
     else:
         on_intvty, noise = resolved_grading(state)
-    return {
+        policy = agentx_policy_config() if on_intvty else {}
+    block = {
         "benchmark_mode": str(_field(state, "benchmark_mode", "") or "").strip() or "synthetic",
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
         "tput_guard": {"enabled": on_intvty, "noise_pct": noise},
     }
+    if on_intvty:
+        block["policy"] = policy or agentx_policy_config()
+    return block
 
 
 def workload_signature(config: Mapping[str, Any]) -> str:

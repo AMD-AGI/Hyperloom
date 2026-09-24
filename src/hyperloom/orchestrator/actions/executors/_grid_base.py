@@ -170,8 +170,16 @@ class VariantResult:
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
+    output_tput_per_gpu: float | None = None
+    intvty_p50: float | None = None
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
+    ttft_p50_ms: float | None = None
+    ttft_p90_ms: float | None = None
+    tpot_p50_ms: float | None = None
+    request_error_rate: float | None = None
+    submission_valid: bool | None = None
+    submission_invalid_reasons: list[str] = field(default_factory=list)
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -215,8 +223,17 @@ class VariantResult:
             "e2el_mean_ms": self.e2el_mean_ms,
             "tpot_mean_ms": self.tpot_mean_ms,
             "input_throughput": self.input_throughput,
+            "output_tput_per_gpu": self.output_tput_per_gpu,
+            "e2e_intvty_p50": self.intvty_p50,
             "tpot_p90_ms": self.tpot_p90_ms,
+            "ttft_p50_ms": self.ttft_p50_ms,
+            "ttft_p90_ms": self.ttft_p90_ms,
+            "tpot_p50_ms": self.tpot_p50_ms,
+            "e2e_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p90": self.intvty_p90,
+            "request_error_rate": self.request_error_rate,
+            "submission_valid": self.submission_valid,
+            "submission_invalid_reasons": self.submission_invalid_reasons,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

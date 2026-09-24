@@ -3,15 +3,26 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
+    GRADED_AXIS_KEYS,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P90,
+    GRADED_OUTPUT_PER_GPU,
     INTVTY_V1,
+    agentx_active,
+    agentx_policy_config,
+    agentx_snapshot_of,
+    graded_axes_of,
     intvty_grading_enabled,
     intvty_of,
+    intvty_p90_of,
     intvty_serving_grading_enabled,
     output_tput_of,
+    output_tput_per_gpu_of,
     parse_intvty_noise_pct,
     passes_intvty_gate,
     passes_tput_guard,
@@ -20,34 +31,23 @@ from hyperloom.common.perf_metric import (
     total_tput_of,
 )
 
-_KEEP_THRESHOLD_PCT = 1.0
 
-# Shaped like a measured AgentX round: prefill dominates the token budget (~114k prompt / ~806 output tokens), so
-# total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s.
 _BASELINE = {
-    "input_throughput": 25801.36,
-    "output_throughput": 183.44,
-    "total_throughput": 25984.80,
-    "e2e_norm_intvty_p90": 22.56,  # realistic Kimi-K3 p10 value
+    "input_throughput": 800.0,
+    "output_throughput": 200.0,
+    "total_throughput": 1000.0,
+    "e2e_intvty_p50": 100.0,
+    "e2e_intvty_p90": 80.0,
+    "output_tput_per_gpu": 25.0,
+    "duration_s": 100.0,
+    "request_error_rate": 1.0,
+    "submission_valid": True,
+    "accuracy_passed": True,
+    "ttft_p50_ms": 1000.0,
+    "ttft_p90_ms": 1500.0,
+    "tpot_p50_ms": 10.0,
+    "tpot_p90_ms": 15.0,
 }
-
-
-def _measured(**pct: float) -> dict[str, float]:
-    """Baseline with named axes scaled; total re-derived on demand."""
-    out = {k: v for k, v in _BASELINE.items() if k != "total_throughput"}
-    for axis, delta in pct.items():
-        out[axis] = _BASELINE[axis] * (1.0 + delta / 100.0)
-    return out
-
-
-def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float | None:
-    """Compose the primitives the way the decision round does."""
-    cand = perf_snapshot_from_mapping(candidate)
-    base = perf_snapshot_from_mapping(anchor)
-    assert cand and base
-    if not passes_intvty_gate(cand, base):
-        return None
-    return gain_pct(intvty_of(cand), intvty_of(base))
 
 
 @pytest.mark.parametrize(
@@ -62,108 +62,116 @@ def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float
     ],
 )
 def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, mode, env, expected):
-    from hyperloom.common.perf_metric import agentx_active
-
     monkeypatch.setenv("HYPERLOOM_AGENTX", env)
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert agentx_active(benchmark_mode=mode) is expected
 
 
-def test_snapshot_carries_both_graded_axes():
+def test_snapshot_carries_every_policy_anchor_field_and_display_metric():
     snap = perf_snapshot_from_mapping(_BASELINE)
+
     assert snap is not None
-    assert snap["e2e_norm_intvty_p90"] == pytest.approx(_BASELINE["e2e_norm_intvty_p90"])
-    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+    assert snap[GRADED_INTVTY] == 100.0
+    assert snap[GRADED_INTVTY_P90] == 80.0
+    assert snap[GRADED_OUTPUT_PER_GPU] == 25.0
+    assert snap["duration_s"] == 100.0
+    assert snap["request_error_rate"] == 1.0
+    assert snap["ttft_p50_ms"] == 1000.0
+    assert snap["ttft_p90_ms"] == 1500.0
+    assert snap["tpot_p50_ms"] == 10.0
+    assert snap["tpot_p90_ms"] == 15.0
 
 
-def test_intvty_of_reads_slow_tail_field():
-    snap = perf_snapshot_from_mapping(_BASELINE)
+def test_snapshot_accepts_legacy_flat_names_for_compatibility():
+    snap = perf_snapshot_from_mapping(
+        {
+            "e2e_norm_intvty_p50": 100.0,
+            "e2e_norm_intvty_p90": 80.0,
+            "output_tput_per_gpu": 25.0,
+            "duration": 100.0,
+            "request_error_rate": 1.0,
+        }
+    )
+
     assert snap is not None
-    assert intvty_of(snap) == pytest.approx(_BASELINE["e2e_norm_intvty_p90"])
+    assert snap[GRADED_INTVTY] == 100.0
+    assert snap[GRADED_INTVTY_P90] == 80.0
+    assert snap[GRADED_OUTPUT_PER_GPU] == 25.0
 
 
-def test_total_falls_back_to_input_plus_output():
-    data = {k: v for k, v in _BASELINE.items() if k != "total_throughput"}
-    snap = perf_snapshot_from_mapping(data)
-    assert snap is not None
-    assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
+@pytest.mark.parametrize(
+    "missing",
+    [GRADED_INTVTY, GRADED_INTVTY_P90, GRADED_OUTPUT_PER_GPU, "duration_s", "request_error_rate"],
+)
+def test_snapshot_requires_every_anchor_input(missing):
+    source = dict(_BASELINE)
+    source.pop(missing)
+    assert perf_snapshot_from_mapping(source) is None
 
 
-def test_snapshot_requires_both_graded_axes():
-    # Missing e2e_norm_intvty_p90 -> None
-    assert perf_snapshot_from_mapping({"output_throughput": 1.0, "total_throughput": 100.0}) is None
-    assert perf_snapshot_from_mapping({"e2e_norm_intvty_p90": 22.56}) is None
-    assert perf_snapshot_from_mapping(None) is None
+@pytest.mark.parametrize("bad", [0.0, -1.0, math.inf, math.nan, None, "n/a"])
+def test_positive_policy_axis_rejects_invalid_values(bad):
+    source = {**_BASELINE, GRADED_INTVTY: bad}
+    assert perf_snapshot_from_mapping(source) is None
 
 
-def test_degenerate_axis_is_not_a_snapshot():
-    assert perf_snapshot_from_mapping({**_BASELINE, "e2e_norm_intvty_p90": 0.0}) is None
-    # total absent and cannot be derived
-    assert perf_snapshot_from_mapping({"e2e_norm_intvty_p90": 22.56, "output_throughput": 183.44}) is None
+@pytest.mark.parametrize("bad", [-1.0, math.inf, math.nan, None, "n/a"])
+def test_error_rate_rejects_invalid_values_but_allows_zero(bad):
+    source = {**_BASELINE, "request_error_rate": bad}
+    assert perf_snapshot_from_mapping(source) is None
+    assert perf_snapshot_from_mapping({**_BASELINE, "request_error_rate": 0.0}) is not None
 
 
-def test_unusable_total_falls_back_to_input_plus_output():
-    for bad in (0.0, -1.0, None, "n/a"):
-        snap = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": bad})
-        assert snap is not None
-        assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
+def test_metric_accessors_use_the_new_agentx_axes():
+    assert intvty_of(_BASELINE) == 100.0
+    assert intvty_p90_of(_BASELINE) == 80.0
+    assert output_tput_per_gpu_of(_BASELINE) == 25.0
+    assert output_tput_of(_BASELINE) == 200.0
+    assert total_tput_of(_BASELINE) == 1000.0
 
 
-def test_intvty_lift_is_keepable():
-    """A +3% interactivity improvement is above the 2% AgentX floor."""
-    candidate = _measured(e2e_norm_intvty_p90=3.0, input_throughput=0.0, output_throughput=0.0)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and gain >= 2.0
+def test_graded_axes_are_the_seven_user_facing_metrics_with_explicit_subset_only():
+    assert GRADED_AXIS_KEYS == (
+        "e2e_intvty_p50",
+        "e2e_intvty_p90",
+        "output_tput_per_gpu",
+        "ttft_p50_ms",
+        "ttft_p90_ms",
+        "tpot_p50_ms",
+        "tpot_p90_ms",
+    )
+    assert graded_axes_of(_BASELINE) == {key: _BASELINE[key] for key in GRADED_AXIS_KEYS}
+    assert graded_axes_of(None) == {}
 
 
-def test_sub_threshold_lift_is_a_gain_but_below_floor():
-    candidate = _measured(e2e_norm_intvty_p90=1.0, input_throughput=0.5, output_throughput=0.5)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and 0.0 < gain < 2.0
+def test_agentx_snapshot_keeps_policy_flags_beside_metrics():
+    snap = agentx_snapshot_of(_BASELINE)
+    assert snap["submission_valid"] is True
+    assert snap["accuracy_passed"] is True
 
 
-def test_trading_input_for_output_with_intvty_unchanged_is_neutral():
-    """Interactivity unchanged: gain == 0, not a loss."""
-    candidate = _measured(input_throughput=-10.0, output_throughput=8.0)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and gain == pytest.approx(0.0)
+def test_legacy_band_helpers_now_read_p50_and_output_per_gpu():
+    assert passes_intvty_gate({**_BASELINE, GRADED_INTVTY: 96.0}, _BASELINE)
+    assert not passes_intvty_gate({**_BASELINE, GRADED_INTVTY: 94.0}, _BASELINE)
+    assert passes_tput_guard({**_BASELINE, GRADED_OUTPUT_PER_GPU: 24.0}, _BASELINE)
+    assert not passes_tput_guard({**_BASELINE, GRADED_OUTPUT_PER_GPU: 23.0}, _BASELINE)
 
 
-def test_intvty_gate_vetoes_regression_past_band():
-    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-6.0))
-    anchor = perf_snapshot_from_mapping(_BASELINE)
-    assert candidate and anchor
-    assert passes_intvty_gate(candidate, anchor) is False
-
-
-def test_intvty_gate_allows_movement_within_band():
-    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-4.0))
-    anchor = perf_snapshot_from_mapping(_BASELINE)
-    assert candidate and anchor
-    assert passes_intvty_gate(candidate, anchor) is True
-
-
-def test_tput_guard_allows_within_band():
-    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.97})
-    anch = perf_snapshot_from_mapping(_BASELINE)
-    assert cand and anch
-    assert passes_tput_guard(cand, anch) is True
-
-
-def test_tput_guard_rejects_regression_past_band():
-    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.90})
-    anch = perf_snapshot_from_mapping(_BASELINE)
-    assert cand and anch
-    assert passes_tput_guard(cand, anch) is False
-
-
-def test_vetoed_candidate_is_never_graded():
-    candidate = _measured(e2e_norm_intvty_p90=-20.0, input_throughput=50.0)
-    assert _graded_gain(candidate, _BASELINE) is None
+def test_fixed_agentx_policy_is_serializable_and_names_every_gate():
+    assert agentx_policy_config() == {
+        "mode": "all_of",
+        "anchor_priority": ["current_best", "baseline"],
+        "submission_valid": True,
+        "request_error_rate_max": "anchor",
+        "accuracy_passed": True,
+        "duration_max_abs_delta_pct": 5.0,
+        "e2e_intvty_p50_min_delta_pct": 3.0,
+        "e2e_intvty_p90_min_delta_pct": -5.0,
+        "output_tput_per_gpu_min_delta_pct": -5.0,
+    }
 
 
 def test_default_band_matches_upstream_measured_noise(monkeypatch):
-    """Upstream records run-to-run noise on this workload as 1-5%."""
     monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
     assert parse_intvty_noise_pct() == pytest.approx(5.0)
 
@@ -174,8 +182,7 @@ def test_band_env_override(monkeypatch, raw, expected):
     assert parse_intvty_noise_pct() == pytest.approx(expected)
 
 
-def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
-    """The corpus this grading exists for must not need an opt-in to get it."""
+def test_an_agentx_run_enables_interactivity_grading(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     assert intvty_grading_enabled() is True
@@ -188,7 +195,6 @@ def test_a_synthetic_run_still_grades_on_output(monkeypatch):
 
 
 def test_an_explicit_metric_overrides_the_agentx_default(monkeypatch):
-    """The escape hatch has to work in both directions."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert intvty_grading_enabled() is False
@@ -207,27 +213,11 @@ def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
     assert intvty_grading_enabled() is False
 
 
-# --- the persisted marker ---
-
-
 def test_the_persisted_benchmark_mode_enables_grading_without_the_env_var(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     assert intvty_grading_enabled(benchmark_mode="agentx") is True
     assert intvty_serving_grading_enabled(benchmark_mode="AgentX") is True
-
-
-def test_a_synthetic_benchmark_mode_does_not_enable_grading(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    for mode in ("", "synthetic", "sweep", None):
-        assert intvty_grading_enabled(benchmark_mode=mode or "") is False
-
-
-def test_an_explicit_metric_still_outranks_the_persisted_marker(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
-    assert intvty_grading_enabled(benchmark_mode="agentx") is False
 
 
 def test_a_scriptable_framework_still_grades_on_output_under_the_marker(monkeypatch):
@@ -236,57 +226,39 @@ def test_a_scriptable_framework_still_grades_on_output_under_the_marker(monkeypa
     assert intvty_serving_grading_enabled(scriptable=True, benchmark_mode="agentx") is False
 
 
-# --- resolve_grading_anchor_perf ---
-
-
 class _State:
     def __init__(self, current_best=None, baseline_perf=None):
         self.current_best = current_best
         self.baseline_perf = baseline_perf
 
 
-def test_anchor_perf_uses_current_best_when_axes_present():
-    state = _State(current_best=_BASELINE, baseline_perf={})
-    snap, reason = resolve_grading_anchor_perf(state)
+def test_anchor_perf_uses_current_best_when_complete():
+    snap, reason = resolve_grading_anchor_perf(_State(current_best=_BASELINE, baseline_perf={}))
     assert reason == ""
-    assert snap is not None
-    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+    assert snap == agentx_snapshot_of(_BASELINE)
 
 
-def test_anchor_perf_does_not_fall_through_to_baseline_when_current_best_lacks_axes():
-    bad_best = {"action": "explore", "tput": 200.0}  # no e2e_norm_intvty_p90 / total_throughput
-    state = _State(current_best=bad_best, baseline_perf=_BASELINE)
-    snap, reason = resolve_grading_anchor_perf(state)
+def test_anchor_perf_does_not_fall_through_when_current_best_is_incomplete():
+    incomplete = dict(_BASELINE)
+    incomplete.pop(GRADED_INTVTY)
+    snap, reason = resolve_grading_anchor_perf(_State(current_best=incomplete, baseline_perf=_BASELINE))
     assert snap is None
     assert reason == "current_best_axes_missing"
 
 
-def test_anchor_perf_uses_baseline_when_current_best_empty():
-    state = _State(current_best={}, baseline_perf=_BASELINE)
-    snap, reason = resolve_grading_anchor_perf(state)
+def test_anchor_perf_uses_baseline_when_current_best_is_absent():
+    snap, reason = resolve_grading_anchor_perf(_State(current_best={}, baseline_perf=_BASELINE))
     assert reason == ""
-    assert snap is not None
-    assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
+    assert snap == agentx_snapshot_of(_BASELINE)
 
 
-def test_anchor_perf_returns_missing_reason_when_both_absent():
-    state = _State(current_best={}, baseline_perf=None)
-    snap, reason = resolve_grading_anchor_perf(state)
+def test_anchor_perf_reports_when_baseline_is_missing():
+    snap, reason = resolve_grading_anchor_perf(_State(current_best={}, baseline_perf=None))
     assert snap is None
     assert reason == "baseline_perf_missing"
 
 
-# --- output_tput_of ---
-
-
-def test_output_tput_of_prefers_the_measurement_field_over_tput():
-    assert output_tput_of({**_BASELINE, "tput": 1.0}) == pytest.approx(_BASELINE["output_throughput"])
-
-
-def test_output_tput_of_falls_back_to_tput():
-    assert output_tput_of({"tput": 183.0}) == pytest.approx(183.0)
-
-
-def test_output_tput_of_reports_zero_when_absent():
-    assert output_tput_of({}) == 0.0
+def test_output_tput_of_prefers_measurement_field_then_legacy_tput():
+    assert output_tput_of({"output_throughput": 183.0, "tput": 1.0}) == 183.0
+    assert output_tput_of({"tput": 183.0}) == 183.0
     assert output_tput_of(None) == 0.0

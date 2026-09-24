@@ -58,7 +58,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 1
+AGENTX_MEASUREMENT_EPOCH = 2
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -72,6 +72,7 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     from hyperloom.common.perf_metric import (
         GRADED_INTVTY,
         GRADED_OUTPUT,
+        agentx_policy_config,
         intvty_serving_grading_enabled,
         parse_intvty_noise_pct,
     )
@@ -82,10 +83,13 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
         scriptable=framework_registry.is_scriptable(framework),
         benchmark_mode=benchmark_mode,
     )
-    return {
+    grading = {
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
         "noise_pct": parse_intvty_noise_pct(),
     }
+    if on_intvty:
+        grading["policy"] = agentx_policy_config()
+    return grading
 
 
 def agentx_state_is_stale(state: Any) -> str:

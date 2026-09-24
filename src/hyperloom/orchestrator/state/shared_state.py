@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shlex
 import time
@@ -118,73 +119,121 @@ def resolve_graded_comparison(
     anchor_perf: Any = None,
     anchor_tput: float | None = None,
 ) -> "GradedComparison":
-    """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
-    # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
-    # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
-    # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
-    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
-    # throughput.
-    #
-    # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
-    # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
-    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
+    """Resolve the configured KEEP decision against current-best, then baseline."""
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
+        AGENTX_DURATION_MAX_ABS_DELTA_PCT,
         AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
+        AGENTX_OUTPUT_MIN_DELTA_PCT,
+        AGENTX_P90_MIN_DELTA_PCT,
         GRADED_INTVTY,
+        GRADED_INTVTY_P90,
         GRADED_OUTPUT,
+        GRADED_OUTPUT_PER_GPU,
         GradedComparison,
         VERDICT_KEEP,
-        VERDICT_RECORDED,
         VERDICT_REVERT,
+        agentx_snapshot_of,
         intvty_of,
         output_tput_of,
-        passes_intvty_gate,
-        passes_tput_guard,
-        perf_snapshot_from_mapping,
-        resolve_grading_anchor_perf,
-        total_tput_of,
+        output_tput_per_gpu_of,
     )
 
-    on_intvty, noise_pct = resolved_grading(state)
+    on_intvty, _noise_pct = resolved_grading(state)
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
-            ref_perf, reason = anchor_perf, ""
+            ref_source, anchor_source = anchor_perf, "round_anchor"
         elif against_baseline:
-            ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
-            reason = "" if ref_perf else "baseline_axes_missing"
+            ref_source, anchor_source = getattr(state, "baseline_perf", None), "baseline"
         else:
-            ref_perf, reason = resolve_grading_anchor_perf(state)
-        cand_perf = perf_snapshot_from_mapping(measurement)
-        if ref_perf and cand_perf:
-            gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
-            threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
-            if threshold > keep_threshold_pct:
-                log.info(
-                    "graded: raising keep_threshold %.2f%% -> %.2f%% (AgentX floor; "
-                    "the slow-tail percentile's own variance is unmeasured)",
-                    keep_threshold_pct,
-                    threshold,
-                )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
-            if gain is not None and gain >= threshold and tput_holds:
-                verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
-                verdict = VERDICT_REVERT
+            current_best = getattr(state, "current_best", None)
+            if current_best:
+                ref_source, anchor_source = current_best, "current_best"
             else:
-                verdict = VERDICT_RECORDED
-            return GradedComparison(
-                objective=GRADED_INTVTY,
-                candidate=intvty_of(cand_perf),
-                reference=intvty_of(ref_perf),
-                verdict=verdict,
-                tput_candidate=total_tput_of(cand_perf),
-                tput_reference=total_tput_of(ref_perf),
-            )
-        degrade_reason = reason or "candidate_axes_missing"
+                ref_source, anchor_source = getattr(state, "baseline_perf", None), "baseline"
+
+        candidate_perf = agentx_snapshot_of(measurement)
+        reference_perf = agentx_snapshot_of(ref_source)
+
+        required_candidate = (
+            GRADED_INTVTY,
+            GRADED_INTVTY_P90,
+            GRADED_OUTPUT_PER_GPU,
+            "duration_s",
+            "request_error_rate",
+            "submission_valid",
+            "accuracy_passed",
+        )
+        required_reference = (
+            GRADED_INTVTY,
+            GRADED_INTVTY_P90,
+            GRADED_OUTPUT_PER_GPU,
+            "duration_s",
+            "request_error_rate",
+        )
+        missing_candidate = [key for key in required_candidate if candidate_perf.get(key) is None]
+        missing_reference = [key for key in required_reference if reference_perf.get(key) is None]
+        missing_reasons: list[str] = []
+        if missing_candidate:
+            missing_reasons.append(f"candidate_fields_missing:{','.join(missing_candidate)}")
+        if missing_reference:
+            missing_reasons.append(f"{anchor_source}_fields_missing:{','.join(missing_reference)}")
+        degrade_reason = ";".join(missing_reasons)
+
+        def _delta(key: str) -> float | None:
+            candidate_value = candidate_perf.get(key)
+            reference_value = reference_perf.get(key)
+            if not isinstance(candidate_value, (int, float)) or not isinstance(reference_value, (int, float)):
+                return None
+            if reference_value <= 0:
+                return None
+            return (float(candidate_value) / float(reference_value) - 1.0) * 100.0
+
+        deltas = {
+            GRADED_INTVTY: _delta(GRADED_INTVTY),
+            GRADED_INTVTY_P90: _delta(GRADED_INTVTY_P90),
+            GRADED_OUTPUT_PER_GPU: _delta(GRADED_OUTPUT_PER_GPU),
+            "duration_s": _delta("duration_s"),
+        }
+
+        def _at_least(value: float | None, threshold: float) -> bool:
+            return value is not None and (value > threshold or math.isclose(value, threshold, abs_tol=1e-9))
+
+        def _within_abs(value: float | None, threshold: float) -> bool:
+            return value is not None and (abs(value) < threshold or math.isclose(abs(value), threshold, abs_tol=1e-9))
+
+        candidate_error = candidate_perf.get("request_error_rate")
+        reference_error = reference_perf.get("request_error_rate")
+        checks = {
+            "submission_valid": candidate_perf.get("submission_valid") is True,
+            "request_error_rate": (
+                isinstance(candidate_error, (int, float))
+                and isinstance(reference_error, (int, float))
+                and float(candidate_error) <= float(reference_error)
+            ),
+            "accuracy_passed": candidate_perf.get("accuracy_passed") is True,
+            "duration_within_5pct": _within_abs(deltas["duration_s"], AGENTX_DURATION_MAX_ABS_DELTA_PCT),
+            "e2e_intvty_p50_gain": _at_least(deltas[GRADED_INTVTY], AGENTX_KEEP_THRESHOLD_FLOOR_PCT),
+            "e2e_intvty_p90_floor": _at_least(deltas[GRADED_INTVTY_P90], AGENTX_P90_MIN_DELTA_PCT),
+            "output_tput_per_gpu_floor": _at_least(deltas[GRADED_OUTPUT_PER_GPU], AGENTX_OUTPUT_MIN_DELTA_PCT),
+        }
+        failed_checks = tuple(name for name, passed in checks.items() if not passed)
+        return GradedComparison(
+            objective=GRADED_INTVTY,
+            candidate=intvty_of(candidate_perf),
+            reference=intvty_of(reference_perf),
+            verdict=VERDICT_KEEP if not failed_checks else VERDICT_REVERT,
+            tput_candidate=output_tput_per_gpu_of(candidate_perf),
+            tput_reference=output_tput_per_gpu_of(reference_perf),
+            degrade_reason=degrade_reason,
+            anchor_source=anchor_source,
+            checks=checks,
+            deltas_pct=deltas,
+            failed_checks=failed_checks,
+            candidate_evidence=candidate_perf,
+            reference_evidence=reference_perf,
+        )
 
     if anchor_tput is not None:
         reference = float(anchor_tput)

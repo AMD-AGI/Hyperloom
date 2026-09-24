@@ -633,7 +633,30 @@ class FrameworkEventRecorder:
                 "gain_pct": _float_or_none(measured.get("gain_pct")),
                 "runtime_sec": _float_or_none(measured.get("runtime_sec")),
                 "estimated_output_throughput": _float_or_none(measured.get("estimated_output_throughput")),
+                "e2e_intvty_p50": _float_or_none(measured.get("e2e_intvty_p50")),
+                "e2e_intvty_p90": _float_or_none(measured.get("e2e_intvty_p90")),
+                "output_tput_per_gpu": _float_or_none(measured.get("output_tput_per_gpu")),
+                "ttft_p50_ms": _float_or_none(measured.get("ttft_p50_ms")),
+                "ttft_p90_ms": _float_or_none(measured.get("ttft_p90_ms")),
+                "tpot_p50_ms": _float_or_none(measured.get("tpot_p50_ms")),
+                "tpot_p90_ms": _float_or_none(measured.get("tpot_p90_ms")),
+                "duration_s": _float_or_none(measured.get("duration_s")),
+                "request_error_rate": _float_or_none(measured.get("request_error_rate")),
             }
+        if "agentx_policy" in fields:
+            row["agentx_policy"] = dict(_as_dict(fields.get("agentx_policy")))
+        if "submission_valid" in fields:
+            row["submission_valid"] = (
+                None if fields.get("submission_valid") is None else bool(fields.get("submission_valid"))
+            )
+        if "submission_invalid_reasons" in fields:
+            row["submission_invalid_reasons"] = [
+                str(reason) for reason in (fields.get("submission_invalid_reasons") or []) if str(reason or "")
+            ]
+        if "accuracy_passed" in fields:
+            row["accuracy_passed"] = (
+                None if fields.get("accuracy_passed") is None else bool(fields.get("accuracy_passed"))
+            )
         if "accuracy" in fields:
             accuracy = _as_dict(fields.get("accuracy"))
             row["accuracy"] = {

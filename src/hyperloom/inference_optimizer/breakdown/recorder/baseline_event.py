@@ -13,6 +13,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
+    bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
@@ -221,6 +222,7 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
     only thing a reader can weigh the adopted number against. ``framework``
     decides the throughput unit.
     """
+    perf = _graded_axes(result)
     return {
         # Named as the V5 section names it, which is what a consumer selects on.
         "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
@@ -240,7 +242,15 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         # The graded axes this round measured. Recorded here rather than read off ``state.baseline_perf`` at export
         # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline
         # is a second answer to the same question.
-        "perf": _graded_axes(result),
+        "perf": perf,
+        **perf,
+        "duration_s": _float_or_none(result.get("duration_s") or result.get("duration_seconds")),
+        "request_error_rate": _float_or_none(result.get("request_error_rate")),
+        "submission_valid": _bool_or_none(result.get("submission_valid")),
+        "submission_invalid_reasons": [str(reason) for reason in _as_list(result.get("submission_invalid_reasons"))],
+        "accuracy_passed": _bool_or_none(
+            result.get("accuracy_passed") if "accuracy_passed" in result else result.get("accuracy_pass")
+        ),
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),

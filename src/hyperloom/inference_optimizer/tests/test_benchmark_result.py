@@ -717,25 +717,19 @@ def test_estimate_killed_variant_none_when_no_logs(tmp_path):
     assert br.estimate_killed_variant_throughput(slot) is None
 
 
-def test_explicitly_invalid_agentx_submission_is_always_rejected(monkeypatch):
+def test_explicitly_invalid_agentx_submission_remains_a_measurement_for_policy(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
-    # submission_valid=False means the scenario explicitly rejected it; the escape hatch must not exempt this case.
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": False,
-            }
-        )
-        is False
+    assert br.is_valid_measurement(
+        {
+            "output_throughput": 170.0,
+            "completed_requests": 10,
+            "submission_valid": False,
+        }
     )
 
 
-def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
+def test_unverified_submission_remains_a_measurement_for_policy(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
     assert br.is_valid_measurement(
         {
             "output_throughput": 170.0,
@@ -745,16 +739,34 @@ def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
     )
 
 
-def test_unverified_submission_rejected_without_hatch(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": None,
-            }
-        )
-        is False
-    )
+def test_merge_raw_result_reads_agentx_policy_and_display_fields(tmp_path):
+    measurement = {}
+    raw = {
+        "duration": 3600.0,
+        "e2e_norm_intvty_p90": 77.0,
+        "submission_valid": True,
+        "submission_invalid_reasons": [],
+        "request_metrics": {
+            "request_error_rate": 0.25,
+            "latency": {
+                "e2e_norm_intvty": {"p50": 100.0, "p90": 999.0},
+                "ttft": {"p50": 1200.0, "p90": 1800.0},
+                "tpot": {"p50": 10.0, "p90": 15.0},
+            },
+            "throughput": {"per_gpu": {"output_tput_tps": 25.0}},
+        },
+    }
+
+    br._merge_raw_result(measurement, raw, source_path=tmp_path / "inferencex_result.json")
+
+    assert measurement["e2e_intvty_p50"] == 100.0
+    assert measurement["e2e_intvty_p90"] == 77.0
+    assert measurement["e2e_norm_intvty_p90"] == 77.0
+    assert measurement["output_tput_per_gpu"] == 25.0
+    assert measurement["duration_seconds"] == 3600.0
+    assert measurement["request_error_rate"] == 0.25
+    assert measurement["ttft_p50_ms"] == 1200.0
+    assert measurement["ttft_p90_ms"] == 1800.0
+    assert measurement["tpot_p50_ms"] == 10.0
+    assert measurement["tpot_p90_ms"] == 15.0
+    assert measurement["submission_valid"] is True

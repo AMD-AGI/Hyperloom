@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from ..state.shared_state import resolve_graded_comparison
 
 
@@ -33,9 +33,8 @@ def assess_integrate_performance(
     stack_incremental_keep_threshold_pct: float,
 ) -> IntegratePerformance:
     """Apply native KEEP thresholds on the shared grader's selected measurement axis."""
-    # The threshold goes into the chokepoint rather than being re-applied here: on the interactivity axis the
-    # chokepoint raises it to the AgentX floor and pairs it with the throughput guard, and a lane that graded the
-    # gain itself would promote points the 2-D rule only RECORDED.
+    # AgentX owns its fixed all-of policy in the chokepoint. Other workloads
+    # retain the caller-supplied output-throughput thresholds below.
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=keep_threshold_pct)
     new_tput = float(measurement.get("output_throughput") or 0.0)
     gain_pct = (
@@ -60,17 +59,10 @@ def assess_integrate_performance(
         and stack_incremental_gain_pct is not None
         and stack_incremental_gain_pct >= stack_incremental_keep_threshold_pct
     )
-    if not graded.comparable:
-        # Fail closed: the axis the session asked for did not apply, so the output figure is a diagnostic, not a
-        # verdict, and promoting or discarding a native integration on it is a call for a human.
+    if graded.graded_on_intvty:
+        decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
+    elif not graded.comparable:
         decision = "NEEDS_REVIEW"
-    elif graded.graded_on_intvty:
-        # RECORDED is a different point on the frontier, not a dominated one: it neither promotes nor reverts.
-        decision = (
-            "KEEP"
-            if graded.verdict == VERDICT_KEEP
-            else ("REVERT" if graded.verdict == VERDICT_REVERT else "NEEDS_REVIEW")
-        )
     else:
         decision = (
             "KEEP"

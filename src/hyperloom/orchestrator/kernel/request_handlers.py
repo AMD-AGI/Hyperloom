@@ -6434,8 +6434,26 @@ async def integrate_handler(
             "bench_result": bench_result,
             "workspace": bench_result.get("workspace"),
         }
+    applyback_pending = (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") != "passed"
+    )
+    accuracy_gate: dict[str, Any] | None = None
+    from hyperloom.common.perf_metric import agentx_active
+
+    if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+        accuracy_gate = _grade_integrate_accuracy(
+            bench_result,
+            session_dir=session_dir,
+            workspace=workspace,
+            strict=applyback_pending,
+            server_args=extra_args,
+        )
+        bench_result["accuracy_passed"] = accuracy_gate.get("accuracy_pass")
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     graded = performance.graded
+    if graded.graded_on_intvty:
+        bench_result["agentx_policy"] = graded.policy_evidence()
     if graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", graded.degrade_reason)
     gain_pct = performance.gain_pct
@@ -6453,12 +6471,7 @@ async def integrate_handler(
     # end-to-end evidence it will ever get.
     # Anything other than a recorded pass still owes the verdict, so an absent or
     # unrecognised status keeps the gate armed rather than disarming it.
-    applyback_pending = (
-        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        and str(payload.get("integration_validation_status") or "") != "passed"
-    )
-    accuracy_gate: dict[str, Any] | None = None
-    if decision == "KEEP":
+    if decision == "KEEP" and accuracy_gate is None:
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
             session_dir=session_dir,

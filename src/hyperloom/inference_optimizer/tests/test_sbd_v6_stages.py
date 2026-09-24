@@ -227,10 +227,28 @@ def _baseline_event(*actions: dict) -> dict:
 
 #: What ``outcome.baseline.perf`` reads on a round that measured no graded axis.
 _UNMEASURED_AXES = {
-    "e2e_norm_intvty_p90": None,
-    "total_throughput": None,
-    "input_throughput": None,
+    "e2e_intvty_p50": None,
+    "e2e_intvty_p90": None,
+    "output_tput_per_gpu": None,
+    "ttft_p50_ms": None,
+    "ttft_p90_ms": None,
+    "tpot_p50_ms": None,
     "tpot_p90_ms": None,
+}
+
+_UNMEASURED_AGENTX_BASELINE = {
+    "e2e_intvty_p50": None,
+    "e2e_intvty_p90": None,
+    "output_tput_per_gpu": None,
+    "ttft_p50_ms": None,
+    "ttft_p90_ms": None,
+    "tpot_p50_ms": None,
+    "tpot_p90_ms": None,
+    "duration_s": None,
+    "request_error_rate": None,
+    "submission_valid": None,
+    "submission_invalid_reasons": [],
+    "accuracy_passed": None,
 }
 
 
@@ -242,7 +260,8 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
         "accuracy": 0.81,
         "ttft_mean_ms": 120.0,
         "e2el_mean_ms": 900.0,
-        # A synthetic anchor measures none of the graded axes, and all four are still published; see
+        **_UNMEASURED_AGENTX_BASELINE,
+        # A synthetic anchor measures none of the AgentX metrics, and every display field is still published; see
         # test_sbd_v6_grading.py for the axes themselves.
         "perf": _UNMEASURED_AXES,
     }
@@ -297,6 +316,7 @@ def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
         "accuracy": None,
         "ttft_mean_ms": None,
         "e2el_mean_ms": None,
+        **_UNMEASURED_AGENTX_BASELINE,
         "perf": _UNMEASURED_AXES,
     }
 

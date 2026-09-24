@@ -21,8 +21,10 @@ from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
+    GRADED_INTVTY_P90,
     GRADED_OUTPUT,
-    VERDICT_RECORDED,
+    GRADED_OUTPUT_PER_GPU,
+    VERDICT_KEEP,
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
@@ -1052,13 +1054,46 @@ class ExploreExecutor:
                     if _stopped_by_the_run(r, variant=gv, idx=idx, round_label="decision"):
                         break
 
-                    # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the
-                    # threshold floor belong to resolve_graded_comparison, which every lane shares.
+                    accuracy_value: float | None = None
+                    accuracy_reference: float | None = None
+                    accuracy_gated = False
+                    accuracy_ok = True
+                    if r.status == "succeeded":
+                        from hyperloom.inference_optimizer import framework_registry
+
+                        scriptable = framework_registry.is_scriptable(framework)
+                        if grade_on_intvty or scriptable or baseline_accuracy > 0:
+                            accuracy_gated = True
+                            eval_out = parse_eval_results(
+                                slot,
+                                framework=framework,
+                                benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+                            )
+                            accuracy_value = eval_out.get("accuracy")
+                            if isinstance(accuracy_value, (int, float)):
+                                # AgentX and scriptable quality gates map pass/fail onto 1/0. Other serving workloads
+                                # retain their measured baseline comparison.
+                                reference = 1.0 if (grade_on_intvty or scriptable) else baseline_accuracy
+                                accuracy_reference = reference
+                                accuracy_ok = accuracy_passed(
+                                    reference,
+                                    float(accuracy_value),
+                                )
+                            else:
+                                accuracy_ok = False
+
                     variant_meas = {
                         GRADED_OUTPUT: r.output_throughput,
-                        "input_throughput": r.input_throughput,
-                        "total_throughput": r.total_token_throughput,
-                        GRADED_INTVTY: r.intvty_p90,
+                        GRADED_OUTPUT_PER_GPU: r.output_tput_per_gpu,
+                        GRADED_INTVTY: r.intvty_p50,
+                        GRADED_INTVTY_P90: r.intvty_p90,
+                        "duration_s": r.duration_seconds,
+                        "request_error_rate": r.request_error_rate,
+                        "submission_valid": r.submission_valid,
+                        "accuracy_passed": accuracy_ok if accuracy_gated else None,
+                        "ttft_p50_ms": r.ttft_p50_ms,
+                        "ttft_p90_ms": r.ttft_p90_ms,
+                        "tpot_p50_ms": r.tpot_p50_ms,
                         "tpot_p90_ms": r.tpot_p90_ms,
                     }
                     graded = resolve_graded_comparison(
@@ -1069,104 +1104,67 @@ class ExploreExecutor:
                         anchor_tput=running_base_tput,
                     )
                     _graded_on_intvty = graded.graded_on_intvty
-                    axes = (
-                        f"intvty {graded.reference:.1f}->{graded.candidate:.1f} "
-                        f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
-                    )
-                    gain: float | None
+                    gain = gain_pct(graded.candidate, graded.reference) if r.status == "succeeded" else None
                     outcome = TS_FAILED
-                    reason: str = ""
-                    # Each gate's verdict as it rules, in the order it ruled.
-                    # Recorded here because this is where it is known: read off
-                    # the outcome afterwards, "REVERT" cannot say which gate
-                    # ended the arc, and a gate that never ran is indistinguishable
-                    # from one that ruled against the variant.
+                    reason = ""
                     decision_gates: list[dict[str, Any]] = []
                     if r.status != "succeeded":
-                        gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
-                    elif graded.degrade_reason:
-                        # Same fail-closed rule as ``_lift_to_current_best``: an
-                        # AgentX session that could not grade on interactivity
-                        # does not KEEP on output throughput instead.
-                        gain = None
-                        outcome = "FAILED"
-                        reason = graded.degrade_reason
-                        log.info(
-                            "explore: variant %r not comparable (%s)",
-                            gv.name,
-                            graded.degrade_reason,
+                    elif _graded_on_intvty:
+                        outcome = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
+                        reason = "" if outcome == "KEEP" else f"agentx_policy_failed:{','.join(graded.failed_checks)}"
+                        deltas = graded.deltas_pct or {}
+                        observed = {
+                            "submission_valid": 1.0 if r.submission_valid is True else 0.0,
+                            "request_error_rate": r.request_error_rate,
+                            "accuracy_passed": accuracy_value,
+                            "duration_within_5pct": deltas.get("duration_s"),
+                            "e2e_intvty_p50_gain": deltas.get(GRADED_INTVTY),
+                            "e2e_intvty_p90_floor": deltas.get(GRADED_INTVTY_P90),
+                            "output_tput_per_gpu_floor": deltas.get(GRADED_OUTPUT_PER_GPU),
+                        }
+                        thresholds = {
+                            "submission_valid": 1.0,
+                            "request_error_rate": (running_base_perf or {}).get("request_error_rate"),
+                            "accuracy_passed": accuracy_reference,
+                            "duration_within_5pct": 5.0,
+                            "e2e_intvty_p50_gain": 3.0,
+                            "e2e_intvty_p90_floor": -5.0,
+                            "output_tput_per_gpu_floor": -5.0,
+                        }
+                        decision_gates.extend(
+                            {
+                                "gate": name,
+                                "passed": passed,
+                                "observed": observed.get(name),
+                                "threshold": thresholds.get(name),
+                                "reason": "" if passed else name,
+                            }
+                            for name, passed in (graded.checks or {}).items()
                         )
                     elif graded.verdict == VERDICT_REVERT:
-                        gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
-                            reason = f"both_axes_regressed ({axes})"
-                        else:
-                            reason = "gain_below_threshold"
-                    elif graded.verdict == VERDICT_RECORDED:
-                        gain = gain_pct(graded.candidate, graded.reference)
-                        outcome = "RECORDED"
-                        reason = f"neither_dominates ({axes})"
-                    else:
-                        gain = gain_pct(graded.candidate, graded.reference)
-                    if r.status == "succeeded":
-                        # The graded comparison ruled, so it is recorded as the
-                        # gate it is. Without a measurement it does not rule at
-                        # all, which is why no row is appended then.
+                        reason = "gain_below_threshold"
                         decision_gates.append(
                             {
-                                "gate": "graded_axes"
-                                if (_graded_on_intvty or graded.degrade_reason)
-                                else "keep_threshold",
-                                "passed": (
-                                    False
-                                    if graded.degrade_reason
-                                    else graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED)
-                                ),
-                                # The anchor is the reference; the floor the
-                                # candidate has to clear belongs to the gate, as
-                                # the tolerance does for accuracy.
-                                "observed": (
-                                    graded.candidate
-                                    if _graded_on_intvty
-                                    else gain_pct(graded.candidate, graded.reference)
-                                ),
-                                "threshold": graded.reference if _graded_on_intvty else keep_threshold_pct,
+                                "gate": "keep_threshold",
+                                "passed": False,
+                                "observed": gain,
+                                "threshold": keep_threshold_pct,
                                 "reason": reason,
                             }
                         )
-                    accuracy_value: float | None = None
-                    accuracy_reference: float | None = None
-                    accuracy_gated = False
-                    if outcome == TS_FAILED and not reason:
-                        # Accuracy gate.
-                        from hyperloom.inference_optimizer import framework_registry
-
-                        scriptable = framework_registry.is_scriptable(framework)
-                        accuracy_ok = True
-                        # Serving still needs a measured baseline to compare against; scriptable compares against a
-                        # fixed 1.0.
-                        if scriptable or baseline_accuracy > 0:
-                            accuracy_gated = True
-                            eval_out = parse_eval_results(
-                                slot,
-                                framework=framework,
-                                benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
-                            )
-                            accuracy_value = eval_out.get("accuracy")
-                            if isinstance(accuracy_value, (int, float)):
-                                # Scriptable maps gate pass→1.0 / fail→0.0, so compare against a perfect reference
-                                # (1.0); serving compares vs the measured baseline.
-                                reference = 1.0 if scriptable else baseline_accuracy
-                                accuracy_reference = reference
-                                accuracy_ok = accuracy_passed(
-                                    reference,
-                                    float(accuracy_value),
-                                )
-                            else:
-                                # No eval result.
-                                accuracy_ok = False
+                    else:
+                        outcome = "KEEP"
+                        decision_gates.append(
+                            {
+                                "gate": "keep_threshold",
+                                "passed": True,
+                                "observed": gain,
+                                "threshold": keep_threshold_pct,
+                                "reason": "",
+                            }
+                        )
                         if accuracy_gated:
                             decision_gates.append(
                                 {
@@ -1182,8 +1180,6 @@ class ExploreExecutor:
                         if not accuracy_ok:
                             outcome = "REVERT"
                             reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
-                        else:
-                            outcome = "KEEP"
 
                     decision_tput = r.output_throughput
                     tested_update[fp] = {
@@ -1199,8 +1195,20 @@ class ExploreExecutor:
                         "decision_tput": decision_tput,
                         "input_throughput": r.input_throughput,
                         "total_throughput": r.total_token_throughput,
+                        "output_tput_per_gpu": r.output_tput_per_gpu,
+                        "e2e_intvty_p50": r.intvty_p50,
+                        "e2e_intvty_p90": r.intvty_p90,
                         "e2e_norm_intvty_p90": r.intvty_p90,
+                        "duration_s": r.duration_seconds,
+                        "request_error_rate": r.request_error_rate,
+                        "submission_valid": r.submission_valid,
+                        "submission_invalid_reasons": list(r.submission_invalid_reasons or []),
+                        "accuracy_passed": accuracy_ok if accuracy_gated else None,
+                        "ttft_p50_ms": r.ttft_p50_ms,
+                        "ttft_p90_ms": r.ttft_p90_ms,
+                        "tpot_p50_ms": r.tpot_p50_ms,
                         "tpot_p90_ms": r.tpot_p90_ms,
+                        "agentx_policy": graded.policy_evidence() if _graded_on_intvty else {},
                         "gain_pct": gain,
                         "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
                         "base_tput": running_base_tput,
@@ -1211,6 +1219,7 @@ class ExploreExecutor:
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
+                        "raw_result_path": r.raw_result_path,
                         "error_class": r.error_class or "",
                         "server_log_path": r.server_log_path,
                         "launch_evidence": dict(r.launch_evidence or {}),
@@ -1227,7 +1236,13 @@ class ExploreExecutor:
                         # "accuracy_pass" would name the gate that refused it.
                         # What ruled against those is in ``gates``.
                         "validation_basis": (
-                            ("accuracy_pass" if accuracy_gated else "keep_verdict_unscored")
+                            (
+                                "agentx_policy"
+                                if _graded_on_intvty
+                                else "accuracy_pass"
+                                if accuracy_gated
+                                else "keep_verdict_unscored"
+                            )
                             if outcome == "KEEP"
                             else ""
                         ),
@@ -1302,14 +1317,24 @@ class ExploreExecutor:
                             # The verdict this KEEP rests on. ``None`` means the variant was not gated (not
                             # high-risk, or no baseline) rather than that it scored nothing.
                             "accuracy": accuracy_value,
+                            "accuracy_passed": accuracy_ok if accuracy_gated else None,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
-                            # The axes this KEEP was graded on travel with it: current_best becomes the next round's
-                            # anchor, and an anchor without them degrades the session.
                             "input_throughput": r.input_throughput,
                             "total_throughput": r.total_token_throughput,
+                            "output_tput_per_gpu": r.output_tput_per_gpu,
+                            "e2e_intvty_p50": r.intvty_p50,
+                            "e2e_intvty_p90": r.intvty_p90,
                             "e2e_norm_intvty_p90": r.intvty_p90,
+                            "duration_s": r.duration_seconds,
+                            "request_error_rate": r.request_error_rate,
+                            "submission_valid": r.submission_valid,
+                            "submission_invalid_reasons": list(r.submission_invalid_reasons or []),
+                            "ttft_p50_ms": r.ttft_p50_ms,
+                            "ttft_p90_ms": r.ttft_p90_ms,
+                            "tpot_p50_ms": r.tpot_p50_ms,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            "agentx_policy": graded.policy_evidence() if _graded_on_intvty else {},
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
@@ -1444,6 +1469,19 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
+            for metric_name in (
+                "e2e_intvty_p50",
+                "e2e_intvty_p90",
+                "output_tput_per_gpu",
+                "ttft_p50_ms",
+                "ttft_p90_ms",
+                "tpot_p50_ms",
+                "tpot_p90_ms",
+                "duration_s",
+                "request_error_rate",
+            ):
+                if te.get(metric_name) is not None:
+                    metrics[metric_name] = te.get(metric_name)
             per_variant_outcomes.append(
                 {
                     "variant_name": str(te.get("name") or ""),
@@ -1478,6 +1516,10 @@ class ExploreExecutor:
                     "measured_against": te.get("measured_against") or {},
                     "gates": [gate for gate in (te.get("gates") or []) if isinstance(gate, dict)],
                     "validation_basis": str(te.get("validation_basis") or ""),
+                    "agentx_policy": dict(te.get("agentx_policy") or {}),
+                    "submission_valid": te.get("submission_valid"),
+                    "submission_invalid_reasons": list(te.get("submission_invalid_reasons") or []),
+                    "accuracy_passed": te.get("accuracy_passed"),
                 }
             )
         for sd in skipped_dup:

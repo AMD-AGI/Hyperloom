@@ -3,7 +3,7 @@
 
 """Coverage for the grading axis the SBD V6 document declares and the axes it publishes.
 
-An AgentX replay is ranked on the slow-tail interactivity percentile with throughput held as a guard; a
+An AgentX replay is promoted only when every fixed policy check passes; a
 synthetic run is ranked on output throughput alone. On the canonical corpus the two axes differ by roughly
 two orders of magnitude, and every throughput field in the breakdown is the output axis by construction, so
 without the declaration a consumer would sort one kind of session against the other and every number would
@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_INTVTY, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_INTVTY, GRADED_OUTPUT, agentx_policy_config
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata, collect_v6_outcome
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, recorder_for, snapshot_metadata
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
@@ -39,9 +39,12 @@ from hyperloom.orchestrator.state.shared_state import SharedState, resolved_grad
 
 #: The AgentX axes a measured round carries, on the keys grading itself reads them from.
 AGENTX_AXES: dict[str, Any] = {
-    GRADED_INTVTY: 41.2,
-    "total_throughput": 25978.0,
-    "input_throughput": 25795.0,
+    GRADED_INTVTY: 45.0,
+    "e2e_intvty_p90": 41.2,
+    "output_tput_per_gpu": 22.9,
+    "ttft_p50_ms": 1000.0,
+    "ttft_p90_ms": 1500.0,
+    "tpot_p50_ms": 10.0,
     "tpot_p90_ms": 24.3,
 }
 
@@ -139,6 +142,7 @@ def test_metadata_grading_declares_the_axis_and_the_guard_band():
         "benchmark_mode": "agentx",
         "objective": GRADED_INTVTY,
         "tput_guard": {"enabled": True, "noise_pct": 3.5},
+        "policy": agentx_policy_config(),
     }
 
 
@@ -176,6 +180,7 @@ def test_the_grading_block_reaches_the_exported_metadata(tmp_path):
         "benchmark_mode": "agentx",
         "objective": GRADED_INTVTY,
         "tput_guard": {"enabled": True, "noise_pct": 3.5},
+        "policy": agentx_policy_config(),
     }
 
 
@@ -268,6 +273,12 @@ def test_the_final_gain_carries_the_same_axis_as_the_reconciliation(tmp_path):
 def test_the_settled_axes_are_published_beside_the_gain_they_produced(tmp_path):
     # Read off the validation row rather than ``current_best``: a revalidation moves the cumulative figure
     # without re-promoting the recipe, so ``current_best`` can be a different measurement entirely.
+    policy = {
+        "anchor_source": "current_best",
+        "checks": {"submission_valid": True},
+        "failed_checks": [],
+        "verdict": "KEEP",
+    }
     stack_event.record_validation(
         stack_len=1,
         baseline_tput=38.0,
@@ -275,11 +286,15 @@ def test_the_settled_axes_are_published_beside_the_gain_they_produced(tmp_path):
         validated_gain_pct=8.42,
         graded_objective=GRADED_INTVTY,
         measurement=AGENTX_AXES,
+        agentx_policy=policy,
     )
 
     outcome = _outcome(tmp_path)
     assert outcome["validation"]["perf"] == AGENTX_AXES
     assert outcome["final"]["perf"] == AGENTX_AXES
+    assert {key: outcome["final"][key] for key in GRADED_AXIS_KEYS} == AGENTX_AXES
+    assert outcome["validation"]["agentx_policy"] == policy
+    assert outcome["final"]["agentx_policy"] == policy
 
 
 def test_an_unmeasured_axis_is_an_explicit_null_rather_than_an_absent_key(tmp_path):
@@ -347,15 +362,27 @@ def _record_baseline(**axes: Any) -> None:
 def test_the_baseline_publishes_the_axes_the_session_was_anchored_on(tmp_path):
     # Recorded on the baseline round rather than read off ``state.baseline_perf`` at export, because this
     # block is already where ``outcome.baseline`` comes from and a second source is a second answer.
-    _record_baseline(**AGENTX_AXES)
+    _record_baseline(
+        **AGENTX_AXES,
+        duration_s=3600.0,
+        request_error_rate=0.25,
+        submission_valid=True,
+        submission_invalid_reasons=[],
+        accuracy_passed=True,
+    )
 
     baseline = _outcome(tmp_path)["baseline"]
     assert baseline["perf"] == AGENTX_AXES
+    assert {key: baseline[key] for key in GRADED_AXIS_KEYS} == AGENTX_AXES
+    assert baseline["duration_s"] == 3600.0
+    assert baseline["request_error_rate"] == 0.25
+    assert baseline["submission_valid"] is True
+    assert baseline["accuracy_passed"] is True
     # The output axis keeps its own meaning beside them: this addition takes nothing away.
     assert baseline["throughput_tok_s_per_gpu"] == 183.0
 
 
-def test_a_synthetic_baseline_publishes_four_nulls(tmp_path):
+def test_a_synthetic_baseline_publishes_all_agentx_metrics_as_null(tmp_path):
     _record_baseline()
 
     assert all(value is None for value in _outcome(tmp_path)["baseline"]["perf"].values())

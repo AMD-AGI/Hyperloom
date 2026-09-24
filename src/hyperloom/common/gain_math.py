@@ -8,7 +8,12 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, passes_tput_guard
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_OUTPUT_PER_GPU,
+    graded_axes_of,
+    passes_tput_guard,
+)
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -49,7 +54,7 @@ def conc_pair_comparison(
     curve. The KEEP path enforces it because a stack promotion at one concurrency is a different question.
     """
     # The guard belongs to the interactivity objective; on the output axis there is no second axis to hold.
-    guard_axis = GRADED_TOTAL if metric_key == GRADED_INTVTY else ""
+    guard_axis = GRADED_OUTPUT_PER_GPU if metric_key == GRADED_INTVTY else ""
 
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
         raw = p.get("conc")

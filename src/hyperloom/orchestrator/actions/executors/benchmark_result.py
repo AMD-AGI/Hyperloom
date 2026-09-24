@@ -490,8 +490,16 @@ def _merge_raw_result(
     source_path: Path,
 ) -> None:
     """Fill missing measurement fields from a raw InferenceX result."""
+    request_metrics = raw.get("request_metrics") if isinstance(raw.get("request_metrics"), dict) else {}
+    latency = request_metrics.get("latency") if isinstance(request_metrics.get("latency"), dict) else {}
+    e2e_intvty = latency.get("e2e_norm_intvty") if isinstance(latency.get("e2e_norm_intvty"), dict) else {}
+    ttft = latency.get("ttft") if isinstance(latency.get("ttft"), dict) else {}
+    tpot = latency.get("tpot") if isinstance(latency.get("tpot"), dict) else {}
+    throughput = request_metrics.get("throughput") if isinstance(request_metrics.get("throughput"), dict) else {}
+    per_gpu = throughput.get("per_gpu") if isinstance(throughput.get("per_gpu"), dict) else {}
+    output_per_gpu = first_float(raw.get("output_tput_per_gpu"), per_gpu.get("output_tput_tps"))
     if measurement.get("output_throughput") is None:
-        measurement["output_throughput"] = to_float(raw.get("output_throughput"))
+        measurement["output_throughput"] = first_float(raw.get("output_throughput"), output_per_gpu)
     if measurement.get("request_throughput") is None:
         measurement["request_throughput"] = to_float(raw.get("request_throughput"))
     if measurement.get("total_token_throughput") is None:
@@ -506,18 +514,39 @@ def _merge_raw_result(
             raw.get("duration_seconds"),
             raw.get("duration"),
         )
+    if measurement.get("output_tput_per_gpu") is None:
+        measurement["output_tput_per_gpu"] = output_per_gpu
+    if measurement.get("e2e_intvty_p50") is None:
+        measurement["e2e_intvty_p50"] = first_float(raw.get("e2e_intvty_p50"), e2e_intvty.get("p50"))
+    if measurement.get("e2e_intvty_p90") is None:
+        measurement["e2e_intvty_p90"] = first_float(
+            raw.get("e2e_intvty_p90"),
+            raw.get("e2e_norm_intvty_p90"),
+            e2e_intvty.get("p90"),
+        )
     if measurement.get("ttft_mean_ms") is None:
         measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
+    if measurement.get("ttft_p50_ms") is None:
+        measurement["ttft_p50_ms"] = first_float(raw.get("ttft_p50_ms"), raw.get("median_ttft_ms"), ttft.get("p50"))
+    if measurement.get("ttft_p90_ms") is None:
+        measurement["ttft_p90_ms"] = first_float(raw.get("ttft_p90_ms"), raw.get("p90_ttft_ms"), ttft.get("p90"))
     if measurement.get("ttft_p99_ms") is None:
         measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
         measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
+    if measurement.get("tpot_p50_ms") is None:
+        measurement["tpot_p50_ms"] = first_float(raw.get("tpot_p50_ms"), raw.get("median_tpot_ms"), tpot.get("p50"))
     if measurement.get("input_throughput") is None:
         measurement["input_throughput"] = to_float(raw.get("input_throughput"))
     if measurement.get("tpot_p90_ms") is None:
-        measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
+        measurement["tpot_p90_ms"] = first_float(raw.get("tpot_p90_ms"), raw.get("p90_tpot_ms"), tpot.get("p90"))
     if measurement.get("e2e_norm_intvty_p90") is None:
-        measurement["e2e_norm_intvty_p90"] = to_float(raw.get("e2e_norm_intvty_p90"))
+        measurement["e2e_norm_intvty_p90"] = measurement.get("e2e_intvty_p90")
+    if measurement.get("request_error_rate") is None:
+        measurement["request_error_rate"] = first_float(
+            raw.get("request_error_rate"),
+            request_metrics.get("request_error_rate"),
+        )
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
@@ -539,6 +568,14 @@ def _merge_raw_result(
         measurement["submission_invalid_reasons"] = (
             [str(r) for r in reasons] if isinstance(reasons, list) else [str(reasons)]
         )
+
+
+def _raw_output_throughput(raw: dict[str, Any]) -> float | None:
+    """Output throughput from either the legacy flat or current nested schema."""
+    request_metrics = raw.get("request_metrics") if isinstance(raw.get("request_metrics"), dict) else {}
+    throughput = request_metrics.get("throughput") if isinstance(request_metrics.get("throughput"), dict) else {}
+    per_gpu = throughput.get("per_gpu") if isinstance(throughput.get("per_gpu"), dict) else {}
+    return first_float(raw.get("output_throughput"), raw.get("output_tput_per_gpu"), per_gpu.get("output_tput_tps"))
 
 
 #: The latency fields whose origin is tracked. A measurement can fill each of
@@ -669,7 +706,7 @@ def extract_benchmark_measurement(
     if workspace is not None:
         for raw_path in _candidate_raw_jsons(workspace):
             raw = read_json(raw_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
+            if not raw or _raw_output_throughput(raw) is None:
                 continue
             before = _latency_snapshot(measurement)
             _merge_raw_result(measurement, raw, source_path=raw_path)
@@ -696,7 +733,7 @@ def extract_benchmark_measurement(
             subprocess_started_unix=subprocess_started_unix,
         ):
             raw = read_json(rescue_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
+            if not raw or _raw_output_throughput(raw) is None:
                 continue
             # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
             materialized = _materialize_rescue_into_workspace(
@@ -780,20 +817,6 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
-    # Gated on BOTH the mode and the key's presence, and each half earns its keep.
-    from ._workload_envs import agentx_enabled
-
-    if agentx_enabled() and "submission_valid" in result:
-        verdict = result.get("submission_valid")
-        if verdict is False:
-            return False
-        if verdict is None:
-            # The verdict is unknown: no --scenario was requested or the aiperf build predates the field. map_aiperf
-            # writes the key unconditionally, so None arrives as a present key.
-            from hyperloom.common.env import env_bool
-
-            if not env_bool("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION"):
-                return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
         from ._accuracy_gate import quality_gate_passed

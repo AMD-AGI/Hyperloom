@@ -378,8 +378,10 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append(f"- verdict             : `{comparison['verdict']}`")
         lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
         if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+            lines.append(f"- reference out/GPU   : `{comparison['tput_reference']:.1f}` tok/s/GPU (policy guard)")
+            lines.append(f"- candidate out/GPU   : `{comparison['tput_candidate']:.1f}` tok/s/GPU (policy guard)")
+            failed = comparison.get("failed_checks") or []
+            lines.append(f"- failed checks       : `{', '.join(failed) if failed else 'none'}`")
         return
 
     from hyperloom.common.gain_math import gain_pct
@@ -387,9 +389,9 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         GRADED_INTVTY,
         INTVTY_V1,
         intvty_of,
-        parse_intvty_noise_pct,
+        intvty_p90_of,
+        output_tput_per_gpu_of,
         perf_snapshot_from_mapping,
-        total_tput_of,
     )
 
     baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
@@ -397,32 +399,29 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         return
     cb = summary.get("current_best") or {}
     cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.append("## AgentX perf (interactivity objective, per-chip tput guard)")
+    lines.append("## AgentX perf (fixed all-of promotion policy)")
     lines.append("")
-    lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
-    lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
+    lines.append(f"- baseline intvty P50 : `{intvty_of(baseline):.1f}` tok/s/user (promotion objective)")
+    lines.append(f"- baseline intvty P90 : `{intvty_p90_of(baseline):.1f}` tok/s/user (official x-axis)")
+    lines.append(f"- baseline out/GPU    : `{output_tput_per_gpu_of(baseline):.1f}` tok/s/GPU (official y-axis)")
     if cb_snap:
-        lines.append(f"- current_best intvty : `{intvty_of(cb_snap):.1f}` tok/s/user")
-        lines.append(f"- current_best total  : `{total_tput_of(cb_snap):.1f}` tok/s")
+        lines.append(f"- current_best P50    : `{intvty_of(cb_snap):.1f}` tok/s/user")
+        lines.append(f"- current_best P90    : `{intvty_p90_of(cb_snap):.1f}` tok/s/user")
+        lines.append(f"- current_best out/GPU: `{output_tput_per_gpu_of(cb_snap):.1f}` tok/s/GPU")
         gain = gain_pct(intvty_of(cb_snap), intvty_of(baseline))
         if gain is not None:
-            lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
-        tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
-        if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+            lines.append(f"- P50 gain (graded)   : `{gain:+.2f}%`")
     grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
     objective = str(grading.get("objective") or "").strip()
     if objective == GRADED_INTVTY:
-        noise_pct = grading.get("noise_pct")
-        band = float(noise_pct) if isinstance(noise_pct, (int, float)) else parse_intvty_noise_pct()
-        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{band:.1f}%`)")
+        lines.append(f"- grading mode        : `{INTVTY_V1}` (AgentX fixed all-of policy)")
     elif objective:
         lines.append(f"- grading mode        : `{objective}`")
     else:
         from hyperloom.common.perf_metric import intvty_grading_enabled
 
         if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-            lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
+            lines.append(f"- grading mode        : `{INTVTY_V1}` (AgentX fixed all-of policy)")
         else:
             lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 
@@ -500,6 +499,10 @@ def _build_summary_dict(
             # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
             "tput_reference": graded.tput_reference,
             "tput_candidate": graded.tput_candidate,
+            "anchor_source": graded.anchor_source,
+            "checks": dict(graded.checks or {}),
+            "deltas_pct": dict(graded.deltas_pct or {}),
+            "failed_checks": list(graded.failed_checks),
         },
         # Preserve the historical validation stamp, even when it disagrees with today's diagnostic.
         "cumulative_gain_validated": state.cumulative_gain_validated,

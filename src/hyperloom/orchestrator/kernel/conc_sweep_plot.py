@@ -24,12 +24,15 @@ def _positive(value: Any) -> float | None:
 
 
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
-    """p90 interactivity against token throughput per chip."""
-    intvty = _positive(point.get("e2e_norm_intvty_p90"))
-    total = _positive(point.get("total_token_throughput"))
-    if intvty is None or total is None:
+    """Official AgentX chart: P90 interactivity against output throughput per GPU."""
+    intvty = _positive(point.get("e2e_intvty_p90")) or _positive(point.get("e2e_norm_intvty_p90"))
+    output_per_gpu = _positive(point.get("output_tput_per_gpu"))
+    if output_per_gpu is None:
+        output = _positive(point.get("output_throughput"))
+        output_per_gpu = output / tp_eff if output is not None else None
+    if intvty is None or output_per_gpu is None:
         return None
-    return intvty, total / tp_eff
+    return intvty, output_per_gpu
 
 
 def _synthetic_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
@@ -61,7 +64,7 @@ def _axes_for_metric(metric: str, tp_eff: float) -> _Axes:
         return _Axes(
             point_xy=_agentx_xy,
             x_label="P90 Interactivity  (tok/s/user)",
-            y_label=f"Token Throughput per Chip  (tok/s/chip, tp={int(tp_eff)})",
+            y_label=f"Output Throughput per GPU  (tok/s/GPU, tp={int(tp_eff)})",
         )
     return _Axes(
         point_xy=_synthetic_xy,

@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX grading: an E2E-normalised-interactivity objective guarded by per-chip throughput."""
+"""AgentX grading and the canonical metrics carried by its measurements."""
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -19,31 +20,58 @@ _AGENTX_ENV = "HYPERLOOM_AGENTX"
 # that started the run.
 _AGENTX_MODE = "agentx"
 
-# Graded axis names, which are also the snapshot keys they are read from. InferenceX publishes a 2-D Pareto frontier
-# with interactivity on x and per-chip throughput on y, and no fixed interactivity target, so trading one for the
-# other moves a point along the frontier rather than violating a constraint.
-GRADED_INTVTY = "e2e_norm_intvty_p90"
+# Canonical AgentX fields. P50 is the promotion objective; P90 and output per
+# GPU remain the official chart axes.
+GRADED_INTVTY = "e2e_intvty_p50"
+GRADED_INTVTY_P90 = "e2e_intvty_p90"
+GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
 
-# The axes ``graded_axes_of`` can carry, for a consumer that must publish all four including the ones a measurement
-# did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader unable to tell
-# an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it was zero".
-GRADED_AXIS_KEYS = (GRADED_INTVTY, GRADED_TOTAL, "input_throughput", "tpot_p90_ms")
+# The user-facing AgentX measurement fields. Session Breakdown publishes every
+# key, using null for a field the benchmark did not report.
+GRADED_AXIS_KEYS = (
+    GRADED_INTVTY,
+    GRADED_INTVTY_P90,
+    GRADED_OUTPUT_PER_GPU,
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "tpot_p50_ms",
+    "tpot_p90_ms",
+)
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
-# Floor under ``keep_threshold_pct`` for AgentX: the slow-tail percentile's own variance is unmeasured, so the
-# default 1% threshold sits inside the noise band.
-AGENTX_KEEP_THRESHOLD_FLOOR_PCT = 2.0
+# AgentX promotion policy. These are fixed business thresholds rather than
+# caller-specific tuning knobs.
+AGENTX_KEEP_THRESHOLD_FLOOR_PCT = 3.0
+AGENTX_P90_MIN_DELTA_PCT = -5.0
+AGENTX_OUTPUT_MIN_DELTA_PCT = -5.0
+AGENTX_DURATION_MAX_ABS_DELTA_PCT = 5.0
 
-# RECORDED exists because a point that loses at the measured concurrency can still be the frontier winner at another
-# rung, so discarding it costs more than storing it.
+# ``RECORDED`` remains part of the shared verdict vocabulary for historical
+# records and non-AgentX consumers. The current AgentX policy emits only KEEP
+# or REVERT.
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
 VERDICT_RECORDED = "RECORDED"
+
+
+def agentx_policy_config() -> dict[str, Any]:
+    """Serializable definition of the fixed AgentX all-of promotion policy."""
+    return {
+        "mode": "all_of",
+        "anchor_priority": ["current_best", "baseline"],
+        "submission_valid": True,
+        "request_error_rate_max": "anchor",
+        "accuracy_passed": True,
+        "duration_max_abs_delta_pct": AGENTX_DURATION_MAX_ABS_DELTA_PCT,
+        "e2e_intvty_p50_min_delta_pct": AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
+        "e2e_intvty_p90_min_delta_pct": AGENTX_P90_MIN_DELTA_PCT,
+        "output_tput_per_gpu_min_delta_pct": AGENTX_OUTPUT_MIN_DELTA_PCT,
+    }
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -102,29 +130,67 @@ def _positive(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     coerced = float(value)
-    return coerced if coerced > 0 else None
+    return coerced if math.isfinite(coerced) and coerced > 0 else None
 
 
-def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
-    """Both graded axes from a measurement or a ``current_best``; None unless both are positive."""
-    # Returning None unless both are present is what stops a lane half-applying the objective. A total that is
-    # absent, null or non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+def _nonnegative(value: Any) -> float | None:
+    """Coerce to a finite non-negative float, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    coerced = float(value)
+    return coerced if math.isfinite(coerced) and coerced >= 0 else None
+
+
+def _first_positive(source: Mapping[str, Any], *keys: str) -> float | None:
+    """Return the first positive value found under *keys*."""
+    for key in keys:
+        value = _positive(source.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _agentx_values(source: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize one AgentX measurement while accepting the previous flat names."""
     if not isinstance(source, Mapping):
+        return {}
+    return {
+        GRADED_INTVTY: _first_positive(source, GRADED_INTVTY, "e2e_norm_intvty_p50"),
+        GRADED_INTVTY_P90: _first_positive(source, GRADED_INTVTY_P90, "e2e_norm_intvty_p90"),
+        GRADED_OUTPUT_PER_GPU: _first_positive(source, GRADED_OUTPUT_PER_GPU),
+        "duration_s": _first_positive(source, "duration_s", "duration_seconds", "duration"),
+        "request_error_rate": _nonnegative(source.get("request_error_rate")),
+        "submission_valid": source.get("submission_valid")
+        if isinstance(source.get("submission_valid"), bool)
+        else None,
+        "accuracy_passed": (
+            source.get("accuracy_passed")
+            if isinstance(source.get("accuracy_passed"), bool)
+            else source.get("accuracy_pass")
+            if isinstance(source.get("accuracy_pass"), bool)
+            else None
+        ),
+        "ttft_p50_ms": _first_positive(source, "ttft_p50_ms", "median_ttft_ms"),
+        "ttft_p90_ms": _first_positive(source, "ttft_p90_ms", "p90_ttft_ms"),
+        "tpot_p50_ms": _first_positive(source, "tpot_p50_ms", "median_tpot_ms"),
+        "tpot_p90_ms": _first_positive(source, "tpot_p90_ms", "p90_tpot_ms"),
+    }
+
+
+def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return the complete AgentX anchor snapshot, or None when a required value is missing."""
+    values = _agentx_values(source)
+    required = (
+        GRADED_INTVTY,
+        GRADED_INTVTY_P90,
+        GRADED_OUTPUT_PER_GPU,
+        "duration_s",
+        "request_error_rate",
+    )
+    if any(values.get(key) is None for key in required):
         return None
-    intvty = _positive(source.get(GRADED_INTVTY))
-    inp = _positive(source.get("input_throughput"))
-    out = _positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput"))
-    total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
-    if total is None and inp is not None and out is not None:
-        total = inp + out
-    if intvty is None or total is None:
-        return None
-    snap: dict[str, float] = {GRADED_INTVTY: intvty, GRADED_TOTAL: total}
-    for key, value in (
-        ("input_throughput", inp),
-        (GRADED_OUTPUT, out),
-        ("tpot_p90_ms", _positive(source.get("tpot_p90_ms"))),
-    ):
+    snap: dict[str, Any] = {}
+    for key, value in values.items():
         if value is not None:
             snap[key] = value
     return snap
@@ -144,6 +210,20 @@ def intvty_of(snapshot: Mapping[str, float] | None) -> float:
     return float(snapshot.get(GRADED_INTVTY) or 0.0)
 
 
+def intvty_p90_of(snapshot: Mapping[str, Any] | None) -> float:
+    """P90 E2E normalized interactivity; 0.0 when unavailable."""
+    if not isinstance(snapshot, Mapping):
+        return 0.0
+    return float(_agentx_values(snapshot).get(GRADED_INTVTY_P90) or 0.0)
+
+
+def output_tput_per_gpu_of(snapshot: Mapping[str, Any] | None) -> float:
+    """Per-GPU output throughput; 0.0 when unavailable."""
+    if not isinstance(snapshot, Mapping):
+        return 0.0
+    return float(_agentx_values(snapshot).get(GRADED_OUTPUT_PER_GPU) or 0.0)
+
+
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     """Total token throughput from a perf snapshot; 0.0 when unavailable."""
     if not isinstance(snapshot, Mapping):
@@ -152,26 +232,22 @@ def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
 
 
 def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
-    """The graded axes *source* carries, for stamping onto a winner record."""
-    # A KEEP's ``current_best`` becomes the next candidate's anchor, and an anchor missing an axis degrades the whole
-    # session to output grading. Axes are absent rather than None so a partial record is not read as a measured zero.
-    if not isinstance(source, Mapping):
-        return {}
+    """The user-facing AgentX metrics *source* carries."""
+    values = _agentx_values(source)
     axes: dict[str, float] = {}
-    intvty = _positive(source.get(GRADED_INTVTY))
-    if intvty is not None:
-        axes[GRADED_INTVTY] = intvty
-    total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
-    if total is not None:
-        axes[GRADED_TOTAL] = total
-    for key in ("input_throughput", "tpot_p90_ms"):
-        value = _positive(source.get(key))
+    for key in GRADED_AXIS_KEYS:
+        value = values.get(key)
         if value is not None:
-            axes[key] = value
+            axes[key] = float(value)
     return axes
 
 
-def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, float] | None, str]:
+def agentx_snapshot_of(source: Mapping[str, Any] | None) -> dict[str, Any]:
+    """All AgentX values needed to grade the next candidate, when available."""
+    return {key: value for key, value in _agentx_values(source).items() if value is not None}
+
+
+def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, Any] | None, str]:
     """Grading anchor: the current-best snapshot, falling back to the baseline; ``reason`` names any failure."""
     # A ``current_best`` that exists but carries no axes must not fall through to ``baseline_perf`` -- that would
     # anchor a candidate against a recipe it was never measured on.
@@ -211,11 +287,9 @@ def passes_tput_guard(
     *,
     noise_pct: float | None = None,
 ) -> bool:
-    """Whether candidate throughput holds within the band below *anchor*."""
-    # ``total_throughput`` is the raw aggregate; a caller comparing configurations of differing tensor-parallel
-    # degree must normalise by the chip count first.
+    """Whether candidate per-GPU output throughput holds within the band."""
     band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
-    return _within_band(total_tput_of(candidate), total_tput_of(anchor), band)
+    return _within_band(output_tput_per_gpu_of(candidate), output_tput_per_gpu_of(anchor), band)
 
 
 @dataclass(frozen=True)
@@ -233,6 +307,12 @@ class GradedComparison:
     tput_candidate: float = 0.0
     tput_reference: float = 0.0
     degrade_reason: str = ""
+    anchor_source: str = ""
+    checks: dict[str, bool] | None = None
+    deltas_pct: dict[str, float | None] | None = None
+    failed_checks: tuple[str, ...] = ()
+    candidate_evidence: dict[str, Any] | None = None
+    reference_evidence: dict[str, Any] | None = None
 
     @property
     def comparable(self) -> bool:
@@ -249,26 +329,44 @@ class GradedComparison:
         """Whether the interactivity objective actually applied."""
         return self.objective == GRADED_INTVTY
 
+    def policy_evidence(self) -> dict[str, Any]:
+        """JSON-friendly AgentX policy evidence for Session Breakdown."""
+        return {
+            "anchor_source": self.anchor_source or None,
+            "checks": dict(self.checks or {}),
+            "deltas_pct": dict(self.deltas_pct or {}),
+            "failed_checks": list(self.failed_checks),
+            "candidate": dict(self.candidate_evidence or {}),
+            "anchor": dict(self.reference_evidence or {}),
+            "verdict": self.verdict,
+        }
+
 
 __all__ = [
     "AGENTX_KEEP_THRESHOLD_FLOOR_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
     "GRADED_INTVTY",
+    "GRADED_INTVTY_P90",
     "GRADED_OUTPUT",
+    "GRADED_OUTPUT_PER_GPU",
     "GRADED_TOTAL",
     "INTVTY_V1",
     "VERDICT_KEEP",
     "VERDICT_RECORDED",
     "VERDICT_REVERT",
     "agentx_active",
+    "agentx_policy_config",
+    "agentx_snapshot_of",
     "graded_axes_of",
     "graded_metric_key",
     "intvty_grading_enabled",
     "intvty_of",
+    "intvty_p90_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
     "output_tput_of",
+    "output_tput_per_gpu_of",
     "parse_intvty_noise_pct",
     "passes_intvty_gate",
     "passes_tput_guard",

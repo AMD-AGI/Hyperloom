@@ -323,13 +323,28 @@ class TestVariantResultToDict:
 
         encoded = result.to_dict()
         expected = asdict(result)
+        expected["e2e_intvty_p50"] = expected.pop("intvty_p50")
+        expected["e2e_intvty_p90"] = expected["intvty_p90"]
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
         assert encoded == {**expected, "fingerprint": result.fingerprint}
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
         encoded = result.to_dict()
-        for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
+        for key in (
+            "input_throughput",
+            "total_token_throughput",
+            "output_tput_per_gpu",
+            "e2e_intvty_p50",
+            "e2e_intvty_p90",
+            "e2e_norm_intvty_p90",
+            "ttft_p50_ms",
+            "ttft_p90_ms",
+            "tpot_p50_ms",
+            "tpot_p90_ms",
+            "request_error_rate",
+            "submission_valid",
+        ):
             assert key in encoded
             assert encoded[key] is None
 

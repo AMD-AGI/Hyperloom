@@ -4359,7 +4359,10 @@ class IntegratePatchExecutor:
         # resolver. On the output axis the drift-resolved ``base_tput`` is the
         # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
+        bench_result["accuracy_passed"] = gate_evidence.get("accuracy_pass")
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
+        if graded.graded_on_intvty:
+            bench_result["agentx_policy"] = graded.policy_evidence()
         if not graded.comparable:
             log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
         if not graded.graded_on_intvty:
@@ -4398,7 +4401,11 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        gate_pass = (
+            graded.verdict == VERDICT_KEEP
+            if graded.graded_on_intvty
+            else graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        )
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -4541,7 +4548,9 @@ class IntegratePatchExecutor:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
-            if not graded.comparable:
+            if graded.graded_on_intvty and graded.failed_checks:
+                reasons.append(f"AgentX policy failed: {', '.join(graded.failed_checks)}")
+            elif not graded.comparable:
                 reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
             elif delta_pct is None:
                 reasons.append("no measurable throughput")

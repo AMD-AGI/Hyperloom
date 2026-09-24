@@ -359,6 +359,54 @@ def test_attempt_pins_the_pair_it_was_judged_on(_bound_session):
     assert attempts["a-2"]["adopted"] is False
 
 
+def test_attempt_records_agentx_metrics_and_policy_evidence(_bound_session):
+    recorder = make_framework_recorder(macro_cycle=0)
+    policy = {
+        "anchor_source": "current_best",
+        "checks": {"submission_valid": True, "e2e_intvty_p50_gain": True},
+        "deltas_pct": {"e2e_intvty_p50": 3.5},
+        "failed_checks": [],
+        "verdict": "KEEP",
+    }
+    recorder.record_attempt(
+        "a-agentx",
+        arm=ARM_CONFIG,
+        outcome="keep",
+        decision="KEEP",
+        adopted=True,
+        measurement={
+            "e2e_intvty_p50": 103.5,
+            "e2e_intvty_p90": 96.0,
+            "output_tput_per_gpu": 95.0,
+            "ttft_p50_ms": 1000.0,
+            "ttft_p90_ms": 1500.0,
+            "tpot_p50_ms": 10.0,
+            "tpot_p90_ms": 15.0,
+            "duration_s": 100.0,
+            "request_error_rate": 0.0,
+        },
+        agentx_policy=policy,
+        submission_valid=True,
+        submission_invalid_reasons=[],
+        accuracy_passed=True,
+    )
+    recorder.finish(exit_reason="accepted")
+
+    attempt = _ext(_bound_session)["attempts"][0]
+    assert attempt["measurement"]["e2e_intvty_p50"] == 103.5
+    assert attempt["measurement"]["e2e_intvty_p90"] == 96.0
+    assert attempt["measurement"]["output_tput_per_gpu"] == 95.0
+    assert attempt["measurement"]["ttft_p50_ms"] == 1000.0
+    assert attempt["measurement"]["ttft_p90_ms"] == 1500.0
+    assert attempt["measurement"]["tpot_p50_ms"] == 10.0
+    assert attempt["measurement"]["tpot_p90_ms"] == 15.0
+    assert attempt["measurement"]["duration_s"] == 100.0
+    assert attempt["measurement"]["request_error_rate"] == 0.0
+    assert attempt["agentx_policy"] == policy
+    assert attempt["submission_valid"] is True
+    assert attempt["accuracy_passed"] is True
+
+
 def test_keep_unstable_stays_distinct_from_revert(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_attempt(

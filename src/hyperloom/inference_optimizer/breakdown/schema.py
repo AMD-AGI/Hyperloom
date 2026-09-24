@@ -140,17 +140,20 @@ class V6MetadataLangfuse(TypedDict, total=False):
 
 
 class V6GradedAxes(TypedDict, total=False):
-    """The four axes an AgentX measurement is ranked on.
+    """The canonical AgentX metrics published with a measurement.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero". A synthetic run
-    carries four nulls.
+    carries seven nulls.
     """
 
-    e2e_norm_intvty_p90: float | None
-    total_throughput: float | None
-    input_throughput: float | None
+    e2e_intvty_p50: float | None
+    e2e_intvty_p90: float | None
+    output_tput_per_gpu: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
     tpot_p90_ms: float | None
 
 
@@ -181,6 +184,7 @@ class V6Grading(TypedDict, total=False):
     benchmark_mode: str
     objective: str
     tput_guard: V6GradingTputGuard
+    policy: dict[str, Any]
 
 
 class V6Metadata(TypedDict, total=False):
@@ -250,6 +254,7 @@ class V6OutcomeValidation(TypedDict, total=False):
     #: produced -- a revalidation moves the cumulative figure without
     #: re-promoting the recipe, so ``current_best`` can be a later measurement.
     perf: V6GradedAxes
+    agentx_policy: dict[str, Any]
     attributed_gain_pct: float
     unattributed_gain_pct: float
     chain_total_gain_pct: float | None
@@ -876,11 +881,19 @@ class V6ConcSweepPoint(TypedDict, total=False):
     request_throughput: float | None
     total_token_throughput: float | None
     input_throughput: float | None
+    output_tput_per_gpu: float | None
+    e2e_intvty_p50: float | None
+    e2e_intvty_p90: float | None
     e2e_norm_intvty_p90: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
     tpot_p90_ms: float | None
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
     duration_seconds: float | None
+    request_error_rate: float | None
+    submission_valid: bool | None
     completed_requests: int | None
     error: str | None
     error_class: str | None
@@ -1798,6 +1811,15 @@ class V6FrameworkMeasurement(TypedDict, total=False):
     gain_pct: float | None
     runtime_sec: float | None
     estimated_output_throughput: float | None
+    e2e_intvty_p50: float | None
+    e2e_intvty_p90: float | None
+    output_tput_per_gpu: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
+    tpot_p90_ms: float | None
+    duration_s: float | None
+    request_error_rate: float | None
 
 
 class V6FrameworkAccuracy(TypedDict, total=False):
@@ -1881,6 +1903,10 @@ class V6FrameworkAttempt(TypedDict, total=False):
     measured_against: V6FrameworkStack
     config_delta: V6FrameworkConfigDelta
     measurement: V6FrameworkMeasurement
+    agentx_policy: dict[str, Any]
+    submission_valid: bool | None
+    submission_invalid_reasons: list[str]
+    accuracy_passed: bool | None
     accuracy: V6FrameworkAccuracy
     failure: V6FrameworkAttemptFailure
     artifacts: V6FrameworkArtifacts

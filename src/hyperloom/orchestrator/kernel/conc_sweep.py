@@ -180,8 +180,6 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
     # rung names the concurrency it was measured at -- so a value that will not
     # parse is a bug to surface, not a rung to file under zero.
     conc = int(envs.get("CONC", "0"))
-    # aiperf reports the total; the other parsers pass through whatever the framework named, leaving it null on a run
-    # that measured both halves.
     total = v.total_token_throughput
     if total is None and v.input_throughput is not None and v.output_throughput is not None:
         total = v.input_throughput + v.output_throughput
@@ -193,8 +191,16 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
+        "output_tput_per_gpu": v.output_tput_per_gpu,
+        "e2e_intvty_p50": v.intvty_p50,
+        "e2e_intvty_p90": v.intvty_p90,
         "e2e_norm_intvty_p90": v.intvty_p90,
+        "ttft_p50_ms": v.ttft_p50_ms,
+        "ttft_p90_ms": v.ttft_p90_ms,
+        "tpot_p50_ms": v.tpot_p50_ms,
         "tpot_p90_ms": v.tpot_p90_ms,
+        "request_error_rate": v.request_error_rate,
+        "submission_valid": v.submission_valid,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -243,8 +249,16 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "request_throughput",
         "total_token_throughput",
         "input_throughput",
+        "output_tput_per_gpu",
+        "e2e_intvty_p50",
+        "e2e_intvty_p90",
         "e2e_norm_intvty_p90",
+        "ttft_p50_ms",
+        "ttft_p90_ms",
+        "tpot_p50_ms",
         "tpot_p90_ms",
+        "request_error_rate",
+        "submission_valid",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",

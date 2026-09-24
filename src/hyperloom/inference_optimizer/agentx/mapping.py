@@ -108,8 +108,14 @@ def map_aiperf(
     rc = int(success) if _valid_count(success) else 0
     isl = stat(m, "input_sequence_length")
 
-    # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
+    # A latency percentile reverses when expressed as a rate: the median stays
+    # P50, while latency P90 is the rate distribution's P10.
+    intvty_p50 = pct(m, "e2e_output_token_throughput", "p50")
     intvty_p90 = pct(m, "e2e_output_token_throughput", "p10")
+    ttft_p50 = pct(m, "time_to_first_token", "p50")
+    ttft_p90 = pct(m, "time_to_first_token", "p90")
+    tpot_p50 = pct(m, "inter_token_latency", "p50")
+    tpot_p90 = pct(m, "inter_token_latency", "p90")
 
     return {
         "request_throughput": stat(m, "request_throughput"),
@@ -122,14 +128,21 @@ def map_aiperf(
         "duration": stat(m, "benchmark_duration"),
         "mean_ttft_ms": stat(m, "time_to_first_token", "avg"),
         "median_ttft_ms": stat(m, "time_to_first_token", "p50"),
+        "ttft_p50_ms": ttft_p50,
+        "ttft_p90_ms": ttft_p90,
         "p99_ttft_ms": stat(m, "time_to_first_token", "p99"),
         "std_ttft_ms": stat(m, "time_to_first_token", "std"),
         "mean_tpot_ms": stat(m, "inter_token_latency", "avg"),
         "median_tpot_ms": stat(m, "inter_token_latency", "p50"),
         "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
+        "tpot_p50_ms": tpot_p50,
+        "tpot_p90_ms": tpot_p90,
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
+        "e2e_intvty_p50": intvty_p50,
+        "e2e_intvty_p90": intvty_p90,
         "e2e_norm_intvty_p90": intvty_p90,
+        "output_tput_per_gpu": out_tput,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),

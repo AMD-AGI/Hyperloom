@@ -36,7 +36,7 @@ def _sample():
         "total_isl": {"unit": "tok", "avg": 4200.0},
         "total_output_tokens": {"unit": "tok", "avg": 2100.0},
         "benchmark_duration": {"unit": "s", "avg": 14.0},
-        "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
+        "time_to_first_token": _metric(120.0, p50=110.0, p90=180.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
         # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
         "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
@@ -144,15 +144,21 @@ def test_map_latency_fields():
     r = map_aiperf(_sample())
     assert r["mean_ttft_ms"] == 120.0
     assert r["median_ttft_ms"] == 110.0
+    assert r["ttft_p50_ms"] == 110.0
+    assert r["ttft_p90_ms"] == 180.0
     assert r["p99_ttft_ms"] == 200.0
     assert r["std_ttft_ms"] == 15.0
     assert r["mean_itl_ms"] == 20.0
     assert r["p99_itl_ms"] == 40.0
     # tpot mirrors inter_token_latency in the aiperf schema
     assert r["mean_tpot_ms"] == 20.0
+    assert r["tpot_p50_ms"] == 18.0
+    assert r["tpot_p90_ms"] == 34.3
     assert r["p90_tpot_ms"] == 34.3
-    # e2e_norm_intvty_p90 is the slow-tail (P10 of the per-request rate = 22.6).
+    assert r["e2e_intvty_p50"] == pytest.approx(55.0)
+    assert r["e2e_intvty_p90"] == pytest.approx(22.6)
     assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)
+    assert r["output_tput_per_gpu"] == pytest.approx(500.0)
     assert r["mean_e2el_ms"] == 900.0
     assert r["p99_e2el_ms"] == 1500.0
 
