@@ -16,6 +16,19 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _aiter_jit as aj
 
 
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    """Keep the developer's own ``~/.aiter`` caches and ambient AITER install out of resolution."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for var in ("AITER_ROOT_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(aj, "AITER_CPP_BUILD_PROBE_PATHS", ())
+    monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", ())
+    return home
+
+
 # _resolve_lock_sweep_dir
 
 
@@ -44,36 +57,82 @@ def test_resolve_dir_none_when_nothing_exists(monkeypatch):
     assert resolved is None or resolved.is_dir()
 
 
-# _resolve_aiter_jit_dir_dynamic
+# probe_aiter_jit_cache
 
 
-def test_resolve_dynamic_returns_empty_when_missing(monkeypatch):
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    assert aj._resolve_aiter_jit_dir_dynamic() == []
+def test_probe_measures_the_runtime_cache_not_the_package(tmp_path, monkeypatch, serving_package):
+    """``AITER_JIT_DIR`` relocates the cache the next start reads, so it decides cold vs warm."""
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for index in range(aj.COLD_START_KERNEL_THRESHOLD):
+        (serving_package / "jit" / f"module_{index}.so").write_bytes(b"x")
+    monkeypatch.setenv("AITER_JIT_DIR", str(runtime))
+
+    assert aj.probe_aiter_jit_cache() == {
+        "path": str(runtime),
+        "kernel_count": 0,
+        "size_mb": 0,
+        "is_cold": True,
+        "probe_status": "found",
+    }
 
 
-def test_resolve_dynamic_importerror_returns_empty(monkeypatch):
-    def _boom(name):
-        raise ValueError("bad spec")
+def test_probe_counts_the_whole_readonly_package_home_cache(tmp_path, monkeypatch, serving_package):
+    """A read-only package serves out of ``~/.aiter/jit``; its top-level modules count too."""
+    cache = tmp_path / "home" / ".aiter" / "jit"
+    (cache / "build" / "module_a").mkdir(parents=True)
+    (cache / "module_gemm.so").write_bytes(b"x" * (3 * 1024 * 1024))
+    (cache / "build" / "module_a" / "module_a.so").write_bytes(b"y")
+    real_access = os.access
+    monkeypatch.setattr(
+        os, "access", lambda path, mode: False if Path(path) == serving_package / "jit" else real_access(path, mode)
+    )
 
-    monkeypatch.setattr(importlib.util, "find_spec", _boom)
-    assert aj._resolve_aiter_jit_dir_dynamic() == []
+    assert aj.probe_aiter_jit_cache() == {
+        "path": str(cache),
+        "kernel_count": 2,
+        "size_mb": 3,
+        "is_cold": True,
+        "probe_status": "found",
+    }
 
 
-def test_resolve_dynamic_returns_paths(monkeypatch, tmp_path):
-    fake_origin = tmp_path / "aiter" / "__init__.py"
-    fake_origin.parent.mkdir(parents=True)
-    fake_origin.write_text("", encoding="utf-8")
+def test_probe_keeps_an_unavailable_cache_out_of_the_cold_verdict(monkeypatch, serving_package):
+    """An empty ``AITER_JIT_DIR`` leaves no runtime cache at all, which is not a cold one."""
+    monkeypatch.setenv("AITER_JIT_DIR", "")
 
-    class _Spec:
-        submodule_search_locations = [str(fake_origin.parent)]
+    assert aj.probe_aiter_jit_cache() == {
+        "path": None,
+        "kernel_count": 0,
+        "size_mb": 0,
+        "is_cold": None,
+        "probe_status": "not_found",
+    }
 
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: _Spec())
-    paths = aj._resolve_aiter_jit_dir_dynamic()
-    assert paths == [
-        str(tmp_path / "aiter" / "jit"),
-        str(tmp_path / "aiter" / "jit" / "build"),
-    ]
+
+def test_probe_reports_an_unreadable_cache_as_an_error(monkeypatch, serving_package):
+    def _boom(*_args, **_kwargs):
+        raise OSError("cache unreadable")
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+
+    probe = aj.probe_aiter_jit_cache()
+
+    assert probe["probe_status"] == "error"
+    assert probe["is_cold"] is None
+
+
+def test_probe_keeps_the_explicit_wrapper_override(tmp_path, monkeypatch, serving_package):
+    selected = tmp_path / "manual" / "jit"
+    selected.mkdir(parents=True)
+    (selected / "module_gemm.so").write_bytes(b"z")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", f"  {selected}  ")
+
+    probe = aj.probe_aiter_jit_cache()
+
+    assert probe["path"] == str(selected)
+    assert probe["kernel_count"] == 1
+    assert probe["is_cold"] is True
 
 
 # clean_stale_aiter_locks
@@ -203,6 +262,60 @@ def test_home_build_tree_outranks_the_root_fallback(tmp_path, monkeypatch):
 
     assert dirs.index(str(home / ".aiter" / "build")) == 0
     assert aj.AITER_CPP_BUILD_PROBE_PATHS[-1] == "/root/.aiter/build"
+
+
+def test_lock_sweep_reaches_the_readonly_package_home_cache(tmp_path, monkeypatch, serving_package):
+    """A read-only package compiles into ``~/.aiter/jit``, so its baton locks are ours to sweep."""
+    lock = tmp_path / "home" / ".aiter" / "jit" / "build" / "module_a" / "lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
+    real_access = os.access
+    monkeypatch.setattr(
+        os, "access", lambda path, mode: False if Path(path) == serving_package / "jit" else real_access(path, mode)
+    )
+
+    stats = aj.clean_stale_aiter_locks(stale_minutes=5)
+
+    assert stats["scanned"] == 1
+    assert stats["deleted"] == 1
+    assert not lock.exists()
+
+
+def test_lock_sweep_keeps_a_private_cache_without_an_importable_package(tmp_path, monkeypatch, isolated_home):
+    """``resolve_serving_context`` has no answer without a package; the sweep still must."""
+    from hyperloom.common.aiter_jit_cache import resolve_serving_context
+
+    lock = tmp_path / "private" / "build" / "module_a" / "lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+    os.utime(lock, (time.time() - 3600,) * 2)
+    monkeypatch.setenv("AITER_JIT_DIR", str(tmp_path / "private"))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+
+    assert resolve_serving_context(jit_probe_paths=aj.AITER_JIT_PROBE_PATHS) is None
+    stats = aj.clean_stale_aiter_locks(stale_minutes=5)
+
+    assert stats["deleted"] == 1
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("override", ["~/private-cache", " private-cache"])
+def test_lock_sweep_reads_the_runtime_override_verbatim(tmp_path, monkeypatch, isolated_home, override):
+    """AITER reads ``AITER_JIT_DIR`` literally: no tilde expansion, no whitespace trimming."""
+    monkeypatch.chdir(tmp_path)
+    lock = Path(override) / "build" / "lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+    os.utime(lock, (time.time() - 3600,) * 2)
+    monkeypatch.setenv("AITER_JIT_DIR", override)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+
+    stats = aj.clean_stale_aiter_locks(stale_minutes=5)
+
+    assert stats["deleted"] == 1
+    assert not lock.exists()
 
 
 def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
@@ -790,16 +903,12 @@ def test_serving_so_invalidation_failure_preserves_the_cache(tmp_path, monkeypat
 
 
 @pytest.fixture
-def serving_package(tmp_path, monkeypatch):
+def serving_package(tmp_path, monkeypatch, isolated_home):
     package = tmp_path / "site" / "aiter"
     (package / "jit").mkdir(parents=True)
     (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
     monkeypatch.delitem(sys.modules, "aiter", raising=False)
     monkeypatch.syspath_prepend(str(package.parent))
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
-    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
-    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", ())
     return package
 
 

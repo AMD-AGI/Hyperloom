@@ -202,12 +202,14 @@ printf 'INSTALL_REACHED_END\\n'
 
 
 @pytest.mark.parametrize("case", ["missing", "wrong", "timeout", "native-error", "nonzero"])
-def test_forge_check_only_fails_without_a_working_claude(tmp_path: Path, case: str) -> None:
+def test_forge_check_only_warns_without_a_working_claude(tmp_path: Path, case: str) -> None:
+    """--check-only reports on the box, it does not fail the installer over it."""
     proc = _run_forge_validation(tmp_path, case=case, check_only=True)
     combined = proc.stdout + proc.stderr
-    assert proc.returncode != 0, combined
-    assert "INSTALL_REACHED_END" not in combined
+    assert proc.returncode == 0, combined
+    assert "INSTALL_REACHED_END" in combined
     assert "VALIDATE_RUNTIME claude" in combined
+    assert "[warn]" in combined
     assert "RUN:" not in combined
     assert not (tmp_path / "home" / ".claude" / "config.json").exists()
 
@@ -276,21 +278,55 @@ def test_forge_installer_never_replaces_an_explicit_cli_pin(tmp_path: Path, vali
 @pytest.mark.parametrize(
     "extra_env",
     [
-        {"TEST_PROVIDER": "codex"},
-        {"KERNEL_OPT_BACKEND_ORDER": "geak", "FORGE_AGENT_BACKEND": "invalid"},
-        {"KERNEL_OPT_BACKEND_ORDER": "forge,geak", "FORGE_AGENT_BACKEND": "invalid"},
-        {"KERNEL_OPT_BACKEND_ORDER": "", "FRAMEWORK": "vllm", "FORGE_AGENT_BACKEND": "invalid"},
+        {"KERNEL_OPT_BACKEND_ORDER": "geak"},
+        {"KERNEL_OPT_BACKEND_ORDER": "forge,geak"},
+        {"KERNEL_OPT_BACKEND_ORDER": "", "FRAMEWORK": "vllm"},
     ],
-    ids=["resolved-codex", "explicit-geak", "non-exact-forge", "default-vllm"],
+    ids=["explicit-geak", "non-exact-forge", "default-vllm"],
 )
-def test_installer_skips_claude_when_forge_does_not_select_it(tmp_path: Path, extra_env: dict[str, str]) -> None:
-    proc = _run_forge_validation(tmp_path, extra_env=extra_env)
+def test_forge_installer_ensures_claude_for_every_kernel_backend(tmp_path: Path, extra_env: dict[str, str]) -> None:
+    """The claude CLI and its credentials are runtime-wide, not gated on the selected kernel backend."""
+    proc = _run_forge_validation(tmp_path, extra_env={"HYPERLOOM_CLAUDE_CODE_VERSION": "1.2.3", **extra_env})
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "RUN: npm install -g @anthropic-ai/claude-code@1.2.3" in combined, combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    config = json.loads((tmp_path / "home" / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert config["primaryApiKey"] == "sk-hl-test-key"
+
+
+def test_installer_still_provisions_claude_under_another_forge_provider(tmp_path: Path) -> None:
+    """A non-Claude provider owns FORGE_AGENT_CLI, so only its validation is skipped.
+
+    GEAK drives the default CLI through ``GEAK_CLAUDE_BIN`` whichever provider
+    Forge itself runs, so the install and credentials must still happen.
+    """
+    proc = _run_forge_validation(
+        tmp_path, case="missing", extra_env={"TEST_PROVIDER": "codex", "KERNEL_OPT_BACKEND_ORDER": "geak"}
+    )
     combined = proc.stdout + proc.stderr
     assert proc.returncode == 0, combined
     assert "INSTALL_REACHED_END" in combined
-    assert "VALIDATE_RUNTIME" not in combined
-    assert "RUN:" not in combined
-    assert not (tmp_path / "home" / ".claude" / "config.json").exists()
+    assert "npm install -g" in combined, combined
+    assert "VALIDATE_RUNTIME" not in combined, "a Codex CLI must not be judged by the Claude --version check"
+    config = json.loads((tmp_path / "home" / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert config["primaryApiKey"] == "sk-hl-test-key"
+
+
+def test_installer_survives_an_unresolvable_forge_provider(tmp_path: Path) -> None:
+    """An unusable FORGE_AGENT_BACKEND is the backend's error to raise, not the installer's.
+
+    The default CLI every backend shares is still provisioned.
+    """
+    proc = _run_forge_validation(
+        tmp_path,
+        case="missing",
+        extra_env={"FORGE_AGENT_BACKEND": "not-a-provider", "KERNEL_OPT_BACKEND_ORDER": "geak"},
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "npm install -g" in combined, combined
+    assert "VALIDATE_RUNTIME" not in combined, combined
 
 
 @pytest.mark.parametrize("backend", ["", "  FORGE  "])

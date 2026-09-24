@@ -13,7 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.aiter_jit_cache import invalidate_jit_cache, resolve_package_root, resolve_serving_context
+from hyperloom.common.aiter_jit_cache import (
+    invalidate_jit_cache,
+    resolve_jit_build_dir,
+    resolve_package_root,
+    resolve_serving_context,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,19 +66,12 @@ _BATON_WAIT_MARKER = "waiting for baton release at"
 _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"}
 
 
-def _resolve_aiter_jit_dir_dynamic() -> list[str]:
-    """Locate aiter's ``jit/`` dir via Python's import machinery."""
-    aiter_root = resolve_package_root()
-    if aiter_root is None:
-        return []
-    return [
-        str(aiter_root / "jit"),
-        str(aiter_root / "jit" / "build"),
-    ]
-
-
 def probe_aiter_jit_cache() -> dict[str, Any]:
-    """Inspect aiter's JIT cache and classify the next start as cold or warm."""
+    """Inspect the JIT cache aiter will serve from and classify the next start as cold or warm.
+
+    A cache the runtime cannot reach at all stays ``not_found``: reporting it as cold
+    would promise a first-time compile that is never going to land there.
+    """
     info: dict[str, Any] = {
         "path": None,
         "kernel_count": 0,
@@ -81,21 +79,15 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
         "is_cold": None,
         "probe_status": "not_found",
     }
-    candidates: list[str] = []
-    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    if override:
-        candidates.append(override)
-    candidates.extend(_resolve_aiter_jit_dir_dynamic())
-    candidates.extend(AITER_JIT_PROBE_PATHS)
-
     try:
-        chosen: Path | None = None
-        for raw in candidates:
-            path = Path(raw)
-            if path.exists() and path.is_dir():
-                chosen = path
-                break
-        if chosen is None:
+        context = resolve_serving_context(
+            os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
+        )
+        if context is None:
+            return info
+        # aiter keeps the serving ``module_*.so`` next to ``build/``, so the cache root is what counts.
+        chosen = context[1].parent
+        if not chosen.is_dir():
             return info
         info["path"] = str(chosen)
 
@@ -168,14 +160,18 @@ def _any_live_compiler(
 
 
 def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None = None) -> list[Path]:
-    """Return existing candidate directories once, preserving priority."""
+    """Return existing candidate directories once, preserving priority.
+
+    Candidates are never tilde-expanded: aiter reads its own path variables literally,
+    so a ``~`` an operator exported is a directory of that name.
+    """
     resolved: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
         try:
-            normalized = candidate.expanduser().resolve()
+            normalized = candidate.resolve()
         except OSError:
-            normalized = candidate.expanduser().absolute()
+            normalized = candidate.absolute()
         key = str(normalized)
         if key in seen:
             continue
@@ -194,6 +190,22 @@ def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None =
     return resolved
 
 
+def _runtime_jit_dirs() -> list[Path]:
+    """The runtime JIT cache root aiter compiles into, and the ``build/`` tree inside it.
+
+    ``resolve_jit_build_dir`` withholds an answer without a package because a serving
+    context also needs the package's configs; a lock sweep needs neither, so a private
+    cache an operator named stays sweepable when aiter itself is not importable.
+    """
+    package_root = resolve_package_root()
+    if package_root is None:
+        override = os.environ.get("AITER_JIT_DIR", "")
+        jit = Path(override).absolute() if override else None
+        return [jit / "build", jit] if jit is not None else []
+    build = resolve_jit_build_dir(package_root)
+    return [build, build.parent] if build is not None else []
+
+
 def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] | None = None) -> list[Path]:
     """Resolve every active aiter build tree that may contain baton locks."""
     if aiter_jit_dir is not None:
@@ -209,32 +221,17 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] |
             candidates.append(Path(home) / ".aiter" / "build")
         candidates.extend(Path(path) for path in AITER_CPP_BUILD_PROBE_PATHS)
 
-    aiter_jit_override = os.environ.get("AITER_JIT_DIR", "").strip()
-    if aiter_jit_override:
-        override_path = Path(aiter_jit_override)
-        candidates.extend([override_path / "build", override_path])
-    if aiter_root and aiter_jit_override:
+    if aiter_root and os.environ.get("AITER_JIT_DIR", ""):
         # Forge sets both variables for a private attempt.
-        return _dedupe_existing_dirs(candidates, unreadable)
+        return _dedupe_existing_dirs([*candidates, *_runtime_jit_dirs()], unreadable)
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         override_path = Path(override)
         # Preserve the legacy explicit-override contract: callers use this variable to constrain a diagnostic/test
         # sweep to one tree.
         return _dedupe_existing_dirs([override_path / "build", override_path], unreadable)
-    package_root = resolve_package_root()
-    if package_root is not None:
-        candidates.append(package_root / "jit" / "build")
-    candidates.extend(
-        Path(path)
-        for path in (
-            "/sgl-workspace/aiter/aiter/jit/build",
-            "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
-            "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-            "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-            "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
-        )
-    )
+    candidates.extend(_runtime_jit_dirs())
+    candidates.extend(Path(path) for path in AITER_JIT_PROBE_PATHS)
     return _dedupe_existing_dirs(candidates, unreadable)
 
 
@@ -734,6 +731,5 @@ __all__ = [
     "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
-    "_resolve_aiter_jit_dir_dynamic",
     "_resolve_lock_sweep_dirs",
 ]
