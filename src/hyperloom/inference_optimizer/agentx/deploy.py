@@ -9,18 +9,51 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Mapping
 
 # The client the AgentX switch pins as ``benchmark_script``. Downstream consumers
 # that must tell "this recipe drives a client" from "this recipe launches a
 # server" match on this name, so it lives here beside the deployment that
 # publishes it rather than being spelled out again at each reader.
-AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+AIPERF_CLIENT_SCRIPT = "aiperf_client.sh"
+MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
+AGENTX_CLIENT_SCRIPT = AIPERF_CLIENT_SCRIPT
+AGENTX_CLIENT_SCRIPTS = frozenset({AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT})
 
-_ASSET_FILES = (AGENTX_CLIENT_SCRIPT, "map_aiperf.py", "aiperf_phase_gate.py")
+_ASSET_FILES = (
+    AIPERF_CLIENT_SCRIPT,
+    MLPERF_CLIENT_SCRIPT,
+    "map_aiperf.py",
+    "map_mlperf.py",
+    "aiperf_phase_gate.py",
+)
 
-# map_aiperf.py imports the mapping from its own directory under this name; the
-# prefix keeps it from clobbering an InferenceX file in the shared benchmarks dir.
+# map_aiperf.py / map_mlperf.py import the mapping from their own directory under
+# this name; the prefix keeps it from clobbering an InferenceX file in the shared
+# benchmarks dir.
 _MAPPING_MODULE = "agentx_mapping.py"
+
+
+def agentic_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return ``mlperf`` or ``aiperf`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
+    runtime = env or os.environ
+    raw = str(runtime.get("HYPERLOOM_AGENTIC_BACKEND") or "").strip().lower()
+    if raw in {"mlperf", "mlperf-agentic"}:
+        return "mlperf"
+    return "aiperf"
+
+
+def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
+    return agentic_backend(env) == "mlperf"
+
+
+def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
+    """The Magpie ``benchmark_script`` this AgentX backend pins."""
+    return MLPERF_CLIENT_SCRIPT if is_mlperf_backend(env) else AIPERF_CLIENT_SCRIPT
+
+
+def is_agentx_client_script(name: str | None) -> bool:
+    return Path(str(name or "")).name in AGENTX_CLIENT_SCRIPTS
 
 
 def agentx_asset_dir() -> Path:

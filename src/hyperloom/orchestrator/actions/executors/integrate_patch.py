@@ -110,6 +110,11 @@ from ._grid_variant_filter import (
     resolve_skip_spec,
 )
 from ._recipe_script import RecipeLeverUnavailableError
+from ._mlperf_keep import (
+    clone_variant_for_mlperf_full,
+    mlperf_full_keep_block,
+    should_validate_mlperf_full,
+)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -5580,6 +5585,55 @@ class IntegratePatchExecutor:
         finally:
             if serving_lease is not None:
                 serving_lease.close()
+
+        if should_validate_mlperf_full() and results and results[0].status == "succeeded":
+            full_variant = clone_variant_for_mlperf_full(variant)
+            full_root = output_root / "mlperf_full_keep"
+            full_root.mkdir(parents=True, exist_ok=True)
+            serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+            try:
+                full_results = await run_grid(
+                    base_yaml_path=config_path,
+                    base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                    grid=[full_variant],
+                    output_root=full_root,
+                    magpie_python=params.get("magpie_python") or None,
+                    keep_going_on_failure=False,
+                    model_path=resolved_model or None,
+                    gpu_type=resolved_gpu or None,
+                    benchmark_script=override_script,
+                    result_dir=override_result_dir,
+                    base_args_mode=args_mode,
+                    base_extra_envs=base_envs,
+                    base_remove_args=base_remove,
+                    base_unset_envs=base_unset,
+                    serving_lease=serving_lease,
+                    session_deadline_sec=session_deadline_sec,
+                    variant_expected_sec=variant_expected_sec,
+                )
+            finally:
+                if serving_lease is not None:
+                    serving_lease.close()
+            full_r = full_results[0] if full_results else None
+            block = mlperf_full_keep_block(
+                getattr(full_r, "workspace", None) if full_r is not None else None,
+                status=getattr(full_r, "status", None) if full_r is not None else "failed",
+            )
+            if block or full_r is None:
+                results = [
+                    VariantResult(
+                        name=full_variant.name,
+                        extra_server_args=full_variant.extra_server_args,
+                        extra_envs=dict(full_variant.extra_envs),
+                        status="failed",
+                        workspace=str(getattr(full_r, "workspace", "") or full_root),
+                        error=block or "mlperf_full_keep_failed",
+                        error_class="mlperf_full_validation_failed",
+                        note=full_variant.note,
+                    )
+                ]
+            else:
+                results = [full_r]
 
         bench: dict[str, Any] = {}
         if results:

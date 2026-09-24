@@ -26,7 +26,7 @@ _POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
 
 # Spelled out rather than imported from ``agentx.deploy``: this module is on the
 # default benchmark path, which is pinned not to import the agentx package.
-_AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+_AGENTX_CLIENT_SCRIPTS = frozenset({"aiperf_client.sh", "mlperf_agentic_client.sh"})
 
 
 class RecipeLeverUnavailableError(ValueError):
@@ -54,7 +54,7 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     if not script:
         return ""
 
-    if script == _AGENTX_CLIENT_SCRIPT:
+    if script in _AGENTX_CLIENT_SCRIPTS:
         script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
         if not script:
             framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
