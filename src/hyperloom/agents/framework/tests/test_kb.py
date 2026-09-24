@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -26,26 +25,26 @@ def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestResolveKbRoot:
-    """_resolve_kb_root, which has exactly one override and no fallback chain."""
+    """mutable_kb_root, which has exactly one override and no fallback chain."""
 
     def test_io_override_matches_writeback_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The fa reader honours the KB override so write/read paths match."""
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
-        assert kb._resolve_kb_root() == tmp_path / "io-kb"
+        assert kb.mutable_kb_root() == tmp_path / "io-kb"
 
     def test_defaults_to_its_own_workspace_subdirectory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """With no override the KB lives in its own directory under the workspace."""
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-        assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
+        assert kb.mutable_kb_root() == tmp_path / "workspace" / "framework-kb"
 
     def test_withdrawn_override_is_ignored_not_raised(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Resolution stays total; rejecting the withdrawn override is start-up's job."""
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
-        assert kb._resolve_kb_root() == tmp_path / "io-kb"
+        assert kb.mutable_kb_root() == tmp_path / "io-kb"
 
     def test_framework_agent_root_is_not_a_kb_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """That variable means "where the skill is installed" and must not raise."""
@@ -53,7 +52,7 @@ class TestResolveKbRoot:
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
         monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "skill"))
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-        assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
+        assert kb.mutable_kb_root() == tmp_path / "workspace" / "framework-kb"
 
 
 class TestCheckKbConfiguration:
@@ -131,13 +130,12 @@ class TestMigrateLegacyPartition:
         assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
 
     def test_adds_nothing_of_its_own_to_the_partition(self, tmp_path: Path) -> None:
-        """The partition is a served KB domain, so the migration may not litter it."""
+        """The migration copies only what the legacy partition held."""
         self._seed_legacy(tmp_path)
 
         destination = kb.migrate_legacy_partition_once()
 
         assert destination is not None
-        assert sorted(p.name for p in destination.iterdir()) == ["lessons.jsonl"]
         assert sorted(p.name for p in destination.iterdir()) == ["lessons.jsonl"]
 
     def test_copies_links_as_links(self, tmp_path: Path) -> None:
@@ -271,4 +269,3 @@ class TestMigrationCannotStopTheRun:
         assert kb.migrate_legacy_partition_once() is not None
         assert kb.migrate_legacy_partition_once() is None
         assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
-

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Knowledge-base selector + contributor for framework-agent."""
+"""Framework PR ledger: KB root resolution, legacy-partition migration, and the ledger reader."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import logging
 import os
 import shutil
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -20,32 +19,8 @@ _log = logging.getLogger(__name__)
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 
-# ---------------------------------------------------------------------------
-# PR ledger vocabulary — single source of truth shared with kb_writeback.py
-# (orchestrator cannot import from this package, so the constants must live here).
-# ---------------------------------------------------------------------------
-
-#: Append-log filename inside the framework_optimization/ directory.
-#: Must remain stable; kb_writeback.LESSONS_FILE and fa-CLI readers match it.
+#: Append-log filename inside the framework_optimization/ directory; stable so existing ledgers stay readable.
 LESSONS_FILE: str = "lessons.jsonl"
-
-#: Allowed ``outcome`` values for a PR ledger row.
-OUTCOME_INTEGRATED: str = "integrated"
-OUTCOME_ALREADY_PRESENT: str = "already_present"
-OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
-OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
-OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
-OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
-ALLOWED_OUTCOMES: frozenset[str] = frozenset(
-    {
-        OUTCOME_INTEGRATED,
-        OUTCOME_REVERTED_SMOKE_FAIL,
-        OUTCOME_REJECTED_APPLY_FAIL,
-        OUTCOME_ALREADY_PRESENT,
-        OUTCOME_REVERTED_SWITCH_OFF_PARITY,
-        OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
-    }
-)
 
 #: The only supported override for the mutable KB root; both this module and
 #: ``kb_writeback`` honour it. It reaches the process through the
@@ -55,9 +30,7 @@ KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 
 #: Workspace subdirectory holding this KB. Deliberately not ``kb``: that is the
 #: legacy recipe root (``inference_optimizer.cli.kb._legacy_recipe_root``, still
-#: read by the one-time recipe migration), and ``list_domains`` reports every
-#: directory under this root as a framework domain, so sharing it would surface
-#: recipe trees as framework domains. The current recipe root is
+#: read by the one-time recipe migration). The current recipe root is
 #: ``<workspace>/knowledge`` and never collided.
 _MUTABLE_KB_DIRNAME: str = "framework-kb"
 
@@ -67,8 +40,7 @@ _MUTABLE_KB_DIRNAME: str = "framework-kb"
 _LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
 
 #: Workspace root when ``USER_DATA_PATH`` is unset. Mirrors
-#: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
-#: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
+#: ``session.paths.DEFAULT_SESSION_DIR``, which this package does not import.
 _DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
 _POD_LOCAL_WORKSPACE: str = "/workspace"
 
@@ -127,11 +99,6 @@ def framework_optimization_root() -> Path:
     return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
 
 
-def _resolve_kb_root() -> Path:
-    """Resolve the active KB root each call (so tests can monkeypatch env)."""
-    return mutable_kb_root()
-
-
 def migrate_legacy_partition_once() -> Path | None:
     """Carry the framework partition over from the legacy ``<workspace>/kb`` root."""
     if os.environ.get(KB_ROOT_ENV, "").strip():
@@ -181,10 +148,9 @@ def _copy_partition_atomically(source: Path, destination: Path) -> None:
         raise
 
 
-
 def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
     """Read the framework PR outcome ledger from ``lessons.jsonl``."""
-    root = kb_root or _resolve_kb_root()
+    root = kb_root or mutable_kb_root()
     path = root / _FRAMEWORK_OPTIMIZATION_ROOT / LESSONS_FILE
     if not path.is_file():
         return []
@@ -204,13 +170,6 @@ def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
 
 __all__ = [
     "LESSONS_FILE",
-    "ALLOWED_OUTCOMES",
-    "OUTCOME_INTEGRATED",
-    "OUTCOME_ALREADY_PRESENT",
-    "OUTCOME_REVERTED_SMOKE_FAIL",
-    "OUTCOME_REJECTED_APPLY_FAIL",
-    "OUTCOME_REVERTED_SWITCH_OFF_PARITY",
-    "OUTCOME_REVERTED_PARITY_INCONCLUSIVE",
     "framework_optimization_root",
     "prepare_kb_environment",
     "read_pr_ledger",
