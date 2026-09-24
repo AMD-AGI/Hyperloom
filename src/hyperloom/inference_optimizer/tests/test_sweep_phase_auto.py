@@ -95,6 +95,7 @@ class _StubTaskRegistry:
             state="queued",
             params=dict(params),
             idempotency_key=idempotency_key,
+            requires_lanes=list(requires_lanes) if requires_lanes else [],
         )
         self._tasks[idempotency_key] = task
         return task, False
@@ -1515,3 +1516,21 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_conc_sweep_task_carries_catalogue_lanes(coord):
+    """_enqueue_internal_conc_sweep_task must forward the catalogue requires_lanes so
+    lane serialization and the admission gate both apply to conc_sweep."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 300.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    expected_lanes = sorted(ACTION_CATALOGUE["conc_sweep"].requires_lanes)
+    assert sorted(task.requires_lanes or []) == expected_lanes

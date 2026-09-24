@@ -121,9 +121,10 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
 #: Kinds the pump dispatches but does not join: it drains what it joins before
-#: returning, and an off-loop compile there would hold every reactor turn for
-#: its duration. Admission is unchanged — same budget, lane and lease gates.
-_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
+#: returning, and an off-loop compile or the KERNEL phase's whole pipeline there
+#: would hold every reactor turn for its duration. Admission is unchanged — same
+#: budget, lane and lease gates.
+_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
 class _InflightAction(NamedTuple):

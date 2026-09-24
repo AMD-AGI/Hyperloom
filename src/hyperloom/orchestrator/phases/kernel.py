@@ -14,6 +14,8 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
+from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -45,7 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
 )
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES, TaskNotFound
+from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
@@ -147,6 +149,11 @@ def _paired_measurement_basis(verdict: Any) -> str:
     if getattr(verdict, "candidate_wins", False):
         return "e2e_paired_entry_reference_to_tuned"
     return f"e2e_paired_entry_reference_to_tuned_{getattr(verdict, 'reason', 'unknown')}"
+
+
+def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
+    """An unpersisted task for a step run under the ``kernel_agent`` task's lanes."""
+    return Task(task_id=uuid.uuid4().hex, kind=kind, state="running", params=params, idempotency_key=idempotency_key)
 
 
 def _geak_decline_status(decline_reason: Any) -> str:
@@ -294,41 +301,25 @@ class KernelPhase(PhaseHandler):
         profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
         task_kind = self._internal_analysis_kind()
-        try:
-            # The re-profile is this entry's own sub-step, not an action of its own: it exists to decide whether the
-            # analysis the lanes will target is stale, and it is never dispatched by anything else.
-            reprofile_task = await self._enqueue_internal_analysis_task(
-                reason=idempotency_reason,
-                inline_event=recorder.event_id if recorder is not None else "",
+        params = self._internal_analysis_params(
+            reason=idempotency_reason,
+            inline_event=recorder.event_id if recorder is not None else "",
+        )
+        if params is None:
+            _note_reprofile(
+                ran=False,
+                task_kind=task_kind,
+                trigger=trigger,
+                skipped_reason="gpu_trace_unsupported",
+                idempotency_reason=idempotency_reason,
+                snapshot_id_before=snapshot_id_before,
             )
-            if reprofile_task is None:
-                _note_reprofile(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="gpu_trace_unsupported",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-                return
-            # An idempotent reuse can return a task that already reached a terminal state (its snapshot from a prior
-            # cycle is still valid). run_task would then attempt succeeded->running -> IllegalTransition, so reuse the
-            # existing snapshot instead of re-running.
-            if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
-                log.info(
-                    "kernel-entry reprofile reuses terminal analysis task (state=%s); the phase targets the existing snapshot",
-                    reprofile_task.state,
-                )
-                _note_reprofile(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="terminal_task_reused",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-                return
-            await self.run_task_registered(reprofile_task)
+            return
+        # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
+        # that task rather than a task of its own.
+        reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
+        try:
+            await self.sub.execute_covered(reprofile_task)
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
@@ -663,27 +654,58 @@ class KernelPhase(PhaseHandler):
         )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """Run deterministic KERNEL-entry optimization and re-profile gates."""
+        """Open the KERNEL timeline and enqueue the ``kernel_agent`` task that carries the phase's work."""
+        state = self.shared_state
         if not self._kernel_enabled():
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 from_phase or "<unknown>",
             )
             return
-        geak_enabled = self._geak_enabled()
         self._open_kernel_timeline(
-            route=ROUTE_GEAK if geak_enabled else ROUTE_FORGE,
-            route_reason=f"kernel_optimizer={str(getattr(self.shared_state, 'kernel_optimizer', '') or '')}",
+            route=ROUTE_GEAK if self._geak_enabled() else ROUTE_FORGE,
+            route_reason=f"kernel_optimizer={str(getattr(state, 'kernel_optimizer', '') or '')}",
             from_phase=from_phase,
         )
-        if geak_enabled:
+        lanes, catalogue_ttl = self._registry_lanes_ttl("kernel_agent")
+        # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
+        remaining = _phase_state.phase_budget_remaining_seconds(state, budget_pct=self._phase_budget_pct)
+        ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
+        # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
+        base_key = f"kernel_agent_c{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        attempt = 0
+        while True:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="kernel_agent",
+                params={"from_phase": str(from_phase or "")},
+                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+            )
+            if not (was_existing and task.state in TERMINAL_STATES):
+                break
+            attempt += 1
+        log.info("KERNEL entry: kernel_agent task=%s (%s)", task.task_id, task.state)
+
+    async def _run_kernel_agent(self, ctx: Any) -> dict[str, Any]:
+        """Run the KERNEL_AGENT phase's work under the ``kernel_agent`` task's lanes.
+
+        Args:
+            ctx: The runner context; ``ctx.task.params["from_phase"]`` names the
+                phase the KERNEL entry came from.
+
+        Returns:
+            A result payload naming the route that ran.
+        """
+        from_phase = str((ctx.task.params or {}).get("from_phase") or "")
+        if self._geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
             # hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
-            return
+            return {"status": "ok", "route": "geak"}
         if not self._gemm_tuning_required_before_kernel_opt():
             await self._finish_kernel_entry()
-            return
+            return {"status": "ok", "route": "forge_no_gemm"}
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
         await self._maybe_reprofile_for_kernel()
@@ -742,6 +764,7 @@ class KernelPhase(PhaseHandler):
         )
         # Capture explore + GEMM-tuning gains before the entry batch.
         await self._finish_kernel_entry()
+        return {"status": "ok", "route": "forge_gemm"}
 
     @staticmethod
     def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
@@ -1341,174 +1364,6 @@ class KernelPhase(PhaseHandler):
             state.save(self.session_dir)
             return True
 
-        async def _replay_succeeded_rebench(task_id: str) -> bool:
-            """Replay a persisted delegated result lost before state writeback."""
-            try:
-                settled_task = await self.tasks.get(task_id)
-                for msg in await self.bus.tail(topic="delegated_result", n=10_000):
-                    payload = msg.payload if isinstance(msg.payload, dict) else {}
-                    if str(payload.get("task_id") or "") != task_id:
-                        continue
-                    if str(payload.get("kind") or "") != "explore":
-                        continue
-                    if str(payload.get("state") or "").lower() != "succeeded":
-                        continue
-                    result = payload.get("result")
-                    if not isinstance(result, dict) or not self._is_promotable_result("explore", result):
-                        return False
-
-                    replay_pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                    replay_pending["status"] = "awaiting_rebench"
-                    replay_pending["revalidation_task_id"] = task_id
-                    replay_pending.pop("revalidation_error", None)
-                    state.geak_pending = replay_pending
-                    state.save(self.session_dir)
-                    await self._promote_to_shared_state(
-                        "explore",
-                        result,
-                        task=settled_task,
-                    )
-                    return True
-            except Exception:
-                log.exception(
-                    "geak: failed to replay delegated result for succeeded rebench %s",
-                    task_id,
-                )
-            return False
-
-        async def _enqueue_geak_revalidation(*, reason: str) -> bool:
-            """Enqueue and persist the rebench that keeps a GEAK win pending."""
-            # Reserve the pending slot BEFORE the task exists.
-            cycle = int(getattr(state, "macro_cycle", 0) or 0)
-            placeholder_keys = _geak_rebench.geak_revalidation_placeholder_keys(cycle)
-            inflight = await _geak_rebench.find_inflight_geak_rebench_task(self.tasks)
-            if inflight is not None and inflight.state in {"queued", "running"}:
-                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                pending["status"] = "awaiting_rebench"
-                pending["revalidation_task_id"] = inflight.task_id
-                pending.pop("revalidation_error", None)
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                log.info(
-                    "geak: revalidation already in flight (%s); skipping duplicate enqueue",
-                    inflight.task_id,
-                )
-                return True
-
-            reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            reserved["status"] = "awaiting_rebench"
-            if not str(reserved.get("revalidation_task_id") or "").strip():
-                reserved["revalidation_task_id"] = _geak_rebench.geak_revalidate_idempotency_key(cycle)
-            reserved.pop("revalidation_error", None)
-            state.geak_pending = reserved
-            state.save(self.session_dir)
-
-            try:
-                summary = await self._enqueue_internal_stack_rebench(reason=reason)
-            except Exception as exc:
-                log.exception("geak: enqueue same-harness revalidation failed")
-                summary = {"skipped": True, "reason": repr(exc)}
-
-            if isinstance(summary, dict) and summary.get("reason") == "geak_invalid_config":
-                return False
-            if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
-                state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
-                state.geak_pending = {}
-                state.resume_pending_revalidation = False
-                state.save(self.session_dir)
-                return False
-
-            # The grid cannot carry a dead overlay or a source-patch-only
-            # deployment. GEAK's final launcher may materialize that artifact;
-            # its fresh measurements still have to pass the fallback gates.
-            if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
-                log.warning(
-                    "geak: 2b declined (%s); validating through the GEAK harness instead",
-                    summary.get("reason"),
-                )
-                try:
-                    fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
-                except Exception as exc:
-                    log.exception("geak: GEAK-harness validation failed")
-                    fb = {"validated": False, "reason": repr(exc)}
-                if bool(fb.get("validated")):
-                    # 2a promotes and clears geak_pending itself.
-                    return True
-                if fb.get("status") == "no_promote":
-                    return False
-                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                pending["status"] = _geak_decline_status((summary or {}).get("reason"))
-                pending.pop("revalidation_task_id", None)
-                pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
-                state.geak_pending = pending
-                if agentx and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION:
-                    verdict = dict(state.geak_result)
-                    verdict["revalidation_status"] = "fallback_failed"
-                    verdict["revalidation_error_class"] = _geak_rebench.INCOMPARABLE_REVALIDATION
-                    verdict["revalidation_error"] = pending["revalidation_error"]
-                    # This refusal is reusable only while its overlay remains unloadable.
-                    verdict["revalidation_blocked_overlay"] = str(verdict.get("final_overlay") or "")
-                    state.geak_result = verdict
-                state.save(self.session_dir)
-                return False
-
-            task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
-            task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
-            existing = bool(isinstance(summary, dict) and summary.get("existing"))
-            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            if task_id and task_state in {"queued", "running"}:
-                pending["status"] = "awaiting_rebench"
-                pending["revalidation_task_id"] = task_id
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                return True
-
-            if task_id and existing and task_state == "succeeded":
-                # create_or_return_existing returned a task that already ran under this cycle's idempotency key
-                # (#1240).
-                prior_geak_result = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-                settled_status = str(prior_geak_result.get("revalidation_status") or "")
-                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
-                    state.geak_pending = {}
-                    state.save(self.session_dir)
-                    return True
-                if await _replay_succeeded_rebench(task_id):
-                    log.info(
-                        "geak: replayed persisted result for already-succeeded rebench %s",
-                        task_id,
-                    )
-                    return True
-                pending["status"] = "rebench_unavailable"
-                if pending.get("revalidation_task_id") in placeholder_keys:
-                    pending.pop("revalidation_task_id", None)
-                pending["revalidation_error"] = (
-                    f"rebench task {task_id} already succeeded but its verdict could not be reconciled"
-                )[:500]
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                log.warning(
-                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
-                    pending["revalidation_error"],
-                )
-                return False
-
-            pending["status"] = "rebench_unavailable"
-            # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
-            if pending.get("revalidation_task_id") in placeholder_keys:
-                pending.pop("revalidation_task_id", None)
-            if task_state == "cancelled":
-                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
-            else:
-                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
-            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
-            state.geak_pending = pending
-            state.save(self.session_dir)
-            log.warning(
-                "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
-                pending["revalidation_error"],
-            )
-            return False
-
         # Crash-recovery: a validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
@@ -1522,7 +1377,7 @@ class KernelPhase(PhaseHandler):
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
             if recovered.get("status") == "ok":
-                await _enqueue_geak_revalidation(reason="geak_e2e_win_recovered")
+                await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
             return
 
         try:
@@ -1658,9 +1513,7 @@ class KernelPhase(PhaseHandler):
                     kill_timeout_s=kill_timeout,
                 ):
                     return
-                # Rebench-first: enqueue the main-flow rebench (candidate stays pending if a budget cap prevents it
-                # from running).
-                await _enqueue_geak_revalidation(reason="geak_e2e_win_sigterm_recovered")
+                await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
                 return
             _finish_skip(
                 {
@@ -1759,14 +1612,13 @@ class KernelPhase(PhaseHandler):
             state.save(self.session_dir)
             return
         self._record_geak_kernel_journey(result)
-        # Enqueue the same-harness config-identity rebench — the ONLY path that
-        # writes the headline. Until it lands the candidate stays pending.
+        # The same-harness rebench is the only path that writes the headline.
         if str(result.get("status") or "") == "ok":
-            await _enqueue_geak_revalidation(reason="geak_e2e_win")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win")
         elif _geak_has_accepted_kernel(result):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
-            await _enqueue_geak_revalidation(reason="geak_e2e_accepted_kernel")
+            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
         self._record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1794,6 +1646,74 @@ class KernelPhase(PhaseHandler):
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
         state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+        state.save(self.session_dir)
+
+    async def _revalidate_geak_candidate(self, *, reason: str) -> None:
+        """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
+
+        The 2b rebench runs as a step of the ``kernel_agent`` task, under the
+        lanes it holds, and its result goes through the same promotion a
+        dispatched explore would. A candidate the grid cannot carry goes to the
+        GEAK-harness replay (2a) instead.
+        """
+        state = self.shared_state
+        params = self._geak_rebench_params(reason=reason)
+        skip_reason = params.get("reason") if params.get("skipped") else None
+        if skip_reason == "geak_invalid_config":
+            return
+        if skip_reason == "geak_no_material":
+            state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
+            state.geak_pending = {}
+            state.resume_pending_revalidation = False
+            state.save(self.session_dir)
+            return
+        if skip_reason is not None:
+            await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
+            return
+        task = _covered_step(
+            "explore", params, idempotency_key=f"geak-revalidate-c{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        )
+        try:
+            result = await self.sub.execute_covered(task)
+        except FuturesCancelledError as exc:
+            state.geak_pending = {
+                **(state.geak_pending or {}),
+                "status": "rebench_cancelled",
+                "revalidation_error": str(exc)[:500],
+            }
+            state.save(self.session_dir)
+            raise
+        if self._is_promotable_result("explore", result):
+            await self._promote_to_shared_state("explore", result, task=task)
+        else:
+            await self._handle_unpromotable_result(task, result)
+
+    async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
+        """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
+        state = self.shared_state
+        log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
+        fb = await self._validate_geak_via_geak_harness(reason=decline_reason)
+        # Both are verdicts 2a has already recorded.
+        if fb.get("validated") or fb.get("status") == "no_promote":
+            return
+        error = str(fb.get("reason") or decline_reason)[:500]
+        state.geak_pending = {
+            **(state.geak_pending or {}),
+            "status": _geak_decline_status(decline_reason),
+            "revalidation_error": error,
+        }
+        if (
+            not _geak_rebench.geak_harness_replays_workload(state)
+            and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION
+        ):
+            state.geak_result = {
+                **state.geak_result,
+                "revalidation_status": "fallback_failed",
+                "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
+                "revalidation_error": error,
+                # This refusal is reusable only while its overlay remains unloadable.
+                "revalidation_blocked_overlay": str(state.geak_result.get("final_overlay") or ""),
+            }
         state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
@@ -3823,8 +3743,6 @@ class KernelPhase(PhaseHandler):
         baselines: dict[str, object] | None = None,
     ) -> None:
         """Run one Controller attempt without preselecting operators."""
-        from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
-
         from ..kernel.controller_submit import (
             record_controller_llm_usage,
             run_controller_subprocess,
@@ -3833,96 +3751,84 @@ class KernelPhase(PhaseHandler):
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
 
-        def _stamp(when: float) -> None:
-            self.shared_state.kernel_inline_step_seen_unix = when
-
-        def _clear() -> None:
-            self.shared_state.kernel_inline_step_seen_unix = 0.0
-
-        # The heartbeat spans patch integration as well as the subprocess.
-        async with inline_step_heartbeat(
-            stamp=_stamp,
-            interval_sec=_phase_state.KERNEL_HEARTBEAT_SEC,
-            clear=_clear,
-        ):
-            if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+        if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+            result = {
+                "status": "no_result",
+                "reason": "no KERNEL phase budget remains for the rewrite controller",
+                "patch_count": 0,
+                "task_count": 0,
+                "output_dir": str(output_dir),
+            }
+        else:
+            try:
+                result = await asyncio.to_thread(
+                    run_controller_subprocess,
+                    handoff_dir=handoff_dir,
+                    output_dir=output_dir,
+                    budget_minutes=controller_budget_sec / 60.0,
+                    hard_timeout_sec=hard_timeout_sec,
+                )
+            except Exception as error:
+                log.exception("KERNEL entry: kernel rewrite controller failed")
                 result = {
-                    "status": "no_result",
-                    "reason": "no KERNEL phase budget remains for the rewrite controller",
+                    "status": "failed",
+                    "reason": f"controller invocation failed: {error}",
                     "patch_count": 0,
                     "task_count": 0,
                     "output_dir": str(output_dir),
                 }
-            else:
-                try:
-                    result = await asyncio.to_thread(
-                        run_controller_subprocess,
-                        handoff_dir=handoff_dir,
-                        output_dir=output_dir,
-                        budget_minutes=controller_budget_sec / 60.0,
-                        hard_timeout_sec=hard_timeout_sec,
-                    )
-                except Exception as error:
-                    log.exception("KERNEL entry: kernel rewrite controller failed")
-                    result = {
-                        "status": "failed",
-                        "reason": f"controller invocation failed: {error}",
-                        "patch_count": 0,
-                        "task_count": 0,
-                        "output_dir": str(output_dir),
-                    }
 
-            result = {
-                **result,
-                "macro_cycle": cycle,
-                "handoff_dir": str(handoff_dir),
-                "budget_minutes": controller_budget_sec / 60.0,
-                "hard_timeout_sec": hard_timeout_sec,
-            }
-            # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
-            # now that the child has exited.
-            record_controller_llm_usage(result=result, session_dir=self.session_dir)
-            # Before integration reads any HEAD. A hard timeout kills the process
-            # tree, so a borrowed repository can still be sitting on a campaign
-            # branch, and integration refuses a publication whose base commit is
-            # not the HEAD it finds -- which would discard exactly the patches
-            # incremental publication saved from the kill.
+        result = {
+            **result,
+            "macro_cycle": cycle,
+            "handoff_dir": str(handoff_dir),
+            "budget_minutes": controller_budget_sec / 60.0,
+            "hard_timeout_sec": hard_timeout_sec,
+        }
+        # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
+        # now that the child has exited.
+        record_controller_llm_usage(result=result, session_dir=self.session_dir)
+        # Before integration reads any HEAD. A hard timeout kills the process
+        # tree, so a borrowed repository can still be sitting on a campaign
+        # branch, and integration refuses a publication whose base commit is
+        # not the HEAD it finds -- which would discard exactly the patches
+        # incremental publication saved from the kill.
+        try:
+            from ..kernel.campaign_baseline import reclaim_campaign_repositories
+
+            reclaimed = reclaim_campaign_repositories(baselines or {})
+            if reclaimed:
+                result["reclaimed_repositories"] = reclaimed
+        except Exception:
+            log.exception("KERNEL entry: reclaiming the campaign repositories failed")
+        if int(result.get("patch_count") or 0) > 0:
             try:
-                from ..kernel.campaign_baseline import reclaim_campaign_repositories
+                from ..kernel.controller_patch_integration import (
+                    integrate_controller_patches,
+                )
 
-                reclaimed = reclaim_campaign_repositories(baselines or {})
-                if reclaimed:
-                    result["reclaimed_repositories"] = reclaimed
-            except Exception:
-                log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-            if int(result.get("patch_count") or 0) > 0:
-                try:
-                    from ..kernel.controller_patch_integration import (
-                        integrate_controller_patches,
-                    )
-
-                    integration = await integrate_controller_patches(
-                        patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                        session_dir=self.session_dir,
-                        shared_state=self.shared_state,
-                        record_keep=self._record_integrate_keep,
-                    )
-                    result["integration"] = integration.to_dict()
-                except Exception as error:
-                    log.exception("KERNEL entry: Controller patch integration failed")
-                    result["integration"] = {
-                        "status": "failed",
-                        "reason": str(error),
-                        "kept_count": 0,
-                    }
-            else:
+                integration = await integrate_controller_patches(
+                    patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                    session_dir=self.session_dir,
+                    shared_state=self.shared_state,
+                    record_keep=self._record_integrate_keep,
+                )
+                result["integration"] = integration.to_dict()
+            except Exception as error:
+                log.exception("KERNEL entry: Controller patch integration failed")
                 result["integration"] = {
-                    "status": "not_run",
-                    "reason": "Controller published no patches",
+                    "status": "failed",
+                    "reason": str(error),
                     "kept_count": 0,
-                    "reverted_count": 0,
-                    "skipped_count": 0,
                 }
+        else:
+            result["integration"] = {
+                "status": "not_run",
+                "reason": "Controller published no patches",
+                "kept_count": 0,
+                "reverted_count": 0,
+                "skipped_count": 0,
+            }
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result

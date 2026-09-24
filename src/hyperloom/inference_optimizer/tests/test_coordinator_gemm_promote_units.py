@@ -9,6 +9,7 @@ import csv
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1091,7 +1092,7 @@ class TestBf16DenseFallbackIsInternalToForge:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+        await coord._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning"]
         # No second, bf16-flavoured subprocess is launched.

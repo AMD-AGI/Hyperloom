@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import os
@@ -66,7 +65,6 @@ from ._grid_runner import (
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
-    _kill_stale_servers,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -446,20 +444,6 @@ class ExploreExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
-        try:
-            return await self._run_explore(ctx)
-        finally:
-            if not os.environ.get("PYTEST_CURRENT_TEST"):
-                try:
-                    await asyncio.to_thread(_kill_stale_servers)
-                except Exception:
-                    log.warning(
-                        "explore: post-run _kill_stale_servers failed",
-                        exc_info=True,
-                    )
-
-    async def _run_explore(self, ctx) -> dict[str, Any]:
-        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
@@ -1035,7 +1019,6 @@ class ExploreExecutor:
                         base_extra_envs=dict(stack_extra_envs),
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
-                        preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,

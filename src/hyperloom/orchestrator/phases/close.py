@@ -15,7 +15,6 @@ import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
-from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
@@ -208,7 +207,6 @@ class ClosePhase(PhaseHandler):
         summary = await self._enqueue_internal_stack_rebench(
             reason="close_unvalidated_stack",
             idempotency_key=f"close-stack-revalidate-g{generation}",
-            include_geak=False,
         )
         task_id = str(summary.get("task_id") or "")
         if not task_id:
@@ -329,52 +327,6 @@ class ClosePhase(PhaseHandler):
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
-    async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
-        """Stop any GEAK 2b rebench and close its pending slot as the run winds down."""
-        try:
-            dropped = await _geak_rebench.cancel_geak_rebench_tasks(
-                self.tasks,
-                reason=reason,
-                include_running=True,
-            )
-            if dropped:
-                log.info(
-                    "%s: cancelled %d in-flight GEAK rebench task(s)",
-                    reason,
-                    len(dropped),
-                )
-            settled = await _geak_rebench.settle_dangling_geak_pending(
-                self.tasks,
-                self.shared_state,
-                reason=reason,
-            )
-            self._record_close_geak_candidate()
-            if not (dropped or settled):
-                return
-            if settled:
-                log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("%s: geak_pending settle save failed", reason)
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "geak_rebench_close_drain",
-                    "reason": reason,
-                    "cancelled_task_ids": dropped,
-                    "pending_settled": bool(settled),
-                },
-            )
-        except Exception:
-            log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
-            await self._record_close_step(
-                "geak_rebench_drain",
-                status="failed",
-                detail="see log; geak_pending may remain awaiting_rebench",
-            )
-
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
@@ -382,7 +334,6 @@ class ClosePhase(PhaseHandler):
         # ``running`` until the verdict below, so a session killed mid-sequence
         # is reported as interrupted rather than judged on the steps it reached.
         _close_out.record_close_opened(self.session_dir)
-        await self._drain_geak_rebench_for_close()
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
@@ -950,11 +901,6 @@ class ClosePhase(PhaseHandler):
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
-
-        # The wall-clock path never reaches ``_on_enter_close``, so it owns the same wind-down: a rebench left running
-        # would keep writing back during the grace window, and an unsettled slot makes the report promise a rebench
-        # whose task the loop above has already cancelled.
-        await self._drain_geak_rebench_for_close(reason="closing_phase")
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""

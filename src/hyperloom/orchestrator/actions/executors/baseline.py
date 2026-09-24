@@ -64,7 +64,6 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # launch needs.
 from ._grid_runner import (
     SessionDirField,
-    _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
@@ -3442,7 +3441,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round."""
+        """Remove the pid/json files a previous round left for this framework and port."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -3451,15 +3450,6 @@ class BaselineExecutor:
                     p.unlink()
             except OSError:
                 pass
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
-        try:
-            await asyncio.to_thread(_kill_stale_servers)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
-                exc,
-            )
 
     def _teardown_lifecycle_server(
         self,

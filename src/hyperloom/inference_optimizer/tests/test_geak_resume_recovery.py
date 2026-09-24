@@ -86,6 +86,13 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
         _runner_should_not_be_needed,
     )
 
+    revalidations: list[str] = []
+
+    async def _record_revalidation(*, reason: str) -> None:
+        revalidations.append(reason)
+
+    coord.phase_kernel._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
+
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
     # The result.json is recovered into state, but as an unvalidated candidate.
@@ -98,15 +105,12 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
-    # The main-flow rebench was enqueued to validate the recovered candidate.
-    rebench = [t for t in coord.tasks.created if (t.params or {}).get("geak_fallback")]
-    assert rebench, "recovery must enqueue a geak main-flow rebench"
-    assert coord.shared_state.geak_pending["revalidation_task_id"] == rebench[0].task_id
+    # The recovered candidate is handed to the same-harness revalidation.
+    assert revalidations == ["geak_e2e_win_recovered"]
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["geak_result"]["status"] == "ok"
     assert saved["geak_pending"]["status"] == "awaiting_rebench"
-    assert saved["geak_pending"]["revalidation_task_id"] == rebench[0].task_id
 
 
 @pytest.mark.asyncio

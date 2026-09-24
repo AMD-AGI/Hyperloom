@@ -2604,14 +2604,38 @@ class PreludePhase(PhaseHandler):
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
         internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
+        params = self._internal_analysis_params(reason=reason, inline_event=inline_event)
+        if params is None:
+            return None
+        kind = self._internal_analysis_kind()
+        lanes, ttl = self._registry_lanes_ttl(kind)
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind=kind,
+            params=params,
+            idempotency_key=(
+                f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+            ),
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        if was_existing:
+            log.info(
+                "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
+                kind,
+                task.task_id,
+                task.state,
+            )
+        return task
+
+    def _internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
+        """Params for a Coordinator-internal analysis run, or None when the stack cannot produce a GPU trace."""
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
         unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
         if unsupported:
             log.error(
-                "internal-analysis (%s): not enqueued -- %s; relying on static-source evidence for the rest of "
-                "the session",
+                "internal-analysis (%s): not run -- %s; relying on static-source evidence for the rest of the session",
                 reason,
                 unsupported,
             )
@@ -2620,7 +2644,6 @@ class PreludePhase(PhaseHandler):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
@@ -2645,21 +2668,4 @@ class PreludePhase(PhaseHandler):
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
-        lanes, ttl = self._registry_lanes_ttl(kind)
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=(
-                f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
-            ),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-        )
-        if was_existing:
-            log.info(
-                "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
-                kind,
-                task.task_id,
-                task.state,
-            )
-        return task
+        return params
