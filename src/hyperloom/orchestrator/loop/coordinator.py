@@ -985,18 +985,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Max tried-candidate rows fed into the ranker/discovery working memory.
-    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
-
-    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it.
-    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
@@ -1582,9 +1573,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     ),
                 },
             )
-
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP = 6
 
     # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})

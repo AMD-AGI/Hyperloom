@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.framework.artifacts import candidate_key
 
 
@@ -40,7 +41,7 @@ class _StateStub:
 class _MiniCoord:
     """Minimal binding of the framework progress helpers under test."""
 
-    _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
+    _MAX_REPEATED_REVIEW_SUBMISSIONS = FrameworkPhase._MAX_REPEATED_REVIEW_SUBMISSIONS
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
     _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
     _stamp_framework_progress = Coordinator._stamp_framework_progress
@@ -141,7 +142,7 @@ class _BusStub:
 class _ReviewCoord(_MiniCoord):
     # Borrowed alongside the method that reads it: the stub used to get away without it because the helper swallowed
     # its own AttributeError.
-    _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
+    _CRITIC_PRIORS_OUTCOME_TAIL = FrameworkPhase._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
 
