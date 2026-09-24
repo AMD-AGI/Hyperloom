@@ -88,7 +88,7 @@ def _patch_subs(profile_result, ta_result):
         "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
 
@@ -328,7 +328,7 @@ async def test_executor_records_preflight_and_liveness_on_every_attempt(tmp_path
     with (
         patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
         patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
         await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
@@ -356,7 +356,7 @@ async def test_a_non_retryable_profile_failure_still_rows_the_attempt(tmp_path):
     with (
         patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
         patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
         result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
@@ -385,7 +385,7 @@ async def test_instrumentation_is_drained_per_attempt_even_when_absent(tmp_path)
     with (
         patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
         patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
         await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
@@ -442,7 +442,7 @@ async def test_profile_exception_with_capture_signature_fails_without_escalating
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -478,7 +478,7 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -524,7 +524,7 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -570,14 +570,14 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
 
 # Lifecycle START defensive except
 @pytest.mark.asyncio
-async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
+async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
     """record_lifecycle_event raising on the START emit must not abort the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
 
     calls = {"n": 0}
-    real_evt = state.record_lifecycle_event
+    real_evt = rf.record_lifecycle_event
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
@@ -585,7 +585,7 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
             raise RuntimeError("lifecycle START boom")
         return real_evt(*args, **kwargs)
 
-    state.record_lifecycle_event = flaky_evt  # type: ignore[assignment]
+    monkeypatch.setattr(rf, "record_lifecycle_event", flaky_evt)
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
@@ -597,14 +597,14 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
 
 # Lifecycle END defensive except
 @pytest.mark.asyncio
-async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
+async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
     """record_lifecycle_event raising on the END emit must not fail the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
 
     calls = {"n": 0}
-    real_evt = state.record_lifecycle_event
+    real_evt = rf.record_lifecycle_event
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
@@ -612,7 +612,7 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
             raise RuntimeError("lifecycle END boom")
         return real_evt(*args, **kwargs)
 
-    state.record_lifecycle_event = flaky_evt  # type: ignore[assignment]
+    monkeypatch.setattr(rf, "record_lifecycle_event", flaky_evt)
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)

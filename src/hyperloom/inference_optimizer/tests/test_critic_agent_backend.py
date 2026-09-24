@@ -1661,7 +1661,7 @@ async def test_run_mirrors_kb_trace_to_langfuse(
     monkeypatch,
 ):
     fake_em = _FakeKbEmitter()
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
@@ -1686,7 +1686,7 @@ async def test_run_skips_langfuse_mirror_when_disabled(
 ):
     fake_em = _FakeKbEmitter()
     fake_em.enabled = False
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'

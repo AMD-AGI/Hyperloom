@@ -132,7 +132,7 @@ def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) ->
         if not isinstance(row, dict):
             continue
         try:
-            from hyperloom.orchestrator.trace.llm_trace import (
+            from hyperloom.inference_optimizer.trace.llm_trace import (
                 LLMCallRecord,
                 append_llm_call,
             )

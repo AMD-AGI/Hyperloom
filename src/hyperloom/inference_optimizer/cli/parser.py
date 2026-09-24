@@ -143,7 +143,7 @@ def _default_research_lane_capacity() -> int:
 
 def _default_gpu_specialist_capacity() -> int:
     """Default ``--gpu-specialist-capacity`` to the whole visible machine."""
-    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
 

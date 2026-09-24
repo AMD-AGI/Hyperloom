@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import TUNER_ENV_VARS, run_subprocess
 from ..shapes import compute_vllm_moe_batch_sizes
 
@@ -405,16 +405,16 @@ def main():
         json.dump(shape_details, f, indent=2)
 
     speedups = [d["speedup"] for d in shape_details if d["speedup"] > 0]
-    best_speedup = max(speedups) if speedups else 1.0
-    avg_speedup = sum(speedups) / len(speedups) if speedups else 1.0
+    best_speedup = max(speedups) if speedups else None
+    avg_speedup = sum(speedups) / len(speedups) if speedups else None
 
     out = {{
         "status": "ok",
         "output": output_path,
         "batch_sizes": len(results),
         "shape_details": shape_details,
-        "best_speedup": round(best_speedup, 4),
-        "avg_speedup": round(avg_speedup, 4),
+        "best_speedup": None if best_speedup is None else round(best_speedup, 4),
+        "avg_speedup": None if avg_speedup is None else round(avg_speedup, 4),
     }}
     if errors:
         out["errors"] = errors[:5]
@@ -542,10 +542,10 @@ class VllmMoeTritonTuner(BaseTuner):
 
         # Extract speedup metrics from sweep script output
         shape_details = script_result.get("shape_details", [])
-        best_speedup = script_result.get("best_speedup", 1.0)
-        avg_speedup = script_result.get("avg_speedup", 1.0)
+        best_speedup = script_result.get("best_speedup")
+        avg_speedup = script_result.get("avg_speedup")
         min_pct = self.ctx.min_improvement_pct / 100.0 if self.ctx.min_improvement_pct else 0.0
-        improved_count = sum(1 for d in shape_details if d.get("speedup", 1.0) > 1.0 + min_pct)
+        improved_count = micro_metrics(shape_details, lambda d: d["speedup"] > 1.0 + min_pct).improved
 
         n_tuned = len(sweep_data)
         return TuneResult(

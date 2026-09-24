@@ -20,7 +20,6 @@ and records its own row.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -34,7 +33,7 @@ from .event_fields import (
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
 )
-from hyperloom.orchestrator.delivery.archive import ROLE_LAUNCH_CONFIG
+from ..round_archive import ROLE_LAUNCH_CONFIG
 
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
@@ -110,105 +109,6 @@ MAX_LOG_EXCERPT_CHARS = 2000
 
 #: Attempt runtimes are capped at five in state; the same bound applies here.
 MAX_RUNTIME_RECORDS = 5
-
-#: The replay contract's own keys, as opposed to the lane status the event
-#: already records row by row. ``replay_sufficiency`` is the verdict a consumer
-#: outside this session reads to decide whether the recipe can be replayed at
-#: all; the rest is the evidence that verdict was reached over, kept beside it
-#: so the decision can be re-derived rather than merely trusted.
-_RECIPE_KEYS: tuple[str, ...] = (
-    "recipe_steps",
-    "replay_sufficiency",
-    "dependency_closure_status",
-    "accepted_stack_targets",
-    "source_snapshots",
-    "roots",
-    "base_sha",
-    "runtime_provenance",
-    "environment_closure",
-    "installed_versions_at_keep",
-    "accepted_config_source",
-    "launch_evidence",
-    # Tri-state, and inputs to the verdict above: ``None`` says the scan could
-    # not be made, ``[]`` that it came back clean. The collector distinguishes
-    # them with a sentinel and omits the key entirely when the state never
-    # recorded one, so the copy below carries all three readings. Left out, a
-    # consumer reading ``build_extensions_not_carried`` or ``levers_unverified``
-    # in the reasons had no way to see what they were decided over -- which is
-    # the one thing this block exists to keep beside the verdict.
-    "build_extensions_not_carried",
-    "levers_without_readers",
-    # ``select_linked_build`` falls back to these when the one-shot specialist
-    # marker has been consumed, which it normally has by the time a build lands.
-    "kept_rounds",
-)
-
-#: Ceiling on the serialized recipe. A real host's environment closure runs to
-#: roughly 12 KB, so this is generous; what it exists for is that nothing else
-#: on this path bounds the block. Exceeding it does NOT truncate: a shortened
-#: closure is indistinguishable from a narrow one, and the verdict was computed
-#: over the full payload, so the pair would contradict each other. The recipe is
-#: replaced by the explicit ``not_evaluated`` decision instead, which every
-#: consumer already reads as insufficient.
-_MAX_RECIPE_BYTES = 256 * 1024
-
-
-def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str, Any]:
-    """Project the durable round state onto the replay contract and judge it.
-
-    This is the one fact about an enablement that no other entry point in this
-    module can state: every ``record_*`` above writes what one round did at the
-    moment it did it, while the recipe is a statement about the *stack* -- what
-    a consumer outside this session would have to replay, and whether the
-    session captured enough for that to be possible. It is computed here, at the
-    terminal, because that is the first moment the accepted stack is complete.
-
-    Never raises, and never returns an empty verdict: an absent
-    ``replay_sufficiency`` is read as insufficient by contract, so a projection
-    that could not run records the explicit ``not_evaluated`` decision rather
-    than leaving the key out and letting a consumer infer it.
-
-    Args:
-        enablement: The durable ``EnablementRound``.
-        session_dir: Session root the snapshot refs are expressed against.
-        mode: The lane's mode, needed only so the collector's own gate opens.
-
-    Returns:
-        The replay-contract subset of the collected section.
-    """
-    from dataclasses import asdict, is_dataclass
-    from pathlib import Path
-
-    from .enablement_section import collect_enablement
-    from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
-
-    section: dict[str, Any] = {}
-    try:
-        state = asdict(enablement) if is_dataclass(enablement) else dict(_as_dict(enablement))
-        collected = collect_enablement(
-            Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, []
-        )
-        section = {key: collected[key] for key in _RECIPE_KEYS if key in collected}
-        # The collector emits this unconditionally beside the steps; carrying its
-        # own absence forward would hand a consumer a recipe with no verdict.
-        if "kept_artifacts" in collected:
-            section["kept_artifacts"] = collected["kept_artifacts"]
-    except RECORDING_ERRORS as exc:
-        note_failure(section="enablement_event", error=exc, detail="enablement event: recipe projection failed")
-    if not isinstance(section.get("replay_sufficiency"), Mapping):
-        section["replay_sufficiency"] = read_status({})
-    try:
-        oversize = len(json.dumps(section, default=str).encode("utf-8")) > _MAX_RECIPE_BYTES
-    except (TypeError, ValueError):
-        oversize = True
-    if oversize:
-        note_failure(
-            section="enablement_event",
-            error=ValueError("recipe exceeds the recorded ceiling"),
-            detail="enablement event: recipe too large to record; reporting it as unjudged",
-        )
-        return {"replay_sufficiency": read_status({})}
-    return section
 
 
 def enablement_event_id() -> str:
@@ -609,9 +509,7 @@ def finish(
     attempt_runtimes: Any = None,
     framework_root: str = "",
     stall_streak: int = 0,
-    enablement: Any = None,
-    session_dir: str = "",
-    mode: str = "",
+    recipe: dict[str, Any] | None = None,
 ) -> None:
     """Close the lane on the terminal it reached.
 
@@ -625,7 +523,6 @@ def finish(
     an event left open as interrupted.
     """
     from .assembler import event_parts
-    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
     sink = _sink()
     if sink is None:
@@ -656,7 +553,6 @@ def finish(
     # Recorded on the close, on every path that reaches a terminal, so the
     # verdict cannot be computed and dropped the way it was while the read side
     # that used to publish it no longer existed.
-    recipe = _recipe_for(enablement, session_dir=session_dir, mode=mode) if enablement is not None else {}
     fragment: dict[str, Any] = {"result": result, "end_time": end_time}
     if recipe:
         fragment["recipe"] = recipe

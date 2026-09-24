@@ -419,7 +419,7 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     # Imported here, not at module scope: ``actions.executors`` re-enters this module through ``session_breakdown``,
     # so a top-level import makes any importer that reaches ``coordinator_helpers`` first (e.g. phases.kernel) fail on
     # a partially initialised module.
-    from ..actions.executors._grid_server_args import (
+    from hyperloom.inference_optimizer.grid_server_args import (
         tokenize_server_args_preserving_json,
     )
 
@@ -694,7 +694,7 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     legacy_envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
     if cfg.get("env_unparsed"):
         log.warning("GEAK accepted_config.env_unparsed reports discarded source text")
-        from ..actions.executors._grid_server_args import remove_server_args
+        from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 
         extra_flags = remove_server_args(extra_flags, cfg["env_unparsed"])
     if extra_flags:
@@ -770,7 +770,7 @@ def _geak_result_has_material(
     prev_best_controls: Any = None,
 ) -> bool:
     """Decide whether a GEAK result carries a material optimization product."""
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    from hyperloom.inference_optimizer.canonical_fingerprint import (
         canonical_fingerprint,
     )
 

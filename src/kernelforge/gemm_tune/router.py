@@ -116,14 +116,10 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
     path = Path(log_path)
     if not path.is_file():
         return {}
-    try:
-        from .evidence import moe_ck_missed_keys, parse_log_file
+    from .evidence import moe_ck_missed_keys, parse_log_file
 
-        report = parse_log_file(path)
-        moe = (report.get("dispatch") or {}).get("moe") or {}
-    except Exception:
-        log.debug("MoE stage parse failed for %s", path, exc_info=True)
-        return {}
+    report = parse_log_file(path)
+    moe = (report.get("dispatch") or {}).get("moe") or {}
     by_stage = moe.get("by_stage") or {}
     return {
         "stages_seen": moe.get("stages_seen") or [],

@@ -97,12 +97,16 @@ def forge_loop_prompts(monkeypatch):
 # deliverable is not), and the sweep bullet replaced "KEEP the knobs ... strip
 # at submission" with a collapse to the selected literals before the
 # implementer ends its turn.
+# The null-fused-timing rule moved fusion's hash alone: the harness contract now
+# says a fused time may be omitted only alongside "skipped": true, and that the
+# driver anchors the pristine run on the eager time instead of failing it.
+# Diffed line by line -- six added lines and one rewrapped, nothing else moved.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
     "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
-    "fusion": "47a08e347027db64ef09da42fe73e8248d35c22c05084bc850e23a7d013c61e5",
+    "fusion": "b91533ecbee89effa8a97cc0491977cbe4ed3c0a5b1724b020793d85e66dc312",
     "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
     "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
     "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",

@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.common.env import EnvValueError
 from kernelforge.gemm_tune import evidence as ev
 
 _MISS = (
@@ -73,10 +76,16 @@ class TestOverrides:
         monkeypatch.setenv(ev._MAX_LINES_ENV, "100000")
         assert "truncated" not in ev.parse_log(_log(50))
 
-    def test_garbage_and_non_positive_values_fall_back_to_the_default(self, monkeypatch):
-        for bad in ("", "0", "-5", "lots"):
-            monkeypatch.setenv(ev._MAX_KEYS_ENV, bad)
-            assert ev._env_int(ev._MAX_KEYS_ENV, 7) == 7
+    def test_a_blank_override_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv(ev._MAX_KEYS_ENV, "")
+        assert ev._env_positive_int(ev._MAX_KEYS_ENV, 7) == 7
+
+    @pytest.mark.parametrize("bad", ["0", "-5", "lots"])
+    def test_a_cap_that_cannot_be_read_as_positive_raises(self, monkeypatch, bad):
+        """Truncation tells the operator to raise this variable, so the bound in force has to be the one they set."""
+        monkeypatch.setenv(ev._MAX_KEYS_ENV, bad)
+        with pytest.raises(EnvValueError, match=ev._MAX_KEYS_ENV):
+            ev._env_positive_int(ev._MAX_KEYS_ENV, 7)
 
 
 class TestKeySchemaMatchesInstalledAiter:

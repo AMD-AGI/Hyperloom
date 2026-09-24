@@ -17,11 +17,8 @@ from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _first_present,
-    _format_inbox_event,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext, SubAgentResult
 from hyperloom.inference_optimizer.session.paths import make_session_dir

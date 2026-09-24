@@ -59,16 +59,12 @@ def _safe_is_file(value: str) -> bool:
 
 def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     """Parse a serving log into a demand file, or \"\" when it carries no demand."""
-    try:
-        from .evidence import moe_dispatch_keys, parse_log_file, write_demand
+    from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        # Hyperloom sets this for serving runs, making zero hits conclusive.
-        # Operator logs without it remain inconclusive.
-        hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
-        report = parse_log_file(server_log, hit_logging=hit_logging or None)
-    except Exception:
-        log.debug("could not parse %s for demand", server_log, exc_info=True)
-        return ""
+    # Hyperloom sets this for serving runs, making zero hits conclusive.
+    # Operator logs without it remain inconclusive.
+    hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
+    report = parse_log_file(server_log, hit_logging=hit_logging or None)
 
     demands = report.get("demands") or []
     # The dense misses are not the only demand the log carries.
@@ -218,13 +214,16 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
     Unverified artifacts return nothing. Marking the result as a candidate
     forces normal e2e validation; microbenchmark speedup is not an e2e claim.
     """
-    from .tuners.base import TuneResult
+    from .tuners.base import TuneResult, micro_metrics
 
     if not outcome.ok or not outcome.output_csv:
         return None
-    best = max(
-        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
-        default=1.0,
+    micro = micro_metrics(
+        {
+            "speedup": float(j.best_timing.speedup) if j.best_timing and j.best_timing.usable else None,
+            "improved": j.improved,
+        }
+        for j in outcome.judgements
     )
     return TuneResult(
         tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
@@ -234,8 +233,9 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
         env_value=outcome.output_csv,
         candidate=True,
         total_shapes=len(outcome.judgements),
-        improved_shapes=outcome.improved_shapes,
-        best_micro_speedup=float(best or 1.0),
+        improved_shapes=micro.improved,
+        best_micro_speedup=micro.best,
+        avg_micro_speedup=micro.avg,
         key_source="runtime_observed",
     )
 
@@ -679,12 +679,12 @@ def run(
         result = tuner_instance.execute()
         results.append(result)
         log.info(
-            "Tuner %s finished: status=%s, improved=%d/%d, best_speedup=%.3fx, elapsed=%.1fs",
+            "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
             spec.name,
             result.status,
-            result.improved_shapes,
+            "unmeasured" if result.improved_shapes is None else result.improved_shapes,
             result.total_shapes,
-            result.best_micro_speedup,
+            "unmeasured" if result.best_micro_speedup is None else f"{result.best_micro_speedup:.3f}x",
             result.elapsed_s,
         )
 

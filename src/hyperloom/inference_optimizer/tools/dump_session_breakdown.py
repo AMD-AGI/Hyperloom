@@ -45,8 +45,9 @@ import math
 import sys
 from pathlib import Path
 
-from ..breakdown import BREAKDOWN_FILENAME, build, write_breakdown_json
+from ..breakdown import build, write_breakdown_json
 from ..session.paths import session_dir as default_session_dir
+from ..session.session_paths import BREAKDOWN_FILENAME
 
 
 def _build_parser() -> argparse.ArgumentParser:

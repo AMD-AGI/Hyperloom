@@ -57,7 +57,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
 
     def _plan_cycle_focus(self) -> dict[str, Any]:
         """Pick an advisory specialist-domain focus for the current macro-cycle."""
-        from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+        from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         state = self.shared_state
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -249,13 +249,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
-        # 4) Deep-clean any lingering inference-server processes.
-        if getattr(self, "_cycle_restart_servers", False):
-            try:
-                self._restart_inference_servers()
-                summary["servers_restarted"] = True
-            except Exception:
-                log.exception("cycle soft-restart: server restart failed")
         log.info(
             "cycle soft-restart %d → %d: %s",
             int(prior_cycle),
@@ -271,17 +264,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         except Exception:
             log.exception("cycle soft-restart: observation write failed")
         return summary
-
-    def _restart_inference_servers(self) -> None:
-        """Deep-clean lingering inference-server processes (macro-cycle soft restart).
-
-        Reuses the grid runner's ``_kill_stale_servers`` /proc sweep, which only
-        targets vLLM/SGLang/atom server processes outside our own process group
-        and is a no-op in multi-node mode.
-        """
-        from ..actions.executors._grid_runner import _kill_stale_servers
-
-        _kill_stale_servers()
 
     async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
         """Force a fresh analysis at the start of a reopened macro-cycle.

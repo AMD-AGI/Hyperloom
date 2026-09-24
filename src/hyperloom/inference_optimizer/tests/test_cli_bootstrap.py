@@ -95,9 +95,10 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
         lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", "/recipes/kimi.sh", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-1")
@@ -140,9 +141,10 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(tmp_path, _args(framework="custom"), session_id="s-custom")
@@ -156,9 +158,10 @@ def _neutralize_seed_io(monkeypatch):
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
 
@@ -226,9 +229,10 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(session_dir, _args(model="/models/Model-A"), session_id="session-arch")
@@ -252,9 +256,10 @@ def test_seed_shared_state_preserves_quantized_model_identity(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
@@ -282,9 +287,10 @@ def test_seed_shared_state_falls_back_to_path_basename(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(

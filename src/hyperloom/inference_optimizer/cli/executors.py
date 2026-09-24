@@ -30,7 +30,7 @@ from hyperloom.orchestrator.actions.executors.targeted_build_executor import Tar
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
-from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
+from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -288,6 +288,9 @@ def _register_executors(
         "targeted_build",
         TargetedBuildExecutor(),
     )
+
+    # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
+    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator._run_kernel_agent(ctx))
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from kernelforge.gemm_tune.report import build_report
 from kernelforge.gemm_tune.tuners.base import TuneResult
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (
@@ -98,12 +100,12 @@ class TestParseNewShapes:
         assert new.get("is_new") is True and new["improved"] is False
 
     def test_all_new_summary_is_ok_with_unverified_not_improved(self):
-        # Align with bf16: shapes without a baseline are unverified, not losers. status=ok + n_improved=0 (do not
-        # claim improved).
+        # Align with bf16: shapes without a baseline are unverified, not losers. status=ok, and every micro metric is
+        # unmeasured rather than a claim of zero winners.
         s = _summarize_shape_results(_parse_tuner_stdout(_NEW_SHAPES_TABLE, ""))
         assert s["status"] == "ok"
-        assert s["total"] == 2 and s["n_improved"] == 0 and s["n_unverified"] == 2
-        assert s["best"] == 1.0 and s["avg"] == 1.0  # no fabricated speedup
+        assert s["total"] == 2 and s["n_improved"] is None and s["n_unverified"] == 2
+        assert s["best"] is None and s["avg"] is None  # unmeasured, not "measured 1.00x"
 
 
 class TestSummarize:
@@ -119,6 +121,17 @@ class TestSummarize:
         rows = [{"M": 1, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.0, "speedup": 1.0, "improved": False}]
         s = _summarize_shape_results(rows)
         assert s["status"] == "no_improvement" and s["total"] == 1
+
+    def test_every_shape_timed_and_none_won_reports_what_it_measured(self):
+        rows = [
+            {"M": 1, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.5, "speedup": 0.9524, "improved": False},
+            {"M": 4, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.05, "speedup": 0.995, "improved": False},
+        ]
+        s = _summarize_shape_results(rows)
+        assert s["status"] == "no_improvement" and s["n_improved"] == 0
+        # Both shapes were timed, so the run publishes the speedups it measured rather than the nulls of a run that
+        # measured nothing.
+        assert s["best"] == 0.995 and s["avg"] == pytest.approx(0.9737)
 
 
 class TestCandidateCsvFallback:
@@ -170,9 +183,9 @@ class TestCandidateCsvFallback:
         shape_results = stdout_rows or _parse_candidate_csv(self._write_candidate(tmp_path))
         s = _summarize_shape_results(shape_results)
         assert s["status"] == "ok" and s["total"] == 2
-        assert s["n_improved"] == 0 and s["n_unverified"] == 2
-        # speedups unknown in this path -> best/avg stay 1.0 (no fabrication)
-        assert s["best"] == 1.0 and s["avg"] == 1.0
+        assert s["n_improved"] is None and s["n_unverified"] == 2
+        # Nothing is knowable about gains in this path, so no micro metric is published.
+        assert s["best"] is None and s["avg"] is None
 
     def test_fallback_empty_stdout_no_candidate_is_empty_output(self, tmp_path):
         stdout_rows = _parse_tuner_stdout("Successfully tuned 2 shapes\n", "")
