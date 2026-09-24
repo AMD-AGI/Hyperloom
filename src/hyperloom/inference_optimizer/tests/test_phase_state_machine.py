@@ -548,8 +548,8 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         ts="2026-05-19T00:02:00+00:00",
         ts_unix=220.0,
     )
-    assert s.explore_elapsed_accum_s == 120.0
-    assert phase_state.explore_elapsed_seconds(s, now_unix=300.0) == 120.0
+    assert s.phase_elapsed_totals[phase_state.PHASE_FRAMEWORK_AGENT] == 120.0
+    assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=300.0) == 120.0
 
     phase_state.record_phase_transition(
         s,
@@ -559,7 +559,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         ts="2026-05-19T00:03:00+00:00",
         ts_unix=280.0,
     )
-    assert phase_state.explore_elapsed_seconds(s, now_unix=310.0) == 150.0
+    assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=310.0) == 150.0
 
 
 def test_langfuse_status_includes_explore_runtime_and_kb_hit():
@@ -567,7 +567,7 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     s.start_ts = "2026-05-19T00:00:00+00:00"
     s.phase = phase_state.PHASE_FRAMEWORK_AGENT
     s.phase_started_unix = 100.0
-    s.explore_elapsed_accum_s = 120.0
+    s.phase_elapsed_totals = {phase_state.PHASE_FRAMEWORK_AGENT: 120.0}
     s.warm_start_context = {"status": "hit"}
 
     summary = s._langfuse_status_summary()
@@ -578,37 +578,6 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
-def test_legacy_resume_keeps_explore_runtime_unknown():
-    raw = SharedState().to_dict()
-    raw.pop("explore_elapsed_accum_s")
-    raw.update(
-        {
-            "start_ts": "2026-05-19T00:00:00+00:00",
-            "phase": "EXPLORE",
-            "phase_started_unix": 100.0,
-        }
-    )
-
-    s = SharedState.from_dict(raw)
-    assert s.explore_elapsed_accum_s is None
-    assert phase_state.explore_elapsed_seconds(s, now_unix=220.0) is None
-
-    summary = s._langfuse_status_summary()
-    assert "session_elapsed_s" in summary
-    assert "explore_elapsed_s" not in summary
-    assert "explore_ratio" not in summary
-
-    phase_state.record_phase_transition(
-        s,
-        to_phase="KERNEL_AGENT",
-        reason="optimize_no_more_leverage",
-        evidence={},
-        ts="2026-05-19T00:02:00+00:00",
-        ts_unix=220.0,
-    )
-    assert s.explore_elapsed_accum_s is None
-
-
 def test_core_state_fields_includes_phase_fields():
     for f in (
         "phase",
@@ -616,7 +585,7 @@ def test_core_state_fields_includes_phase_fields():
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        "explore_elapsed_accum_s",
+        "phase_elapsed_totals",
     ):
         assert f in CORE_STATE_FIELDS, f
 

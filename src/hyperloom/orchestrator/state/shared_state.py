@@ -754,8 +754,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Durable sum of completed optimisation-phase segments.
-    explore_elapsed_accum_s: float | None = 0.0
     # Durable per-phase sum of COMPLETED segments, keyed by phase name.
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
@@ -1068,10 +1066,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A pre-telemetry state may already have completed optimisation segments, but their exact sum cannot be
-        # reconstructed once phase_history has been capped.
-        if "explore_elapsed_accum_s" not in raw:
-            filtered["explore_elapsed_accum_s"] = None
         # A state written before per-phase totals existed still records every transition in phase_history, so the
         # completed segments are reconstructible.
         if not isinstance(filtered.get("phase_elapsed_totals"), dict):
@@ -1286,16 +1280,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
         try:
-            from ..phases.machine_state import explore_elapsed_seconds
+            from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
 
             session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
             summary["session_elapsed_s"] = int(round(session_elapsed_s))
-            explore_elapsed_s = explore_elapsed_seconds(self)
-            if explore_elapsed_s is not None:
-                summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
-                summary["explore_ratio"] = (
-                    round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
-                )
+            explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
+            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
+            summary["explore_ratio"] = (
+                round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
+            )
         except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None

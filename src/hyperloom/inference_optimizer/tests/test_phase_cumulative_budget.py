@@ -185,9 +185,6 @@ def test_totals_accumulate_for_every_phase_not_just_explore():
         ps.PHASE_KERNEL_AGENT: 150.0,
         ps.PHASE_SWEEP: 50.0,
     }
-    # EXPLORE's dedicated accumulator still agrees; it is kept because it carries a tri-state "unknown" for legacy
-    # resumes that the budget totals deliberately do not have.
-    assert state.explore_elapsed_accum_s == 100.0
 
 
 def test_fresh_state_has_no_banked_totals():

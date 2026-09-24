@@ -655,20 +655,6 @@ def phase_cumulative_seconds(
     return accumulated
 
 
-def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Return total optimisation-phase wall-clock seconds across all macro cycles."""
-    raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-    if raw_accumulated is None:
-        return None
-    try:
-        accumulated = float(raw_accumulated or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if (getattr(state, "phase", "") or "").strip().upper() == PHASE_FRAMEWORK_AGENT:
-        accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
-    return max(0.0, accumulated)
-
-
 def _phase_budget_total_seconds(
     state: Any,
     *,
@@ -1974,18 +1960,6 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
         banked = 0.0
     totals[phase] = banked + segment
     state.phase_elapsed_totals = totals
-    # The optimisation phase keeps its own accumulator: it carries a tri-state "unknown" for legacy resumes that
-    # status telemetry reports as absent, whereas ``phase_elapsed_totals`` must never report "unknown" — a budget
-    # guard would read that as "no cap".
-    if phase == PHASE_FRAMEWORK_AGENT:
-        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-        if raw_accumulated is not None:
-            try:
-                accumulated = float(raw_accumulated or 0.0)
-            except (TypeError, ValueError):
-                state.explore_elapsed_accum_s = None
-            else:
-                state.explore_elapsed_accum_s = accumulated + segment
     return segment
 
 
@@ -2214,7 +2188,6 @@ __all__ = [
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",
-    "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
