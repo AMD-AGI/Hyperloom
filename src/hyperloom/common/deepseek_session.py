@@ -255,7 +255,8 @@ class DeepSeekSession:
     async def turn(self, prompt: str, *, timeout_sec: float) -> DeepSeekSessionResult:
         """Run one turn on the held conversation and normalize its outcome."""
         if self._harness is None:
-            raise DeepSeekSessionError("DeepSeekSession.turn called before start()")
+            # A timed-out turn closes the runtime, so a turn after it starts the next one.
+            await self.start()
         async with self._turn_lock:
             opening = not self._session_id
             if opening:
@@ -266,6 +267,10 @@ class DeepSeekSession:
             try:
                 sdk_result = await asyncio.wait_for(run, timeout=timeout_sec)
             except asyncio.TimeoutError as exc:
+                # The SDK has no per-turn cancel: abandoning the await leaves the turn running, and spending, on
+                # a runtime the next turn would share. Closing the runtime is the only way to stop it; the next
+                # turn starts a new one and a new conversation.
+                await self.aclose()
                 raise DeepSeekSessionTimeoutError(f"the harness turn outlived its {timeout_sec}s budget") from exc
             except Exception as exc:
                 raise DeepSeekSessionError(f"the harness turn failed: {exc}") from exc

@@ -364,6 +364,45 @@ async def test_an_unconfigured_gateway_fails_at_start_not_at_the_first_turn(
         await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
 
 
+async def test_a_timed_out_turn_is_stopped_and_the_next_one_runs_on_a_fresh_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK has no per-turn cancel, so a timed-out turn keeps spending until its runtime is closed."""
+    import threading
+
+    _pin_gateway(monkeypatch)
+    release = threading.Event()
+    harnesses: list[Any] = []
+
+    class _Harness:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.closed = False
+            harnesses.append(self)
+
+        def run(self, _body: str, *, session_id: str) -> Any:
+            if len(harnesses) == 1:
+                release.wait(timeout=5)
+            return SimpleNamespace(final_response="ok", finish_reason="completed", events=[], session_id=session_id)
+
+        def close(self) -> None:
+            self.closed = True
+            release.set()
+
+    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: SimpleNamespace(DeepSeekHarness=_Harness))
+    session = DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home")
+    await session.start()
+
+    with pytest.raises(deepseek_session.DeepSeekSessionTimeoutError):
+        await session.turn("slow", timeout_sec=0.05)
+    assert harnesses[0].closed
+
+    result = await session.turn("fast", timeout_sec=5)
+    assert len(harnesses) == 2
+    assert result.text == "ok"
+    await session.aclose()
+
+
 # Token accounting.
 
 
