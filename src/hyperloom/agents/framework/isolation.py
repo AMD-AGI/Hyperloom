@@ -15,7 +15,7 @@ from pathlib import Path
 from hyperloom.common.git_safety import safe_directory_args
 
 from .logging_setup import get_logger
-from .models import Candidate, ExploreRequest
+from .models import Candidate
 
 log = get_logger(__name__)
 
@@ -105,22 +105,22 @@ def disk_preflight(
 
 
 # Repo cache (mirror clone)
-def _repo_cache_dir(req: ExploreRequest) -> Path:
+def _repo_cache_dir(repo_url: str, work_dir: Path) -> Path:
     """Stable per-repo cache directory under work_dir/_repos."""
-    safe = "".join(ch if ch.isalnum() else "-" for ch in req.repo_url.lower()).strip("-")
-    return req.work_dir / "_repos" / (safe or "repo")
+    safe = "".join(ch if ch.isalnum() else "-" for ch in repo_url.lower()).strip("-")
+    return work_dir / "_repos" / (safe or "repo")
 
 
-def prepare_repo_cache(req: ExploreRequest) -> Path:
+def prepare_repo_cache(repo_url: str, work_dir: Path) -> Path:
     """Mirror-clone the repo into the cache dir; fetch when already present."""
-    repo_dir = _repo_cache_dir(req)
+    repo_dir = _repo_cache_dir(repo_url, work_dir)
     if repo_dir.exists():
         log.debug("prepare_repo_cache: fetching existing mirror at %s", repo_dir)
         _run_git(["git", "fetch", "--all", "--tags", "--prune"], cwd=repo_dir)
         return repo_dir
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
-    log.info("prepare_repo_cache: cloning --mirror %s -> %s", req.repo_url, repo_dir)
-    _run_git(["git", "clone", "--mirror", req.repo_url, str(repo_dir)])
+    log.info("prepare_repo_cache: cloning --mirror %s -> %s", repo_url, repo_dir)
+    _run_git(["git", "clone", "--mirror", repo_url, str(repo_dir)])
     return repo_dir
 
 
@@ -155,27 +155,19 @@ def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
 
 # Per-candidate workspace lifecycle
 def prepare_candidate_workspace(
-    req: ExploreRequest,
     candidate: Candidate,
     *,
+    repo_url: str,
+    work_dir: Path,
     index: int,
-    execute: bool,
 ) -> WorkspacePaths:
-    """Materialise ``candidate_dir`` + (when execute) worktree + venv."""
-    candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
+    """Materialise ``candidate_dir`` + worktree + venv for a candidate."""
+    candidate_dir = work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
     venv_dir = candidate_dir / "venv"
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
-    if not execute or not req.prepare_candidate_env:
-        log.debug(
-            "prepare_candidate_workspace[%02d] %s: plan mode (no worktree/venv)",
-            index,
-            candidate.ref,
-        )
-        return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
-
-    repo_dir = prepare_repo_cache(req)
+    repo_dir = prepare_repo_cache(repo_url, work_dir)
     fetch_candidate_ref(repo_dir, candidate)
     if worktree_dir.exists():
         shutil.rmtree(worktree_dir)

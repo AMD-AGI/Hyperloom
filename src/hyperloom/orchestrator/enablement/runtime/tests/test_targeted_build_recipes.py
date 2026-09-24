@@ -52,10 +52,10 @@ class FakeIsolation:
         self.worktree_dir = worktree_dir
         self.venv_dir = venv_dir
 
-    def prepare_repo_cache(self, req):
+    def prepare_repo_cache(self, repo_url, work_dir):
         return self.worktree_dir
 
-    def prepare_candidate_workspace(self, req, candidate, *, index, execute):
+    def prepare_candidate_workspace(self, candidate, *, repo_url, work_dir, index):
         self.venv_dir.mkdir(parents=True, exist_ok=True)
         return SimpleNamespace(worktree_dir=self.worktree_dir, venv_dir=self.venv_dir)
 
