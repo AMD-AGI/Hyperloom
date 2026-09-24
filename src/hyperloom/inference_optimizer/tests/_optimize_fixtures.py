@@ -41,7 +41,7 @@ def optimize_state(
     **overrides: Any,
 ) -> SharedState:
     """A real ``SharedState`` positioned in the optimisation phase."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG, LEVER_SOURCE_PATCH
+    from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_SOURCE_PATCH
     from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 
     state = SharedState()

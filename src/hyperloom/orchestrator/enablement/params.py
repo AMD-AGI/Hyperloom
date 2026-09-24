@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator

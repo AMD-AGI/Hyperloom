@@ -502,7 +502,7 @@ def test_the_arms_deliverable_decides_its_lever():
     A config proposal and a diff are both valid returns from the same dispatch,
     and a row left with an empty lever is invisible to the dryness judgment.
     """
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    from hyperloom.orchestrator.lever import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
     )
@@ -529,7 +529,7 @@ def test_the_arms_deliverable_decides_its_lever():
 
 def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
     """The ledger row sits behind the same gate as the progress row, so retries are not evidence the lever is dry."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
+    from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     from .test_framework_agent_authoring import _Stub

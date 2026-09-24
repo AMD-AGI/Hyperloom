@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_SOURCE_PATCH
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
 from hyperloom.orchestrator.phases.machine_state import (
     _lever_attempts,
     _trailing_no_keep,
