@@ -66,10 +66,11 @@ class TestDropInaccurateRows:
             ],
         )
 
-        dropped = sd.drop_inaccurate_rows(csv_path)
+        applied = sd.drop_inaccurate_rows(csv_path)
 
-        assert len(dropped) == 1
-        assert dropped[0]["libtype"] == "flydsl"
+        assert applied.completed
+        assert len(applied.dropped) == 1
+        assert applied.dropped[0]["libtype"] == "flydsl"
         assert _shapes(csv_path) == {("1024", "1536", "7168")}
 
     def test_keeps_everything_when_all_rows_are_accurate(self, tmp_path):
@@ -82,7 +83,9 @@ class TestDropInaccurateRows:
         )
         before = csv_path.read_text(encoding="utf-8")
 
-        assert sd.drop_inaccurate_rows(csv_path) == []
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert applied.completed and applied.dropped == []
         assert csv_path.read_text(encoding="utf-8") == before
 
     def test_boundary_is_kept(self, tmp_path):
@@ -90,19 +93,23 @@ class TestDropInaccurateRows:
         # one path deploy what the other rejects.
         csv_path = _csv(tmp_path, [_row(16, 1536, 7168, "asm", 4, 12.0, 0.01)])
 
-        assert sd.drop_inaccurate_rows(csv_path) == []
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert applied.completed and applied.dropped == []
         assert len(_shapes(csv_path)) == 1
 
     def test_camel_case_column_is_honoured(self, tmp_path):
         hdr = _HDR.replace("err_ratio", "errRatio")
         csv_path = _csv(tmp_path, [_row(16, 1536, 7168, "flydsl", 7, 8.1, 0.02)], hdr)
 
-        assert len(sd.drop_inaccurate_rows(csv_path)) == 1
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert applied.completed and len(applied.dropped) == 1
         assert _shapes(csv_path) == set()
 
-    def test_missing_accuracy_column_does_not_silently_pass_or_crash(self, tmp_path):
-        # No column means no evidence of a problem, so nothing is dropped -- but the operator has to be told the
-        # filter did not run, or a schema rename upstream would disable it invisibly.
+    def test_missing_accuracy_column_is_an_unfiltered_table(self, tmp_path):
+        # A schema rename upstream would otherwise disable the filter invisibly: no column means every row's accuracy
+        # is unknown, not that every row is accurate.
         hdr = ",".join(c for c in _HDR.split(",") if c != "err_ratio")
         row = ",".join(
             v
@@ -111,29 +118,51 @@ class TestDropInaccurateRows:
         )
         csv_path = _csv(tmp_path, [row], hdr)
 
-        assert sd.drop_inaccurate_rows(csv_path) == []
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert not applied.completed
+        assert "accuracy column" in applied.reason
         assert len(_shapes(csv_path)) == 1
 
-    def test_unparseable_value_is_treated_as_no_evidence(self, tmp_path):
+    def test_an_unparseable_value_is_an_unfiltered_table(self, tmp_path):
         csv_path = _csv(tmp_path, [_row(16, 1536, 7168, "flydsl", 7, 8.1, "n/a")])
 
-        assert sd.drop_inaccurate_rows(csv_path) == []
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert not applied.completed
         assert len(_shapes(csv_path)) == 1
 
-    def test_empty_and_missing_files_are_safe(self, tmp_path):
-        assert sd.drop_inaccurate_rows(tmp_path / "nope.csv") == []
+    def test_nan_is_not_an_accurate_row(self, tmp_path):
+        # NaN compares false against the limit, so an arithmetic accuracy check that produced no number would read as
+        # a row inside the tolerance.
+        csv_path = _csv(tmp_path, [_row(16, 1536, 7168, "flydsl", 7, 8.1, "nan")])
+
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert not applied.completed
+        assert len(_shapes(csv_path)) == 1
+
+    def test_an_absent_file_is_not_a_clean_table(self, tmp_path):
+        applied = sd.drop_inaccurate_rows(tmp_path / "nope.csv")
+
+        assert not applied.completed and applied.dropped == []
+
+    def test_a_header_only_file_has_nothing_to_filter(self, tmp_path):
         empty = tmp_path / "empty.csv"
         empty.write_text(_HDR + "\n", encoding="utf-8")
-        assert sd.drop_inaccurate_rows(empty) == []
+
+        applied = sd.drop_inaccurate_rows(empty)
+
+        assert applied.completed and applied.dropped == []
 
     def test_a_shape_losing_its_only_row_falls_back_to_aiter_default(self, tmp_path):
         # Dropping the row leaves the shape untuned, which is the intended outcome: at serve time aiter picks its own
         # kernel, and no tuned entry beats a tuned entry that computes the wrong answer.
         csv_path = _csv(tmp_path, [_row(16, 4096, 7168, "flydsl", 4, 13.472, 0.0139)])
 
-        dropped = sd.drop_inaccurate_rows(csv_path)
+        applied = sd.drop_inaccurate_rows(csv_path)
 
-        assert len(dropped) == 1
+        assert applied.completed and len(applied.dropped) == 1
         assert _shapes(csv_path) == set()
         assert csv_path.read_text(encoding="utf-8").strip() == _HDR
 
@@ -156,6 +185,25 @@ class TestDropInaccurateRows:
         # The surviving shape is still deployable.
         assert result.total_shapes == 1
 
+    def test_an_unfiltered_table_is_not_deployed(self, tmp_path, monkeypatch):
+        # Every row tuned fine, but one carries no accuracy figure: the run has no evidence the table is correct, so
+        # it must not hand the artifact to serving.
+        from kernelforge.gemm_tune.tests.test_sglang_dense_bf16 import _prep, _run
+
+        _prefix = "gfx950,256,{m},4096,4096,False,torch.bfloat16,torch.bfloat16,False,False"
+        rows = [
+            _prefix.format(m=1) + ",flydsl,4492,7,8.116,knl,,800.0,3000.0",
+            _prefix.format(m=512) + ",hipblaslt,438549,0,35.7,knl,0.0,800.0,3000.0",
+        ]
+        _prep(tmp_path, monkeypatch, tuned_rows=rows)
+
+        result = _run(tmp_path)
+
+        assert result.status == "failed"
+        assert result.error_class == "accuracy_filter_incomplete"
+        assert not result.candidate
+        assert not result.artifact_path
+
     def test_a_failed_write_leaves_the_artifact_alone(self, tmp_path, monkeypatch):
         # Truncating the real file first would leave a half-written table that the caller is told nothing was filtered
         # from -- worse than not filtering, because the artifact is then neither original nor clean.
@@ -171,7 +219,10 @@ class TestDropInaccurateRows:
             lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
         )
 
-        assert sd.drop_inaccurate_rows(csv_path) == []
+        applied = sd.drop_inaccurate_rows(csv_path)
+
+        assert not applied.completed
+        assert len(applied.dropped) == 1
         assert csv_path.read_text(encoding="utf-8") == before
         assert not list(tmp_path.glob("*.tmp"))
 

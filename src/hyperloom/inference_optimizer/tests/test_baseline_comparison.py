@@ -204,7 +204,7 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     summary = analyze(
         session_dir=tmp_path,
@@ -363,7 +363,7 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
 def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
     """A pre-existing (e.g. scout-authored) competitor_target.json must be dropped when analyze() ends in no_match, so the advisory feed never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     # Seed a stale scout-authored target on disk.
     research_hints.write_competitor_target(
@@ -396,7 +396,7 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
 def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monkeypatch):
     """When measured advisory write fails, any pre-existing competitor_target.json must be removed so the EXPLORE gap block never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     research_hints.write_competitor_target(
         tmp_path,
@@ -410,7 +410,7 @@ def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monke
 
     _patch_fetch_rows(monkeypatch, _make_rows())
     monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.research_hints.write_competitor_target",
+        "hyperloom.inference_optimizer.baseline_comparison.research_hints.write_competitor_target",
         lambda *_args, **_kwargs: False,
     )
 
@@ -547,7 +547,7 @@ def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path,
     md = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
     assert "agentic_traces" in md
     assert "cross-system" in md
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     target = research_hints.load_competitor_target(tmp_path)
     assert target["benchmark_mode"] == "agentx"

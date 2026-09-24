@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_gemm_tuning`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_fusion` lane shares that handler table but is Coordinator-owned: it runs at KERNEL entry behind its own gate and PolicyGate rejects an agent request for it.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 
@@ -127,7 +127,7 @@ Artefact paths emitted by agents must resolve under the **session dir**;
 PolicyGate enforces that. `source_file` and `framework_source_root` are exempt —
 they name framework source, which lives outside the session dir by construction,
 and where a patch may land is decided when `integrate_patch` applies it.
-`hyperloom.orchestrator.framework.paths.resolve_framework_tree` names the tree a
+`hyperloom.inference_optimizer.framework_paths.resolve_framework_tree` names the tree a
 session optimises and `resolve_kernel_search_roots` the trees worth searching;
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` (colon-separated) supplements the
 latter and is auto-probed by
@@ -1392,7 +1392,7 @@ The optimizer should:
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
-  (`src/hyperloom/orchestrator/kernel/roofline_ceiling.py`) for the report's
+  (`src/hyperloom/inference_optimizer/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
   `last_trace_analyze`.

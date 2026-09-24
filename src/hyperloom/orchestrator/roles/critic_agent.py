@@ -39,9 +39,9 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
-from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
-from ..trace.parse_usage import reasoning_output_tokens
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -817,7 +817,7 @@ class CriticAgentBackend:
     ) -> None:
         """Mirror the per-iteration KB trace into Langfuse (best-effort)."""
         try:
-            from ..trace.langfuse_emitter import get_emitter
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import get_emitter
 
             emitter = get_emitter(self.session_dir)
             if not emitter.enabled:

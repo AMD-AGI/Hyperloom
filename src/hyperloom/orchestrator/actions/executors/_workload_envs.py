@@ -35,6 +35,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
@@ -54,11 +55,11 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_OSL,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from ._benchmark_interpreter import _resolve_probe_python
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -66,9 +67,9 @@ from ._grid_server_args import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import remove_server_args
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
@@ -85,9 +86,10 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
-# gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
-# gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
-_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
+# has no such kernel. The gate is the arch, so the board list is read off the
+# identity table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
 
 # Value is optional so a bare, value-less flag (an operator typo, or a flag
@@ -1770,7 +1772,7 @@ def materialize_config_with_envs(
         envs.pop(name, None)
     if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        from ._grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[_ref_fw_env] = compose_server_args(
             base_extra_args=ref_args,

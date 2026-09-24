@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -41,6 +42,26 @@ CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
 # How long releasing a lease waits for the actor to reap its served process before killing the actor anyway.
 CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 
+# Wall-clock ceiling on how long the submitter blocks on one round, over and above the round's own hard cap.
+# ``ray.wait`` only times out its poll, so the loop around it had no deadline at all: on 2026-09-21 two warmup
+# rounds whose tasks Ray never scheduled -- 8/8 GPUs held by ghost reservations from a specialist that died
+# without releasing them -- sat in PENDING_NODE_ASSIGNMENT for over an hour, parking their pool threads and
+# leaving their lane leases to expire unreclaimed.
+#
+# The slack covers only what the round spends OUTSIDE its own cap, which is less than it looks: server bringup is
+# inside it, because ``_grid_runner.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
+# ``server_lifecycle.server_ready_timeout_s``, and both submitters run that before submitting. What is genuinely
+# outside is Ray dispatching the method onto an actor ``ensure()`` already created, the cooperative reap the actor
+# performs once the cap fires (``COOPERATIVE_REAP_BUDGET_SEC``), and shipping the round's captured stdout/stderr
+# back through the object store -- seconds to a few minutes. An hour is a deliberately wide margin over that, so a
+# loaded head node can be slow by two orders of magnitude before a real round is cut short.
+ROUND_WAIT_SLACK_SEC: float = 3600.0
+
+# Absolute override for the ceiling above, in seconds; unset means ``round timeout + ROUND_WAIT_SLACK_SEC``.
+# ``<= 0`` disables the ceiling, which is also what a round with no cap of its own gets.
+ROUND_WAIT_TIMEOUT_ENV: str = "INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC"
+
+
 # Method slots the serving actor runs at once: the round, plus room for the cancel that has to reach it.
 _SERVING_ACTOR_CONCURRENCY: int = 2
 
@@ -68,6 +89,58 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
             "existing Ray head has no serving_slot resource; "
             "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
         )
+
+
+def _round_wait_timeout_sec(timeout: int | float | None) -> float:
+    """Return the wall-clock ceiling for blocking on one round; ``<= 0`` disables the ceiling.
+
+    Args:
+        timeout: The round's own hard cap in seconds, or ``None`` when it has none.
+
+    Returns:
+        float: Seconds to allow, or ``0.0`` for no ceiling.
+
+    Raises:
+        ValueError: The override is set to something other than a finite number.
+    """
+    raw = os.environ.get(ROUND_WAIT_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{ROUND_WAIT_TIMEOUT_ENV} must be a finite number, got {raw!r}") from exc
+        if not math.isfinite(value):
+            # Rejected rather than tolerated, the way ``_subprocess_kill.resolve_benchmark_timeouts`` rejects its
+            # own overrides: ``nan > 0`` is False, so a nan here would switch the ceiling off altogether and one
+            # ops typo would silently reinstate the stall this ceiling exists to bound.
+            raise ValueError(f"{ROUND_WAIT_TIMEOUT_ENV} must be a finite number, got {raw!r}")
+        return value
+    if timeout is None or timeout <= 0:
+        # A round the caller chose not to cap gets no ceiling either. Deriving one from a zero cap would mean
+        # "no limit" silently became "killed after ROUND_WAIT_SLACK_SEC".
+        return 0.0
+    return float(timeout) + ROUND_WAIT_SLACK_SEC
+
+
+def _round_label(cmd: Any) -> str:
+    """Name a round in an operator log without pasting its whole argv."""
+    try:
+        parts = [str(tok) for tok in (cmd or [])]
+    except TypeError:
+        return "<unnamed>"
+    for tok in parts:
+        if tok.endswith(".sh") or "/" in tok:
+            return tok
+    return parts[0] if parts else "<unnamed>"
+
+
+def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
+    """Explain a round abandoned at the wall-clock ceiling, and how to widen it."""
+    return (
+        f"ray_round_wait_timeout: the Ray round did not return within {waited:.0f}s "
+        f"(ceiling {ceiling:.0f}s, raise it with {ROUND_WAIT_TIMEOUT_ENV}); its task was most likely never "
+        "schedulable -- check for held GPU/serving_slot resources with no live process behind them"
+    )
 
 
 def _pdeathsig_preexec() -> None:
@@ -335,6 +408,28 @@ def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
 
 
+#: Actor handles from quarantined leases, held for the life of this process.
+#:
+#: A Ray actor lives as long as a handle to it does: lose the last reference and
+#: Ray collects it, which returns its GPUs to the scheduler just as surely as
+#: ``ray.kill`` would. Every real owner keeps its lease in an action-local
+#: variable, closes it in a ``finally`` and drops it, so refusing to kill the
+#: actor is not by itself enough to keep its devices reserved -- the handle has
+#: to outlive the lease object. Nothing removes entries: that is the point, and
+#: it is bounded by the session, since the process holding them is the session.
+_QUARANTINED_ACTORS: list[Any] = []
+
+
+class ServingLeaseQuarantined(RuntimeError):
+    """A lease whose devices are held by an actor that never answered.
+
+    Raised rather than silently reusing the lease: its round timed out, nothing
+    established what became of the served subprocess tree, and the actor is
+    deliberately still alive so the scheduler cannot place anything else on its
+    cards.
+    """
+
+
 class ServingLease:
     """A held Ray GPU lease spanning every round that shares one server."""
 
@@ -349,9 +444,22 @@ class ServingLease:
         self._serving_slot = bool(serving_slot)
         self._ensure_log_path = ensure_log_path
         self._actor: Any = None
+        # Non-empty once a round timed out with the actor unresponsive: the label
+        # of that round. The actor is then kept alive on purpose so its GPUs stay
+        # reserved, and every entry point below refuses to hand this lease out
+        # again. Declared in _await_or_cancel's timeout branch.
+        self._quarantined: str = ""
 
     def ensure(self) -> None:
-        """Ensure the Ray cluster is up and the serving actor is created."""
+        """Ensure the Ray cluster is up and the serving actor is created.
+
+        Raises:
+            RuntimeError: This lease is quarantined. Its devices are held by an
+                actor whose round never answered, so handing the caller a usable
+                lease would place the next round on cards a live server may
+                still map.
+        """
+        self._refuse_if_quarantined("ensure")
         if self._actor is not None:
             return
         from ._ray_backend import get_ray_backend
@@ -375,6 +483,18 @@ class ServingLease:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
 
+        if self._quarantined:
+            # Reported the way an ensure failure is, rather than raised: callers
+            # such as run_grid move to the next variant on a non-zero rc, and
+            # every one of those attempts must be refused too. Raising here would
+            # instead escape the variant loop, a wider blast radius than this
+            # change is entitled to.
+            log.warning(
+                "ServingLease.run_session_kill: refusing a round on a lease quarantined by round %s; its GPUs "
+                "are still reserved by an actor that never answered",
+                self._quarantined,
+            )
+            return 1, "", f"ray_lease_quarantined: round {self._quarantined} timed out with its actor unresponsive"
         try:
             self.ensure()
         except (RayInfeasibleError, RuntimeError) as exc:
@@ -418,9 +538,13 @@ class ServingLease:
 
         _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
         try:
+            # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
+            # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
             rc, out, err = self._await_or_cancel(
                 ref,
                 acquire_ref=acquire_ref,
+                cmd=cmd,
+                timeout=timeout,
                 cancel_scope=cancel_scope,
             )
         except _actor_err as exc:
@@ -450,15 +574,47 @@ class ServingLease:
             raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
         return rc, out, err
 
-    def _await_or_cancel(self, ref: Any, *, acquire_ref: Any, cancel_scope: Any) -> tuple[int, str, str]:
-        """Wait for actor scheduling, then forward cancellation while the round runs."""
+    def _await_or_cancel(
+        self,
+        ref: Any,
+        *,
+        acquire_ref: Any,
+        cmd: list[str],
+        timeout: int | float | None,
+        cancel_scope: Any,
+    ) -> tuple[int, str, str]:
+        """Wait for the actor to be placed, then block on its round under a wall-clock ceiling.
+
+        The two bounds guard different windows and are not interchangeable. Until the actor acquires resources
+        nothing has been spawned behind it, so that deadline can kill the actor outright. Once it has, the round
+        may genuinely be serving on its GPUs, and the ceiling below hands the lease to quarantine instead of
+        killing it -- see the teardown.
+
+        Args:
+            ref: The submitted ``run_blocking`` object ref.
+            acquire_ref: A probe ref that resolves once Ray has placed the actor.
+            cmd: The round's argv, for the :exc:`subprocess.TimeoutExpired` raised at the ceiling.
+            timeout: The round's own hard cap in seconds, or ``None``; the ceiling is derived from it.
+            cancel_scope: Scope to watch for an orchestrator cancel, or ``None`` for an uncancellable round.
+
+        Returns:
+            tuple[int, str, str]: The round's ``(rc, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: The round did not return inside the wall-clock ceiling.
+        """
         import ray
 
         from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 
-        asked_at: float | None = None
-        acquire_deadline = time.monotonic() + RESOURCE_ACQUIRE_TIMEOUT_SEC
+        started_at = time.monotonic()
+        wait_ceiling = _round_wait_timeout_sec(timeout)
+        acquire_deadline = started_at + RESOURCE_ACQUIRE_TIMEOUT_SEC
         acquired = False
+        asked_at: float | None = None
+        # Set when the ceiling, rather than the scope, is what asked the actor to stop. The two share the teardown
+        # below -- cooperative stop, then kill -- but owe the caller different outcomes.
+        timed_out = False
         while True:
             refs = [ref] if acquired else [ref, acquire_ref]
             wait_timeout = _CANCEL_POLL_SEC
@@ -466,42 +622,123 @@ class ServingLease:
                 wait_timeout = min(wait_timeout, max(0.0, acquire_deadline - time.monotonic()))
             ready, _ = ray.wait(refs, num_returns=1, timeout=wait_timeout)
             if ref in ready:
-                return ray.get(ref)
+                rc, out, err = ray.get(ref)
+                if not timed_out:
+                    return rc, out, err
+                # The actor did come back, but only because the ceiling made us ask it to: the caller is owed the
+                # timeout, not whatever returncode a stopped round reports.
+                raise subprocess.TimeoutExpired(
+                    cmd,
+                    wait_ceiling,
+                    output=out or None,
+                    stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+                )
             if acquire_ref in ready:
                 ray.get(acquire_ref)
                 acquired = True
-                if cancel_scope is None:
-                    return ray.get(ref)
+                # An uncancellable round keeps polling rather than settling into a bare ``ray.get``: that get carries
+                # no wall-clock deadline, and a round that never returns would park this thread for the rest of the
+                # session -- which is the failure the ceiling below exists to bound, cancellable or not.
                 continue
             if not acquired and time.monotonic() >= acquire_deadline:
+                # Killing outright is safe here in a way it is not at the ceiling: an actor Ray never placed holds no
+                # resources and has spawned no server, so nothing survives this call still mapping GPUs.
                 log.warning(
                     "ServingLease: actor did not acquire resources within %.0fs; killing it",
                     RESOURCE_ACQUIRE_TIMEOUT_SEC,
                 )
                 self._kill_actor()
                 return 1, "", "resource_acquire_timeout"
-            if cancel_scope is None:
-                continue
             if asked_at is None:
-                if not cancel_scope.cancelled:
+                waited = time.monotonic() - started_at
+                if wait_ceiling > 0 and waited >= wait_ceiling:
+                    # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
+                    # the lease it holds is never released. Go through the cancel path's cooperative step first --
+                    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
+                    # genuinely still running would strand the served process tree on its GPUs.
+                    timed_out = True
+                    reason = f"ray_round_wait_timeout after {waited:.0f}s"
+                    log.warning(
+                        "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
+                        "stop it -- its task was most likely never schedulable",
+                        waited,
+                        wait_ceiling,
+                    )
+                elif cancel_scope is not None and cancel_scope.cancelled:
+                    reason = cancel_scope.reason or "orchestrator_cancelled"
+                    log.warning(
+                        "ServingLease: asking the actor to stop the round in flight (%s)",
+                        reason,
+                    )
+                else:
                     continue
-                reason = cancel_scope.reason or "orchestrator_cancelled"
                 asked_at = time.monotonic()
-                log.warning(
-                    "ServingLease: asking the actor to stop the round in flight (%s)",
-                    reason,
-                )
                 if not self._ask_actor_to_cancel(reason):
                     # The actor never took the round, or cannot be reached to be told about it.
                     asked_at -= CANCEL_ROUND_GRACE_SEC
             elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
                 log.warning(
-                    "ServingLease: the actor did not return its cancelled round within %.0fs; "
+                    "ServingLease: the actor did not return its round within %.0fs of being asked to stop; "
                     "killing it to release the lease",
                     CANCEL_ROUND_GRACE_SEC,
                 )
                 # Straight to the kill: an actor that has not answered is not going to answer a graceful stop either,
                 # and waiting for one would spend the rest of the window the caller is owed.
+                #
+                # What this does NOT do is account for the served process tree. ``ray.kill`` runs neither
+                # ``__ray_terminate__`` nor atexit, so if the round really was still running its subprocesses
+                # survive this call, on their GPUs, with nothing here to reap them. That is a worse outcome than a
+                # clean teardown and a better one than the alternative this replaced -- a thread parked on
+                # ``ray.wait`` forever, its task stuck 'running' and its lane lease never released, which is how
+                # 2026-09-21 wedged a whole session. Reaping a tree the actor would not give up belongs to the
+                # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
+                # operator can look.
+                if timed_out:
+                    # Deliberately NOT killing the actor. ``ray.kill`` runs
+                    # neither ``__ray_terminate__`` nor atexit, so a round that
+                    # really is still running keeps its server subprocesses --
+                    # but killing the actor hands its GPUs straight back to the
+                    # scheduler, and the next round would be placed on cards a
+                    # live server still maps. That trades a bounded wait for
+                    # concurrent GPU use, which corrupts quietly.
+                    #
+                    # Leaving the actor alive keeps those devices reserved, so
+                    # nothing else can be placed on them. The cost is that they
+                    # stay out of circulation until the session ends or an
+                    # operator intervenes -- the same asymmetry the lane leases
+                    # settle on: a resource stuck is recoverable, a resource
+                    # shared is not.
+                    self._abandon_ref(ref)
+                    # Declared here, honoured by ensure(), run_session_kill() and
+                    # close(). Declaring it without those would be the same
+                    # half-measure a prior revision shipped: the quarantine held
+                    # inside this method while the caller's finally: close() went
+                    # on to kill the actor anyway.
+                    self._quarantined = _round_label(cmd)
+                    # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
+                    if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
+                        _QUARANTINED_ACTORS.append(self._actor)
+                    log.warning(
+                        "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
+                        "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
+                        "rather than being returned to the scheduler. They will not be reusable until this session "
+                        "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
+                        "by hand",
+                        _round_label(cmd),
+                        time.monotonic() - started_at,
+                    )
+                    raise subprocess.TimeoutExpired(
+                        cmd,
+                        wait_ceiling,
+                        stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+                    )
+                # The cancel path keeps the behaviour it had on main: an operator
+                # or a shutdown asked for this, and the caller is waiting on the
+                # teardown rather than on a round.
+                log.warning(
+                    "ServingLease: killing the actor for round %s after it ignored the stop request",
+                    _round_label(cmd),
+                )
                 self._kill_actor()
                 return (
                     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -509,6 +746,17 @@ class ServingLease:
                     "the orchestrator cancelled this action; its Ray actor was killed after "
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
+
+    def _abandon_ref(self, ref: Any) -> None:
+        """Drop a round this lease will never collect. Never raises."""
+        try:
+            import ray
+
+            # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
+            # interrupt, and ``force=True`` is rejected for actor tasks.
+            ray.cancel(ref)
+        except Exception as exc:  # noqa: BLE001 — the actor kill below is what actually frees the resources
+            log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
         """Tell the actor to stop the round it is running. Never raises."""
@@ -524,7 +772,23 @@ class ServingLease:
             return False
 
     def close(self) -> None:
-        """Release the GPU lease: stop the server, then kill the actor. Idempotent."""
+        """Release the GPU lease: stop the server, then kill the actor. Idempotent.
+
+        A quarantined lease is the exception. Its round timed out without the
+        actor ever answering, so nothing established what became of the served
+        subprocess tree; killing the actor here would hand its GPUs back to the
+        scheduler while that tree may still map them. Ordinary teardown reaches
+        this method from a caller's ``finally``, which is precisely where the
+        quarantine would otherwise be undone, so it has to be honoured here
+        rather than only at the point it was declared.
+        """
+        if self._quarantined:
+            log.warning(
+                "ServingLease.close: leaving the quarantined actor for round %s alive; its GPUs stay reserved "
+                "until this session ends. Confirm no server of that round survives before killing it by hand",
+                self._quarantined,
+            )
+            return
         if self._actor is None:
             return
         try:
@@ -534,6 +798,21 @@ class ServingLease:
         except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()
+
+    def _refuse_if_quarantined(self, op: str) -> None:
+        """Refuse an operation that would put work back on quarantined devices.
+
+        Args:
+            op: The operation being refused, named in the message.
+
+        Raises:
+            ServingLeaseQuarantined: Always, when this lease is quarantined.
+        """
+        if self._quarantined:
+            raise ServingLeaseQuarantined(
+                f"serving lease is quarantined after round {self._quarantined} timed out with its actor "
+                f"unresponsive; {op} would place work on GPUs its subprocess tree may still hold"
+            )
 
     def _kill_actor(self) -> None:
         """Kill the actor handle without waiting for it. Idempotent, never raises."""

@@ -361,7 +361,6 @@ omit = [
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
     "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
     "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
@@ -510,7 +509,7 @@ ignore = ["E501", "E741"]
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
-"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/inference_optimizer/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is

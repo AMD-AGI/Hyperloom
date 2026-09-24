@@ -14,14 +14,11 @@ Coordinator's own metadata write, which is reissued on every state save.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from .recorder import recorder_for
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 SECTION = "versions"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
@@ -62,7 +59,7 @@ def _run_first_line(argv: list[str]) -> str:
             timeout=3,
             check=False,
         )
-    except Exception:  # noqa: BLE001
+    except (OSError, TimeoutError, subprocess.SubprocessError):
         return ""
     if out.returncode != 0:
         return ""
@@ -86,11 +83,13 @@ def _git_describe(root: Path) -> str:
 
 def _dist_version(names: tuple[str, ...]) -> str:
     """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
-    from importlib.metadata import PackageNotFoundError, version
-
+    try:
+        from importlib.metadata import PackageNotFoundError, version as _dist_ver
+    except ImportError:
+        return ""
     for name in names:
         try:
-            v = str(version(name) or "").strip()
+            v = str(_dist_ver(name) or "").strip()
         except PackageNotFoundError:
             continue
         # Reject a stale 0.0.0 masquerade.
@@ -101,19 +100,16 @@ def _dist_version(names: tuple[str, ...]) -> str:
 
 def _probe_tool_version(strategy: Any, root_dir: str) -> str:
     """Resolve a tool's human version per its ``_TOOL_PROVENANCE`` strategy."""
-    try:
-        if strategy == "git_describe":
-            return _git_describe(Path(root_dir)) if root_dir else ""
-        if strategy == "git_short":
-            return _git_short_commit(Path(root_dir)) if root_dir else ""
-        if isinstance(strategy, tuple) and len(strategy) == 2:
-            kind, arg = strategy
-            if kind == "cmd":
-                return _run_first_line(list(arg))
-            if kind == "dist":
-                return _dist_version(tuple(arg))
-    except Exception:  # noqa: BLE001
-        return ""
+    if strategy == "git_describe":
+        return _git_describe(Path(root_dir)) if root_dir else ""
+    if strategy == "git_short":
+        return _git_short_commit(Path(root_dir)) if root_dir else ""
+    if isinstance(strategy, tuple) and len(strategy) == 2:
+        kind, arg = strategy
+        if kind == "cmd":
+            return _run_first_line(list(arg))
+        if kind == "dist":
+            return _dist_version(tuple(arg))
     return ""
 
 
@@ -146,7 +142,7 @@ def _tool_metadata(
             try:
                 if Path(root_dir).is_dir():
                     commit = _git_short_commit(Path(root_dir))
-            except Exception:  # noqa: BLE001
+            except OSError:
                 commit = ""
         probed = _probe_tool_version(hint.get("version"), root_dir) if hint else ""
         cached = {
@@ -184,12 +180,8 @@ def record_tool_version(
     if not session_dir or not name:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
-    try:
-        meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
-        recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
-    except Exception as exc:
-        log.debug("record_tool_version failed for %s", name, exc_info=True)
-        trace_skip(reason="writer raised", section=SECTION, entity=name, error=exc)
+    meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
+    recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
 
 
 __all__ = ["record_tool_version"]

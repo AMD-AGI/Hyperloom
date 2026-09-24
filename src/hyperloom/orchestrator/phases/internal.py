@@ -107,7 +107,7 @@ class InternalTasksPhase(PhaseHandler):
     async def _maybe_enqueue_prelude_research_scout(self) -> None:
         """Force-dispatch the PRELUDE research scout (not LLM-proposable); writes hints skeleton first."""
         try:
-            from ..knowledge import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             _research_hints.write_hints_skeleton(self.session_dir)
         except Exception:
@@ -229,7 +229,7 @@ class InternalTasksPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             digest = ""
         direction, _pct = self._dominant_roofline_direction()
-        from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+        from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
         domain = hint[0] if hint else "serving_specialist"

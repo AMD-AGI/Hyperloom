@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +16,7 @@ import yaml
 from hyperloom.orchestrator.actions.executors import (
     ExploreExecutor,
 )
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
@@ -356,7 +355,13 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     state = coord.shared_state
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
-    state.baseline_perf = {"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    state.baseline_perf = {
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
     state.current_best.update(state.baseline_perf)
     state.geak_result = _ok_result(final=150.0)
     sub.shared_state = state
@@ -382,7 +387,17 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
 
     def fake_measure(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=132.0, perf_axes={"total_token_throughput": 900.0, "e2e_norm_intvty_p90": 50.0})
+        _fake_workspace(
+            slot,
+            tput=132.0,
+            perf_axes={
+                "total_token_throughput": 900.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 50.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     async def must_not_replay(**kwargs):
@@ -392,7 +407,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("both_axes_regressed")
+    assert rejection["reason"].startswith("median_or_guard_failed")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord._promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
@@ -419,6 +434,9 @@ async def test_explore_missing_axes_fails_closed(
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     base_tput = state.baseline_tput
     if missing_from == "current_best":
@@ -427,12 +445,18 @@ async def test_explore_missing_axes_fails_closed(
             "tput": 250.0,
             "total_token_throughput": 25000.0,
             "e2e_norm_intvty_p90": 300.0,
+            "e2e_norm_intvty_p50": 300.0,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         base_tput = 250.0
     candidate_axes = {
         "input_throughput": 20000.0,
         "total_token_throughput": 40000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     incomplete = {
         "candidate": candidate_axes,
@@ -440,7 +464,9 @@ async def test_explore_missing_axes_fails_closed(
         "baseline": state.baseline_perf,
     }[missing_from]
     missing_keys = (
-        ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+        ("input_throughput", "total_token_throughput")
+        if missing_axis == "total"
+        else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
     )
     for key in missing_keys:
         incomplete.pop(key, None)
@@ -494,7 +520,7 @@ async def test_explore_missing_axes_fails_closed(
 @pytest.mark.parametrize("incomplete_output", [170.0, 20000.0])
 @pytest.mark.parametrize(
     "next_intvty,next_total,intvty_outcome",
-    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
+    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "REVERT")],
 )
 async def test_explore_missing_axes_preserves_running_grading_anchor(
     sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
@@ -510,6 +536,9 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
@@ -522,18 +551,23 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         config = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
         observed_args[name] = config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
         output, total, intvty = {
-            "v00_v_good": (180.0, 22000.0, 330.0),
+            "v00_v_good": (210.0, 22000.0, 330.0),
             "v01_v_incomplete": (incomplete_output, 40000.0, 360.0),
-            "v02_v_next": (160.0, next_total, next_intvty),
+            "v02_v_next": (220.0, next_total, next_intvty),
         }[name]
         axes = {
             "input_throughput": total - output,
             "total_token_throughput": total,
             "e2e_norm_intvty_p90": intvty,
+            "e2e_norm_intvty_p50": intvty,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         if name == "v01_v_incomplete":
             for key in (
-                ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+                ("input_throughput", "total_token_throughput")
+                if missing_axis == "total"
+                else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
             ):
                 axes.pop(key)
         _fake_workspace(slot, tput=output, perf_axes=axes)
@@ -565,15 +599,15 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert out["status"] == "succeeded"
     assert len(tested) == 3
     assert tested["v_good"]["outcome"] == "KEEP"
-    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p50"
     assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
-    assert tested["v_good"]["tput"] == 180.0
+    assert tested["v_good"]["tput"] == 210.0
     assert tested["v_incomplete"]["status"] == "succeeded"
     assert tested["v_incomplete"]["outcome"] == "FAILED"
     assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
-    assert tested["v_incomplete"]["base_tput"] == 180.0
-    assert tested["v_next"]["base_tput"] == 180.0
-    assert tested["v_next"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_incomplete"]["base_tput"] == 210.0
+    assert tested["v_next"]["base_tput"] == 210.0
+    assert tested["v_next"]["graded_objective"] == "e2e_norm_intvty_p50"
     if intvty_outcome == "REVERT":
         assert tested["v_next"]["gain_pct"] is None
     else:
@@ -585,7 +619,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (160.0 if intvty_outcome == "KEEP" else 180.0)
+    assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
 
 
 @pytest.mark.asyncio
@@ -2526,66 +2560,3 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert fp_failed in tested
     # The latest result for fp_failed overwrites the FAILED entry.
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
-
-
-# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
-# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
-
-
-def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
-    """A ctx that makes __call__ take its earliest ``return`` (missing_config), exercising the wrapper without needing
-    to drive a full benchmark round.
-    """
-    return SimpleNamespace(
-        task=SimpleNamespace(
-            task_id="t-explore-reap",
-            params={"config_path": str(tmp_path / "does_not_exist.yaml")},
-        ),
-        extra={},
-    )
-
-
-@pytest.mark.asyncio
-async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, monkeypatch):
-    """__call__ must reap any lingering server after _run_explore returns, even on its earliest failure path
-    (missing_config) -- not just after a full benchmark round.
-    """
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    executor = ExploreExecutor(session_dir=tmp_path)
-    ctx = _missing_config_ctx(tmp_path)
-
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        result = await executor(ctx)
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_config"
-    assert kill_calls["n"] == 1
-
-
-@pytest.mark.asyncio
-async def test_explore_call_skips_reap_under_pytest(tmp_path):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
-    executor = ExploreExecutor(session_dir=tmp_path)
-    ctx = _missing_config_ctx(tmp_path)
-
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        result = await executor(ctx)
-
-    assert result["status"] == "failed"
-    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"

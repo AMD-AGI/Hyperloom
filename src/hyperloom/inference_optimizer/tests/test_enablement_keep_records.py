@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     patch_declared_ops,
@@ -1417,7 +1417,7 @@ def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: P
 def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, tmp_path: Path):
     """End to end: an unapplied patch reaches the decision as an undeclared
     step, not as a satisfied one."""
-    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+    from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
     base_sha = _git_head_sha(repo)
     patch = _patch(tmp_path, "never.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")

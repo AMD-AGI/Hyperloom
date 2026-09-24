@@ -19,8 +19,7 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Kernel-owned action name -> the request ``kind`` its handler is registered under in
-# ``request_handlers.KERNEL_REQUEST_HANDLERS``.
+# Kernel-owned action name -> the request ``kind`` that names it.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "gemm_tuning": "run_gemm_tuning",
@@ -81,6 +80,8 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "replay_warm_recipe",
         # Off-loop compiled-component builds; dispatched by the Coordinator, never by an LLM agent.
         "targeted_build",
+        # The KERNEL_AGENT phase's whole pipeline, enqueued once at phase entry.
+        "kernel_agent",
     }
 )
 
@@ -232,6 +233,26 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + "
                 "accuracy gate, KEEP or REVERT. Deterministic executor for FRAMEWORK_AGENT; also serves "
                 "the enablement launch-only build probe and framework-agent authoring lanes."
+            ),
+        ),
+        # typical_runtime_min is a floor, not the expected wall clock: the task runs until the KERNEL phase budget
+        # ends it, so the time-budget gate admits it whenever one benchmark round still fits.
+        "kernel_agent": ActionMetadata(
+            name="kernel_agent",
+            family="deep_kernel",
+            pipeline_phase="deep",
+            verdict_class="exploration",
+            expected_gain_pct=(0.0, 30.0),
+            accuracy_risk=0.05,
+            crash_risk=0.05,
+            typical_runtime_min=1.0,
+            lease_ttl_sec=21600,
+            requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
+            side_effects=("workspace_write", "server_restart", "writes_config"),
+            description=(
+                "Coordinator-internal: the KERNEL_AGENT phase's work as one lane-holding task. Runs the GEAK e2e "
+                "delegation or the Forge pipeline (GEMM tuning, fusion, kernel rewrite controller) per "
+                "kernel_optimizer, so no other benchmark shares the GPUs while it runs."
             ),
         ),
         "profile": ActionMetadata(

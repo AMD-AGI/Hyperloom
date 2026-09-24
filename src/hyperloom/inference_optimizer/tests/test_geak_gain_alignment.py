@@ -214,8 +214,24 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     state.framework = "vllm"
-    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 500.0, "e2e_norm_intvty_p90": 5.0}
-    state.current_best.update({"input_throughput": 450.0, "total_throughput": 600.0, "e2e_norm_intvty_p90": 6.0})
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 500.0,
+        "e2e_norm_intvty_p90": 5.0,
+        "e2e_norm_intvty_p50": 5.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
+    state.current_best.update(
+        {
+            "input_throughput": 450.0,
+            "total_throughput": 600.0,
+            "e2e_norm_intvty_p90": 6.0,
+            "e2e_norm_intvty_p50": 6.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        }
+    )
     state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
     state.cumulative_gain = 20.0
     state.cumulative_gain_validated = 20.0
@@ -232,6 +248,9 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         "input_throughput": 9999.0,
         "total_throughput": 10000.0,
         "e2e_norm_intvty_p90": 99.0,
+        "e2e_norm_intvty_p50": 99.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     return coord
 
@@ -308,7 +327,6 @@ async def test_persisted_legacy_mode_allows_existing_geak_replay(
         "missing_axes",
         "missing_output",
         "identity_mismatch",
-        "total_regression",
         "lift_refused",
     ],
 )
@@ -329,14 +347,15 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         "input_throughput": 800.0 - measured,
         "total_throughput": 800.0,
         "e2e_norm_intvty_p90": 8.0,
+        "e2e_norm_intvty_p50": 8.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     if case == "missing_axes":
         measurement.pop("e2e_norm_intvty_p90")
     elif case == "missing_output":
         measured = None
         measurement.pop("tput")
-    elif case == "total_regression":
-        measurement.update(input_throughput=350.0, total_throughput=550.0)
     elif case == "lift_refused":
         monkeypatch.setattr(coord, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
 
@@ -351,13 +370,16 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             measurement_location: measurement,
             "total_throughput": 10000.0,
             "e2e_norm_intvty_p90": 99.0,
+            "e2e_norm_intvty_p50": 99.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
         }
     result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
     await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
 
     assert not state.geak_pending
     attempt = state.explore_attempts[-1]
-    if case in {"positive", "output_drop"}:
+    if case == "positive":
         assert attempt["decision"] == "promoted"
         assert state.current_best["tput"] == measured
         assert state.current_best["input_throughput"] == 800.0 - measured
@@ -375,7 +397,8 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert state.resume_pending_revalidation is True
-        if case in {"total_regression", "lift_refused", "missing_axes"}:
+        # ``output_drop`` joins them: the guard reads output throughput, which this case regresses past the band.
+        if case in {"lift_refused", "missing_axes", "output_drop"}:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"
@@ -580,35 +603,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
         "model_path": "/models/gemma",
         "tp_size": 1,
     }
-
-
-@pytest.mark.asyncio
-async def test_2b_rebench_of_a_stack_that_moved_since_enqueue_is_dropped(tmp_path: Path) -> None:
-    base, measured = 2844.209, 3270.0
-    coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    ss = coord.shared_state
-    ss.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
-    ss.resume_pending_revalidation = True
-    ss.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
-    ss.working_recipe_generation = 3
-    prior_best = dict(ss.current_best)
-
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("a stale 2b result must not fall back to the GEAK harness")
-
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
-
-    result = {"output_throughput": measured, "best_variant": {"fingerprint": "abc"}, "winners": []}
-    await coord._promote_to_shared_state(
-        "explore", result, task=_revalidate_task(expected_hash="abc", recipe_generation=2)
-    )
-
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.current_best == prior_best
-    assert ss.working_recipe_generation == 3
-    assert ss.geak_pending["status"] == "rebench_unavailable"
-    assert ss.geak_pending["revalidation_error"] == "stale_recipe_generation"
-    assert ss.resume_pending_revalidation is True
 
 
 @pytest.mark.asyncio

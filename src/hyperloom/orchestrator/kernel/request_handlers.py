@@ -18,7 +18,6 @@ import importlib
 import importlib.util
 import json
 import logging
-import math
 import os
 import re
 import shlex
@@ -35,8 +34,20 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
+from ..actions.executors._kernel_agent_tool import (
+    HandlerResult,
+    _kernel_agent_root_error,
+    _kernel_agent_tool_path,
+    _load_apply_tool,
+    _maybe_apply_kernel_patch,
+    _maybe_finalize_kernel_patch,
+    _maybe_revert_kernel_patch,
+    _run_subprocess,
+    _shape_tool_result,
+)
+from ..actions.executors.trace_analyze import trace_analyze_handler
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
     LANE_FUSION,
@@ -46,19 +57,12 @@ from .lane_budget import (
 )
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
-from ..trace.task_progress import heartbeat_while_output_flows
-
-
-from ._recorder_trace import trace_recording_skipped
 
 from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 
 
 log = logging.getLogger(__name__)
 
-# Recognized trace-analysis routes. Only an omitted value defaults to ``agent``;
-# an explicit unknown value fails before dispatch so it cannot start an LLM.
-_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 # A patch whose correctness was only established against a reference kernel;
@@ -191,26 +195,8 @@ _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
 
 # Kernel-agent shell tools root; read lazily so late env injection wins.
-_KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
 
 
-def _kernel_agent_root_from_env() -> Path | None:
-    """Read the kernel-agent install root from the environment at call time.
-
-    Resolved lazily on every call so a late ``os.environ`` injection by the CLI
-    preflight still wins.
-
-    Returns:
-        Path | None: The kernel-agent root as a :class:`~pathlib.Path`, or
-            ``None`` when ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset or empty.
-    """
-    raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
-    if not raw:
-        return None
-    return Path(raw)
-
-
-HandlerResult = dict[str, Any]
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
 _RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
@@ -234,13 +220,13 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
     Emits a lower-case variant per root because that classifier matches against
     a lower-cased source path. Path containment uses
-    :func:`~hyperloom.orchestrator.framework.paths.resolved_within` instead.
+    :func:`~hyperloom.inference_optimizer.framework_paths.resolved_within` instead.
 
     Returns:
         The de-duplicated framework install roots (each with a lower-case
         variant), including FlyDSL checkout roots.
     """
-    from ..framework.paths import resolve_known_source_prefixes
+    from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 
     roots = resolve_known_source_prefixes()
     out: list[str] = []
@@ -253,7 +239,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
     return tuple(out)
 
 
-_APPLY_TOOL_MODULE: Any | None = None
 # forge is the only per-kernel backend. The default phase-level backend is the
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
@@ -272,477 +257,6 @@ _DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
 # budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
-
-
-_CANDIDATE_ENV_KEYS = {
-    "CONC",
-    "ISL",
-    "OSL",
-    "TP",
-    "NUM_PROMPTS",
-    "NUM_WARMUPS",
-    "MAX_MODEL_LEN",
-    "RANDOM_RANGE_RATIO",
-    "ROCR_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-}
-_CANDIDATE_ENV_PREFIXES = (
-    "SGLANG_",
-    "VLLM_",
-    "AITER_",
-    "TRITON_",
-    "FLYDSL_",
-    "HIPBLASLT_",
-    "PYTORCH_TUNABLEOP_",
-)
-_SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
-
-
-def _kernel_agent_root_error() -> str | None:
-    """Validate that the kernel-agent install root is configured and present.
-
-    Returns:
-        str | None: A human-readable error message when the root env var is
-            unset or points at a missing directory, or ``None`` when the root
-            exists and is usable.
-    """
-    root = _kernel_agent_root_from_env()
-    if root is None:
-        return (
-            f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "src/hyperloom/inference_optimizer/assets/install.sh and source $KERNEL_AGENT_ENV "
-            "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-        )
-    if not root.is_dir():
-        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {root}"
-    return None
-
-
-def _resolve_tracelens_root() -> Path:
-    """Resolve the TraceLens checkout, independent of inherited env.
-
-    Falls back to the install-script-derived pod-local path so trace analysis
-    works even when the coordinator process did not source kernel-agent.env.sh.
-
-    Returns:
-        Path: The resolved TraceLens root (may not exist yet; callers validate).
-    """
-    from hyperloom.inference_optimizer.session import paths
-
-    return paths.tracelens_root()
-
-
-def _tracelens_root_error(root: Path) -> str | None:
-    """Validate that the resolved TraceLens root is a usable git checkout.
-
-    A directory that exists but lacks ``.git`` is not usable and must be reported
-    so a non-default override fails fast and a default path is self-healed.
-
-    Returns:
-        str | None: A human-readable error when the checkout is missing or
-            incomplete, or ``None`` when it is a usable git checkout.
-    """
-    if not root.is_dir():
-        return (
-            f"TraceLens root not found: {root}; run "
-            "src/hyperloom/agents/kernel/scripts/install.sh "
-            "or set TRACELENS_ROOT to an existing checkout"
-        )
-    if not (root / ".git").exists():
-        return (
-            f"TraceLens root incomplete (not a git checkout): {root}; "
-            "run src/hyperloom/agents/kernel/scripts/install.sh "
-            "or set TRACELENS_ROOT to a valid checkout"
-        )
-    return None
-
-
-def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
-    """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
-
-    Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
-    failure is swallowed so the caller's validation produces the error.
-    """
-    from hyperloom.inference_optimizer.session import paths
-
-    # The installer-managed checkout is <deps_cache_root>/TraceLens or the
-    # per-revision <deps_cache_root>/TraceLens@<sha>; both are healable. An
-    # explicit override elsewhere must fail fast (never auto-clone).
-    try:
-        cache_root = paths.deps_cache_root().resolve()
-        root_resolved = Path(root).resolve()
-    except OSError:
-        return
-    is_default = root_resolved.parent == cache_root and (
-        root_resolved.name == "TraceLens" or root_resolved.name.startswith("TraceLens@")
-    )
-    if not is_default:
-        return  # explicit non-default override: never auto-clone
-    try:
-        tool = _kernel_agent_tool_path("tracelens_analysis.py")
-        tools_dir = str(tool.parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        import tracelens_analysis as _tla  # type: ignore[import-not-found]
-
-        heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
-        heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
-        _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
-    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
-        _log = getattr(log, "warning", None)
-        if _log:
-            _log("trace_analyze: TraceLens self-heal failed: %s", exc)
-
-
-def _kernel_agent_tool_path(tool_name: str) -> Path:
-    """Resolve the absolute path to a kernel-agent shell tool.
-
-    Args:
-        tool_name (str): File name of the tool under ``<root>/tools/`` (for
-            example ``tracelens_analysis.py``).
-
-    Returns:
-        Path: The resolved path to the requested tool.
-
-    Raises:
-        RuntimeError: If the kernel-agent root is unset/missing, or the named
-            tool does not exist under ``<root>/tools/``.
-    """
-    err = _kernel_agent_root_error()
-    if err:
-        raise RuntimeError(err)
-    root = _kernel_agent_root_from_env()
-    assert root is not None
-    path = root / "tools" / tool_name
-    if not path.is_file():
-        raise RuntimeError(f"kernel-agent tool not found: {path}")
-    return path
-
-
-def _coerce_runtime_value(value: Any) -> Any:
-    """Best-effort coercion of a string runtime value to ``int`` or ``float``.
-
-    Integer-looking strings become ``int``; strings containing ``.`` that
-    parse as a float become ``float``. Anything else (including unparseable
-    strings and non-string inputs) is returned unchanged.
-
-    Args:
-        value (Any): The raw value to coerce.
-
-    Returns:
-        Any: The coerced numeric value, or the original value when no safe
-            numeric coercion applies.
-    """
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            return int(stripped)
-        try:
-            return float(stripped) if "." in stripped else value
-        except ValueError:
-            return value
-    return value
-
-
-def _candidate_env_allowed(key: str) -> bool:
-    """Decide whether an env var may be forwarded as candidate metadata.
-
-    Rejects anything that looks sensitive (keys, tokens, secrets, passwords,
-    credentials); otherwise allows the key if it is in the explicit allowlist
-    or starts with a known safe prefix (e.g. ``SGLANG_``, ``VLLM_``).
-
-    Args:
-        key (str): Environment variable name to test.
-
-    Returns:
-        bool: ``True`` if the env var is safe to surface, ``False`` otherwise.
-    """
-    upper = key.upper()
-    if any(part in upper for part in _SENSITIVE_ENV_PARTS):
-        return False
-    return key in _CANDIDATE_ENV_KEYS or any(key.startswith(prefix) for prefix in _CANDIDATE_ENV_PREFIXES)
-
-
-def _split_server_args(raw: str) -> list[str]:
-    """Tokenize a raw server-args string into an argv list.
-
-    Args:
-        raw (str): Raw shell-style server argument string.
-
-    Returns:
-        list[str]: The parsed argv tokens, or an empty list when ``raw`` is
-            falsy or cannot be parsed (a warning is logged on parse failure).
-    """
-    try:
-        return shlex.split(raw) if raw else []
-    except ValueError:
-        log.warning("failed to parse materialized server args; preserving raw string")
-        return []
-
-
-def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
-    """Extract runtime workload context from a materialized Magpie YAML config.
-
-    Reads the config's ``benchmark`` block and derives the per-framework
-    server-args env name, the allowed candidate env vars, and a normalized
-    ``runtime_args`` view (framework, model, precision, server args, and the
-    coerced workload knobs such as ``tp`` / ``conc`` / ``isl`` / ``osl``).
-
-    Args:
-        config_path (str): Path to the materialized workload YAML config.
-
-    Returns:
-        dict[str, Any]: A dict with ``env_vars`` and ``runtime_args`` keys, or
-            an empty dict when the path is missing/unreadable. Empty/``None``
-            ``runtime_args`` entries are dropped.
-    """
-    if not config_path:
-        return {}
-    path = Path(config_path)
-    if not path.exists():
-        return {}
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:  # noqa: BLE001
-        log.warning("failed to read materialized workload config %s: %s", path, exc)
-        return {}
-    bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
-    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    framework = str(bench.get("framework") or "").strip().lower()
-    # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
-    from ..actions.executors._grid_runner import server_args_env_name
-
-    server_key = server_args_env_name(framework)
-    server_args = str(envs.get(server_key) or "").strip()
-    workload = {
-        out_key: _coerce_runtime_value(envs[src_key])
-        for out_key, src_key in (
-            ("tp", "TP"),
-            ("conc", "CONC"),
-            ("isl", "ISL"),
-            ("osl", "OSL"),
-            ("num_prompts", "NUM_PROMPTS"),
-            ("num_warmups", "NUM_WARMUPS"),
-            ("max_model_len", "MAX_MODEL_LEN"),
-            ("random_range_ratio", "RANDOM_RANGE_RATIO"),
-        )
-        if src_key in envs
-    }
-    runtime_args = {
-        "materialized_config": str(path),
-        "framework": framework or None,
-        "model": bench.get("model"),
-        "precision": bench.get("precision"),
-        "server_args": server_args,
-        "server_args_argv": _split_server_args(server_args),
-        "workload": workload,
-    }
-    return {
-        "env_vars": {str(key): str(value) for key, value in envs.items() if _candidate_env_allowed(str(key))},
-        "runtime_args": {key: value for key, value in runtime_args.items() if value not in (None, "", {})},
-    }
-
-
-def _enrich_candidate_runtime_metadata(
-    candidates: Any,
-    metadata: dict[str, Any],
-) -> None:
-    """Backfill runtime env/args metadata onto each candidate kernel in place.
-
-    For every dict candidate, sets default ``env_vars`` and ``runtime_args``
-    entries from ``metadata`` without overwriting values the candidate already
-    carries (uses ``setdefault`` semantics).
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        metadata (dict[str, Any]): Metadata with ``env_vars`` / ``runtime_args``
-            sub-dicts as produced by
-            :func:`_load_materialized_workload_metadata`.
-
-    Returns:
-        None: The ``candidates`` list is mutated in place.
-    """
-    if not isinstance(candidates, list) or not metadata:
-        return
-    env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
-    runtime_args = metadata.get("runtime_args") if isinstance(metadata.get("runtime_args"), dict) else {}
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        item_env = item.setdefault("env_vars", {})
-        if isinstance(item_env, dict):
-            for key, value in env_vars.items():
-                item_env.setdefault(key, value)
-        item_args = item.setdefault("runtime_args", {})
-        if isinstance(item_args, dict):
-            for key, value in runtime_args.items():
-                item_args.setdefault(key, value)
-
-
-def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
-    """Stamp the TraceLens report path onto each candidate kernel in place.
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        report_path (str): Path to the TraceLens ``analysis.md`` report; ignored
-            if empty.
-
-    Returns:
-        None: Each dict candidate gains a default ``trace_report_path`` entry.
-    """
-    if not isinstance(candidates, list) or not report_path:
-        return
-    for item in candidates:
-        if isinstance(item, dict):
-            item.setdefault("trace_report_path", report_path)
-
-
-def _enrich_candidates_artifact(
-    candidates_path: str,
-    metadata: dict[str, Any],
-    *,
-    trace_report_path: str = "",
-) -> None:
-    """Rewrite the on-disk candidates artifact with enriched metadata.
-
-    Loads the ``candidates_path`` JSON, enriches its ``hot_kernels`` and
-    ``hot_kernels_top15`` lists with runtime metadata and (optionally) the
-    TraceLens report path, then writes the artifact back out (pretty-printed,
-    key-sorted). No-op when the path is missing or unreadable.
-
-    Args:
-        candidates_path (str): Path to the candidates JSON artifact to update.
-        metadata (dict[str, Any]): Runtime metadata to merge into each kernel.
-        trace_report_path (str): Optional TraceLens report path to record at
-            both the top level and on each kernel entry.
-
-    Returns:
-        None: The artifact file is rewritten in place when changes apply.
-    """
-    if not candidates_path:
-        return
-    path = Path(candidates_path)
-    if not path.exists():
-        return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("failed to read candidates artifact %s: %s", path, exc)
-        return
-    if not isinstance(data, dict):
-        return
-    if metadata:
-        _enrich_candidate_runtime_metadata(data.get("hot_kernels"), metadata)
-        _enrich_candidate_runtime_metadata(data.get("hot_kernels_top15"), metadata)
-    if trace_report_path:
-        data.setdefault("trace_report_path", trace_report_path)
-        artifact_paths = data.setdefault("artifact_paths", {})
-        if isinstance(artifact_paths, dict):
-            artifact_paths.setdefault("trace_report_path", trace_report_path)
-        _enrich_candidate_trace_report(data.get("hot_kernels"), trace_report_path)
-        _enrich_candidate_trace_report(
-            data.get("hot_kernels_top15"),
-            trace_report_path,
-        )
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _load_apply_tool() -> Any:
-    """Lazily import and cache the kernel-agent ``apply_kernel_patch.py`` module.
-
-    Loaded by file path via :mod:`importlib.util` and memoized in the module
-    global ``_APPLY_TOOL_MODULE`` so subsequent calls reuse the same module.
-
-    Returns:
-        Any: The imported ``apply_kernel_patch`` module object.
-
-    Raises:
-        RuntimeError: If the kernel-agent root/tool path cannot be resolved.
-        ImportError: If the module cannot be loaded from its resolved path.
-    """
-    global _APPLY_TOOL_MODULE
-    if _APPLY_TOOL_MODULE is not None:
-        return _APPLY_TOOL_MODULE
-    path = _kernel_agent_tool_path("apply_kernel_patch.py")
-    spec = importlib.util.spec_from_file_location("hyperloom_apply_kernel_patch", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load apply_kernel_patch.py from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _APPLY_TOOL_MODULE = module
-    return module
-
-
-def _artifact_paths_from_payload(payload: dict) -> list[str]:
-    """Normalize compiled-artifact paths from a payload into a list of strings.
-
-    Accepts either ``artifact_paths`` or ``compiled_artifact_paths``; a single
-    string is wrapped into a one-element list and falsy entries are dropped.
-
-    Args:
-        payload (dict): Request payload that may carry artifact path(s).
-
-    Returns:
-        list[str]: The collected artifact paths (possibly empty).
-    """
-    raw = payload.get("artifact_paths") or payload.get("compiled_artifact_paths") or []
-    if isinstance(raw, str):
-        return [raw]
-    if isinstance(raw, list):
-        return [str(item) for item in raw if item]
-    return []
-
-
-def _final_content_snapshot(
-    *,
-    patch_path: str,
-    snapshot_dir: str | None,
-    repo_root: str | None,
-) -> str | None:
-    """Return a snapshot dir holding the patch's FINAL bytes, materializing if needed.
-
-    ``snapshot_dir`` means two different things on the two sides of the
-    nomination wire. The fusion exporter records its *pre-authoring pristine*
-    snapshot -- the baseline it diffed AGAINST -- on ``RecipePatch.snapshot_dir``,
-    and that value rides the envelope into the pending record. ``apply_kernel_patch``
-    reads the same field as the *post-patch final* contents it copies FROM. A
-    pristine dir can never satisfy that: it is missing, by construction, every
-    module the fusion authored, so the apply pre-flight refuses the whole patch
-    with "snapshot missing content for <...>_fused_<recipe>.py" and a real KEEP
-    is lost.
-
-    Rather than trust the field, check it: a usable snapshot has the final bytes
-    for every path the patch writes. When it does not, materialize one from the
-    patch itself. Materialization failure returns the original value so apply
-    reports the real error instead of this helper's.
-    """
-    if not (patch_path.endswith(".patch") and repo_root):
-        return snapshot_dir
-    try:
-        descriptors = _load_apply_tool().parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
-        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
-        return snapshot_dir
-    if not writes:
-        return snapshot_dir
-    if snapshot_dir and all((Path(snapshot_dir) / rel).exists() for rel in writes):
-        return snapshot_dir
-    try:
-        return materialize_unified_patch_snapshot(
-            patch_path=patch_path,
-            repo_root=repo_root,
-            snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
-        )
-    except Exception:
-        log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
-        return snapshot_dir
 
 
 def _preapplied_snapshot_payload(payload: dict) -> dict:
@@ -781,224 +295,6 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
     return {**payload, "snapshot_dir": str(snapshot)}
-
-
-def _maybe_apply_kernel_patch(
-    payload: dict,
-    *,
-    session_dir: Path,
-    kernel_id: str | None,
-) -> HandlerResult:
-    """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
-
-    Resolves a backup root under the session's patches dir when none is given,
-    then delegates to the tool with rebuild / dry-run / target options pulled
-    from the payload.
-
-    Args:
-        payload (dict): Request payload carrying ``patch_path`` plus
-            ``target_file`` / ``source_file`` and optional apply/rebuild flags.
-        session_dir (Path): Session directory used to derive the backup root.
-        kernel_id (str | None): Kernel identifier for backup namespacing;
-            falls back to ``payload['kernel_id']`` or ``"anon"``.
-
-    Returns:
-        HandlerResult: A ``status="skipped"`` result when required inputs are
-            missing, otherwise the tool's apply result dict.
-    """
-    patch_path = str(payload.get("patch_path") or "").strip()
-    target_file = str(payload.get("target_file") or payload.get("source_file") or "").strip()
-    if not patch_path or not target_file:
-        return {
-            "status": "skipped",
-            "reason": "missing patch_path or target_file/source_file",
-        }
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
-
-    kid = str(kernel_id or payload.get("kernel_id") or "")
-    # Same fold as the integrate workspace: a fusion sibling keys this dir by its
-    # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
-    tool = _load_apply_tool()
-    # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
-    snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
-    repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
-    snapshot_dir = _final_content_snapshot(
-        patch_path=patch_path,
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-    )
-    return tool.apply_kernel_patch(
-        patch_path=patch_path,
-        target_file=target_file,
-        backup_root=backup_root,
-        kernel_id=kid,
-        artifact_paths=_artifact_paths_from_payload(payload),
-        rebuild_command=payload.get("rebuild_command"),
-        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
-        skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        dry_run=bool(payload.get("dry_run_patch", False)),
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
-    )
-
-
-def materialize_unified_patch_snapshot(
-    *,
-    patch_path: str | Path,
-    repo_root: str | Path,
-    snapshot_dir: str | Path | None = None,
-) -> str:
-    """Materialize final file contents for apply_kernel_patch snapshot mode.
-
-    Applies a ``forge-fusion`` unified diff to a minimal throwaway mirror of the
-    touched files and returns that mirror path (snapshot mode treats the diff as
-    a manifest with final bytes under ``snapshot_dir``).
-    """
-    patch = Path(patch_path).resolve()
-    root = Path(repo_root).resolve()
-    if not patch.is_file():
-        raise FileNotFoundError(f"patch_path does not exist: {patch}")
-    if not root.is_dir():
-        raise FileNotFoundError(f"kernel repo does not exist: {root}")
-
-    tool = _load_apply_tool()
-    patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = tool.parse_patch_manifest(patch_text)
-    if not descriptors:
-        raise ValueError(f"patch has no file operations: {patch}")
-
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
-
-    snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
-    if snap.exists():
-        shutil.rmtree(snap)
-    snap.mkdir(parents=True, exist_ok=True)
-
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
-        if not rel.parts or rel.is_absolute() or ".." in rel.parts:
-            raise ValueError(f"unsafe patch path: {rel}")
-        dst = snap / rel
-        base = subprocess.run(
-            ["git", *safe_directory_args(["-C", str(root), "show", f"HEAD:{rel.as_posix()}"])],
-            capture_output=True,
-            timeout=60,
-        )
-        if base.returncode == 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
-            # ``git show HEAD:`` failed and this is a MODIFY (not a create):
-            # non-git repo_root (e.g. vLLM/sglang under site-packages/
-            # dist-packages) or an untracked-but-present file. Fall back to the
-            # on-disk source. forge-fusion (PR #75) emits the patch for these
-            # non-git frameworks; without this fallback the snapshot lacks the
-            # base file and ``git apply`` fails "<path>: No such file or
-            # directory". New files are intentionally left for ``git apply`` to
-            # create.
-            src = root / rel
-            if not src.is_file():
-                # Neither git HEAD nor the on-disk layout has the base. Surface
-                # a precise error here instead of the opaque ``git apply`` "No
-                # such file or directory" that would otherwise follow.
-                raise FileNotFoundError(
-                    f"patch base missing for {rel.as_posix()}: not in git HEAD and not on disk under {root}"
-                )
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(src.read_bytes())
-
-    # ``git apply <path>`` rejects an otherwise valid final hunk when the patch
-    # artifact lacks a trailing newline (observed in legacy KB records). Feed a
-    # normalized in-memory copy so materialization is tolerant without mutating
-    # the content-addressed downloaded artifact.
-    normalized_patch_text = patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
-    # Pin the work tree to ``snap``. Without this, ``git apply`` resolves paths
-    # against whatever repository encloses ``snap`` -- and when the session dir
-    # lives INSIDE a checkout (a session under the Hyperloom repo itself), every
-    # hunk is reported "Skipped patch ..." while git still exits 0. The snapshot
-    # then comes back empty and the failure surfaces later as the far more
-    # confusing "snapshot missing final content".
-    apply_env = {
-        **os.environ,
-        "GIT_DIR": str(snap / ".git_materialize"),
-        "GIT_WORK_TREE": str(snap),
-        "GIT_CEILING_DIRECTORIES": str(snap.parent),
-    }
-    proc = subprocess.run(
-        ["git", "apply", "--unsafe-paths", "-"],
-        cwd=snap,
-        input=normalized_patch_text,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=apply_env,
-    )
-    if proc.returncode != 0:
-        msg = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
-
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
-    return str(snap)
-
-
-def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
-    """Revert a kernel patch using its apply manifest.
-
-    A manifest is enough; the apply's ``status`` is not required, so a partial
-    apply reverts the files it managed to touch. Gating on ``status == "ok"``
-    used to leave exactly those applied.
-
-    Args:
-        apply_result: Apply metadata carrying ``manifest_path``.
-
-    Returns:
-        The revert result, or an explicit failure result.
-    """
-    if not apply_result.get("manifest_path"):
-        return {"status": "skipped", "reason": "no applied patch manifest"}
-    try:
-        return _load_apply_tool().revert_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "failed",
-            "error_class": "patch_revert_exception",
-            "error": repr(exc),
-            "manifest_path": str(apply_result["manifest_path"]),
-        }
-
-
-def _maybe_finalize_kernel_patch(
-    apply_result: HandlerResult,
-) -> HandlerResult:
-    """Delete patch backups after a KEEP becomes durable."""
-    if apply_result.get("status") != "ok":
-        return {
-            "status": "skipped",
-            "reason": "patch apply did not complete",
-        }
-    if not apply_result.get("manifest_path"):
-        return {"status": "skipped", "reason": "no applied patch manifest"}
-    try:
-        return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "failed",
-            "error_class": "patch_finalize_exception",
-            "error": repr(exc),
-            "manifest_path": str(apply_result["manifest_path"]),
-        }
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
@@ -1405,99 +701,6 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             },
         }
     return resolved, None
-
-
-def _tool_label(cmd: list[str]) -> str:
-    """Name the tool a command runs, for the progress note.
-
-    Args:
-        cmd (list[str]): The command and arguments.
-
-    Returns:
-        str: The first ``.py`` argument's stem, else the executable's name.
-    """
-    for arg in cmd:
-        text = str(arg)
-        if text.endswith(".py"):
-            return Path(text).stem
-    return Path(str(cmd[0])).name if cmd else "subprocess"
-
-
-async def _run_subprocess(
-    cmd: list[str],
-    *,
-    timeout_sec: int,
-) -> tuple[int, str, str]:
-    """Run a bounded subprocess without blocking the reactor.
-
-    Args:
-        cmd: The command and arguments to run.
-        timeout_sec: Per-run timeout in seconds.
-
-    Returns:
-        A tuple of ``(returncode, stdout, stderr)``.
-    """
-    if (
-        isinstance(timeout_sec, bool)
-        or not isinstance(timeout_sec, (int, float))
-        or not math.isfinite(float(timeout_sec))
-        or timeout_sec <= 0
-    ):
-        raise ValueError("timeout_sec must be finite and positive")
-
-    def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
-        """Run the command synchronously in a worker thread.
-
-        Copies the environment, injects the Ray GCS address in multi-node mode,
-        and prepends the venv ``bin`` to ``PATH``. Launches the child in its own
-        POSIX session and, on timeout, reaps the whole process group so a hung
-        grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
-        stdout/stderr and re-raises ``TimeoutExpired``.
-
-        Args:
-            on_output: Liveness callback invoked per line the child emits.
-
-        Returns:
-            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
-
-        Raises:
-            subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
-        """
-        env = os.environ.copy()
-        from ..actions.executors._multi_node_env import (
-            is_multi_node,
-            ray_gcs_address_from_state,
-            infera_ssh_env_from_state,
-        )
-        from ..actions.executors._subprocess_kill import run_with_session_kill
-
-        if is_multi_node():
-            # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
-            # infera_ssh_env_from_state() returns {} for RayJob/single-node, so
-            # the RAY_ADDRESS path below is unchanged for those.
-            ssh_env = infera_ssh_env_from_state()
-            if ssh_env:
-                env.update(ssh_env)
-            addr = "" if ssh_env else ray_gcs_address_from_state()
-            if addr:
-                env.setdefault("RAY_ADDRESS", addr)
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # The heartbeat around this call is only as honest as the child's
-        # flushing: block-buffered on a pipe, it looks dead between flushes.
-        # ``setdefault`` so an operator who set this deliberately still wins.
-        env.setdefault("PYTHONUNBUFFERED", "1")
-        # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
-        cp = run_with_session_kill(
-            cmd,
-            env=env,
-            timeout=timeout_sec,
-            text=True,
-            on_output=on_output,
-        )
-        return cp.returncode, cp.stdout or "", cp.stderr or ""
-
-    async with heartbeat_while_output_flows(unit="kernel_tool", label=_tool_label(cmd)) as activity:
-        return await asyncio.to_thread(_run, activity.note)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -1939,7 +1142,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     Returns (precision, quant_type) tuple.
     """
-    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
     framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
 
@@ -2669,13 +1872,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     return "per_token"
 
 
-_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
-
-
 def _is_gfx950(gpu_type: str) -> bool:
     """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
     key = (gpu_type or "").strip().lower()
-    if key in _GFX950_GPU_TYPES:
+    if is_gfx_arch(key, "gfx950"):
         return True
     if not key or key == "auto":
         return _is_gfx950_rocminfo()
@@ -3266,7 +2466,7 @@ def _resolve_vllm_aiter_routing(
     if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
-        from hyperloom.inference_optimizer.cli.model_gate import (
+        from hyperloom.inference_optimizer.model_config_utils import (
             model_supports_aiter_ck_fused_moe,
         )
 
@@ -3963,7 +3163,7 @@ async def _run_forge_gemm_tuning(
     gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
     tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs.
-    from ..policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     detected_gpus = detect_gpu_count() or tp
     mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
@@ -4669,38 +3869,46 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_fusion_decode_trace(state, payload: dict) -> str:
-    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
+def _resolve_fusion_decode_trace(state) -> str:
+    """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
-    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
-    re-profiling. Explicit ``payload['trace_path']`` wins.
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace.
+    PRELUDE/roofline already captured one and promoted it into
+    ``state.last_profile_trace`` alongside the workload it was measured on
+    (``SharedState.record_profile_workload``), so the lane reuses that rather than
+    re-profiling. ``state.last_profile_trace`` is the only source: the fusion
+    opportunities discovered below are attributed to the run that produced the trace,
+    and a caller-supplied path would file this run's decisions under another workload.
+
+    ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
+    round that merged its ranks, and the capture directory otherwise --
+    ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
+    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
+    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    newest capture in it, which is this run's too: the directory is the round's own
+    ``trace_dir``.
+
+    Args:
+        state: The session ``SharedState``.
+
+    Returns:
+        str: The decode trace file to discover against, or ``""`` when this run has
+            no usable trace yet.
     """
-
-    def _trace_file(path_str: str) -> str:
-        path = Path(path_str)
-        if path.is_file():
-            return str(path)
-        if not path.is_dir():
-            return ""
-        candidates = sorted(
-            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return str(candidates[0]) if candidates else ""
-
-    explicit = str(payload.get("trace_path") or "").strip()
-    if explicit:
-        resolved = _trace_file(explicit)
-        if resolved:
-            return resolved
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace:
-        resolved = _trace_file(trace)
-        if resolved:
-            return resolved
-    return ""
+    if not trace:
+        return ""
+    path = Path(trace)
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(
+        list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(captures[0]) if captures else ""
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -4857,8 +4065,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = _resolve_fusion_decode_trace(state, payload)
+    trace_path = _resolve_fusion_decode_trace(state)
     if not trace_path:
+        recorded = str(getattr(state, "last_profile_trace", "") or "").strip()
         return {
             "status": "skipped",
             "backend": "forge",
@@ -4866,7 +4075,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "error_class": "decode_trace_missing",
             "error": (
                 "no decode trace available for fusion discovery "
-                "(state.last_profile_trace empty; run profile/roofline first)"
+                f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)"
             ),
             "decision": "REVERT",
             "kept": False,
@@ -5085,448 +4294,10 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
 
-def _build_trace_analyze_cmd(
-    payload: dict,
-    *,
-    session_dir: Path,
-    state: Any,
-    workspace_path: str,
-    trace_input: Any,
-    tracelens_root: "Path | None",
-    is_bypass: bool,
-    scriptable: bool,
-    workload: dict,
-    model_name: str,
-    framework: str,
-    target_platform: str,
-    analysis_mode: str,
-) -> "tuple[list[str], str]":
-    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
-    ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
-    # Both tools share the CLI surface below except ``--tracelens-root``.
-    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
-    cmd = [
-        "python3" if is_bypass else sys.executable,
-        str(_kernel_agent_tool_path(tool_name)),
-        "--trace-input",
-        str(trace_input),
-        "--session-id",
-        str(payload.get("session_id") or session_dir.name),
-        "--workspace-path",
-        workspace_path,
-    ]
-    if not is_bypass:
-        # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(tracelens_root)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        cmd += ["--require-single-rank"]
-        try:
-            state_tp = int(getattr(state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            state_tp = 0
-        if state_tp > 0:
-            cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
-
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
-    model_path = str(
-        payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
-    ).strip()
-    if model_path:
-        cmd += ["--model-path", model_path]
-    precision = str(
-        payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
-    ).strip()
-    if precision:
-        cmd += ["--precision", precision]
-    runtime_config = str(payload.get("runtime_config") or getattr(state, "baseline_config_path", "") or "").strip()
-    if runtime_config and not is_bypass:
-        cmd += ["--runtime-config", runtime_config]
-
-    if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
-        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
-        if num_denoise not in (None, ""):
-            try:
-                if int(num_denoise) > 0:
-                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
-            except (TypeError, ValueError):
-                pass
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
-        split_conc = payload.get("split_conc") or workload.get("conc")
-        if split_conc not in (None, ""):
-            cmd += ["--split-conc", str(split_conc).strip()]
-        split_osl = payload.get("split_osl") or workload.get("osl")
-        if split_osl not in (None, ""):
-            cmd += ["--split-osl", str(split_osl).strip()]
-        split_r = payload.get("split_r") or workload.get("random_range_ratio")
-        if split_r not in (None, ""):
-            cmd += ["--split-r", str(split_r).strip()]
-
-    capture_folder = (
-        payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
-    )
-    if capture_folder:
-        cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
-    if steady_state_mode:
-        cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
-    roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
-    if roofline_output_name:
-        cmd += ["--roofline-output-name", roofline_output_name]
-    if payload.get("dry_run"):
-        cmd += ["--dry-run"]
-    return cmd, steady_state_mode
-
-
 # TraceLens picks its steady-state window by writing split chunks and selecting
 # one file; the TraceLens-free reader picks a window in memory and never writes
 # chunks. Both answer "is the window this analysis rests on trustworthy", so the
 # event normalizes them onto one shape and keeps the raw form under ``selected``.
-_STEADY_SOURCE_SPLIT_CHUNK = "split_chunk"
-_STEADY_SOURCE_READER_WINDOW = "in_reader_window"
-
-
-def _analysis_steady_state(
-    result: dict[str, Any],
-    *,
-    requested_mode: str,
-    tool: str,
-) -> dict[str, Any]:
-    """Normalize the steady-state window across analysis tools.
-
-    Args:
-        result: The analysis tool's result dict.
-        requested_mode: The steady-state mode asked of the tool.
-        tool: ``tracelens`` or ``bypass``.
-
-    Returns:
-        A dict naming the requested mode, how the window was picked, the raw
-        selection, whether the tool fell back to the full trace, and the
-        aggregation scope the shares are anchored to.
-    """
-    run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
-    scope = str(result.get("aggregation_scope") or run_meta.get("aggregation_scope") or "")
-    if tool == "bypass":
-        selected = result.get("steady_window") or {}
-        fell_back = bool(result.get("estimated")) or (bool(scope) and scope != "steady_state")
-        source = _STEADY_SOURCE_READER_WINDOW
-    else:
-        selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
-        selected = selection or {}
-        fell_back = bool(selection.get("fell_back_to_full_trace"))
-        source = _STEADY_SOURCE_SPLIT_CHUNK
-    return {
-        "requested_mode": str(requested_mode or ""),
-        "source": source,
-        "selected": selected if isinstance(selected, dict) else {"value": selected},
-        "fell_back_to_full_trace": fell_back,
-        "aggregation_scope": scope,
-    }
-
-
-def _build_analysis_meta(
-    result: dict[str, Any],
-    *,
-    route: str,
-    tool: str,
-    requested_mode: str,
-    trace_input: str,
-    duration_sec: float,
-) -> dict[str, Any]:
-    """Assemble the per-run analysis metadata the roofline timeline event carries.
-
-    The TraceLens agent and TraceLens-free reader share this envelope. ``route``
-    records the routing policy (``agent`` / ``bypass``), while ``tool`` records
-    the implementation that ran (``tracelens`` / ``bypass``). Tool-specific
-    analysis output lands under ``route_ext`` rather than widening the shared
-    envelope.
-
-    Args:
-        result: The analysis tool's result dict.
-        route: The requested analysis route (``agent`` / ``bypass``).
-        tool: The tool that actually ran (``tracelens`` / ``bypass``).
-        requested_mode: The steady-state mode asked of the tool.
-        trace_input: The trace the run analyzed.
-        duration_sec: Wall-clock seconds the subprocess took.
-
-    Returns:
-        The analysis metadata dict.
-    """
-    run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
-    steps = run_meta.get("steps")
-    return {
-        "route": str(route or ""),
-        "tool": str(tool or ""),
-        "steady_state_mode": str(requested_mode or ""),
-        "trace_input": str(trace_input or ""),
-        "duration_sec": duration_sec,
-        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode, tool=tool),
-        "preflight": run_meta.get("preflight") if isinstance(run_meta.get("preflight"), dict) else {},
-        "split": run_meta.get("split") if isinstance(run_meta.get("split"), dict) else {},
-        "selection": run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {},
-        "steps": [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else [],
-        "route_ext": run_meta.get("route_ext") if isinstance(run_meta.get("route_ext"), dict) else {},
-    }
-
-
-async def trace_analyze_handler(
-    payload: dict,
-    *,
-    session_dir: Path,
-) -> HandlerResult:
-    """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
-
-    The explicit payload framework normally takes precedence over the persisted
-    session value.  A scriptable session overrides a conflicting non-scriptable
-    payload framework so a diffusion trace is not sent through the LLM
-    prefill/decode splitter.
-
-    Args:
-        payload (dict): Request payload (see ``Required payload`` /
-            ``Optional payload`` below for the recognized keys).
-        session_dir (Path): Session root used for resolving inputs and writing
-            the analysis outputs.
-
-    Required payload:
-        trace_input: path to a torch_trace dir or single .trace.json.gz file.
-
-    Returns the tool's result dict with ``status``, surfaced artifact paths, and
-    ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
-    """
-    trace_input = payload.get("trace_input") or payload.get("trace_dir")
-    if not trace_input:
-        return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Backfill workload context from SharedState when Orchestration omits it.
-    from ..state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state_framework = str(state.framework or "").strip()
-    payload_framework = str(payload.get("framework") or "").strip()
-    from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-    # Payload metadata remains authoritative for ordinary serving frameworks.
-    # The exception is a scriptable session receiving a stale non-scriptable
-    # default (commonly ``sglang``): that would make xDiT follow the LLM trace
-    # splitter, which discards its raw diffusion GPU kernels.
-    framework = payload_framework or state_framework
-    framework_warnings: list[dict[str, Any]] = []
-    if payload_framework and is_scriptable(state_framework) and not is_scriptable(payload_framework):
-        framework = state_framework
-        framework_warnings.append(
-            {
-                "code": "stale_framework_overridden",
-                "severity": "warning",
-                "message": (
-                    f"overrode non-scriptable payload framework {payload_framework!r} "
-                    f"with scriptable session framework {state_framework!r} "
-                    "to preserve the raw trace"
-                ),
-                "payload_framework": payload_framework,
-                "session_framework": state_framework,
-            }
-        )
-        log.warning(
-            "trace_analyze: overriding payload framework %r with session "
-            "scriptable framework %r to preserve the raw trace",
-            payload_framework,
-            state_framework,
-        )
-    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
-    model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
-    analysis_mode = (payload.get("analysis_mode") or "").strip()
-    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
-        analysis_mode = "inference"
-
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # is the explicit route via payload ``analysis_route`` /
-    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    # Only an absent or blank payload value defers to the env var. A non-blank
-    # value is kept even when unrecognized, so it reaches the check below rather
-    # than silently overriding the env with the ``agent`` default.
-    raw_route = payload.get("analysis_route")
-    route_text = "" if raw_route is None else str(raw_route).strip()
-    if not route_text:
-        route_text = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
-    explicit_route = route_text.lower()
-    # An explicit unknown route is a configuration error. Falling back to
-    # ``agent`` could turn a no-LLM request into a paid model session.
-    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
-        message = (
-            f"unknown analysis_route {explicit_route!r} (expected one of {valid_routes}); "
-            "refusing to fall back to 'agent' because that may start an LLM session. "
-            "Use 'bypass' for no-LLM trace analysis."
-        )
-        log.error("trace_analyze: %s", message)
-        return {
-            "status": "failed",
-            "error_class": "invalid_analysis_route",
-            "error": message,
-            "requested_route": explicit_route,
-            "valid_routes": valid_routes,
-        }
-    analysis_route = explicit_route or "agent"
-    is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
-    tracelens_root: Path | None = None
-    if not is_bypass:
-        tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing or incomplete (no .git).
-        if not (tracelens_root / ".git").exists():
-            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-        tl_err = _tracelens_root_error(tracelens_root)
-        if tl_err:
-            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
-    # raw trace and drop the --split-* hints.
-    scriptable = is_scriptable(framework)
-
-    # Load materialized baseline workload metadata once.
-    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
-    workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
-
-    cmd, steady_state_mode = _build_trace_analyze_cmd(
-        payload,
-        session_dir=session_dir,
-        state=state,
-        workspace_path=workspace_path,
-        trace_input=trace_input,
-        tracelens_root=tracelens_root,
-        is_bypass=is_bypass,
-        scriptable=scriptable,
-        workload=workload,
-        model_name=model_name,
-        framework=framework,
-        target_platform=target_platform,
-        analysis_mode=analysis_mode,
-    )
-    timeout_sec = int(payload.get("budget_minutes", 60)) * 60
-
-    _disc_started = time.monotonic()
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-        result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
-        }
-    _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
-    if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
-        result["candidates_path"] = artifacts["kernel_candidates"]
-    # Surface analysis.md path at the handler boundary for the Coordinator.
-    if isinstance(result, dict):
-        report_path = result.get("trace_report_path")
-        if not report_path and isinstance(artifacts, dict):
-            report_path = artifacts.get("trace_report_path")
-        if report_path:
-            result["trace_report_path"] = str(report_path)
-            _enrich_candidate_trace_report(
-                result.get("hot_kernels"),
-                str(report_path),
-            )
-        # Surface the reusable-vs-skipped audit sidecar.
-        if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
-            result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
-        if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
-            result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
-
-        # A failed TraceLens run is a hard failure, not "empty candidates".
-        if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error") or ""):
-            failure_warning: dict[str, Any] = {
-                "code": "tracelens_analysis_failed",
-                "severity": "warning",
-                "message": (
-                    "TraceLens analysis failed; refusing to treat this as a "
-                    "successful empty-kernel result. See ``stderr_tail`` / "
-                    "``error`` for the upstream failure."
-                ),
-            }
-            for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
-                if key in result and result[key] not in (None, ""):
-                    failure_warning[key] = result[key]
-            health = list(result.get("trace_health_warnings") or [])
-            health.append(failure_warning)
-            result["trace_health_warnings"] = health
-            result["hot_kernels"] = []
-            result.setdefault("orchestrator_error", failure_warning.get("error", ""))
-
-        # Prepend handler validation warnings so they reach the LLM.
-        result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
-
-        _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
-        candidates_path = result.get("candidates_path")
-        if isinstance(candidates_path, str):
-            _enrich_candidates_artifact(
-                candidates_path,
-                metadata,
-                trace_report_path=str(report_path or ""),
-            )
-
-        # Route and tool are one-to-one after the no-LLM TraceLens route was
-        # removed: agent runs TraceLens, while bypass runs its standalone reader.
-        _disc_route = analysis_route
-        _disc_tool = "bypass" if is_bypass else "tracelens"
-        # Surfaced for the caller's SBD V6 roofline event, which records the run
-        # as it happens rather than re-deriving it at export time.
-        result["analysis_meta"] = _build_analysis_meta(
-            result,
-            route=_disc_route,
-            tool=_disc_tool,
-            requested_mode=steady_state_mode,
-            trace_input=str(trace_input),
-            duration_sec=_disc_duration_sec,
-        )
-        # This run is the only place the build of the reader that produced the
-        # session's hot kernels is in scope. Nothing downstream can recover it,
-        # so it is recorded here even though the rest of the discovery run is
-        # already on the roofline event.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
-
-            tool_versions.record_tool_version(session_dir, tool=_disc_tool)
-        except Exception as exc:  # noqa: BLE001
-            trace_recording_skipped(
-                "versions",
-                reason="caller raised before the recorder",
-                entity=_disc_tool,
-                error=exc,
-            )
-
-    return result
 
 
 #: Rewrite targets forge can actually execute in one ``--auto`` call. Running
@@ -5583,101 +4354,6 @@ def geak_selected(payload: dict | None = None) -> bool:
         bool: ``True`` when ``geak`` is in the resolved order.
     """
     return "geak" in _raw_kernel_backend_order(payload)
-
-
-def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
-    """Wrap a kernel-agent tool's exit + stdout into our schema (prefer the tool's own JSON, synthesize only on parse failure).
-
-    Args:
-        rc: The tool's process return code.
-        stdout: The tool's captured standard output.
-        stderr: The tool's captured standard error.
-
-    Returns:
-        The tool's own JSON result (status filled from ``rc`` if absent), or a
-        synthesized failure result when stdout has no parseable JSON.
-    """
-    parsed = _parse_tool_stdout(stdout)
-    if parsed and set(parsed) == {"raw_stdout_tail"}:
-        # Unparseable output is not a result. Inferring ``ok`` from rc==0 here
-        # made a tool whose output we could not read indistinguishable from one
-        # that succeeded: the roofline executor read status=ok, recorded an
-        # empty analysis over the real one, and the leg reported success while
-        # twenty minutes of GPU evidence went in the bin.
-        return {
-            "status": "failed",
-            "error_class": "tool_output_unparseable",
-            "error": ("tool exited rc=%d but its stdout held no JSON object" % rc),
-            "returncode": rc,
-            "raw_stdout_tail": parsed["raw_stdout_tail"],
-            "stderr_tail": stderr[-2000:] if stderr.strip() else "",
-        }
-    if parsed:
-        # Trust the tool's own status; else infer from rc.
-        if "status" not in parsed:
-            parsed["status"] = "ok" if rc == 0 else "failed"
-        if rc != 0:
-            parsed.setdefault("returncode", rc)
-            if stderr.strip():
-                parsed.setdefault("stderr_tail", stderr[-2000:])
-        return parsed
-    return {
-        "status": "failed" if rc != 0 else "ok",
-        "returncode": rc,
-        "error": (stderr or stdout)[-2000:],
-    }
-
-
-def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
-    """Parse a tool's stdout into a dict, surviving non-JSON noise.
-
-    Tries the whole stdout as a JSON object first; if that fails, scans
-    backwards for the last line that is a standalone JSON object. As a last
-    resort returns the stdout tail under ``raw_stdout_tail``.
-
-    Args:
-        stdout (str): Captured standard output from a kernel-agent tool.
-
-    Returns:
-        dict[str, Any]: The parsed JSON object, an empty dict for empty input,
-            or ``{"raw_stdout_tail": ...}`` when no JSON object is found.
-    """
-    text = stdout.strip()
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = None
-    if isinstance(data, dict):
-        return data
-    # Fallback: scan for the last JSON object on its own line.
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    return obj
-            except json.JSONDecodeError:
-                continue
-    # Last: a pretty-printed object opening at the start of a line. A tool that
-    # indents its result spans many lines, so neither whole-text nor per-line
-    # parsing sees it, and it is exactly the tools with a lot to say that
-    # indent. tracelens_analysis returned a megabyte of hot-kernel analysis this
-    # way, interleaved with progress chatter and followed by an import banner;
-    # every field of it was dropped and the run still reported ``ok``.
-    # ``raw_decode`` stops at the end of the object, so trailing noise is fine.
-    decoder = json.JSONDecoder()
-    starts = [m.start() for m in re.finditer(r"^\{", text, re.MULTILINE)]
-    for start in reversed(starts):
-        try:
-            obj, _end = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    return {"raw_stdout_tail": text[-2000:]}
 
 
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
@@ -6614,8 +5290,7 @@ async def integrate_handler(
 # Kernel-agent programmatic dispatch table.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
-    "run_gemm_tuning": run_gemm_tuning_handler,
-    # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
+    # No run_gemm_tuning / run_fusion entries: KernelPhase awaits those handlers directly.
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
 }
@@ -6652,5 +5327,4 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_gemm_tuning_handler",
-    "trace_analyze_handler",
 ]

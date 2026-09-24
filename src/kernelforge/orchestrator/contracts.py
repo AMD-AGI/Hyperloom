@@ -181,6 +181,7 @@ class OrchestrationContext:
             "ACCEPT",
             "REVISE",
             "REPLACE",
+            "NOT_REVIEWED",
         }:
             raise ValueError("context.last_critic_verdict is unsupported")
         _text(
@@ -461,8 +462,12 @@ class PlanCriticOutcome:
     narrowing_status: str = "not_asked"
 
     def __post_init__(self) -> None:
-        if self.verdict not in {"ACCEPT", "REVISE", "REPLACE"}:
+        if self.verdict not in {"ACCEPT", "REVISE", "REPLACE", "NOT_REVIEWED"}:
             raise ValueError("plan critic verdict is unsupported")
+        # The outage detail is the whole of what ``NOT_REVIEWED`` means, so neither can be recorded without the
+        # other: every reader below decides from the verdict alone that this round carries no judgement.
+        if (self.verdict == "NOT_REVIEWED") != bool(self.error):
+            raise ValueError("plan critic NOT_REVIEWED and error must be recorded together")
         _text(self.review, "plan critic review", allow_empty=True)
         _text(self.error, "plan critic error", allow_empty=True)
         if self.duration_sec < 0:
@@ -486,18 +491,18 @@ class PlanCriticOutcome:
     @property
     def fail_open(self) -> bool:
         """Whether the draft bypassed enforcement because review failed."""
-        return bool(self.error)
+        return self.verdict == "NOT_REVIEWED"
 
     @property
     def requires_revision(self) -> bool:
-        return not self.error and self.verdict in {
+        return self.verdict in {
             "REVISE",
             "REPLACE",
         }
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "CRITIC_ERROR" if self.error else "reviewed",
+            "status": "CRITIC_ERROR" if self.fail_open else "reviewed",
             "verdict": self.verdict,
             "error": self.error,
             "fail_open": self.fail_open,
@@ -509,8 +514,11 @@ class PlanCriticOutcome:
         }
 
     def render_artifact(self) -> str:
-        if self.error:
-            return f"STATUS: CRITIC_ERROR\n\nERROR: {self.error}\n\nThe draft plan was used without critic enforcement."
+        if self.fail_open:
+            return (
+                f"STATUS: CRITIC_ERROR\n\nVERDICT: {self.verdict}\n\nERROR: {self.error}\n\n"
+                "The draft plan was used without critic enforcement."
+            )
         return self.review.strip()
 
 

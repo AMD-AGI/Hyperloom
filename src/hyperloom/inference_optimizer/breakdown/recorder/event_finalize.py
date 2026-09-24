@@ -141,20 +141,36 @@ def finalize_events(session_dir: Path) -> list[str]:
 
 def _finalize_type(spec: _EventType) -> list[str]:
     """Close the open events of one type."""
-    from .recorder_warnings import RECORDING_ERRORS
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
     try:
         parts = event_parts(spec.sections)
-    except RECORDING_ERRORS:
-        log.warning("timeline: cannot read %s fragments to recover events", spec.event_type, exc_info=True)
+    except RECORDING_ERRORS as exc:
+        log.warning(
+            "timeline: cannot read %s fragments to recover events", spec.event_type, extra={"error": exc}, exc_info=True
+        )
+        note_failure(
+            section="timeline",
+            error=exc,
+            detail=f"cannot read {spec.event_type} fragments to recover events",
+        )
         return []
 
     closed: list[str] = []
     for residual in residual_events(parts.get(spec.event_section) or [], event_type=spec.event_type):
         try:
             ext, _derived = spec.assemble(parts, event=residual.event_id)
-        except RECORDING_ERRORS:  # one unrecoverable event must not cost the others
-            log.warning("timeline: cannot assemble interrupted %s event %s", spec.event_type, residual.event_id)
+        except RECORDING_ERRORS as exc:  # one unrecoverable event must not cost the others
+            log.warning(
+                "timeline: cannot assemble interrupted %s event %s",
+                spec.event_type,
+                residual.event_id,
+            )
+            note_failure(
+                section="timeline",
+                error=exc,
+                detail=f"cannot assemble interrupted {spec.event_type} event {residual.event_id}",
+            )
             continue
         finish_event(
             event_type=spec.event_type,

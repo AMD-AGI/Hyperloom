@@ -121,7 +121,7 @@ def known_target_roots() -> tuple[str, ...]:
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
     try:
-        from hyperloom.orchestrator.framework.paths import (
+        from hyperloom.inference_optimizer.framework_paths import (
             resolve_known_source_prefixes,
         )
 

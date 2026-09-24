@@ -20,7 +20,7 @@ from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.roles.codex_agent as codex_agent
 import hyperloom.orchestrator.specialists.subprocess_ as sp
-from hyperloom.orchestrator.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
 AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX
