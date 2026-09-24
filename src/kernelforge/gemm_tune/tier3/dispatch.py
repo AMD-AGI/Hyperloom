@@ -656,7 +656,7 @@ class _Bf16DenseAdapter:
                 for _ in range(GRAPH_INNER):
                     fn()
             return graph.replay
-        except Exception as exc:  # noqa: BLE001 - narrowed into CaptureFailed for the caller to route
+        except Exception as exc:
             # ``graph.replay`` runs GRAPH_INNER invocations per call where ``fn`` runs one, so an
             # uncaptured callable cannot be timed against a captured baseline.
             raise CaptureFailed(f"graph capture failed: {exc!r}") from exc
