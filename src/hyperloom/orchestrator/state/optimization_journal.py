@@ -68,6 +68,19 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _measured_float(value: Any) -> float | None:
+    """Coerce a measurement to float, or ``None`` when nothing was measured.
+
+    A non-positive throughput is the sentinel an unanchored run used to carry,
+    so it reads as absent rather than as a reading a consumer can divide by.
+    """
+    try:
+        measured = float(value)
+    except (TypeError, ValueError):
+        return None
+    return measured if measured > 0 else None
+
+
 @dataclass
 class JournalEntry:
     """One KEEP / REVERT / no_promote / skipped decision (``None`` distinguishes "not measured" from "measured zero")."""
@@ -151,7 +164,9 @@ class Journal:
     model: str
     hardware: str
     framework: str = ""
-    baseline_throughput: float = 0.0
+    # ``None`` distinguishes "no baseline was anchored" from "the baseline measured zero"; a run that
+    # never anchors one leaves it null rather than reporting a sentinel a consumer divides by.
+    baseline_throughput: float | None = None
     final_throughput: float | None = None
     total_gain_pct: float | None = None
     entries: list[JournalEntry] = field(default_factory=list)
@@ -167,7 +182,7 @@ class Journal:
         model: str,
         hardware: str,
         framework: str = "",
-        baseline_throughput: float = 0.0,
+        baseline_throughput: float | None = None,
     ) -> Journal:
         """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty)."""
         path = cls._journal_path(session_dir)
@@ -186,7 +201,8 @@ class Journal:
             model=str(blob.get("model") or model),
             hardware=str(blob.get("hardware") or hardware),
             framework=str(blob.get("framework") or framework),
-            baseline_throughput=float(blob.get("baseline_throughput") or baseline_throughput),
+            baseline_throughput=_measured_float(blob.get("baseline_throughput"))
+            or _measured_float(baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
             entries=entries,
@@ -227,10 +243,11 @@ class Journal:
             self.total_gain_pct = float(total_gain_pct)
         self._flush()
 
-    def update_baseline(self, baseline_throughput: float) -> None:
-        """Late-binding setter for the baseline measurement (no-op on non-positive, to avoid erasing a real value with a stale 0)."""
-        if baseline_throughput and baseline_throughput > 0:
-            self.baseline_throughput = float(baseline_throughput)
+    def update_baseline(self, baseline_throughput: float | None) -> None:
+        """Late-binding setter for the baseline measurement (no-op when nothing was measured, so an unanchored run cannot erase a real value)."""
+        measured = _measured_float(baseline_throughput)
+        if measured is not None:
+            self.baseline_throughput = measured
             self._flush()
 
     # Persistence
