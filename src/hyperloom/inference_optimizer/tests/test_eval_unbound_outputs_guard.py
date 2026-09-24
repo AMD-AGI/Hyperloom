@@ -95,6 +95,64 @@ def test_a_harness_that_already_carries_the_upstream_fix_is_left_alone(monkeypat
     assert api.amodel_call is amodel_call
 
 
+def test_when_eval_probe_ran_first_the_guard_still_wraps_amodel_call(monkeypatch):
+    """The probe wrapper must not hide the pre-fix upstream signature from the guard."""
+
+    async def upstream(self, *args, **kwargs):
+        # mirrors pre-fix ``TemplateAPI.amodel_call`` logging ``{outputs}`` on failure
+        try:
+            raise ConnectionRefusedError("connect refused")
+        except BaseException:
+            raise UnboundLocalError("cannot access local variable 'outputs'") from None
+
+    api = _install_stub_lm_eval(monkeypatch, upstream)
+    prev = api.amodel_call
+
+    async def _hl_probe_amodel_call(self, *args, **kwargs):
+        return await prev(self, *args, **kwargs)
+
+    _hl_probe_amodel_call._hl_prev_amodel_call = prev
+    api.amodel_call = _hl_probe_amodel_call
+
+    exec(compile(_EVAL_UNBOUND_OUTPUTS_PY, "<sitecustomize>", "exec"), {})
+
+    assert getattr(api.amodel_call, "_hl_unbound_outputs_guard", False)
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(api.amodel_call(object()))
+    assert "refused connection" in str(excinfo.value)
+    assert "3293" in str(excinfo.value)
+
+
+def test_a_legacy_guard_block_is_upgraded_in_place(tmp_path, monkeypatch):
+    """Nodes that already appended the first guard get the upstream-source check on the next ensure."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        _EVAL_UNBOUND_OUTPUTS_LEGACY_MARKER,
+        _rewrite_eval_unbound_outputs_block,
+        _upgrade_eval_unbound_outputs_block,
+    )
+
+    target = tmp_path / "utils" / "evals" / "patches" / "lm_eval_sitecustomize.py"
+    target.parent.mkdir(parents=True)
+    legacy = (
+        "# upstream\n"
+        "# --- HYPERLOOM_EVAL_UNBOUND_OUTPUTS ---\n"
+        "def _hl_eval_unbound_outputs_install():\n"
+        "    async def _hl_amodel_call(self, *args, **kwargs):\n"
+        "        return await call(self, *args, **kwargs)\n"
+        "# --- end HYPERLOOM_EVAL_UNBOUND_OUTPUTS ---\n"
+    )
+    assert _EVAL_UNBOUND_OUTPUTS_LEGACY_MARKER in legacy
+    target.write_text(legacy, encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+
+    assert ensure_eval_unbound_outputs_patched(tmp_path) is True
+    text = target.read_text(encoding="utf-8")
+    assert _EVAL_UNBOUND_OUTPUTS_LEGACY_MARKER not in text
+    assert "_hl_upstream_still_vulnerable" in text
+    assert _rewrite_eval_unbound_outputs_block(text) is None
+    assert _upgrade_eval_unbound_outputs_block(target) is False
+
+
 def test_applying_it_twice_appends_one_block(tmp_path, monkeypatch):
     """The sentinel makes the append idempotent, as every other patch here is."""
     target = tmp_path / "utils" / "evals" / "patches" / "lm_eval_sitecustomize.py"
