@@ -121,8 +121,6 @@ class Candidate:
     gap_keywords: tuple[str, ...] = ()
     prior_score: float = 0.0
     prior_rank: int = 0
-    pr_kb_files_slug: str = ""
-
     @property
     def slug(self) -> str:
         """Filesystem-safe slug derived from ref (used for candidate_dir name)."""

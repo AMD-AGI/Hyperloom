@@ -1468,14 +1468,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 ids.add(pid)
         return ids
 
-    def _framework_tried_refs(self) -> list[str]:
-        """Refs already discovered this phase (fed to compose_gap to bias away from prior PR categories)."""
-        refs: list[str] = []
-        for cid in self._framework_known_candidate_ids():
-            if cid:
-                refs.append(cid)
-        return refs
-
     def _build_framework_working_memory(self) -> dict[str, Any]:
         """Aggregate the FRAMEWORK working memory from the three ledgers (deterministic, zero-LLM)."""
         state = self.shared_state
@@ -1506,45 +1498,9 @@ class FrameworkPhase(CoordinatorCollaborator):
                 learnings.append(rationale[:200])
             if len(learnings) >= self._FRAMEWORK_TRIED_MEMORY_CAP:
                 break
-        pending = [self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()]
-        excluded = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
         return {
             "tried_and_why": tried,
-            "excluded_refs": sorted(r for r in excluded if r),
-            "learnings": learnings,
-            "pending": [r for r in pending if r],
         }
-
-    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        """Repo URLs to query for the FRAMEWORK batch: framework's own repo + global PR_QUERY_REPOS allowlist, dedup preserving order."""
-        from hyperloom.inference_optimizer import framework_registry
-
-        from hyperloom.agents.framework.repo_map import repo_url_for_framework as _repo_url_for_framework
-        from ..specialists.domains import PR_QUERY_REPOS
-
-        urls: list[str] = []
-
-        def _add(u: str) -> None:
-            """Append a trimmed URL to ``urls`` if non-empty and not already present."""
-            u = (u or "").strip()
-            if u and u not in urls:
-                urls.append(u)
-
-        # Primary: the framework's own repo.
-        primary_repo_url = _repo_url_for_framework(framework)
-        _add(primary_repo_url)
-
-        # Serving/infra PRs cannot be git-applied to scriptable model repos, so a scriptable session queries its own
-        # repo and nothing else.
-        if not framework_registry.is_scriptable(framework):
-            for repo in PR_QUERY_REPOS:
-                repo = str(repo or "").strip()
-                if repo and "/" in repo:
-                    _add(f"https://github.com/{repo}.git")
-            if not urls:
-                # Last-ditch: let phase_discover resolve from framework itself.
-                _add(_repo_url_for_framework(framework or "sglang"))
-        return urls
 
     def _record_framework_agent_phase_done(
         self,
@@ -2157,15 +2113,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             progress[:] = [
                 row for row in progress if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
             ]
-        # Roll the batch max-gain stat the plateau judge reads.
-        batches = getattr(self.shared_state, "framework_agent_batches", None) or []
-        if isinstance(batches, list) and batch_id:
-            for entry in reversed(batches):
-                if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
-                    prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                    if gain > prev:
-                        entry["max_gain_pct_observed_in_batch"] = gain
-                    break
         recorded = self._stamp_framework_progress(
             candidate_id=cand_id,
             batch_id=batch_id,
@@ -2423,8 +2370,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "mode": "research",
             "reason": reason,
             "source": "coordinator_internal",
-            "discover_repo_urls": self._framework_agent_discover_repo_urls(framework),
-            "tried_refs": self._framework_tried_refs(),
         }
         await self._warm_specialist_params(params)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
@@ -2673,9 +2618,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             proposals: The specialist ``proposal_set`` entries materialised into
                 the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
-        # Framework config-generation specialists own their proposal_set; skip.
-        if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
-            return
         from ..actions.executors._multi_node_env import is_multi_node
         from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 

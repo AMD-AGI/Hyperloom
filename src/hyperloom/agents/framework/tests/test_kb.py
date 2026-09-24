@@ -283,7 +283,7 @@ class TestMigrationCannotStopTheRun:
 
 
 class TestListAndMatch:
-    """list_domains / get_domain_files / _match_domains."""
+    """list_domains / get_domain_files."""
 
     def test_list_domains_empty_when_root_missing(self, kb_root: Path) -> None:
         """list_domains returns [] when no domain directory has been created."""
@@ -299,58 +299,6 @@ class TestListAndMatch:
         names = sorted(p.name for p in kb.get_domain_files("framework"))
         assert names == ["README.md", "empirical_kb.md"]
 
-    def test_match_domains_keyword_hit(self) -> None:
-        """A task description containing whitelisted keywords picks the right domain."""
-        domains = kb._match_domains("improve sglang vllm cudagraph attention")
-        assert "framework" in domains
-        assert "kernel_agent" in domains
-
-    def test_match_domains_no_hit(self) -> None:
-        """When no keyword matches, the result is an empty list."""
-        assert kb._match_domains("totally unrelated free-form text") == []
-
-    def test_match_domains_atom_keyword_hit(self) -> None:
-        """``atom`` must hit the framework domain."""
-        domains = kb._match_domains("improve atom moe throughput on mi300x")
-        assert "framework" in domains, f"atom must hit the framework domain; got {domains!r}"
-
-    def test_atom_in_framework_domain_keywords_constant(self) -> None:
-        """Constant-level guard: ``atom`` must appear in the framework domain's keyword list."""
-        assert "atom" in kb.DOMAIN_KEYWORDS["framework"]
-
-
-class TestSelectKb:
-    """select_kb priority and fallback behaviour."""
-
-    def test_prioritises_empirical_then_pitfalls(self, kb_root: Path) -> None:
-        """select_kb returns empirical_kb.md before shared_pitfalls.md before rest."""
-        d = kb_root / "framework"
-        d.mkdir()
-        (d / "README.md").write_text("# r")
-        (d / "shared_pitfalls.md").write_text("# pitfalls")
-        (d / "empirical_kb.md").write_text("# emp")
-        (d / "model_taxonomy.md").write_text("# tax")
-        out = kb.select_kb("sglang scheduler tuning", domains=["framework"])
-        names = [p.path.name for p in out]
-        assert names[0] == "empirical_kb.md"
-        assert names[1] == "shared_pitfalls.md"
-        assert set(names[2:]) == {"README.md", "model_taxonomy.md"}
-
-    def test_auto_matches_when_domains_none(self, kb_root: Path) -> None:
-        """select_kb derives domains from task_description when omitted."""
-        d = kb_root / "framework"
-        d.mkdir()
-        (d / "empirical_kb.md").write_text("# emp")
-        out = kb.select_kb("improve sglang throughput")
-        assert any(p.domain == "framework" for p in out)
-
-    def test_full_text_fallback(self, kb_root: Path) -> None:
-        """When no keyword matches, fallback scans file contents for the lower-cased query."""
-        d = kb_root / "kernel_agent"
-        d.mkdir()
-        (d / "empirical_kb.md").write_text("Quirk-Wibble is the new HotAcronym for stuff.")
-        out = kb.select_kb("quirk-wibble")
-        assert out and out[0].domain == "kernel_agent"
 
 
 class TestContributeAndSynthesize:
@@ -544,34 +492,3 @@ class TestKbCli:
 
 # Per-framework KB partition (`framework_optimization/<fw>/`)
 
-
-class TestPathForFramework:
-    """``path_for_framework`` resolves the per-framework KB partition."""
-
-    def test_atom_partition_path_resolves(self, kb_root: Path) -> None:
-        path = kb.path_for_framework("atom")
-        assert path == kb_root / "framework_optimization" / "atom"
-
-    @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
-    def test_path_resolves_for_all_known_frameworks(
-        self,
-        kb_root: Path,
-        framework: str,
-    ) -> None:
-        path = kb.path_for_framework(framework)
-        assert path == kb_root / "framework_optimization" / framework
-
-    def test_path_lowercases_and_strips(self, kb_root: Path) -> None:
-        path_a = kb.path_for_framework("  Atom  ")
-        path_b = kb.path_for_framework("ATOM")
-        path_c = kb.path_for_framework("atom")
-        assert path_a == path_b == path_c
-
-    def test_empty_framework_returns_partition_root(self, kb_root: Path) -> None:
-        assert kb.path_for_framework("") == kb_root / "framework_optimization"
-        assert kb.path_for_framework("   ") == kb_root / "framework_optimization"
-
-    def test_partition_dir_not_created_eagerly(self, kb_root: Path) -> None:
-        # path_for_framework is read-only; it must NOT create the dir.
-        _ = kb.path_for_framework("atom")
-        assert not (kb_root / "framework_optimization" / "atom").exists()

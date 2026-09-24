@@ -138,33 +138,6 @@ def _copy_partition_atomically(source: Path, destination: Path) -> None:
         raise
 
 
-def path_for_framework(framework: str) -> Path:
-    """Resolve the KB sub-partition path for a per-framework finding bag."""
-    fw = (framework or "").strip().lower()
-    root = _resolve_kb_root()
-    if not fw:
-        return root / _FRAMEWORK_OPTIMIZATION_ROOT
-    return root / _FRAMEWORK_OPTIMIZATION_ROOT / fw
-
-
-DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "kernel_agent": ["kernel_agent", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
-    "communication": [
-        "allreduce",
-        "nccl",
-        "rccl",
-        "quickreduce",
-        "communication",
-        "collective",
-    ],
-    "compiler": ["compiler", "inductor", "codegen"],
-    "framework": ["vllm", "sglang", "atom", "framework", "scheduler", "cuda_graph", "cudagraph"],
-    "fusion": ["fusion", "fused", "overlap"],
-    "systems": ["system", "hip", "rocm", "driver", "launch", "dispatch"],
-    "pr_intelligence": ["pr", "github", "upstream", "patch"],
-    "recipes": ["recipe", "warm_start", "best_config", "prior_session"],
-}
-
 _PRIORITY_FILES = ["empirical_kb.md", "shared_pitfalls.md"]
 
 _DEFAULT_MODEL = "claude-opus-5"
@@ -177,11 +150,6 @@ class KBFile:
     path: Path
     domain: str
     content: str
-
-
-def packaged_kb_root() -> Path:
-    """Root of the read-only KB shipped inside the wheel."""
-    return Path(__file__).resolve().parent / "kb"
 
 
 def mutable_kb_root() -> Path:
@@ -236,16 +204,6 @@ def _prioritized_files(domain: str) -> list[Path]:
     return priority + rest
 
 
-def _match_domains(task_description: str) -> list[str]:
-    """Match domains by keyword (case-insensitive) against the task text."""
-    lower = task_description.lower()
-    matched: set[str] = set()
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        if any(kw in lower for kw in keywords):
-            matched.add(domain)
-    return sorted(matched)
-
-
 def _load_file(path: Path, domain: str) -> KBFile | None:
     """Best-effort read of a single KB file; OSErrors swallowed."""
     try:
@@ -253,36 +211,6 @@ def _load_file(path: Path, domain: str) -> KBFile | None:
     except OSError:
         return None
     return KBFile(path=path, domain=domain, content=content)
-
-
-def select_kb(
-    task_description: str,
-    domains: list[str] | None = None,
-) -> list[KBFile]:
-    """Return prioritised KB files for the given task / domain list."""
-    if domains is None:
-        domains = _match_domains(task_description)
-        if not domains:
-            lower = task_description.lower()
-            for domain in list_domains():
-                for path in _prioritized_files(domain):
-                    try:
-                        if lower in path.read_text().lower():
-                            domains.append(domain)
-                            break
-                    except OSError:
-                        continue
-    results: list[KBFile] = []
-    seen: set[Path] = set()
-    for domain in domains:
-        for path in _prioritized_files(domain):
-            if path in seen:
-                continue
-            seen.add(path)
-            kb_file = _load_file(path, domain)
-            if kb_file is not None:
-                results.append(kb_file)
-    return results
 
 
 def contribute_to_kb(
@@ -459,12 +387,9 @@ def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
 
 __all__ = [
     "KBFile",
-    "DOMAIN_KEYWORDS",
     "list_domains",
     "get_domain_files",
-    "select_kb",
     "contribute_to_kb",
-    "path_for_framework",
     "synthesize_findings",
     "search_kb",
     "read_pr_ledger",

@@ -31,17 +31,6 @@ def test_repo_slug_examples():
     assert pr_kb_slug.repo_slug("https://github.com/ROCm/vllm.git") == "rocm-vllm"
 
 
-def test_slug_builders(monkeypatch):
-    monkeypatch.delenv("PR_KB_SLUG_PREFIX", raising=False)
-    assert pr_kb_slug.files_slug("ROCm/vllm", 42) == "pr-kb-files/rocm-vllm/pr/42"
-    assert pr_kb_slug.index_slug("ROCm/vllm") == "pr-kb-index/rocm-vllm"
-
-
-def test_slug_prefix_override(monkeypatch):
-    monkeypatch.setenv("PR_KB_SLUG_PREFIX", "prkb2")
-    assert pr_kb_slug.files_slug("ROCm/vllm", 1) == "prkb2-files/rocm-vllm/pr/1"
-
-
 def test_normalise_repo():
     assert pr_kb_slug.normalise_repo("https://github.com/ROCm/vllm.git") == "ROCm/vllm"
     assert pr_kb_slug.normalise_repo("ROCm/vllm") == "ROCm/vllm"
@@ -75,24 +64,6 @@ def test_iter_sse_multi_event_join():
 
 
 # --- diff synthesis ---------------------------------------------------------
-
-
-def test_synthesize_unified_diff_skips_omitted():
-    patches = [
-        {"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@\n-x\n+y"},
-        {"filename": "big.bin", "status": "modified", "patch_omitted": True, "reason": "binary"},
-    ]
-    diff = pr_kb.synthesize_unified_diff(patches)
-    assert "diff --git a/a.py b/a.py" in diff
-    assert "big.bin" not in diff
-    assert diff.endswith("\n")
-
-
-def test_synthesize_added_removed_dev_null():
-    added = pr_kb.synthesize_unified_diff([{"filename": "n.py", "status": "added", "patch": "@@ -0,0 +1 @@\n+z"}])
-    assert "--- /dev/null" in added
-    removed = pr_kb.synthesize_unified_diff([{"filename": "d.py", "status": "removed", "patch": "@@ -1 +0,0 @@\n-z"}])
-    assert "+++ /dev/null" in removed
 
 
 # --- files page parse + fetch ----------------------------------------------
@@ -200,7 +171,6 @@ def test_enumerate_pr_kb_index_only(monkeypatch):
     assert sorted(c.ref for c in out) == ["PR:101", "PR:102"]
     c = out[0]
     assert c.source == "gbrain_pr_kb"
-    assert c.pr_kb_files_slug == "pr-kb-files/rocm-vllm/pr/102"
     assert c.html_url == "https://github.com/ROCm/vllm/pull/102"
 
 
@@ -234,7 +204,6 @@ def test_enumerate_pr_kb_list_pages_fallback(monkeypatch):
     out = pr_kb_source.enumerate_pr_kb(_req(repo="https://github.com/sgl-project/sglang.git"))
     assert sorted(c.ref for c in out) == ["PR:27560", "PR:29881"]
     assert all(c.source == "gbrain_pr_kb" for c in out)
-    assert out[0].pr_kb_files_slug == "pr-kb-files/sgl-project-sglang/pr/29881"
 
 
 def test_enumerate_pr_kb_index_skips_list_pages_fallback(monkeypatch):

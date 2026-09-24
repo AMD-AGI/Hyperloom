@@ -248,6 +248,4 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
 __all__ = [
     "SourceConfigError",
     "enumerate_candidates",
-    "_rank_by_keyword_overlap",
-    "_resolve_keywords",
 ]

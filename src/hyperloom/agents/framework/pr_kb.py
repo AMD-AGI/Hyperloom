@@ -42,26 +42,6 @@ def _extract_fenced_json(markdown: str, marker: str) -> Any:
         return None
 
 
-def synthesize_unified_diff(patches: list[dict[str, Any]]) -> str:
-    """Build a git-style unified diff from PR KB ``Patches JSON`` entries."""
-    out: list[str] = []
-    for entry in patches:
-        if not isinstance(entry, dict) or entry.get("patch_omitted"):
-            continue
-        patch = entry.get("patch")
-        filename = entry.get("filename")
-        if not patch or not filename:
-            continue
-        status = str(entry.get("status") or "")
-        old = "/dev/null" if status == "added" else f"a/{filename}"
-        new = "/dev/null" if status == "removed" else f"b/{filename}"
-        out.append(f"diff --git a/{filename} b/{filename}")
-        out.append(f"--- {old}")
-        out.append(f"+++ {new}")
-        out.append(patch if patch.endswith("\n") else patch + "\n")
-    return "\n".join(out).strip() + "\n" if out else ""
-
-
 def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the ``## PRs JSON`` list from an index page (empty on miss)."""
     data = _extract_fenced_json(_page_markdown(page), "## PRs JSON")
@@ -69,7 +49,6 @@ def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 __all__ = [
-    "synthesize_unified_diff",
     "parse_index_prs",
     "index_slug",
 ]
