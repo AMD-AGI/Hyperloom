@@ -54,6 +54,7 @@ class BuildLifecycleCollaborator:
             requires_lanes=["build_lane"],
             lease_ttl_sec=ttl,
             task_id=task_id,
+            dispatch_class="coordinator",
         )
         return str(getattr(task, "task_id", "") or "")
 

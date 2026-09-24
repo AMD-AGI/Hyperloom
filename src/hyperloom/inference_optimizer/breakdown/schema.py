@@ -192,6 +192,19 @@ class V6Grading(TypedDict, total=False):
     tput_guard: V6GradingTputGuard
 
 
+class V6WorkflowMetadata(TypedDict, total=False):
+    """Identity and frozen action surfaces for deterministic workflow replay."""
+
+    workflow_contract_version: str
+    contract_digest: str
+    run_flags: dict[str, Any]
+    phase_actions: dict[str, list[str]]
+    llm_proposable_actions: dict[str, list[str]]
+    coordinator_internal_actions: list[str]
+    coordinator_reserved_actions: dict[str, list[str]]
+    kernel_lane_task_kinds: list[str]
+
+
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint."""
 
@@ -201,6 +214,7 @@ class V6Metadata(TypedDict, total=False):
     task_config: V6TaskConfig
     grading: V6Grading
     langfuse: V6MetadataLangfuse
+    workflow: V6WorkflowMetadata
     warnings: list[str]
 
 
@@ -309,6 +323,10 @@ class V6TimelineEvent(TypedDict, total=False):
     type: str
     kind: str
     status: str
+    process_status: str
+    business_outcome: str | None
+    failure: dict[str, Any] | None
+    blocked_by: str | None
     start_time: str
     end_time: str
     id: str
@@ -1199,6 +1217,9 @@ class V6PhaseAction(TypedDict, total=False):
     phase: str
     macro_cycle: int
     tick: int
+    dispatch_class: Literal["llm", "coordinator", "inline"]
+    allowed: bool
+    denial_rule: str | None
     dispatched_at: str
     dispatched_unix: float | None
     status: str
@@ -1217,6 +1238,18 @@ class V6PhaseMarker(TypedDict, total=False):
     reason: str
     evidence: dict[str, Any]
     ts: str
+
+
+class V6PhaseDenial(TypedDict, total=False):
+    """One author-time PolicyGate refusal in the phase where it happened."""
+
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    phase: str
+    rule: str
+    hint: str
+    denied_at: str
 
 
 class V6PhaseProposalReview(TypedDict, total=False):
@@ -1301,6 +1334,7 @@ class V6PhaseExt(TypedDict, total=False):
     actions: dict[str, Any]
     markers: dict[str, Any]
     proposals: dict[str, Any]
+    denials: dict[str, Any]
 
 
 class V6StackAdoption(TypedDict, total=False):
@@ -2513,6 +2547,7 @@ class V6KernelExt(TypedDict, total=False):
     in_flight_stage: str | None
     duration_sec: float | None
     entry: V6KernelEntry
+    failure: dict[str, Any] | None
     attempts: list[V6KernelAttempt]
     rebench: list[V6KernelRebenchAttempt]
     integrate: list[V6KernelIntegrateRun]

@@ -90,6 +90,7 @@ class InternalTasksPhase(PhaseHandler):
             requires_lanes=["research_lane"],
             side_effects=["writes_results"],
             lease_ttl_sec=1800,
+            dispatch_class="coordinator",
         )
         if not was_existing:
             self.shared_state.bump_research_scout_runs()
@@ -188,6 +189,7 @@ class InternalTasksPhase(PhaseHandler):
             requires_lanes=["research_lane"],
             side_effects=["writes_results"],
             lease_ttl_sec=1800,
+            dispatch_class="coordinator",
         )
         if not was_existing:
             try:
@@ -258,6 +260,7 @@ class InternalTasksPhase(PhaseHandler):
             requires_lanes=["research_lane"],
             side_effects=["writes_results"],
             lease_ttl_sec=1800,
+            dispatch_class="coordinator",
         )
         if not was_existing:
             log.info(

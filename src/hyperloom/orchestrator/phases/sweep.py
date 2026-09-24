@@ -149,6 +149,7 @@ class SweepPhase(PhaseHandler):
             requires_lanes=lanes,
             idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
+            dispatch_class="coordinator",
         )
         if was_existing:
             log.info(

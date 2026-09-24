@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import task_dispatch_origin
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +188,7 @@ def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
     return DispatcherCollaborator(fake)
 
 
-def _task(kind: str, task_id: str) -> Any:
+def _task(kind: str, task_id: str, state: SharedState) -> Any:
     return types.SimpleNamespace(
         kind=kind,
         task_id=task_id,
@@ -195,6 +196,14 @@ def _task(kind: str, task_id: str) -> Any:
         params={},
         requires_lanes=(),
         lease_ttl_sec=60,
+        history=[
+            {
+                "dispatch_class": "coordinator",
+                "allowed": True,
+                "denial_rule": None,
+                **task_dispatch_origin(state),
+            }
+        ],
     )
 
 
@@ -205,7 +214,7 @@ def test_the_real_runner_records_the_dispatch(tmp_path):
     sub = _Sub(result="done")
     dispatcher = _dispatcher(tmp_path, state, sub)
 
-    asyncio.run(dispatcher.run_task_registered(_task("baseline", "t-1")))
+    asyncio.run(dispatcher.run_task_registered(_task("baseline", "t-1", state)))
 
     assert sub.ran == ["baseline"]
     row = _ext("FRAMEWORK_AGENT")["actions"]["rows"][0]
@@ -217,6 +226,23 @@ def test_the_real_runner_records_the_dispatch(tmp_path):
     assert row.get("status", "") == ""
 
 
+def test_the_real_runner_uses_persisted_dispatch_provenance(tmp_path):
+    state = _state(tmp_path)
+    machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
+    dispatcher = _dispatcher(tmp_path, state, _Sub(result="done"))
+    task = _task("baseline", "t-provenance", state)
+    task.history[0]["dispatch_class"] = "llm"
+    state.phase = "KERNEL_AGENT"
+    state.macro_cycle = 4
+    state.tick = 99
+
+    asyncio.run(dispatcher.run_task_registered(task))
+
+    row = _ext("FRAMEWORK_AGENT")["actions"]["rows"][0]
+    assert (row["dispatch_class"], row["allowed"], row["denial_rule"]) == ("llm", True, None)
+    assert (row["phase"], row["macro_cycle"], row["tick"]) == ("FRAMEWORK_AGENT", 0, 0)
+
+
 def test_the_real_runner_records_every_kind_it_is_given(tmp_path):
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="CLOSE", reason="start")
@@ -225,7 +251,7 @@ def test_the_real_runner_records_every_kind_it_is_given(tmp_path):
 
     unaudited = ("report", "recover", "session_breakdown", "target_analysis")
     for index, kind in enumerate(unaudited):
-        asyncio.run(dispatcher.run_task_registered(_task(kind, f"t-{index}")))
+        asyncio.run(dispatcher.run_task_registered(_task(kind, f"t-{index}", state)))
 
     assert _ext("CLOSE")["actions"]["kinds"] == sorted(unaudited)
 
@@ -244,19 +270,17 @@ def test_the_runner_is_the_only_path_an_action_takes(tmp_path):
     assert "loop/dispatcher.py" in found[0]
 
 
-def test_a_dispatch_still_runs_when_recording_cannot(tmp_path, monkeypatch):
+def test_a_dispatch_does_not_run_when_recording_cannot(tmp_path, monkeypatch):
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="start")
 
-    def _boom(**_kwargs):
-        raise RuntimeError("spool is gone")
-
-    monkeypatch.setattr(phase_event, "record_dispatch", _boom)
+    monkeypatch.setattr(phase_event, "record_dispatch", lambda **_kwargs: False)
     sub = _Sub(result="done")
     dispatcher = _dispatcher(tmp_path, state, sub)
 
-    assert asyncio.run(dispatcher.run_task_registered(_task("baseline", "t-1"))) == "done"
-    assert sub.ran == ["baseline"]
+    with pytest.raises(RuntimeError, match="dispatch evidence write failed"):
+        asyncio.run(dispatcher.run_task_registered(_task("baseline", "t-1", state)))
+    assert sub.ran == []
 
 
 def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
@@ -272,7 +296,7 @@ def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
 
     dispatcher = _dispatcher(tmp_path, state, _Boom())
     with pytest.raises(RuntimeError):
-        asyncio.run(dispatcher.run_task_registered(_task("kernel_opt", "t-5")))
+        asyncio.run(dispatcher.run_task_registered(_task("kernel_opt", "t-5", state)))
 
     rows = _ext("KERNEL_AGENT")["actions"]["rows"]
     assert [row["task_id"] for row in rows] == ["t-5"]

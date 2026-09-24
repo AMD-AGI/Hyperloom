@@ -523,6 +523,7 @@ class DispatcherCollaborator:
                     idempotency_key=new_key,
                     requires_lanes=list(task.requires_lanes or []),
                     lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                    dispatch_class="coordinator",
                 )
                 if not was_existing:
                     created.append(new_task.task_id)
@@ -911,24 +912,6 @@ class DispatcherCollaborator:
             handle = asyncio.current_task()
             if handle is not None:
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
-        # Put the dispatch on its phase's event here, where the ordering phase
-        # is what state says it is. Recording it at settle instead is what
-        # forced the export-time attribution to guess: an action can outlive the
-        # phase that ordered it, and the phase in scope when the result lands is
-        # then the wrong owner.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-
-            phase_event.record_dispatch(
-                action=str(task.kind or ""),
-                task_id=str(task.task_id or ""),
-                phase=str(getattr(self.shared_state, "phase", "") or ""),
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                dispatched_unix=time.time(),
-            )
-        except Exception:
-            log.debug("dispatcher: phase dispatch record failed", exc_info=True)
 
         async def release_resources() -> bool:
             if gpu_specialist_lease is not None:
@@ -939,6 +922,34 @@ class DispatcherCollaborator:
             if gpu_lease is not None:
                 await self.gpu_specialist_pool.release(gpu_lease)
             return True
+
+        # Fresh tasks carry the phase coordinates frozen when their row was
+        # authored. Legacy rows have no record and remain legacy on resume.
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.orchestrator.state.task_registry import task_dispatch_record
+
+        dispatch_record = task_dispatch_record(task)
+        if dispatch_record is not None:
+            try:
+                recorded = phase_event.record_dispatch(
+                    action=str(task.kind or ""),
+                    task_id=str(task.task_id or ""),
+                    phase=str(dispatch_record["phase"]),
+                    macro_cycle=int(dispatch_record["macro_cycle"]),
+                    tick=int(dispatch_record["tick"]),
+                    dispatch_class=str(dispatch_record["dispatch_class"]),
+                    allowed=bool(dispatch_record["allowed"]),
+                    denial_rule=dispatch_record["denial_rule"],
+                    dispatched_unix=time.time(),
+                )
+                if not recorded:
+                    raise RuntimeError("dispatch evidence was not durably recorded")
+            except Exception as exc:
+                cleanup_confirmed = await release_resources()
+                if cleanup_confirmed and lease is not None:
+                    await self.locks.release(lease)
+                self._inflight_actions.pop(task.task_id, None)
+                raise RuntimeError(f"refusing to start task {task.task_id!r}: dispatch evidence write failed") from exc
 
         async def execute_and_complete() -> SubAgentResult:
             result = await self.sub.run_task(
@@ -1761,7 +1772,7 @@ class DispatcherCollaborator:
             running_loop = None
         if synchronous and running_loop is loop:
             return "(run_action_now unavailable: sync bridge invoked on the coordinator loop thread)"
-        coro = self._run_action_now(name, dict(params or {}))
+        coro = self._run_action_now_in_session(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:
             timeout_s = float(
@@ -1778,6 +1789,13 @@ class DispatcherCollaborator:
         except RuntimeError as exc:
             return f"(run_action_now: could not schedule on coordinator loop: {exc!r})"
         return fut, name, timeout_s
+
+    async def _run_action_now_in_session(self, action_name: str, params: dict[str, Any]) -> str:
+        """Restore recorder binding after an agent-thread to loop handoff."""
+        from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+        with session_scope(self.session_dir):
+            return await self._run_action_now(action_name, params)
 
     @staticmethod
     def _inline_action_result(fut: Future[str], name: str, timeout_s: float, *, wait_timeout_s: float) -> str:
@@ -1905,6 +1923,7 @@ class DispatcherCollaborator:
             idempotency_key=key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="inline",
         )
         if was_existing and task.state in ("succeeded", "failed", "cancelled"):
             for entry in reversed(task.history):

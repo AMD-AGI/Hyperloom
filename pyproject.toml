@@ -92,6 +92,7 @@ test = [
     "hyperloom-inference_optimizer[ci]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "jsonschema>=4.18",
     # Property-based tests over the bring-up ladder.
     "hypothesis>=6.0",
     "respx>=0.21",
@@ -287,6 +288,7 @@ hyperloom = [
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
     "*.md",
+    "contracts/*.json",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",

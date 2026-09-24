@@ -153,6 +153,8 @@ def _lane(session_dir: Path, **overrides: Any):
         baseline_failure_streak=1,
         baseline_arg_error_streak=0,
         baseline_total_failures=0,
+        phase=PHASE_ENABLEMENT,
+        macro_cycle=0,
         tick=0,
         stop_reason="",
         save=lambda *a, **k: None,

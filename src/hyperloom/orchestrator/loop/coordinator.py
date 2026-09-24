@@ -57,7 +57,7 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec, timed
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
-from ..state.task_registry import TaskRegistry
+from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
@@ -186,7 +186,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         self.bus = bus_class(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
-        self.tasks = TaskRegistry(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
         self.cursors = CursorStore(self.db)
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks,
