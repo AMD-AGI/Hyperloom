@@ -495,7 +495,7 @@ base_preflight() {
 
   local py
   if ! py="$(resolve_python)"; then die "no usable Python found (set PYTHON or provide /opt/venv). ${IMAGE_HINT}"; fi
-  log "Python: ${py} ($(${py} --version 2>&1))"
+  log "Python: ${py} ($("${py}" --version 2>&1))"
 
   local torch_report tv thip
   torch_report="$("${py}" - <<'PY' 2>/dev/null || true
@@ -531,6 +531,14 @@ PY
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
     local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
+      if [ "$fw" = "atom" ] && [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
+        if ! "$probe_py" -B -c 'import atom'; then
+          warn "framework atom: import failed (required)"; rc=1; continue
+        fi
+        if ! "$probe_py" -B -m atom.entrypoints.openai_server --help >/dev/null; then
+          warn "framework atom: server --help failed (required)"; rc=1; continue
+        fi
+      fi
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
       else
@@ -2592,10 +2600,18 @@ main() {
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 
-  local user_data
-  # Precedence: --user-data-path > process env > .env > default. The .env value
-  # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
-  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
+  local user_data dotenv_user_data root_declaration readonly_root=0
+  # Precedence: --user-data-path > process env > .env > default. A readonly
+  # platform root must also agree with the selected CLI/dotenv workspace.
+  dotenv_user_data="$(read_dotenv_var USER_DATA_PATH)"
+  root_declaration="$(declare -p USER_DATA_PATH 2>/dev/null || true)"
+  if [[ "$root_declaration" =~ ^declare\ -[^[:space:]]*r[^[:space:]]*\  ]]; then
+    readonly_root=1
+    user_data="${USER_DATA_PATH_ARG:-${dotenv_user_data:-${USER_DATA_PATH:-}}}"
+    [ "${USER_DATA_PATH:-}" = "$user_data" ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+  else
+    user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$dotenv_user_data}}"
+  fi
 # Container images ship a writable /workspace; a bare-metal host off root has
 # neither it nor permission to create it, so the mkdir below would abort.
 _default_workspace_root() {
@@ -2606,11 +2622,14 @@ _default_workspace_root() {
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
   user_data="${user_data:-$(_default_workspace_root)}"
-  export USER_DATA_PATH="$user_data"
-  # Same precedence as USER_DATA_PATH above: the setup skill writes the backend
-  # into .env before this runs, so an unread .env would silently reset it to geak.
+  if [ "${USER_DATA_PATH:-}" != "$user_data" ]; then
+    [ "$readonly_root" -eq 0 ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+    USER_DATA_PATH="$user_data"
+  fi
+  export USER_DATA_PATH
+  # Preserve explicit choices with env > .env precedence; leave an omitted backend
+  # empty so the CLI can apply its framework-specific default at launch.
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"
-  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"

@@ -31,6 +31,19 @@ _KEY = "KERNEL_OPT_BACKEND_ORDER"
 _WARNING = "so the kernel phase runs GEAK"
 
 
+@pytest.fixture(autouse=True)
+def _restore_kernel_backend_order():
+    """Restore direct production writes that monkeypatch does not track."""
+    original = os.environ.get(_KEY)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(_KEY, None)
+        else:
+            os.environ[_KEY] = original
+
+
 def test_unset_backend_defaults_to_forge(monkeypatch, capsys):
     monkeypatch.delenv(_KEY, raising=False)
 

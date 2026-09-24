@@ -515,7 +515,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)

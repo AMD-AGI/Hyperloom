@@ -54,7 +54,7 @@ The following table lists the minimum requirements for running Hyperloom.
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
 | Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0),                  |
-|                     | Atom (>= 0.1.7-rc0), plus ``custom`` for your own      |
+|                     | ATOM (preinstalled; see below), plus ``custom``        |
 |                     | benchmark script                                       |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
@@ -129,9 +129,9 @@ The following inference frameworks are supported:
        ``rocm723`` wheel, a ROCm 10 host (``torch.version.hip`` 7.15) builds vLLM
        from source, and any other combination is rejected (see below). Do not mix
        frameworks within one session
-   * - Atom
-     - 7.2.4
-     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset). On a quantized non-vLLM backend GEAK must resolve a live rewrite seam rather than guess one, which forge does not require.
+   * - ATOM
+     - 7.2.4 (recorded image stack)
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker or direct execution in a preinstalled ATOM/ROCm torch environment. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X, not a universal ATOM pip-version minimum. Other builds require local validation. The CLI defaults an unset/empty ``KERNEL_OPT_BACKEND_ORDER`` to ``forge`` on ATOM and preserves explicit values; GEAK's live rewrite-seam resolution is unproven here.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -185,6 +185,23 @@ Bare-metal recommended environment
 
 For ``baremetal`` setup, align the host to this combination before running setup.
 Hyperloom does not install ROCm or torch itself.
+
+For ATOM, ``baremetal`` means running directly in the development machine's
+selected Python environment, including when the development platform itself is
+a container; it does not start an additional Docker container. ATOM must already
+be installed. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
+with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
+launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
+the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
+
+Run ``python -m hyperloom.inference_optimizer.setup --check-only --
+--install-framework none --frameworks atom --require-frameworks`` with the
+selected interpreter first. Only after approval, repeat without ``--check-only``:
+``none`` skips framework installation but can still write configuration and
+apply ROCm hotfixes. Preserve the selected ``USER_DATA_PATH``; an existing setup
+need not be repeated. Hyperloom does not install ATOM and does not assert a
+minimum ATOM package version derived from a Docker tag. Import checks establish
+local prerequisites, not end-to-end validation of every stack.
 
 .. list-table::
    :header-rows: 1
