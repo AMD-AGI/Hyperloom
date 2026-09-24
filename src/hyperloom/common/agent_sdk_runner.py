@@ -58,8 +58,18 @@ async def drive_agent_session(
     child_env: Mapping[str, str] | None = None,
     log: Callable[[str], None] | None = None,
     backend: str | None = None,
+    done: Callable[[], bool] | None = None,
+    continuation_prompt: str = "",
+    max_continuations: int = 3,
 ) -> AgentSdkTurnResult:
-    """Run one harness session and return the accumulated assistant text."""
+    """Run one harness session and return the accumulated assistant text.
+
+    ``done`` names the artifact the session owes. The DeepSeek Harness ends a
+    turn whenever the model replies without a tool call -- including when it
+    writes one out as text -- so a session that stopped before ``done()`` holds
+    is continued with ``continuation_prompt``, at most ``max_continuations``
+    times. Claude's own loop runs to its turn cap and takes no continuation.
+    """
     resolved = (backend or llm_config.resolve_agent_backend()).strip().lower()
     if resolved == llm_config.AGENT_BACKEND_DEEPSEEK:
         return await _drive_deepseek(
@@ -70,6 +80,9 @@ async def drive_agent_session(
             allowed_tools=allowed_tools,
             child_env=child_env,
             log=log,
+            done=done,
+            continuation_prompt=continuation_prompt,
+            max_continuations=max_continuations,
         )
     return await _drive_claude(
         prompt=prompt,
@@ -136,6 +149,9 @@ async def _drive_deepseek(
     allowed_tools: list[str] | None,
     child_env: Mapping[str, str] | None,
     log: Callable[[str], None] | None,
+    done: Callable[[], bool] | None = None,
+    continuation_prompt: str = "",
+    max_continuations: int = 0,
 ) -> AgentSdkTurnResult:
     writable = bool(allowed_tools)
     instructions = "\n\n".join(part for part in (_RUNTIME_MAPPING.strip(), system_prompt.strip()) if part)
@@ -148,26 +164,35 @@ async def _drive_deepseek(
         env=dict(child_env) if child_env is not None else None,
         request_timeout_sec=7200.0,
     )
+    chunks: list[str] = []
     error = ""
     try:
         await session.start()
-        result = await session.turn(prompt, timeout_sec=session.request_timeout_sec)
+        turn_prompt = prompt
+        for continuation in range(max_continuations + 1):
+            if continuation and log:
+                log(f"[deepseek-harness] continuing: the owed artifact is not written (continuation {continuation})")
+            result = await session.turn(turn_prompt, timeout_sec=session.request_timeout_sec)
+            text = result.text or ""
+            if text:
+                chunks.append(text)
+                if log:
+                    log(f"[deepseek-harness] {text[:1000]}")
+            if result.error:
+                error = result.error
+                if log:
+                    log(f"[deepseek-harness] WARNING: {error}")
+                break
+            if done is None or done():
+                break
+            turn_prompt = continuation_prompt
     except DeepSeekSessionError as exc:
         error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[deepseek-harness] WARNING: {error}")
-        return AgentSdkTurnResult(error=error)
     finally:
         await session.aclose()
-
-    text = result.text or ""
-    if result.error:
-        error = result.error
-        if log:
-            log(f"[deepseek-harness] WARNING: {error}")
-    if log and text:
-        log(f"[deepseek-harness] {text[:1000]}")
-    return AgentSdkTurnResult(text=text, error=error, chunks=[text] if text else [])
+    return AgentSdkTurnResult(text="\n".join(chunks), error=error, chunks=chunks)
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:

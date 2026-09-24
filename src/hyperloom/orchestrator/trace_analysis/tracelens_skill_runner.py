@@ -688,6 +688,7 @@ async def _run_tracelens_skill_deepseek(
 
     harness_error = ""
     raw_text = ""
+    report_path = output_dir / "analysis.md"
     try:
         result = await drive_agent_session(
             prompt=prompt,
@@ -697,6 +698,12 @@ async def _run_tracelens_skill_deepseek(
             max_turns=300,
             allowed_tools=DEFAULT_ALLOWED_TOOLS,
             log=log,
+            done=report_path.exists,
+            continuation_prompt=(
+                f"{report_path} has not been written yet, so the workflow is not finished. A tool call "
+                "written out as text in a reply is not executed. Continue from the step you stopped at, "
+                f"calling tools directly, and write {report_path} before you stop."
+            ),
         )
         raw_text = result.text
         harness_error = result.error
@@ -705,7 +712,6 @@ async def _run_tracelens_skill_deepseek(
         if log:
             log(f"[deepseek-harness] WARNING: {harness_error}")
 
-    report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if harness_error:
             raise RuntimeError(f"TraceLens DeepSeek runner failed before writing {report_path}: {harness_error}")
