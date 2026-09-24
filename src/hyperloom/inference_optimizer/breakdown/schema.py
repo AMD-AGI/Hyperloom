@@ -142,8 +142,9 @@ class V6MetadataLangfuse(TypedDict, total=False):
 class V6GradedAxes(TypedDict, total=False):
     """The axes an AgentX measurement is ranked and reported on.
 
-    ``e2e_norm_intvty_p50`` is the objective; the tail and ``output_tput_per_gpu`` are its guards. The rest are the
-    figures the frontier and the latency detail view are drawn from.
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``, which is not a
+    member here -- the verdict reads it off the measurement, not off this block. ``output_tput_per_gpu`` is the
+    frontier's y axis and the latency percentiles are the detail view: reported, never graded.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
