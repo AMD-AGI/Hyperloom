@@ -86,6 +86,20 @@ def test_data_files_sources_exist():
     assert not missing, f"data-files entries point at missing sources: {missing}"
 
 
+def test_fleet_demo_skills_install_for_every_agent() -> None:
+    data_files = _pyproject()["tool"]["setuptools"]["data-files"]
+    skills = (
+        "fleet-kb-slack-toolbox",
+        "fleet-kb-observability",
+        "hyperloom-fleet-worker-run",
+    )
+    for root in (".agents", ".claude", ".cursor"):
+        for skill in skills:
+            destination = f"{root}/skills/{skill}"
+            assert destination in data_files
+            assert any(source.endswith(f"/{skill}/SKILL.md") for source in data_files[destination])
+
+
 def _module_path(dotted: str) -> Path | None:
     base = _src() / dotted.replace(".", "/")
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):

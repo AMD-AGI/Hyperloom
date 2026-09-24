@@ -207,6 +207,58 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+# Fleet demo skills installed into the agent workspace by ``pip --target``.
+".agents/skills/fleet-kb-slack-toolbox" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/SKILL.md",
+]
+".agents/skills/fleet-kb-slack-toolbox/scripts" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/scripts/toolbox_cli.py",
+]
+".claude/skills/fleet-kb-slack-toolbox" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/SKILL.md",
+]
+".claude/skills/fleet-kb-slack-toolbox/scripts" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/scripts/toolbox_cli.py",
+]
+".cursor/skills/fleet-kb-slack-toolbox" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/SKILL.md",
+]
+".cursor/skills/fleet-kb-slack-toolbox/scripts" = [
+    "src/hyperloom/skills/fleet-kb-slack-toolbox/scripts/toolbox_cli.py",
+]
+".agents/skills/fleet-kb-observability" = [
+    "src/hyperloom/skills/fleet-kb-observability/SKILL.md",
+]
+".agents/skills/fleet-kb-observability/scripts" = [
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
+]
+".claude/skills/fleet-kb-observability" = [
+    "src/hyperloom/skills/fleet-kb-observability/SKILL.md",
+]
+".claude/skills/fleet-kb-observability/scripts" = [
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
+]
+".cursor/skills/fleet-kb-observability" = [
+    "src/hyperloom/skills/fleet-kb-observability/SKILL.md",
+]
+".cursor/skills/fleet-kb-observability/scripts" = [
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
+    "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
+]
+".agents/skills/hyperloom-fleet-worker-run" = [
+    "src/hyperloom/skills/hyperloom-fleet-worker-run/SKILL.md",
+]
+".claude/skills/hyperloom-fleet-worker-run" = [
+    "src/hyperloom/skills/hyperloom-fleet-worker-run/SKILL.md",
+]
+".cursor/skills/hyperloom-fleet-worker-run" = [
+    "src/hyperloom/skills/hyperloom-fleet-worker-run/SKILL.md",
+]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]

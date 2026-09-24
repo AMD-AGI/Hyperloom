@@ -17,7 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   decision are reused while later decisions see the current scope-verified view,
   without weakening the original Recipe baseline. New Fleet Experiences are
   unverified and unavailable by default; runtime reads see only Experiences a
-  Slack user explicitly marked `verified_for_scope` for that Run.
+  Slack user explicitly marked `verified_for_scope` for that Run. The demo
+  branch wheel also installs the Slack toolbox, event bridge, and Worker-run
+  Skills into Claude/Cursor/Agents discovery directories.
 
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,

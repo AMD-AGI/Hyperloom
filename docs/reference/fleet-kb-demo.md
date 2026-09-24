@@ -7,8 +7,8 @@ Experiences explicitly marked `verified_for_scope` for its own Run scope.
 
 ## Central server
 
-Install the `demo/fleet-kb-service` Hyperloom-KB branch, put the service behind
-the Slack server's TLS reverse proxy, and seed the reviewed Experience payload:
+Install the `demo/fleet-kb-service` Hyperloom-KB branch and put the service
+behind the Slack server's TLS reverse proxy:
 
 ```bash
 hyperloom-kb-fleet-serve \
@@ -26,6 +26,28 @@ or bundled corpus is loaded.
 The process also needs `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
 `LOCAL_KB_PLANNER_MODEL`, `HYPERLOOM_FLEET_KB_WORKER_TOKEN`, and a distinct
 `HYPERLOOM_FLEET_KB_BOT_TOKEN`.
+
+## Slack agent install
+
+Install the Hyperloom demo branch into the workspace where the Slack server
+starts Claude:
+
+```bash
+cd "$SLACK_CLAUDE_WORKSPACE"
+python3 -m pip install --upgrade --target . \
+  "git+https://github.com/AMD-AGI/Hyperloom.git@demo/fleet-kb-integration"
+```
+
+Restart Claude in that workspace. The wheel installs these directly into its
+discovery directory:
+
+```text
+.claude/skills/fleet-kb-slack-toolbox/
+.claude/skills/fleet-kb-observability/
+.claude/skills/hyperloom-fleet-worker-run/
+```
+
+The same files are installed for Cursor and Agents-compatible runtimes.
 
 ## Worker launch
 
@@ -48,7 +70,7 @@ export HYPERLOOM_FLEET_KB_WORKER_ID="$(hostname)"
 export HYPERLOOM_FLEET_KB_SCOPE_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
-export HYPERLOOM_FLEET_KB_SPOOL="$SESSION_DIR/fleet-kb-spool"
+export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH}/fleet-kb-spool/$SLACK_JOB_ID"
 ```
 
 During FRAMEWORK_AGENT, the orchestration prompt performs one Fleet read for

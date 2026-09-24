@@ -5,6 +5,11 @@ description: Run a 3-hour Hyperloom Qwen3-8B FRAMEWORK_AGENT (OPTIMIZE) session 
 
 # Hyperloom Qwen3-8B 3h Framework-Only (No-Kernel) Run
 
+If the request comes from the Fleet KB Slack demo or
+`HYPERLOOM_FLEET_KB_URL` is configured, do not use this standalone Skill.
+Use `hyperloom-fleet-worker-run`; it contains the recommended Qwen3-8B example
+plus the required scope, token, cold-start, read, and write contracts.
+
 Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a short Qwen3-8B demo.
 
 ## Run Mode
