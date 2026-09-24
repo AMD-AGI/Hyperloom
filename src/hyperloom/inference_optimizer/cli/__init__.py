@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.env import is_truthy
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
+from hyperloom.common.env import env_bool
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -600,7 +601,7 @@ def _catalog_probe_has_no_credential() -> bool:
 
 def _custom_orch_model_allowed() -> bool:
     """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
-    return is_truthy(os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "").strip() or None, default=True)
+    return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:

@@ -23,15 +23,12 @@ def atomic_write_json(path: str | Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload))
 
 
-def _validated_warm_start_result(
-    workspace_dir: str,
-    *,
-    commit_hash: str,
-    baseline_ms: float,
-    best_ms: float,
-    mean_case_speedup: float,
-) -> dict | None:
-    """Return the published warm-start commit point when it is authoritative."""
+def load_published_best(workspace_dir: str) -> dict | None:
+    """Return the published best result, or ``None`` when the campaign has no authoritative one.
+
+    ``best_result.json`` is the commit point: every consumer of a campaign's outcome reads it
+    through here so that one verdict on what counts as published governs them all.
+    """
     path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
     try:
         payload = json.loads(path.read_text())
@@ -41,9 +38,22 @@ def _validated_warm_start_result(
         not isinstance(payload, dict)
         or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION
         or payload.get("correctness_passed") is not True
-        or payload.get("commit_hash") != commit_hash
-        or int(payload.get("iteration", -1)) != 0
     ):
+        return None
+    return payload
+
+
+def _validated_warm_start_result(
+    workspace_dir: str,
+    *,
+    commit_hash: str,
+    baseline_ms: float,
+    best_ms: float,
+    mean_case_speedup: float,
+) -> dict | None:
+    """Return the published warm-start commit point when it is authoritative."""
+    payload = load_published_best(workspace_dir)
+    if payload is None or payload.get("commit_hash") != commit_hash or int(payload.get("iteration", -1)) != 0:
         return None
     try:
         published_baseline = float(payload.get("baseline_wall_ms"))

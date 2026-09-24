@@ -29,8 +29,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from hyperloom.common.llm_headers import format_custom_headers
 from kernelforge.llm import (
-    format_custom_headers,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
@@ -660,8 +660,13 @@ class ClaudeBackend:
             end_reason = "turn_cap"
         elif subtype and subtype != "success":
             end_reason = f"sdk_{subtype}"
-        else:
+        elif subtype == "success":
             end_reason = "agent_stopped"
+        else:
+            # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
+            # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
+            # as the agent's answer.
+            end_reason = "sdk_no_result"
 
         result = AgentRunResult(
             text="\n".join(text_parts).strip(),

@@ -17,7 +17,7 @@ from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.llm.git import git
 from kernelforge.loop.scoring import aggregate_regression_detail
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
 # v2 adds `aggregate_regression` and derives `total_improved` from it, so a v1 manifest is missing a field this
 # publisher always writes.
@@ -71,19 +71,6 @@ class BestResultPublisher:
             file.write(text)
             file.flush()
             os.fsync(file.fileno())
-
-    @classmethod
-    def _fsync_tree(cls, root: Path) -> None:
-        """fsync every file and directory under ``root`` (bottom of the bundle must be durable before the top-level rename makes it visible)."""
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                file_path = Path(dirpath) / name
-                fd = os.open(str(file_path), os.O_RDONLY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-            fsync_directory(Path(dirpath))
 
     def _copy_changed_files(
         self,
@@ -417,7 +404,7 @@ class BestResultPublisher:
                 )
                 # Make the whole bundle durable before it becomes visible, then fsync the parent so the rename itself
                 # survives a crash (mirrors archive.record's fsync discipline).
-                self._fsync_tree(temporary)
+                fsync_tree(temporary)
                 os.replace(temporary, version_dir)
                 fsync_directory(self.best_root)
             finally:

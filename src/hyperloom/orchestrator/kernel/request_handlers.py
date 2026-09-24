@@ -36,6 +36,7 @@ from hyperloom.common import codex_session, llm_config
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
@@ -2669,13 +2670,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     return "per_token"
 
 
-_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
-
-
 def _is_gfx950(gpu_type: str) -> bool:
     """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
     key = (gpu_type or "").strip().lower()
-    if key in _GFX950_GPU_TYPES:
+    if is_gfx_arch(key, "gfx950"):
         return True
     if not key or key == "auto":
         return _is_gfx950_rocminfo()
@@ -4669,38 +4667,46 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_fusion_decode_trace(state, payload: dict) -> str:
-    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
+def _resolve_fusion_decode_trace(state) -> str:
+    """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
-    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
-    re-profiling. Explicit ``payload['trace_path']`` wins.
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace.
+    PRELUDE/roofline already captured one and promoted it into
+    ``state.last_profile_trace`` alongside the workload it was measured on
+    (``SharedState.record_profile_workload``), so the lane reuses that rather than
+    re-profiling. ``state.last_profile_trace`` is the only source: the fusion
+    opportunities discovered below are attributed to the run that produced the trace,
+    and a caller-supplied path would file this run's decisions under another workload.
+
+    ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
+    round that merged its ranks, and the capture directory otherwise --
+    ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
+    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
+    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    newest capture in it, which is this run's too: the directory is the round's own
+    ``trace_dir``.
+
+    Args:
+        state: The session ``SharedState``.
+
+    Returns:
+        str: The decode trace file to discover against, or ``""`` when this run has
+            no usable trace yet.
     """
-
-    def _trace_file(path_str: str) -> str:
-        path = Path(path_str)
-        if path.is_file():
-            return str(path)
-        if not path.is_dir():
-            return ""
-        candidates = sorted(
-            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return str(candidates[0]) if candidates else ""
-
-    explicit = str(payload.get("trace_path") or "").strip()
-    if explicit:
-        resolved = _trace_file(explicit)
-        if resolved:
-            return resolved
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace:
-        resolved = _trace_file(trace)
-        if resolved:
-            return resolved
-    return ""
+    if not trace:
+        return ""
+    path = Path(trace)
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(
+        list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(captures[0]) if captures else ""
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -4857,8 +4863,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = _resolve_fusion_decode_trace(state, payload)
+    trace_path = _resolve_fusion_decode_trace(state)
     if not trace_path:
+        recorded = str(getattr(state, "last_profile_trace", "") or "").strip()
         return {
             "status": "skipped",
             "backend": "forge",
@@ -4866,7 +4873,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "error_class": "decode_trace_missing",
             "error": (
                 "no decode trace available for fusion discovery "
-                "(state.last_profile_trace empty; run profile/roofline first)"
+                f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)"
             ),
             "decision": "REVERT",
             "kept": False,

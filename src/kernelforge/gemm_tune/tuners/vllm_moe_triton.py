@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import TUNER_ENV_VARS, run_subprocess
 from ..shapes import compute_vllm_moe_batch_sizes
 
@@ -307,16 +307,14 @@ def _create_tensors(M, dtype=torch.bfloat16):
 
 
 def benchmark_baseline(M, dtype=torch.bfloat16):
-    """Benchmark with vLLM default config (no override) as baseline."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for vLLM's default config, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts_default(hidden_states, w1, w2, topk_weights, topk_ids)
         except Exception as e:
             print(f"  [baseline warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -326,16 +324,14 @@ def benchmark_baseline(M, dtype=torch.bfloat16):
 
 
 def benchmark_config(M, config, dtype=torch.bfloat16):
-    """Benchmark a single Triton config for fused MoE at batch size M."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for one Triton config at batch size M, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, config)
         except Exception as e:
             print(f"  [warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -358,24 +354,31 @@ def main():
 
     for M in BATCH_SIZES:
         baseline_time = benchmark_baseline(M)
+        if baseline_time is None:
+            # Without the default config's own time there is nothing to be faster than, and dividing by a stand-in
+            # would report this shape as an unbounded win.
+            errors.append(f"M={{M}}: the default config did not benchmark")
+            print(f"M={{M}}: baseline did not benchmark; no config can be judged", file=sys.stderr)
+            torch.cuda.empty_cache()
+            continue
         print(f"M={{M}}: baseline={{baseline_time:.1f}}us", file=sys.stderr)
 
-        best_time = float("inf")
+        best_time = None
         best_config = None
 
         for config in CONFIGS:
             try:
                 elapsed = benchmark_config(M, config)
-                if elapsed < best_time:
-                    best_time = elapsed
-                    best_config = dict(config)
             except Exception as e:
                 if not errors:
                     errors.append(f"M={{M}}: {{type(e).__name__}}: {{e}}")
                 continue
+            if elapsed is not None and (best_time is None or elapsed < best_time):
+                best_time = elapsed
+                best_config = dict(config)
 
-        if best_config is not None:
-            speedup = baseline_time / best_time if best_time > 0 else 1.0
+        if best_config is not None and best_time > 0:
+            speedup = baseline_time / best_time
             shape_details.append({{
                 "M": M,
                 "baseline_us": round(baseline_time, 2),
@@ -389,7 +392,7 @@ def main():
                 print(f"M={{M}}: best={{best_time:.1f}}us speedup={{speedup:.3f}}x SKIP (not faster than default)", file=sys.stderr)
         else:
             if not errors:
-                errors.append(f"M={{M}}: all configs returned inf")
+                errors.append(f"M={{M}}: no config benchmarked")
 
         torch.cuda.empty_cache()
 
@@ -402,16 +405,16 @@ def main():
         json.dump(shape_details, f, indent=2)
 
     speedups = [d["speedup"] for d in shape_details if d["speedup"] > 0]
-    best_speedup = max(speedups) if speedups else 1.0
-    avg_speedup = sum(speedups) / len(speedups) if speedups else 1.0
+    best_speedup = max(speedups) if speedups else None
+    avg_speedup = sum(speedups) / len(speedups) if speedups else None
 
     out = {{
         "status": "ok",
         "output": output_path,
         "batch_sizes": len(results),
         "shape_details": shape_details,
-        "best_speedup": round(best_speedup, 4),
-        "avg_speedup": round(avg_speedup, 4),
+        "best_speedup": None if best_speedup is None else round(best_speedup, 4),
+        "avg_speedup": None if avg_speedup is None else round(avg_speedup, 4),
     }}
     if errors:
         out["errors"] = errors[:5]
@@ -532,23 +535,17 @@ class VllmMoeTritonTuner(BaseTuner):
         elif "mi355" in gpu_name.lower():
             gpu_name = "AMD_Instinct_MI355X"
 
-        # Determine dtype string
-        dtype_str = "bfloat16"
-        if self.ctx.precision == "fp8":
-            dtype_str = "fp8_w8a8"
-        elif "awq" in self.ctx.quant_type or "gptq" in self.ctx.quant_type:
-            dtype_str = "int8_w8a16"
-
-        config_filename = f"E={E},N={N},device_name={gpu_name},dtype={dtype_str}.json"
+        # The dtype in the name is what vLLM matches against, so it states the dtype the sweep benchmarked.
+        config_filename = f"E={E},N={N},device_name={gpu_name},dtype=bfloat16.json"
         config_path = tuned_configs_dir / config_filename
         config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
 
         # Extract speedup metrics from sweep script output
         shape_details = script_result.get("shape_details", [])
-        best_speedup = script_result.get("best_speedup", 1.0)
-        avg_speedup = script_result.get("avg_speedup", 1.0)
+        best_speedup = script_result.get("best_speedup")
+        avg_speedup = script_result.get("avg_speedup")
         min_pct = self.ctx.min_improvement_pct / 100.0 if self.ctx.min_improvement_pct else 0.0
-        improved_count = sum(1 for d in shape_details if d.get("speedup", 1.0) > 1.0 + min_pct)
+        improved_count = micro_metrics(shape_details, lambda d: d["speedup"] > 1.0 + min_pct).improved
 
         n_tuned = len(sweep_data)
         return TuneResult(

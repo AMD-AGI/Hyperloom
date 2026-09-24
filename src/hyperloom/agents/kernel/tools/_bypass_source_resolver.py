@@ -18,7 +18,7 @@ import re
 import time
 from pathlib import Path
 
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ def _build_repo_kernel_index() -> dict[str, str]:
 
 def resolve_by_kernel_name(device_kernel_name: str) -> tuple[str, str]:
     """Resolve a device kernel name to an editable source via repo scan."""
-    if is_truthy(os.environ.get("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN")):
+    if env_bool("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN"):
         return "", "unresolved"
     bare = _demangle_kernel_name(device_kernel_name)
     if not bare:
