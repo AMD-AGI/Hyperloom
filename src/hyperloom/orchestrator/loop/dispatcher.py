@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator action dispatch: admission, launch, reaping and cancellation of lane tasks."""
 
 from __future__ import annotations
 import asyncio
@@ -58,9 +58,7 @@ from .coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 
-from .coordinator import (
-    _format_inbox_event,
-)
+from .conversation import _format_inbox_event
 import logging as _logging
 
 log = _logging.getLogger(__name__)

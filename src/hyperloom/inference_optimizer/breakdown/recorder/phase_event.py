@@ -86,6 +86,15 @@ STATUS_INTERRUPTED = "interrupted"
 MAX_REASON_CHARS = 500
 
 
+def is_phase_transition_row(row: Any) -> bool:
+    """True when ``row`` records an actual phase change, not an in-phase marker."""
+    if not isinstance(row, dict):
+        return False
+    to_phase = str(row.get("to_phase") or "").strip().upper()
+    from_phase = str(row.get("from_phase") or "").strip().upper()
+    return bool(to_phase) and to_phase != from_phase
+
+
 def phase_event_id(phase: str, macro_cycle: int) -> str:
     """Build ``{phase}:{macro_cycle}:phase``. Raises ``ValueError`` if ``phase``
     is not a token or ``macro_cycle`` is negative."""
@@ -751,6 +760,7 @@ __all__ = [
     "STATUS_INTERRUPTED",
     "STATUS_SUCCEEDED",
     "assemble_phase_ext",
+    "is_phase_transition_row",
     "phase_event_id",
     "record_dispatch",
     "record_entry",

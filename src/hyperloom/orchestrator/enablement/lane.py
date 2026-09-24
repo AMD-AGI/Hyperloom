@@ -17,10 +17,10 @@ from hyperloom.common.deadline import Deadline
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
-from ..actions.executors._grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
-from ..delivery.archive import ROLE_LAUNCH_CONFIG, RoundArchive
+from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
@@ -29,6 +29,7 @@ from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import create_in_cursor
+from .recipe.section import recipe_for
 from .recipe.setup_ledger import mark_round_disposition
 
 if TYPE_CHECKING:
@@ -877,7 +878,9 @@ def _record_enablement_round(
         stall_streak=int(stall_streak or 0),
         # The replay contract is judged at the terminal, which is here: the
         # accepted stack is complete only once the lane has closed on one.
-        enablement=lane,
-        session_dir=str(session_dir or ""),
-        mode=str(getattr(state, "enablement_mode", "") or ""),
+        recipe=recipe_for(
+            lane,
+            session_dir=str(session_dir or ""),
+            mode=str(getattr(state, "enablement_mode", "") or ""),
+        ),
     )

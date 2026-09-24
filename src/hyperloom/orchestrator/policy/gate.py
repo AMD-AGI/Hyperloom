@@ -15,17 +15,16 @@ second gate, not the first one.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
-from ..framework.paths import (
+from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
 from hyperloom.common.env import env_bool, is_truthy
-from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
+from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -107,54 +106,6 @@ BASELINE_ACTION_NAME: str = "baseline"
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
-
-
-def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
-
-    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
-    pinning mask per the repo's GPU runner convention (and the CLI preflight
-    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
-    GPU-specialist capacity scoped to the operator's mask instead of the whole
-    machine.
-
-    Returns:
-        int: the number of visible GPUs derived from the
-            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
-            count parsed from ``rocm-smi``; 0 when nothing can be probed.
-    """
-    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        raw = raw.strip()
-        if raw == "":
-            return 0
-        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
-        if ids:
-            return len(ids)
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
 
 
 def research_lane_ceiling() -> int:
@@ -428,7 +379,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        "explore_elapsed_accum_s",
         "phase_elapsed_totals",
         # KERNEL idle-streak bookkeeping. Forging these is how a model could talk
         # the phase machine into winding KERNEL down early, or hold it open while
@@ -1777,106 +1727,6 @@ class PolicyGate:
                     f"only cancels the queued backlog."
                 ),
             )
-
-
-# ---------------------------------------------------------------------------
-# Policy-denial write-owner functions: they take ``state`` first and own the
-# denial-streak bookkeeping + its prompt summary. ``SharedState`` exposes
-# forwarding shims so existing callers reach these.
-# ---------------------------------------------------------------------------
-def record_policy_denial(
-    state,
-    *,
-    action_name: str,
-    rule: str,
-    hint: str,
-    intent_type: str,
-    tick: int,
-    intent_payload: dict[str, Any] | None = None,
-) -> int:
-    """Append a PolicyGate denial row and bump the per-(action, rule) streak.
-
-    Records a capped rolling history entry and increments the
-    consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
-
-    Args:
-        action_name (str): The action the denied intent targeted (empty
-            is normalized to ``"*"`` in the streak key).
-        rule (str): The PolicyGate rule id that fired.
-        hint (str): Human-readable remediation hint surfaced to the LLM.
-        intent_type (str): The denied intent's type.
-        tick (int): The Coordinator tick at which the denial occurred.
-        intent_payload (dict[str, Any] | None): Optional intent payload;
-            when present, its sorted keys are recorded for context.
-
-    Returns:
-        int: The new consecutive-denial streak value for this
-            (action, rule) pair.
-    """
-    from hyperloom.common.timeutil import now_iso
-
-    key = f"{action_name or '*'}:{rule}"
-    streak = int(state.policy_denial_streak.get(key, 0)) + 1
-    state.policy_denial_streak[key] = streak
-    entry = {
-        "tick": int(tick),
-        "action_name": action_name or "",
-        "rule": rule,
-        "hint": hint or "",
-        "intent_type": intent_type,
-        "streak": streak,
-        "ts": now_iso(),
-    }
-    if intent_payload:
-        entry["intent_payload_keys"] = sorted(intent_payload.keys())
-    history = list(state.policy_denial_history or [])
-    history.append(entry)
-    if len(history) > state._POLICY_DENIAL_HISTORY_CAP:
-        history = history[-state._POLICY_DENIAL_HISTORY_CAP :]
-    state.policy_denial_history = history
-    return streak
-
-
-def reset_policy_denial_streak(state, action_name: str) -> None:
-    """Clear all consecutive-denial streaks for a given action.
-
-    Drops every ``policy_denial_streak`` entry whose key begins with
-    ``"<action_name>:"`` — called when the action finally succeeds so a
-    later denial starts a fresh streak.
-
-    Args:
-        action_name (str): The action whose streaks should be reset; a
-            falsy value is a no-op.
-    """
-    if not action_name:
-        return
-    prefix = f"{action_name}:"
-    state.policy_denial_streak = {
-        k: v for k, v in (state.policy_denial_streak or {}).items() if not k.startswith(prefix)
-    }
-
-
-def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
-    """Render the most recent PolicyGate denials for prompt injection.
-
-    Args:
-        top_k (int): Maximum number of newest denial rows to render.
-
-    Returns:
-        str: A ``=== Recent policy denials ===`` block, or ``""`` when
-            no denials have been recorded.
-    """
-    if not state.policy_denial_history:
-        return ""
-    rows = list(state.policy_denial_history)[-top_k:]
-    lines = [f"=== Recent policy denials (newest last, total={len(state.policy_denial_history)}) ==="]
-    for r in rows:
-        lines.append(
-            f"  tick={r.get('tick')} action={r.get('action_name')!r} "
-            f"rule={r.get('rule')!r} streak={r.get('streak')} "
-            f"hint={str(r.get('hint') or '')[:140]!r}"
-        )
-    return "\n".join(lines)
 
 
 def validate_specialist_max_turns_raw(

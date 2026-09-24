@@ -46,9 +46,10 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from hyperloom.orchestrator.kernel import controller_submit, request_handlers
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
+    from hyperloom.orchestrator.kernel import controller_submit
 
-    real_tool_path = request_handlers._kernel_agent_tool_path
+    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
 
     def _tool_path_without_geak_runner(tool_name: str) -> Path:
         if tool_name == "backends/geak_runner.py":
@@ -57,7 +58,7 @@ def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
-    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 

@@ -33,7 +33,7 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import (
+from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     resolve_session_framework_root,
 )
@@ -85,7 +85,7 @@ from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
-from ._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant,
@@ -98,7 +98,7 @@ from ._grid_runner import (
     session_grid_bounds,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     merge_server_args,
     tokenize_server_args_preserving_json,
@@ -3711,7 +3711,7 @@ class IntegratePatchExecutor:
             collect_contributions,
             declared_targets,
         )
-        from ...framework.paths import resolve_session_framework_root
+        from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
         from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
 
         root = str(framework_root or "")

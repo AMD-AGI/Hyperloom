@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``orchestrator.state.optimization_journal``."""
+"""Tests for ``inference_optimizer.session.optimization_journal``."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     JOURNAL_FILENAME,
     Journal,
     JournalEntry,
@@ -209,7 +209,7 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
 
 def test_append_entry_dedupe_per_task_id(session_dir: Path):
     """``task_id`` breaks the dedupe tie for two same-kind tasks in one tick."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         KIND_KERNEL_FILE,
     )
 
@@ -418,7 +418,7 @@ def test_derive_journal_outcome_integrate_patch_kept_is_keep():
 
 def test_derive_journal_outcome_refused_promotion_is_no_promote():
     """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
-    from hyperloom.orchestrator.state.optimization_journal import PROMOTION_REFUSED_KEY
+    from hyperloom.inference_optimizer.session.optimization_journal import PROMOTION_REFUSED_KEY
 
     out = derive_journal_outcome(
         "integrate_patch",
@@ -488,7 +488,7 @@ def test_a_stray_was_skipped_cannot_demote_a_kept_patch():
 
 
 def test_operation_kind_for_maps_kind_and_action():
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         operation_kind_for,
     )
 
@@ -506,7 +506,7 @@ def test_operation_kind_for_maps_kind_and_action():
 
 
 def test_proposer_for_resolves_provenance():
-    from hyperloom.orchestrator.state.optimization_journal import proposer_for
+    from hyperloom.inference_optimizer.session.optimization_journal import proposer_for
 
     assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
     assert proposer_for("llm_direct") == "orchestration"
@@ -516,7 +516,7 @@ def test_proposer_for_resolves_provenance():
 
 
 def test_journal_entry_roundtrips_proposer_and_metrics():
-    from hyperloom.orchestrator.state.optimization_journal import JournalEntry
+    from hyperloom.inference_optimizer.session.optimization_journal import JournalEntry
 
     e = JournalEntry(
         phase="EXPLORE",
@@ -551,7 +551,7 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
 
 
 def test_journal_entry_roundtrips_predicted_gain():
-    from hyperloom.orchestrator.state.optimization_journal import JournalEntry
+    from hyperloom.inference_optimizer.session.optimization_journal import JournalEntry
 
     e = JournalEntry(
         phase="EXPLORE",

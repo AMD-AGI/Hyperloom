@@ -22,9 +22,9 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
-from ...state.shared_state import SharedState
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)
@@ -526,7 +526,7 @@ def _build_summary_dict(
     if external_baseline:
         summary["external_baseline"] = _external_baseline_with_comparison(state, external_baseline, session_dir)
     # Roofline comparison: emit only when at least one snapshot exists.
-    from ...kernel.roofline_snapshot import build_roofline_comparison_from_history
+    from hyperloom.inference_optimizer.roofline_snapshot import build_roofline_comparison_from_history
 
     cmp = build_roofline_comparison_from_history(getattr(state, "roofline_snapshots", None))
     if cmp:
@@ -828,7 +828,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
-    from ...kernel.roofline_snapshot import format_roofline_metrics_table
+    from hyperloom.inference_optimizer.roofline_snapshot import format_roofline_metrics_table
 
     lines: list[str] = ["## Roofline Comparison", ""]
     baseline = cmp.get("baseline") or {}
@@ -935,7 +935,11 @@ def _external_baseline_with_comparison(
 ) -> dict[str, Any]:
     """Use the same persisted target as prompt advisory, never reconstructing missing evidence."""
     from hyperloom.common.perf_metric import agentx_active
-    from ...knowledge.research_hints import ComparisonReason, gap_for_state, load_competitor_target
+    from hyperloom.inference_optimizer.baseline_comparison.research_hints import (
+        ComparisonReason,
+        gap_for_state,
+        load_competitor_target,
+    )
 
     if not agentx_active(benchmark_mode=state.benchmark_mode):
         return external
@@ -996,7 +1000,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 
     comparison = ext.get("comparison")
     if isinstance(comparison, dict) and comparison.get("benchmark_mode") == "agentx":
-        from ...knowledge.research_hints import full_gap_summary
+        from hyperloom.inference_optimizer.baseline_comparison.research_hints import full_gap_summary
 
         lines.extend(["", full_gap_summary(comparison)])
         lines.append("")

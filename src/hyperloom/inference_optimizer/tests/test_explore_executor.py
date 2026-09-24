@@ -17,7 +17,7 @@ import yaml
 from hyperloom.orchestrator.actions.executors import (
     ExploreExecutor,
 )
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (

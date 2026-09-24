@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator result writeback: settle finished tasks into SharedState, the optimization journal and the recipe KB."""
 
 from __future__ import annotations
 import argparse
@@ -22,6 +22,7 @@ from hyperloom.common.launch_log_evidence import (
     observed_sglang_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
+from ..enablement.recipe.section import recipe_for
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -32,8 +33,8 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
 )
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
-from ..kernel._recorder_trace import trace_recording_skipped
-from ..state.optimization_journal import (
+from ..actions._recorder_trace import trace_recording_skipped
+from hyperloom.inference_optimizer.session.optimization_journal import (
     Journal,
     JournalEntry,
     OUTCOME_KEEP,
@@ -47,13 +48,15 @@ from ..state.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_base import is_kept as _is_kept
-from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, record_lifecycle_event
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.attempt_ledger import record_config_attempt
-from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
+from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -93,18 +96,38 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
-
-from .coordinator import (
-    _BASELINE_MAX_TOTAL_FAILURES,
-    _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
-    _SEVERITY_CRASH,
-    _SEVERITY_REGRESS,
-    PendingProposal,
-    _extract_enablement_launch_log,
-)
+from .proposals import PendingProposal
+from ..measurement.integrate_performance import integrate_measurement_fields
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Recipe snapshot severity tags (schema has no fixed enum).
+_SEVERITY_CRASH: str = "crash"
+_SEVERITY_REGRESS: str = "regress"
+
+# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
+_BASELINE_MAX_TOTAL_FAILURES: int = 3
+# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
+# drift.
+_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
+
+
+def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
+    """Extract launch/traceback text from a failed baseline result payload."""
+    if not isinstance(result_payload, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
+        val = result_payload.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            joined = "\n".join(str(x) for x in val if str(x).strip())
+            if joined.strip():
+                parts.append(joined.strip())
+    return "\n".join(parts).strip()
+
 
 # Stable ``result_type`` codes for the reasons the remote KB Store returns.
 # Use an exact lookup so a reason token cannot collide with the same text inside
@@ -176,31 +199,6 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     not read back out what the caller already resolved.
     """
     return {**measurement, "output_throughput": float(output_tput)}
-
-
-def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
-
-    return {
-        **graded_axes_of(measurement),
-        **{
-            key: measurement[key]
-            for key in (
-                "ttft_mean_ms",
-                "e2el_mean_ms",
-                "tpot_mean_ms",
-                "workspace",
-                "raw_result_path",
-                "report_path",
-                "materialized_config",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            )
-            if key in measurement
-        },
-    }
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -516,7 +514,8 @@ class WritebackCollaborator:
             duration_s: Optional elapsed seconds for the step.
         """
         try:
-            self.shared_state.record_lifecycle_event(
+            record_lifecycle_event(
+                self.shared_state,
                 step=step,
                 status=status,
                 artifacts=artifacts,
@@ -984,7 +983,7 @@ class WritebackCollaborator:
             "candidate_extra_server_args": result.get("extra_server_args"),
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
             "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-            **_integrate_measurement_fields(measurement),
+            **integrate_measurement_fields(measurement),
         }
         if is_fusion:
             variant["provenance"] = "forge_fusion"
@@ -1256,9 +1255,11 @@ class WritebackCollaborator:
         enablement_event.finish(
             outcome=outcome,
             reason=reason,
-            enablement=lane,
-            session_dir=str(self.session_dir or ""),
-            mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
+            recipe=recipe_for(
+                lane,
+                session_dir=str(self.session_dir or ""),
+                mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
+            ),
             kept_patches=lane.kept_patches,
             kept_artifacts=lane.kept_artifacts,
             setup_commands=lane.setup_commands,
@@ -3056,7 +3057,7 @@ class WritebackCollaborator:
         Args:
             done_payload: The completed specialist task payload.
         """
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = done_payload.get("new_findings") or []
         if not isinstance(hints, list):
@@ -3275,7 +3276,7 @@ class WritebackCollaborator:
                 if isinstance(bv, dict):
                     fp_val = str(bv.get("fingerprint") or "").strip()
                     if not fp_val:
-                        from ..actions.executors._canonical_fingerprint import (
+                        from hyperloom.inference_optimizer.canonical_fingerprint import (
                             canonical_fingerprint,
                         )
 
@@ -4768,7 +4769,7 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(new_tput),
-                **_integrate_measurement_fields(measurement),
+                **integrate_measurement_fields(measurement),
                 "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
                 # Durable source-layer handles so current_best stays relaunchable
@@ -6409,10 +6410,7 @@ class WritebackCollaborator:
         No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
         backend selected.
         """
-        from ..phases.machine_state import (
-            ESCALATE_HINT_SKIP_TO_SWEEP,
-            PHASE_KERNEL_AGENT,
-        )
+        from ..phases.machine_state import PHASE_KERNEL_AGENT
 
         if not self._resumed_from.get("is_resume"):
             return

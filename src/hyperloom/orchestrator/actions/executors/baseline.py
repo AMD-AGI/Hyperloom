@@ -43,7 +43,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -1557,6 +1557,62 @@ def _revert_legacy_warm_patch_trees(
     )
 
 
+def restore_warm_kernel_snapshots(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Restore exact kernel target bytes captured before each mutation."""
+    errors: list[str] = []
+    for snapshot in reversed(snapshots):
+        target = Path(str(snapshot.get("target") or ""))
+        try:
+            if snapshot.get("existed"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(Path(str(snapshot.get("backup") or "")).read_bytes())
+                if snapshot.get("mode") is not None:
+                    target.chmod(int(snapshot["mode"]))
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            if snapshot.get("existed"):
+                expected = Path(str(snapshot.get("backup") or "")).read_bytes()
+                if not target.is_file() or target.read_bytes() != expected:
+                    raise OSError("kernel restore verification failed")
+            elif target.exists() or target.is_symlink():
+                raise OSError("kernel target still exists after restore")
+        except OSError as exc:
+            errors.append(f"{target}:{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
+
+
+def revert_warm_kernel_patches(
+    applied: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Rollback kernels exactly, reporting every failure."""
+    from ._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    errors: list[str] = []
+    for apply_result in reversed(applied):
+        if not apply_result.get("manifest_path"):
+            continue
+        try:
+            reverted = _maybe_revert_kernel_patch(apply_result)
+            if reverted.get("status") != "ok":
+                raise RuntimeError(
+                    str(
+                        reverted.get("error")
+                        or reverted.get("reason")
+                        or f"kernel revert status={reverted.get('status')}"
+                    )
+                )
+        except Exception as exc:
+            log.warning("warm-kernel KB: revert failed", exc_info=True)
+            errors.append(f"{type(exc).__name__}:{exc}")
+    if snapshots:
+        restored = restore_warm_kernel_snapshots(snapshots)
+        errors.extend(restored.get("errors") or [])
+    return {"ok": not errors, "errors": errors}
+
+
 def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
@@ -1564,9 +1620,8 @@ def _rollback_warm_kernel_apply_results(
     """Rollback kernel mutations and report whether every restore succeeded."""
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...phases.prelude import PreludePhase
 
-    return PreludePhase._revert_warm_kernel_patches(
+    return revert_warm_kernel_patches(
         [r for r in results if isinstance(r, dict)],
         list(snapshots) if isinstance(snapshots, list) else None,
     )

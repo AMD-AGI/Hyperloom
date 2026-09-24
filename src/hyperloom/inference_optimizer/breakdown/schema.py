@@ -1006,7 +1006,7 @@ class V6ConcSweepExt(TypedDict, total=False):
 class V6ArchivedFile(TypedDict, total=False):
     """One copy an enablement round's archive holds, and what it is.
 
-    ``role`` is a ``delivery.archive.ROLE_*`` value. It distinguishes a patch
+    ``role`` is a ``round_archive.ROLE_*`` value. It distinguishes a patch
     the round applied from one it refused, which the round's own result cannot.
     """
 

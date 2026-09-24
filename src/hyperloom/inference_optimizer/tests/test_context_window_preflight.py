@@ -150,7 +150,7 @@ def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
 
 # The preflight stop_reason must be a canonical STOP_REASON_VOCAB term.
 def test_context_window_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )
