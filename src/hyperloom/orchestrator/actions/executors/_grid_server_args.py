@@ -371,17 +371,17 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
 )
 
 
-def tokenize_server_args_preserving_json(
+def normalize_server_args_preserving_json(
     server_args: str | None,
-) -> tuple[str, list[str]] | None:
-    """Tokenize server args without stripping JSON's inner double quotes."""
+) -> tuple[str, list[str] | None]:
+    """Compact JSON and return tokens only when their boundaries remain intact."""
     normalized = _reserialize_json_blobs(str(server_args or "").strip())
     if not normalized:
         return "", []
     try:
         tokens = shlex.split(normalized, posix=False)
     except ValueError:
-        return None
+        return normalized, None
     for token in tokens:
         # A balanced JSON value must remain one token.
         depth = 0
@@ -402,14 +402,22 @@ def tokenize_server_args_preserving_json(
             elif char in "}]":
                 depth -= 1
         if depth != 0:
-            return None
+            return normalized, None
         if any(ch.isspace() for ch in token):
-            return None
+            return normalized, None
         # ``shlex.split(..., posix=False)`` can fracture a quoted operand with whitespace into edge-quoted pieces
         # (``"my`` / ``parser"``).
         if token.startswith(("'", '"')) or token.endswith(("'", '"')):
-            return None
+            return normalized, None
     return normalized, tokens
+
+
+def tokenize_server_args_preserving_json(
+    server_args: str | None,
+) -> tuple[str, list[str]] | None:
+    """Tokenize server args without stripping JSON's inner double quotes."""
+    normalized, tokens = normalize_server_args_preserving_json(server_args)
+    return None if tokens is None else (normalized, tokens)
 
 
 def dedup_vllm_server_args(
@@ -428,6 +436,12 @@ def dedup_vllm_server_args(
     if parsed is None:
         return args
     normalized, tokens = parsed
+    kept = dedup_vllm_server_arg_tokens(tokens)
+    return normalized if kept == tokens else " ".join(kept)
+
+
+def dedup_vllm_server_arg_tokens(tokens: list[str]) -> list[str]:
+    """Drop earlier known single-value spans without mapping argv into a dict."""
     # Collect the token span of every recognized single-value flag.
     spans: list[tuple[str, int, int]] = []
     i = 0
@@ -455,10 +469,7 @@ def dedup_vllm_server_args(
         # Keep only the last occurrence; drop the token span of the earlier ones.
         for _name, start, end in occurrences[:-1]:
             drop.update(range(start, end + 1))
-    if not drop:
-        return normalized
-    kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
-    return " ".join(kept)
+    return [tok for idx, tok in enumerate(tokens) if idx not in drop]
 
 
 def _shell_safe_dedupe(args: str) -> str:

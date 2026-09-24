@@ -37,6 +37,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
     LANE_FUSION,
@@ -51,29 +52,7 @@ from ..trace.task_progress import heartbeat_while_output_flows
 
 from ._recorder_trace import trace_recording_skipped
 
-# Re-exported: callers patch these at ``request_handlers.<name>``.
-from ._kernel_decisions import (
-    _honest_flag as _honest_flag,
-    _entry_by_kernel_id as _entry_by_kernel_id,
-    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
-    enqueue_nominated_patch as enqueue_nominated_patch,
-)
-from .nomination_result import parse_outcome as parse_outcome
+from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 
 
 log = logging.getLogger(__name__)
@@ -1415,7 +1394,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             "status": "failed",
             "error_class": "missing_integration_inputs",
             "error": "integrate requires an optimized artifact and target source before E2E",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kernel_id": kernel_id or None,
             "patch_path": patch_path or None,
             "target_file": target_file or None,
@@ -3664,7 +3643,7 @@ async def _capture_vllm_tunableop_shapes(
     if not profile_mode and (not config_path or not Path(config_path).is_file()):
         return {
             "status": "failed",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "requires_e2e_validation": False,
             "error_class": "shape_capture_failed",
             "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
@@ -3686,7 +3665,7 @@ async def _capture_vllm_tunableop_shapes(
         except ValueError as exc:
             return {
                 "status": "failed",
-                "decision": "REVERT",
+                "decision": VERDICT_REVERT,
                 "requires_e2e_validation": False,
                 "error_class": "shape_capture_failed",
                 "error": str(exc),
@@ -3840,7 +3819,7 @@ async def _capture_vllm_tunableop_shapes(
     except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
         return {
             "status": "failed",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "requires_e2e_validation": False,
             "error_class": "shape_capture_failed",
             "error": f"vLLM TunableOp shape capture raised {exc!r}",
@@ -3871,7 +3850,7 @@ async def _capture_vllm_tunableop_shapes(
         detail = f": {benchmark_error}" if benchmark_error else ""
         return {
             "status": "failed",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "requires_e2e_validation": False,
             "error_class": "shape_capture_failed",
             "error": f"vLLM block-FP8 profile capture produced no structured GEMM shapes{detail}",
@@ -3894,7 +3873,7 @@ async def _capture_vllm_tunableop_shapes(
         detail = f": {benchmark_error}" if benchmark_error else ""
         return {
             "status": "failed",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "requires_e2e_validation": False,
             "error_class": "shape_capture_failed",
             "error": f"vLLM TunableOp shape capture produced no complete workload recording{detail}",
@@ -4366,7 +4345,7 @@ async def _run_forge_gemm_tuning(
     # recommended_env becomes decision="KEEP" + extra_envs.
     micro = str(result.get("micro_decision") or "").strip().lower()
     if micro == "candidate" and result.get("recommended_env"):
-        result.setdefault("decision", "KEEP")
+        result.setdefault("decision", VERDICT_KEEP)
         # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
         # source-layer snapshot): copy it into the serving aiter config dir,
         # repoint the env there, and snapshot it so the KEEP survives with the
@@ -4395,9 +4374,9 @@ async def _run_forge_gemm_tuning(
         result.setdefault("requires_e2e_validation", True)
     elif micro in ("no_improvement", "skipped"):
         # Left unadorned on purpose: the wordings below are only legible against it.
-        result.setdefault("decision", "REVERT")
+        result.setdefault("decision", VERDICT_REVERT)
     elif micro in _FORGE_BARREN_MICRO_DECISIONS:
-        result.setdefault("decision", "REVERT")
+        result.setdefault("decision", VERDICT_REVERT)
         if micro == "failed":
             result.setdefault("status", "failed")
         result.setdefault("error_class", f"forge_{micro}")
@@ -4586,7 +4565,7 @@ async def _run_geak_gemm_tuning(
     elif not payload.get("dry_run"):
         return {
             "status": "skipped",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "backend": "geak",
             "engine": "geak",
             "error_class": "legacy_geak_config_missing",
@@ -4848,7 +4827,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "backend": "forge",
             "engine": "forge_fusion",
             "micro_decision": "already_active",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
             "requires_e2e_validation": False,
             "active_env_flags": active_fusion_flags,
@@ -4866,7 +4845,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "engine": "forge_fusion",
             "error_class": "forge_fusion_not_found",
             "error": ("KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'."),
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
         }
 
@@ -4878,7 +4857,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "engine": "forge_fusion",
             "error_class": "model_path_missing",
             "error": "model_path is required",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
         }
 
@@ -4893,7 +4872,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
                 "no decode trace available for fusion discovery "
                 "(state.last_profile_trace empty; run profile/roofline first)"
             ),
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
         }
 
@@ -4908,7 +4887,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "engine": "forge_fusion",
             "error_class": "invalid_agent_backend",
             "error": str(exc),
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
         }
     try:
@@ -4923,7 +4902,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "engine": "forge_fusion",
             "error_class": "invalid_agent_sandbox_mode",
             "error": str(exc),
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
@@ -4994,7 +4973,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
                 "engine": "forge_fusion",
                 "error_class": "subprocess_timeout",
                 "error": timeout_error,
-                "decision": "REVERT",
+                "decision": VERDICT_REVERT,
                 "kept": False,
             }
 
@@ -6230,7 +6209,7 @@ async def integrate_handler(
             "status": "failed",
             "error_class": "apply_failed",
             "error": (f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"),
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "apply_result": apply_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
@@ -6241,7 +6220,7 @@ async def integrate_handler(
             "status": "failed",
             "error_class": "patch_not_applied",
             "error": "kernel patch was not applied; refusing to run E2E benchmark",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "apply_result": apply_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
@@ -6358,7 +6337,7 @@ async def integrate_handler(
                 "patch_path": patch_path,
                 "apply_result": apply_result,
                 "revert_result": revert_result,
-                "decision": "REVERT",
+                "decision": VERDICT_REVERT,
             }
 
     try:
@@ -6413,7 +6392,7 @@ async def integrate_handler(
             "status": "failed",
             "error_class": rebaseline_error_class,
             "error": "re-baseline did not succeed",
-            "decision": "REVERT",
+            "decision": VERDICT_REVERT,
             "rebaseline_detail": bench_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
@@ -6486,7 +6465,7 @@ async def integrate_handler(
         and str(payload.get("integration_validation_status") or "") != "passed"
     )
     accuracy_gate: dict[str, Any] | None = None
-    if decision == "KEEP":
+    if decision == VERDICT_KEEP:
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
             session_dir=session_dir,
@@ -6516,7 +6495,7 @@ async def integrate_handler(
                 }
             # A measured regression is hard negative evidence -> REVERT. A
             # missing verdict is only an evidence gap -> NEEDS_REVIEW.
-            decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
+            decision = VERDICT_REVERT if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
 
     # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt
     # out with HL_HONEST_E2E=0 or HL_CONFIRM_SOURCE_IMPORTED=0). Advisory:
@@ -6537,7 +6516,7 @@ async def integrate_handler(
             bench_result.get("workspace"),
         )
         if (
-            decision == "KEEP"
+            decision == VERDICT_KEEP
             and source_import_confirmed is False
             and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
         ):
@@ -6546,10 +6525,10 @@ async def integrate_handler(
 
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
-        if decision == "KEEP"
+        if decision == VERDICT_KEEP
         else _maybe_revert_kernel_patch(apply_result)
     )
-    if decision != "KEEP":
+    if decision != VERDICT_KEEP:
         finalize_result = {"status": "skipped", "reason": "non-KEEP decision"}
     elif preapplied_git_patch:
         # Only the caller's own commit makes a pre-applied KEEP durable, so the
@@ -6558,7 +6537,7 @@ async def integrate_handler(
         finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
     else:
         finalize_result = _maybe_finalize_kernel_patch(apply_result)
-    revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
+    revert_required = decision != VERDICT_KEEP and bool(apply_result.get("manifest_path"))
     top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
         decision=decision,
         revert_result=revert_result,
@@ -6604,7 +6583,7 @@ async def integrate_handler(
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
-    if graded.graded_on_intvty and graded.verdict == "REVERT":
+    if graded.graded_on_intvty and graded.verdict == VERDICT_REVERT:
         result["decision_reason"] = "intvty_regression"
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
@@ -6633,7 +6612,7 @@ async def integrate_handler(
         # Only a KEEP settles the outstanding verdict. A non-KEEP is left
         # unstamped: the attempt ledger already distinguishes a rejection from a
         # retryable fault, and this field must not blur the two.
-        if decision == "KEEP":
+        if decision == VERDICT_KEEP:
             result["integration_validation_status"] = "passed"
             result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
     return result

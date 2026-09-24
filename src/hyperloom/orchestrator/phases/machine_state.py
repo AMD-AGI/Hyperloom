@@ -172,6 +172,13 @@ def render_phase_action_bullets(
 #: "the run did not stop" rather than into an error anyone sees.
 AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
+#: A patch lifecycle owed the framework tree a revert and could not complete it,
+#: so the tree still holds patches the session never measured against. Named
+#: here because two independent recoveries -- the integrate sentinel and the
+#: kernel stack checkpoint -- halt on the same condition, and both refuse to
+#: continue rather than measure a tree whose contents they cannot account for.
+PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
+
 
 # stop_reason vocab
 STOP_REASON_VOCAB: frozenset[str] = frozenset(
@@ -235,6 +242,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # its way out of it, so the run halts on the FIRST occurrence instead of
         # spending the budget in the enablement lane.
         AGENTX_PREFLIGHT_STOP_REASON,
+        # A restore obligation outlived the attempt that owed it: the framework
+        # tree still carries patches, so every later measurement would be
+        # attributed to a baseline that is not on disk. Deliberately absent from
+        # INFRASTRUCTURE_STOP_REASONS -- the host is healthy and a person has to
+        # settle the tree, which reads as a failure rather than an abort.
+        PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
     }
 )
 

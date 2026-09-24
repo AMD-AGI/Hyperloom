@@ -851,6 +851,7 @@ def test_resume_needs_a_cluster_that_still_serves(
         last_restart_ep=1,
         last_restart_pd_mode="aggregated",
         last_restart_extra_args="",
+        last_restart_env_digest=mncli._collect_ray_launch_env({}).digest,
         # The resume fast path matches on the whole topology record, so seeding the per-field keys alone is not a
         # prior launch it will recognise.
         last_restart_topology={
@@ -1080,6 +1081,486 @@ def test_missing_handoff_exits_config_error_not_transient(
         mncli._load_state()
     assert mncli.main(["verify"]) == mncli.EXIT_CONFIG_ERROR
     assert "HYPERLOOM_MN_EXT_SERVICE_URL is unset" in capsys.readouterr().err
+
+
+@pytest.fixture(params=["rayjob", "infera"])
+def restart_backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    """Exercise restart entrypoints with every remote boundary replaced locally."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    for key in tuple(os.environ):
+        if key.startswith(("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_", "HYPERLOOM_MN_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "1")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/traces")
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", "/shared/logs")
+    state = {
+        "backend": request.param,
+        "head_pod_ip": "192.0.2.1",
+        "worker_pod_ips": ["192.0.2.1", "192.0.2.2"],
+        "ssh_key_path": "/unused/test-key",
+        "nodes": 2,
+        "framework": "sglang",
+    }
+    harness = types.SimpleNamespace(
+        backend=request.param,
+        state=state,
+        sent=[],
+        probes=[],
+        before_send=lambda: None,
+        launch_rc=0,
+        job_status="SUCCEEDED",
+    )
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/models/test",
+        tp=8,
+        ep=1,
+        pd_mode="aggregated",
+        extra_args="",
+        pid_file="/tmp/pids",
+        log_file=None,
+        no_wait_health=False,
+        poll_timeout=5,
+        poll_interval=1,
+        print_logs=False,
+    )
+
+    class FakeRay:
+        def get_job(self, submission: str) -> dict[str, str]:
+            harness.probes.append(submission)
+            return {"status": harness.job_status}
+
+        def submit_job(self, entrypoint: str, runtime_env: dict | None = None) -> str:
+            harness.sent.append((entrypoint, dict((runtime_env or {}).get("env_vars", {}))))
+            return f"launch-{len(harness.sent)}"
+
+        def get_job_logs(self, submission: str) -> str:
+            return ""
+
+    def fake_ssh(_state, ip, script, python, launch_args, **kwargs):
+        harness.before_send()
+        harness.sent.append((launch_args, dict(kwargs["env"])))
+        return types.SimpleNamespace(returncode=harness.launch_rc, stdout='{"status":"ok"}', stderr="")
+
+    def fake_kill(*_args, **_kwargs):
+        harness.before_send()
+        return "kill-test"
+
+    def fail_external(*_args, **_kwargs):
+        raise AssertionError("unexpected external operation")
+
+    monkeypatch.setattr(mncli, "_load_state", lambda: dict(state))
+    monkeypatch.setattr(mncli, "_save_state", lambda value: state.update(value))
+    monkeypatch.setattr(mncli, "_read_pod_script", lambda name: "# test launcher\n")
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", lambda _state: contextlib.nullcontext(FakeRay()))
+    monkeypatch.setattr(mncli, "_exec_kill_submission", fake_kill)
+    monkeypatch.setattr(mncli, "_short_poll", lambda **kwargs: {"status": harness.job_status})
+    monkeypatch.setattr(mncli, "cluster_is_serving", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mncli, "_infera_ssh_run_script", fake_ssh)
+    monkeypatch.setattr(mncli, "_infera_ssh_bash_with_env", fail_external)
+    monkeypatch.setattr(infera, "_infera_servers_alive", lambda *_args, **_kwargs: True)
+    # The proxy can carry patches left by older tests; pin this fixture's boundaries explicitly.
+    for name in ("_load_state", "_save_state", "_read_pod_script", "_infera_ssh_run_script"):
+        monkeypatch.setattr(infera._mn_cli, name, getattr(mncli, name))
+    harness.args = args
+    harness.restart = lambda: mncli.cmd_restart_server(args)
+    return harness
+
+
+def test_restart_explicit_snapshot_and_force_do_not_touch_global_env(restart_backend, monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node._internal.launch_env import LaunchEnv
+
+    snapshot = LaunchEnv(
+        {"SGLANG_USE_AITER": "snapshot"}, unset=("MORI_OLD",), profiler_dir="/captured/traces", log_dir="/captured/logs"
+    )
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER":"ambient"}')
+    before = dict(os.environ)
+    assert mncli.cmd_restart_server(restart_backend.args, launch_env=snapshot) == 0
+    count = len(restart_backend.sent)
+    assert restart_backend.sent[-1][1]["SGLANG_USE_AITER"] == "snapshot"
+    assert mncli.cmd_restart_server(restart_backend.args, launch_env=snapshot) == 0
+    assert len(restart_backend.sent) == count
+    assert mncli.cmd_restart_server(restart_backend.args, launch_env=snapshot, force_full_restart=True) == 0
+    assert len(restart_backend.sent) > count
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("worker_fails", [False, True])
+@pytest.mark.asyncio
+async def test_round_restart_passes_explicit_snapshot_without_global_env_mutation(
+    restart_backend, monkeypatch, tmp_path, worker_fails
+):
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    monkeypatch.setattr(lifecycle, "is_multi_node", lambda: True)
+    monkeypatch.setattr(lifecycle, "_read_state", lambda: dict(restart_backend.state))
+    monkeypatch.setattr(lifecycle, "_RESTART_LOCK", None)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_RESTART_RECLAIM_RETRY", "0")
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"MORI_OLD":"ambient"}')
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", '["MORI_OTHER"]')
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/ambient/traces")
+    monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "1")
+    before = dict(os.environ)
+    calls = []
+
+    def restart(args, **options):
+        assert dict(os.environ) == before, "the round must not publish temporary launch inputs globally"
+        calls.append(options)
+        if worker_fails:
+            raise RuntimeError("worker launch failed")
+        return 0
+
+    async def ready(**_kwargs):
+        return None
+
+    monkeypatch.setattr(mncli, "cmd_restart_server", restart)
+    for name in (
+        "_wait_for_workers_ready_async",
+        "_wait_for_server_health_async",
+        "_wait_for_published_service_ready_async",
+    ):
+        monkeypatch.setattr(lifecycle, name, ready)
+    trace_dir = str(tmp_path / "traces")
+    outcome = (
+        pytest.raises(lifecycle.ServerRestartFailed, match="worker launch failed")
+        if worker_fails
+        else contextlib.nullcontext()
+    )
+    with outcome:
+        await lifecycle.restart_server_for_round(
+            framework="sglang",
+            model_path="/m",
+            tp=8,
+            extra_env={"SGLANG_USE_AITER": "0"},
+            unset_env=["MORI_OLD"],
+            torch_profiler_dir=trace_dir,
+            force_full_restart=True,
+        )
+    assert dict(os.environ) == before
+    assert calls[0]["force_full_restart"] is True
+    snapshot = calls[0]["launch_env"]
+    assert snapshot.forward_env["SGLANG_USE_AITER"] == "0"
+    assert snapshot.unset == ("MORI_OLD",)
+    if restart_backend.backend == "infera":
+        assert snapshot.forward_env["SGLANG_TORCH_PROFILER_DIR"] == trace_dir
+    else:
+        assert snapshot.profiler_dir == trace_dir
+
+
+def _pin_round_restart_boundaries(lifecycle, restart_backend, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Route a round restart at the real remote boundary and record its attempts."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setattr(lifecycle, "is_multi_node", lambda: True)
+    monkeypatch.setattr(lifecycle, "_read_state", lambda: dict(restart_backend.state))
+    monkeypatch.setattr(lifecycle, "_RESTART_LOCK", None)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_RESTART_RECLAIM_RETRY", "0")
+
+    async def ready(**_kwargs):
+        """Stand in for the post-launch /health polls."""
+        return None
+
+    for name in (
+        "_wait_for_workers_ready_async",
+        "_wait_for_server_health_async",
+        "_wait_for_published_service_ready_async",
+    ):
+        monkeypatch.setattr(lifecycle, name, ready)
+
+    restarts: list[dict] = []
+    real_restart = mncli.cmd_restart_server
+
+    def counting_restart(args, **options):
+        """Count the launches while still driving the real restart command."""
+        restarts.append(options)
+        return real_restart(args, **options)
+
+    monkeypatch.setattr(mncli, "cmd_restart_server", counting_restart)
+    return restarts
+
+
+@pytest.mark.parametrize("restart_backend", ["rayjob"], indirect=True)
+@pytest.mark.parametrize(
+    ("enable_patch", "shape_mode", "expected_fanouts"),
+    [("0", "patched", 0), ("1", "sitecustomize", 0), ("1", "patched", 1)],
+)
+@pytest.mark.asyncio
+async def test_round_restart_patch_fanout_honors_env_switches(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+    enable_patch: str,
+    shape_mode: str,
+    expected_fanouts: int,
+) -> None:
+    """HYPERLOOM_ENABLE_PATCH and HYPERLOOM_SGLANG_SHAPE_MODE gate the multi-node TraceLens fan-out."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+
+    restarts = _pin_round_restart_boundaries(lifecycle, restart_backend, monkeypatch)
+    monkeypatch.setenv("TRACELENS_ROOT", "/shared/tracelens")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", shape_mode)
+
+    await lifecycle.restart_server_for_round(framework="sglang", model_path="/models/test", tp=8)
+
+    fanouts = [sent for sent, _env in restart_backend.sent if "apply_tracelens_patch_multinode.py" in sent]
+    assert len(fanouts) == expected_fanouts
+    assert len(restarts) == 1, "the round must still reach the real restart boundary"
+
+
+@pytest.mark.parametrize("restart_backend", ["rayjob"], indirect=True)
+@pytest.mark.asyncio
+async def test_round_restart_rejects_atom_before_any_patch_fanout(
+    restart_backend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ATOM has no TraceLens patch set, and the multi-node round refuses it outright."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors._server_patcher import tracelens_patch_attempted
+
+    restarts = _pin_round_restart_boundaries(lifecycle, restart_backend, monkeypatch)
+    monkeypatch.setenv("TRACELENS_ROOT", "/shared/tracelens")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+
+    assert not tracelens_patch_attempted("atom")
+    with pytest.raises(lifecycle.ServerRestartFailed, match="unsupported framework 'atom'"):
+        await lifecycle.restart_server_for_round(framework="atom", model_path="/models/test", tp=8)
+    assert restart_backend.sent == []
+    assert restarts == []
+
+
+def test_restart_changed_effective_env_never_reuses(restart_backend, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "0"}')
+    assert restart_backend.restart() == 0
+    previous_count = len(restart_backend.sent)
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "1"}')
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) > previous_count
+    assert restart_backend.sent[-1][1]["SGLANG_USE_AITER"] == "1"
+
+
+def test_restart_equivalent_env_reuses_without_persisting_secrets(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"TOKEN": "private-test-token", "SGLANG_USE_AITER": 1}')
+    assert restart_backend.restart() == 0
+    previous_count = len(restart_backend.sent)
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "1", "TOKEN": "private-test-token"}')
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) == previous_count
+    identity = restart_backend.state["last_restart_env_digest"]
+    assert len(identity) == 64
+    assert "private-test-token" not in json.dumps(restart_backend.state)
+
+
+def test_restart_legacy_state_without_env_identity_does_not_reuse(restart_backend) -> None:
+    assert restart_backend.restart() == 0
+    previous_count = len(restart_backend.sent)
+    restart_backend.state.pop("last_restart_env_digest", None)
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) > previous_count
+
+
+def test_restart_sends_the_env_captured_before_external_operations(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "before"}')
+    restart_backend.before_send = lambda: monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "after"}'
+    )
+    if restart_backend.backend == "infera":
+        restart_backend.state.update(
+            pd_mode="disaggregated", prefill_pod_ips=["192.0.2.1"], decode_pod_ips=["192.0.2.2"]
+        )
+
+    assert restart_backend.restart() == 0
+    assert all(env["SGLANG_USE_AITER"] == "before" for _, env in restart_backend.sent)
+    count = len(restart_backend.sent)
+    restart_backend.before_send = lambda: None
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_USE_AITER": "before"}')
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) == count, "the recorded identity must describe what was sent"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["HYPERLOOM_MN_PROFILE_TRACE_DIR", "HYPERLOOM_MN_SERVER_LOG_DIR", "HYPERLOOM_MN_UNSET_FWD_ENV"],
+)
+def test_restart_changed_launch_env_settings_do_not_reuse(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    assert restart_backend.restart() == 0
+    previous_count = len(restart_backend.sent)
+    monkeypatch.setenv(key, '["MORI_ABSENT"]' if key.endswith("UNSET_FWD_ENV") else "/shared/changed")
+    if key == "HYPERLOOM_MN_SERVER_LOG_DIR":
+        restart_backend.state.pop("last_server_log_dir", None)
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) > previous_count
+
+
+@pytest.mark.parametrize("restart_backend", ["infera"], indirect=True)
+@pytest.mark.parametrize("key", ["TRACELENS_ROOT", "TRACELENS_SHAPE_DISCOVERY", "AITER_REBUILD"])
+def test_infera_changed_implicit_tuning_env_does_not_reuse(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    assert restart_backend.restart() == 0
+    count = len(restart_backend.sent)
+    monkeypatch.setenv(key, "changed")
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) > count
+    assert restart_backend.sent[-1][1][key] == "changed"
+
+
+def test_restart_equivalent_unsets_and_blocked_keys_do_not_force_relaunch(
+    restart_backend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", '["MORI_B", "MORI_A", "MORI_A", "LD_PRELOAD"]')
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"MORI_A": "set", "LD_PRELOAD": "/blocked"}')
+    assert restart_backend.restart() == 0
+    count = len(restart_backend.sent)
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", '["MORI_B"]')
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"MORI_A": "set"}')
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) == count
+    assert "LD_PRELOAD" not in restart_backend.sent[-1][1]
+
+
+@pytest.mark.parametrize("key", ["AITER_REBUILD", "HYPERLOOM_MN_SERVER_LOG_DIR"])
+def test_launch_env_retains_explicit_unset_of_generated_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key: str
+) -> None:
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+    from hyperloom.inference_optimizer.multi_node.scripts import launch_infera_node as pod
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    monkeypatch.setenv(key, "/shared/logs" if key.endswith("LOG_DIR") else "1")
+    baseline = infera._collect_launch_env()
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps([key]))
+    snapshot = infera._collect_launch_env()
+
+    assert key in baseline.forward_env
+    assert key not in snapshot.forward_env
+    assert snapshot.unset == (key,)
+    assert snapshot.digest != baseline.digest
+    identity = snapshot.digest
+    wire = mncli._launch_env_transport(snapshot)
+    wire[key] = "inherited-value"
+    captured = []
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unexpected external operation")
+
+    monkeypatch.setattr(pod.os, "environ", wire)
+    monkeypatch.setattr(pod.Path, "read_bytes", lambda path: b"POD_IP=192.0.2.1\0")
+    monkeypatch.setattr(pod.subprocess, "run", unexpected)
+    monkeypatch.setattr(pod.subprocess, "Popen", unexpected)
+    monkeypatch.setattr(pod, "_kill_prior", lambda *_args: None)
+    monkeypatch.setattr(pod, "_kill_gpu_sampler", lambda *_args: None)
+    monkeypatch.setattr(pod, "_start_gpu_sampler", unexpected)
+    monkeypatch.setattr(pod, "_wait_health", unexpected)
+    monkeypatch.setattr(pod, "_resolve_pod_ip", lambda env: "192.0.2.1")
+    monkeypatch.setattr(pod, "_detach_launch", lambda cmd, log, pid, env: captured.append(dict(env)) or 42)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "launch_infera_node.py",
+            "--framework",
+            "sglang",
+            "--model",
+            "/m",
+            "--tp",
+            "8",
+            "--pid-file",
+            str(tmp_path / "server.pid"),
+            "--log-file",
+            str(tmp_path / "server.log"),
+        ],
+    )
+    assert pod.main() == 0
+    assert key not in captured[0]
+    assert snapshot.digest == identity
+
+
+def test_launch_env_is_immutable_and_detached_from_source() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from hyperloom.inference_optimizer.multi_node._internal.launch_env import LaunchEnv
+
+    source = {"MORI_A": "before"}
+    snapshot = LaunchEnv(source, unset=("MORI_B", "MORI_A", "MORI_B"))
+    identity = snapshot.digest
+    source["MORI_A"] = "after"
+    assert snapshot.forward_env["MORI_A"] == "before"
+    assert snapshot.unset == ("MORI_A", "MORI_B")
+    assert snapshot.digest == identity
+    with pytest.raises(TypeError):
+        snapshot.forward_env["MORI_A"] = "mutated"
+    with pytest.raises(FrozenInstanceError):
+        snapshot.log_dir = "/other"
+
+
+def test_restart_collects_one_snapshot_per_operation(restart_backend, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    owner = mncli if restart_backend.backend == "rayjob" else infera
+    name = "_collect_ray_launch_env" if restart_backend.backend == "rayjob" else "_collect_launch_env"
+    collect = getattr(owner, name)
+    snapshots = []
+
+    def tracked(*args, **kwargs):
+        snapshot = collect(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(owner, name, tracked)
+    assert restart_backend.restart() == 0
+    assert len(snapshots) == 1
+    assert restart_backend.state["last_restart_env_digest"] == snapshots[0].digest
+    assert restart_backend.restart() == 0
+    assert len(snapshots) == 2
+
+
+def test_restart_force_full_still_disables_reuse(restart_backend, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert restart_backend.restart() == 0
+    previous_count = len(restart_backend.sent)
+    monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "0")
+
+    assert restart_backend.restart() == 0
+    assert len(restart_backend.sent) > previous_count
+
+
+def test_restart_failed_launch_is_not_a_reusable_success(restart_backend) -> None:
+    restart_backend.launch_rc = 1
+    restart_backend.job_status = "FAILED"
+    assert restart_backend.restart() == 1
+    previous_count = len(restart_backend.sent)
+
+    assert restart_backend.restart() == 1
+    assert len(restart_backend.sent) > previous_count
 
 
 def test_bootstrap_accepts_handed_over_rayjob_without_rayjob_id(

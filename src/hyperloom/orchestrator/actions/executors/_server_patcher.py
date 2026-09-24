@@ -311,6 +311,47 @@ def resolve_sglang_shape_mode() -> str:
     return sglang_shape_mode(version)
 
 
+_ENABLE_PATCH_ENV = "HYPERLOOM_ENABLE_PATCH"
+
+
+def tracelens_patch_enabled() -> bool:
+    """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
+
+    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
+    SGLang. Default on because the patches are backward-compatible.
+
+    With the switch off, no *server flag* that only a patched build accepts is
+    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
+    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
+    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
+    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
+    **kept**: they ride the ``/start_profile`` API, which an unpatched server
+    accepts, and the switch is also how a pre-patched image opts out of runtime
+    patching while still supporting them. Only a patch that was *attempted and
+    failed* clears them, which is why that gate reads
+    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
+    path) rather than the patch outcome.
+    """
+    return os.environ.get(_ENABLE_PATCH_ENV, "1").strip() != "0"
+
+
+def tracelens_patch_attempted(framework: str) -> bool:
+    """Whether the TraceLens runtime patch applies to ``framework`` at all.
+
+    The single-node launcher and the multi-node fan-out both gate on this, so a
+    kill switch or a shape mode that disables one disables the other. ATOM
+    drives its profiler over HTTP and has no TraceLens patch set; an SGLang on
+    the ``sitecustomize`` shape path gets its shapes from the no-patch
+    ``kernel_shape_tool`` instead of a ``git apply``.
+    """
+    if not tracelens_patch_enabled():
+        return False
+    fw = (framework or "").strip().lower()
+    if "atom" in fw:
+        return False
+    return not ("sglang" in fw and resolve_sglang_shape_mode() == "sitecustomize")
+
+
 def ensure_sglang_patched_for_ck_blockscale(
     kernelforge_root: Path | str | None = None,
 ) -> bool:

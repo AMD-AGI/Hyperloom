@@ -12,6 +12,7 @@ import os
 from typing import Any
 
 from hyperloom.common.env import env_bool
+from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
@@ -137,7 +138,7 @@ def _queue_kernel_keep(
         and entry.get("last_correctness_passed") is True
         and micro_speedup >= promotion_threshold
     )
-    if decision != "KEEP" and not promoted_needs_review:
+    if decision != VERDICT_KEEP and not promoted_needs_review:
         return None
     artifact_path = str(entry.get("last_artifact_path") or "")
     artifact_bundle = dict(entry.get("last_artifact_bundle") or {})
@@ -260,7 +261,7 @@ def enqueue_nominated_patch(
         "deploy_repo_root": str(getattr(patch, "kernel_repo", "") or ""),
         "base_commit": str(getattr(patch, "base_commit", "") or ""),
         "micro_speedup": micro_speedup,
-        "optimization_decision": "KEEP",
+        "optimization_decision": VERDICT_KEEP,
         "trace_gpu_pct": 0.0,
         "created_at": _now_iso(),
         "status": "pending",
@@ -311,7 +312,7 @@ def enqueue_nominated_patch(
     return queue[integration_id]
 
 
-def _patch_budget_for(state) -> int:
+def _patch_budget_for() -> int:
     """How many sibling patches one round may land, env-overridable."""
     return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
 
@@ -325,7 +326,7 @@ def _ensure_kernel_task_state(state) -> None:
     # The queue's only deletion point.
     state.pending_kernel_integrations = evict_terminal(
         state.pending_kernel_integrations,
-        budget=_patch_budget_for(state),
+        budget=_patch_budget_for(),
     )
     for task_key, stable_entry in state.kernel_opt_task_attempts.items():
         if not isinstance(stable_entry, dict):
@@ -423,7 +424,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         deduped.append(record)
     # Cap how many siblings dispatch this round.
-    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for(state))
+    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for())
     return fit
 
 
@@ -595,7 +596,7 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    if result.get("decision") == "KEEP":
+    if result.get("decision") == VERDICT_KEEP:
         validation_tier = str(result.get("validation_tier") or "")
         integration_status = str(result.get("integration_validation_status") or "")
         if isinstance(pending_record, dict):
@@ -626,11 +627,13 @@ def record_kernel_integrate_result(
         reason = f"fault_attempts_exhausted_{max_fault_attempts}"
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts without a KEEP.
-        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
+        should_reject = result.get("decision") == VERDICT_REVERT or verdict_attempt_count >= max_attempts
         if not should_reject:
             return entry
         reason = (
-            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision"
+            if result.get("decision") == VERDICT_REVERT
+            else f"max_e2e_attempts_{max_attempts}_without_keep"
         )
     rejected = {
         "key": key,

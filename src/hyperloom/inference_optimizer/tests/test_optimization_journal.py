@@ -167,6 +167,70 @@ def test_append_entry_flushes_to_disk(session_dir: Path):
     assert blob["entries"][0]["ts"]
 
 
+def test_each_mutation_is_visible_in_the_original_json_file(session_dir: Path):
+    journal = Journal.load_or_create(session_dir, session_id="s", model="m", hardware="h", framework="sglang")
+    journal.update_baseline(600.0)
+    expected = {
+        "session_id": "s",
+        "model": "m",
+        "hardware": "h",
+        "framework": "sglang",
+        "baseline_throughput": 600.0,
+        "final_throughput": None,
+        "total_gain_pct": None,
+        "entries": [],
+    }
+    path = session_dir / "reports" / JOURNAL_FILENAME
+    assert json.loads(path.read_text(encoding="utf-8")) == expected
+
+    for index in range(2):
+        entry = JournalEntry(
+            phase="EXPLORE", iter=index, kind=KIND_PARAM, change=f"variant-{index}", outcome=OUTCOME_KEEP, ts="fixed"
+        )
+        assert journal.append_entry(entry) is True
+        expected["entries"].append(entry.to_dict())
+        assert json.loads(path.read_text(encoding="utf-8")) == expected
+
+    journal.finalize(total_gain_pct=25.0)
+    expected["total_gain_pct"] = 25.0
+    assert json.loads(path.read_text(encoding="utf-8")) == expected
+    journal.finalize(final_throughput=750.0)
+    expected["final_throughput"] = 750.0
+    assert json.loads(path.read_text(encoding="utf-8")) == expected
+
+
+@pytest.mark.parametrize("existing_file", [False, True])
+def test_same_baseline_retries_after_flush_io_failure(session_dir: Path, monkeypatch, caplog, existing_file):
+    from hyperloom.orchestrator.state import optimization_journal as journal_module
+
+    journal = Journal.load_or_create(session_dir, session_id="s", model="m", hardware="h")
+    if existing_file:
+        journal.update_baseline(600.0)
+    write_text = journal_module.atomic_write_text
+    writes = []
+
+    def fail_once(path, text, **kwargs):
+        writes.append((path, text))
+        if len(writes) == 1:
+            raise OSError("journal storage unavailable")
+        return write_text(path, text, **kwargs)
+
+    monkeypatch.setattr(journal_module, "atomic_write_text", fail_once)
+    journal.update_baseline(700.0)
+    assert journal.baseline_throughput == 700.0
+    if existing_file:
+        assert json.loads(journal.path.read_text(encoding="utf-8"))["baseline_throughput"] == 600.0
+    else:
+        assert not journal.path.exists()
+    assert "optimization_journal flush failed" in caplog.text
+    assert "journal storage unavailable" in caplog.text
+
+    journal.update_baseline(700.0)
+    assert len(writes) == 2
+    assert writes[0] == writes[1]
+    assert json.loads(journal.path.read_text(encoding="utf-8")) == journal.to_dict()
+
+
 def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,

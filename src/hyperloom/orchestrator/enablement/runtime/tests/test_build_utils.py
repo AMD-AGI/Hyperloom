@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,7 +14,6 @@ import pytest
 from hyperloom.orchestrator.enablement.runtime.build_utils import (
     AbiMismatchError,
     check_rocm_toolchain_alignment,
-    coerce_build_argv,
     probe_torch_abi,
     run_argv,
     sort_tags_desc,
@@ -28,67 +28,28 @@ def _completed(stdout="", stderr="", returncode=0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
-# coerce_build_argv
-
-
-def test_coerce_list_passthrough():
-    assert coerce_build_argv(["pip", "install", "-e", "."]) == ["pip", "install", "-e", "."]
-
-
-def test_coerce_string_split():
-    assert coerce_build_argv("pip install -e .") == ["pip", "install", "-e", "."]
-
-
-def test_coerce_none_returns_empty():
-    assert coerce_build_argv(None) == []
-    assert coerce_build_argv([]) == []
-    assert coerce_build_argv("") == []
-
-
-def test_coerce_rejects_pipe():
-    with pytest.raises(ValueError):
-        coerce_build_argv(["pip", "install", "|", "tee"])
-
-
-def test_coerce_rejects_semicolon():
-    with pytest.raises(ValueError):
-        coerce_build_argv("pip install; rm -rf /")
-
-
-def test_coerce_rejects_backtick():
-    with pytest.raises(ValueError):
-        coerce_build_argv(["pip", "`evil`"])
-
-
-def test_coerce_rejects_control_chars():
-    with pytest.raises(ValueError):
-        coerce_build_argv(["pip\x00install"])
-
-
-def test_coerce_rejects_shell_dash_c():
-    with pytest.raises(ValueError):
-        coerce_build_argv(["bash", "-c", "echo hi"])
-
-
-def test_coerce_allows_safe_args():
-    argv = coerce_build_argv(["python", "setup.py", "develop", "--user"])
-    assert argv[0] == "python"
-
-
 # run_argv
 
 
-def test_run_argv_ok():
+@pytest.mark.parametrize("argv", [["echo", "hello"], ["python", "-c", "print('a; $VALUE | >')", "path with spaces"]])
+def test_run_argv_ok(argv):
     calls: list[Any] = []
+    work_dir = Path("build workspace")
+    build_env = {"BUILD_MODE": "release"}
 
     def _run(argv, *, cwd, env, capture_output, text, timeout):
-        calls.append((argv, cwd))
+        calls.append((argv, cwd, env, capture_output, text, timeout))
         return _completed(stdout="hello\n", returncode=0)
 
-    r = run_argv(["echo", "hello"], cwd="/tmp", run=_run)
+    r = run_argv(argv, cwd=work_dir, env=build_env, timeout_sec=42, run=_run)
     assert r.returncode == 0
-    assert "hello" in r.stdout_tail
-    assert calls[0][0] == ["echo", "hello"]
+    assert r.stdout_tail == "hello\n"
+    assert r.stderr_tail == ""
+    assert r.timed_out is False
+    assert r.command == argv
+    assert r.command is not argv
+    assert r.cwd == str(work_dir)
+    assert calls == [(argv, str(work_dir), build_env, True, True, 42)]
 
 
 def test_run_argv_nonzero():

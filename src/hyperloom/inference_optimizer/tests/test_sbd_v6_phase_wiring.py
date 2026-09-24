@@ -18,6 +18,7 @@ import re
 import types
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,8 +27,16 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_eve
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases.close import ClosePhase
+from hyperloom.orchestrator.phases.internal import InternalTasksPhase
+from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
+from hyperloom.orchestrator.phases.machine import MachinePhase
+from hyperloom.orchestrator.phases.prelude import PreludePhase
+from hyperloom.orchestrator.phases.sweep import SweepPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -36,6 +45,68 @@ def _bound_session(tmp_path):
     """Bind the session the way startup does, so the machine records into it."""
     with session_scope(tmp_path):
         yield tmp_path
+
+
+@pytest.mark.parametrize(
+    ("phase_type", "owner", "method_name"),
+    [
+        (PreludePhase, "phase_prelude", "_internal_analysis_kind"),
+        (KernelPhase, "phase_kernel", "_on_enter_kernel"),
+        (MachinePhase, "phase_machine", "_on_phase_entered"),
+        (SweepPhase, "phase_sweep", "_on_enter_sweep"),
+        (InternalTasksPhase, "phase_internal", "_enqueue_internal_research_scout_task"),
+        (ClosePhase, "phase_close", "_on_enter_close"),
+        (KernelStackPhase, "phase_kernel_stack", "_drain_pending_keep_integrates"),
+    ],
+)
+def test_phase_collaborators_preserve_coordinator_delegation(phase_type, owner, method_name):
+    coordinator = Coordinator.__new__(Coordinator)
+    coordinator.shared_state = object()
+    phase = getattr(coordinator, owner)
+
+    assert isinstance(phase, phase_type)
+    assert getattr(coordinator, owner) is phase
+    assert phase.shared_state is coordinator.shared_state
+    coordinator.shared_state = object()
+    assert phase.shared_state is coordinator.shared_state
+    assert getattr(phase, "missing_optional_setting", None) is None
+    with pytest.raises(AttributeError, match="missing_required_setting"):
+        getattr(phase, "missing_required_setting")
+
+    method = getattr(coordinator, method_name)
+    assert method.__self__ is phase
+    assert method.__func__ is getattr(phase_type, method_name)
+    assert getattr(Coordinator, method_name) is method.__func__
+
+
+@pytest.mark.parametrize(
+    ("target", "hook_name"),
+    [
+        ("framework_agent", "_on_enter_framework"),
+        ("kernel_agent", "_on_enter_kernel"),
+        ("sweep", "_on_enter_sweep"),
+        ("close", "_on_enter_close"),
+        ("prelude", None),
+    ],
+)
+def test_phase_entry_dispatch_keeps_coordinator_hooks(tmp_path, target, hook_name):
+    hooks = {
+        name: AsyncMock() for name in ("_on_enter_framework", "_on_enter_kernel", "_on_enter_sweep", "_on_enter_close")
+    }
+    coordinator = Coordinator.__new__(Coordinator)
+    coordinator.session_dir = tmp_path
+    coordinator.shared_state = _state(tmp_path)
+    coordinator._orch_prompt_is_user_supplied = True
+    for name, hook in hooks.items():
+        setattr(coordinator, name, hook)
+
+    asyncio.run(coordinator._on_phase_entered(from_phase="PRELUDE", to_phase=target))
+
+    for name, hook in hooks.items():
+        if name == hook_name:
+            hook.assert_awaited_once_with(from_phase="PRELUDE")
+        else:
+            hook.assert_not_awaited()
 
 
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:

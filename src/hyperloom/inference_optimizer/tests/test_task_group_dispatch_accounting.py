@@ -172,17 +172,83 @@ class TestEnqueueNominatedPatch:
 
             assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == [], action
 
-    def test_the_patch_budget_caps_dispatched_siblings(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [(None, 3), ("", 3), ("invalid", 3), ("0", 3), ("-1", 3), ("2", 2), (" 1 ", 1)],
+    )
+    def test_the_patch_budget_caps_dispatched_siblings(self, monkeypatch, configured, expected):
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
-        monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "2")
+        if configured is None:
+            monkeypatch.delenv("HL_KERNEL_PATCH_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", configured)
         state = SharedState()
         for i in range(4):
             enqueue_nominated_patch(state, patch=self._patch(f"k{i}", f"/repo/f{i}.py", micro=1.0 + i))
 
-        # All four are queued (deferred, not dropped); the reader caps dispatch.
+        records = state.pending_kernel_integration_records()
+
+        assert [record["kernel_id"] for record in records] == ["k3", "k2", "k1", "k0"][:expected]
         assert len(state.pending_kernel_integrations) == 4
-        assert len(state.pending_kernel_integration_records()) == 2
+
+    def test_budget_changes_resize_terminal_retention_without_dropping_pending(self, monkeypatch):
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        state = SharedState()
+        for i in range(4):
+            enqueue_nominated_patch(state, patch=self._patch(f"k{i}", f"/repo/f{i}.py", micro=1.0 + i))
+        pending_ids = set(state.pending_kernel_integrations)
+        for i in range(8):
+            state.pending_kernel_integrations[f"terminal-{i}"] = {
+                "status": ("integrated", "rejected", "dispatch_failed")[i % 3],
+                "micro_speedup": i,
+            }
+
+        for budget in (2, 1):
+            monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", str(budget))
+            records = state.pending_kernel_integration_records()
+
+            assert [record["kernel_id"] for record in records] == ["k3", "k2"][:budget]
+            assert set(state.pending_kernel_integrations) == pending_ids | {
+                f"terminal-{i}" for i in range(8 - 2 * budget, 8)
+            }
+
+    @pytest.mark.parametrize(
+        ("decision", "status", "queue_status"),
+        [
+            ("KEEP", "complete", "integrated"),
+            ("REVERT", "complete", "rejected"),
+            ("NEEDS_REVIEW", "complete", "pending"),
+            ("NEEDS_REVIEW", "failed", "pending"),
+        ],
+    )
+    def test_integrate_verdicts_preserve_queue_and_attempt_accounting(self, decision, status, queue_status):
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        state = SharedState()
+        record = enqueue_nominated_patch(state, patch=self._patch("k0", "/repo/a.py"))
+
+        entry = state.record_kernel_integrate_result(
+            {
+                "kernel_id": "k0",
+                "integration_id": record["integration_id"],
+                "decision": decision,
+                "status": status,
+                "gain_pct": 2.0,
+            }
+        )
+
+        assert record["optimization_decision"] == "KEEP"
+        assert record["status"] == queue_status
+        assert entry["last_decision"] == decision
+        assert entry["attempt_count"] == 1
+        assert entry["fault_count"] == int(status == "failed")
+        assert entry["verdict_attempt_count"] == int(status != "failed")
+        assert bool(entry.get("retryable")) is (status == "failed")
+        assert bool(state.rejected_kernel_patches) is (decision == "REVERT")
+        if decision == "REVERT":
+            assert entry["rejected"]["reason"] == "revert_decision"
 
     def test_re_enqueue_is_idempotent_and_refreshes_the_fusion_facts(self):
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch

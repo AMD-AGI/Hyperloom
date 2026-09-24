@@ -509,12 +509,12 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self._integrate_reconcile_child_exists(
+            if await self.tasks.integrate_reconcile_child_exists(
                 base_key,
                 states=("succeeded",),
             ):
                 continue
-            if await self._integrate_reconcile_child_exists(
+            if await self.tasks.integrate_reconcile_child_exists(
                 base_key,
                 states=("queued", "running"),
             ):
@@ -540,24 +540,6 @@ class DispatcherCollaborator:
                 if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
-
-    async def _integrate_reconcile_child_exists(
-        self,
-        base_key: str,
-        *,
-        states: tuple[str, ...],
-    ) -> bool:
-        """Return whether a reconcile child idempotency key exists in any of ``states``."""
-        if not states:
-            return False
-        prefix = f"{base_key}-reconcile%"
-        placeholders = ",".join("?" for _ in states)
-        row = await self.tasks.db.fetchone(
-            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
-            (prefix, *states),
-        )
-        return row is not None
 
     async def _spawn_fitting_queued(
         self,
@@ -1209,264 +1191,260 @@ class DispatcherCollaborator:
             maybe_result: The task's result, or the exception it raised.
             gpu_lease: The GPU specialist lease to release, or ``None``.
         """
-        for (task, _, gpu_lease), maybe_result in zip(
-            [(task, None, gpu_lease)],
-            [maybe_result],
-        ):
-            if isinstance(maybe_result, asyncio.CancelledError):
-                # Asked for, not gone wrong: the wall-clock defences stop
-                # in-flight actions on purpose. Logged as the deliberate act it
-                # is so a shutdown does not read as a crash.
-                log.warning(
-                    "dispatcher: in-flight action task=%s kind=%s was cancelled",
-                    task.task_id,
-                    task.kind,
-                )
-                continue
-            if isinstance(maybe_result, BaseException):
-                log.exception(
-                    "dispatcher: spawned task %s raised: %r",
-                    task.task_id,
-                    maybe_result,
-                )
-                continue
-            result: SubAgentResult = maybe_result
-            # Bounded transient-failure auto-retry (infra only): on a subprocess
-            # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
-            # task and skip this attempt's bookkeeping. Semantic empties fall
-            # through and are recorded.
-            if task.kind == "specialist" and result.state != "cancelled":
-                try:
-                    if await self._maybe_auto_retry_specialist(task, result):
-                        continue
-                except Exception:  # noqa: BLE001 — never block the dispatch loop
-                    log.exception(
-                        "specialist auto-retry hook failed for task=%s",
-                        task.task_id,
-                    )
-            if isinstance(result.result, dict):
-                reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
-                if reauthor_attempt not in (None, ""):
-                    result.result.setdefault("reauthor_attempt", reauthor_attempt)
-            try:
-                await self.bus.append_and_seq(
-                    Message.new(
-                        "coordinator",
-                        "*",
-                        "delegated_result",
-                        {
-                            "task_id": task.task_id,
-                            "kind": task.kind,
-                            "state": result.state,
-                            "result": result.result,
-                            "error": result.error,
-                        },
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception(
-                    "dispatcher: failed to append delegated_result for task=%s",
-                    task.task_id,
-                )
-                self._record_coordinator_exception(
-                    stage="dispatcher_result",
-                    exc=exc,
-                )
-                continue
-            # Specialist bookkeeping: done payload under result.result['specialist_done']; always runs to keep the ledgers coherent.
-            if task.kind == "specialist":
-                result_dict = result.result if isinstance(result.result, dict) else {}
-                done_payload = result_dict.get("specialist_done") or {}
-                if isinstance(done_payload, dict):
-                    try:
-                        await self._record_specialist_result(
-                            task=task,
-                            done_payload=done_payload,
-                            source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "specialist bookkeeping hook failed for task=%s",
-                            task.task_id,
-                        )
-                    # FRAMEWORK authoring bridge for an EMPTY deliverable: a
-                    # specialist that authored no patch never spawns an
-                    # integrate_patch; stamp the terminal progress row here to
-                    # avoid a pump livelock.
-                    try:
-                        self._record_framework_agent_authoring_empty_outcome(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
-                    # Harvest a discovery specialist's candidates into the
-                    # source arm's batch.
-                    try:
-                        self._ingest_candidate_discovery(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK: candidate discovery ingest failed for task=%s",
-                            task.task_id,
-                        )
-            # intervention-mix ledger: log change_type for explore/integrate_patch.
-            if task.kind in ("explore", "integrate_patch"):
-                try:
-                    self._record_intervention_for_task(task, result.result)
-                except Exception:  # noqa: BLE001
-                    log.exception(
-                        "intervention ledger update failed for task=%s",
-                        task.task_id,
-                    )
-            # integrate_patch completion handling.
-            if task.kind == "integrate_patch" and result.state != "cancelled":
-                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
-                if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
-                    try:
-                        self._record_framework_agent_authored_outcome(
-                            task=task,
-                            result=result,
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK authored-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
-                # Unified rearm: handles enablement and apply_failed perf-lane
-                # results (schedules retry or stamps terminal).
-                res_dict = getattr(result, "result", None)
-                try:
-                    await self._maybe_rearm_authored_lane(res_dict)
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "AUTHORED_LANE rearm failed for task=%s",
-                        task.task_id,
-                    )
-                # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
-                try:
-                    await self._drain_apply_fail_retry_pending()
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "apply_fail retry drain failed for task=%s",
-                        task.task_id,
-                    )
-            # Auto-promote succeeded results into CORE_STATE_FIELDS
-            # (Coordinator-only writer).  Warm replay is deliberately routed
-            # through its promote handler even when dispatch itself failed:
-            # that handler owns rollback of pre-applied framework patches and
-            # clears the PRELUDE ``in_flight`` gate.
-            result_payload = dict(result.result or {})
-            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
-            if replay_needs_cleanup:
-                result_payload.setdefault("status", "failed")
-                result_payload.setdefault("error_class", "dispatch_failed")
-                if result.error:
-                    result_payload.setdefault("error", str(result.error))
-            kept = (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
-                task.kind, result_payload
+        if isinstance(maybe_result, asyncio.CancelledError):
+            # Asked for, not gone wrong: the wall-clock defences stop
+            # in-flight actions on purpose. Logged as the deliberate act it
+            # is so a shutdown does not read as a crash.
+            log.warning(
+                "dispatcher: in-flight action task=%s kind=%s was cancelled",
+                task.task_id,
+                task.kind,
             )
-            # Settle the dispatch row on the phase that ordered it. Here rather
-            # than inside the two branches below: both of them return early on
-            # some paths, and the verdict is the same fact either way.
+            return
+        if isinstance(maybe_result, BaseException):
+            log.exception(
+                "dispatcher: spawned task %s raised: %r",
+                task.task_id,
+                maybe_result,
+            )
+            return
+        result: SubAgentResult = maybe_result
+        # Bounded transient-failure auto-retry (infra only): on a subprocess
+        # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
+        # task and skip this attempt's bookkeeping. Semantic empties fall
+        # through and are recorded.
+        if task.kind == "specialist" and result.state != "cancelled":
             try:
-                from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-
-                phase_event.record_settle(
-                    task_id=str(task.task_id or ""),
-                    status=str(result.state or ""),
-                    decision="promoted" if kept else "no_promote",
-                    error_class=result_payload.get("error_class") or result.error_class,
-                    workspace=result_payload.get("workspace"),
-                    settled_unix=time.time(),
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    action=str(task.kind or ""),
+                if await self._maybe_auto_retry_specialist(task, result):
+                    return
+            except Exception:  # noqa: BLE001 — never block the dispatch loop
+                log.exception(
+                    "specialist auto-retry hook failed for task=%s",
+                    task.task_id,
                 )
-            except Exception:  # noqa: BLE001 — a verdict outranks its own record
-                log.debug("dispatcher: phase settle record failed", exc_info=True)
-            if result.state == "cancelled":
-                continue
-            try:
-                if kept:
-                    await self._promote_to_shared_state(
-                        task.kind,
-                        result_payload,
+        if isinstance(result.result, dict):
+            reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
+            if reauthor_attempt not in (None, ""):
+                result.result.setdefault("reauthor_attempt", reauthor_attempt)
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "delegated_result",
+                    {
+                        "task_id": task.task_id,
+                        "kind": task.kind,
+                        "state": result.state,
+                        "result": result.result,
+                        "error": result.error,
+                    },
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "dispatcher: failed to append delegated_result for task=%s",
+                task.task_id,
+            )
+            self._record_coordinator_exception(
+                stage="dispatcher_result",
+                exc=exc,
+            )
+            return
+        # Specialist bookkeeping: done payload under result.result['specialist_done']; always runs to keep the ledgers coherent.
+        if task.kind == "specialist":
+            result_dict = result.result if isinstance(result.result, dict) else {}
+            done_payload = result_dict.get("specialist_done") or {}
+            if isinstance(done_payload, dict):
+                try:
+                    await self._record_specialist_result(
                         task=task,
+                        done_payload=done_payload,
+                        source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                        run_error=str(result.error or ""),
                     )
-                elif task.task_id not in self._dead_holder_accounted:
-                    unpromotable_result = dict(result.result or {})
-                    # Surface a PolicyGate dispatch rejection's specific rule
-                    # (e.g. "policy_path_outside_session_dir") into
-                    # the gap ledger instead of letting it default to
-                    # "unknown_error" — result.result is {} for these
-                    # (rejected before the executor ever ran), so error_class
-                    # would otherwise be silently dropped here.
-                    if result.error_class and not unpromotable_result.get("error_class"):
-                        unpromotable_result["error_class"] = result.error_class
-                    await self._handle_unpromotable_result(task, unpromotable_result)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "specialist bookkeeping hook failed for task=%s",
+                        task.task_id,
+                    )
+                # FRAMEWORK authoring bridge for an EMPTY deliverable: a
+                # specialist that authored no patch never spawns an
+                # integrate_patch; stamp the terminal progress row here to
+                # avoid a pump livelock.
+                try:
+                    self._record_framework_agent_authoring_empty_outcome(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
+                        task.task_id,
+                    )
+                # Harvest a discovery specialist's candidates into the
+                # source arm's batch.
+                try:
+                    self._ingest_candidate_discovery(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "FRAMEWORK: candidate discovery ingest failed for task=%s",
+                        task.task_id,
+                    )
+        # intervention-mix ledger: log change_type for explore/integrate_patch.
+        if task.kind in ("explore", "integrate_patch"):
+            try:
+                self._record_intervention_for_task(task, result.result)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "intervention ledger update failed for task=%s",
+                    task.task_id,
+                )
+        # integrate_patch completion handling.
+        if task.kind == "integrate_patch" and result.state != "cancelled":
+            # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
+            if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
+                try:
+                    self._record_framework_agent_authored_outcome(
+                        task=task,
+                        result=result,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "FRAMEWORK authored-outcome bridge failed for task=%s",
+                        task.task_id,
+                    )
+            # Unified rearm: handles enablement and apply_failed perf-lane
+            # results (schedules retry or stamps terminal).
+            res_dict = getattr(result, "result", None)
+            try:
+                await self._maybe_rearm_authored_lane(res_dict)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "AUTHORED_LANE rearm failed for task=%s",
+                    task.task_id,
+                )
+            # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
+            try:
+                await self._drain_apply_fail_retry_pending()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "apply_fail retry drain failed for task=%s",
+                    task.task_id,
+                )
+        # Auto-promote succeeded results into CORE_STATE_FIELDS
+        # (Coordinator-only writer).  Warm replay is deliberately routed
+        # through its promote handler even when dispatch itself failed:
+        # that handler owns rollback of pre-applied framework patches and
+        # clears the PRELUDE ``in_flight`` gate.
+        result_payload = dict(result.result or {})
+        replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
+        if replay_needs_cleanup:
+            result_payload.setdefault("status", "failed")
+            result_payload.setdefault("error_class", "dispatch_failed")
+            if result.error:
+                result_payload.setdefault("error", str(result.error))
+        kept = (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
+            task.kind, result_payload
+        )
+        # Settle the dispatch row on the phase that ordered it. Here rather
+        # than inside the two branches below: both of them return early on
+        # some paths, and the verdict is the same fact either way.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+            phase_event.record_settle(
+                task_id=str(task.task_id or ""),
+                status=str(result.state or ""),
+                decision="promoted" if kept else "no_promote",
+                error_class=result_payload.get("error_class") or result.error_class,
+                workspace=result_payload.get("workspace"),
+                settled_unix=time.time(),
+                phase=str(getattr(self.shared_state, "phase", "") or ""),
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                action=str(task.kind or ""),
+            )
+        except Exception:  # noqa: BLE001 — a verdict outranks its own record
+            log.debug("dispatcher: phase settle record failed", exc_info=True)
+        if result.state == "cancelled":
+            return
+        try:
+            if kept:
+                await self._promote_to_shared_state(
+                    task.kind,
+                    result_payload,
+                    task=task,
+                )
+            elif task.task_id not in self._dead_holder_accounted:
+                unpromotable_result = dict(result.result or {})
+                # Surface a PolicyGate dispatch rejection's specific rule
+                # (e.g. "policy_path_outside_session_dir") into
+                # the gap ledger instead of letting it default to
+                # "unknown_error" — result.result is {} for these
+                # (rejected before the executor ever ran), so error_class
+                # would otherwise be silently dropped here.
+                if result.error_class and not unpromotable_result.get("error_class"):
+                    unpromotable_result["error_class"] = result.error_class
+                await self._handle_unpromotable_result(task, unpromotable_result)
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "dispatcher: promotion/unpromotable handling failed for task=%s",
+                task.task_id,
+            )
+            self._record_coordinator_exception(
+                stage="dispatcher_promote",
+                exc=exc,
+            )
+            return
+        # Fact-write hook: lands KEEP/REVERT in the journal + optional KB
+        # write. replay_warm_recipe is excluded (verification, not a fact).
+        if task.kind != "replay_warm_recipe":
+            try:
+                await self._fact_write_hook(task=task, result=result, kept=kept)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
-                    "dispatcher: promotion/unpromotable handling failed for task=%s",
+                    "dispatcher: fact-write hook failed for task=%s",
                     task.task_id,
                 )
                 self._record_coordinator_exception(
-                    stage="dispatcher_promote",
+                    stage="dispatcher_fact_write",
                     exc=exc,
                 )
-                continue
-            # Fact-write hook: lands KEEP/REVERT in the journal + optional KB
-            # write. replay_warm_recipe is excluded (verification, not a fact).
-            if task.kind != "replay_warm_recipe":
-                try:
-                    await self._fact_write_hook(task=task, result=result, kept=kept)
-                except Exception as exc:  # noqa: BLE001
-                    log.exception(
-                        "dispatcher: fact-write hook failed for task=%s",
-                        task.task_id,
-                    )
-                    self._record_coordinator_exception(
-                        stage="dispatcher_fact_write",
-                        exc=exc,
-                    )
-            # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
-            if task.kind == "explore":
-                result_dict = result.result if isinstance(result.result, dict) else {}
-                try:
-                    self._record_explore_round_gaps(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "gaps refresh: explore-round update failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    self._record_explore_variant_failures(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "explore: per-variant failure recording failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    await self._refresh_gaps(reason="explore_round")
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "gaps refresh: _refresh_gaps after explore failed for task=%s",
-                        task.task_id,
-                    )
+        # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
+        if task.kind == "explore":
+            result_dict = result.result if isinstance(result.result, dict) else {}
+            try:
+                self._record_explore_round_gaps(
+                    task=task,
+                    result=result_dict,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "gaps refresh: explore-round update failed for task=%s",
+                    task.task_id,
+                )
+            try:
+                self._record_explore_variant_failures(
+                    task=task,
+                    result=result_dict,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "explore: per-variant failure recording failed for task=%s",
+                    task.task_id,
+                )
+            try:
+                await self._refresh_gaps(reason="explore_round")
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "gaps refresh: _refresh_gaps after explore failed for task=%s",
+                    task.task_id,
+                )
 
     @staticmethod
     def _lanes_fit(

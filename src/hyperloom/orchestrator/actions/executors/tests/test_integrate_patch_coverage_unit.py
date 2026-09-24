@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -243,6 +244,9 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
 
         def grid_session_deadline_sec(self, **_kwargs):
             return 4242.0
+
+        def save(self, _path):
+            pass
 
     captured: dict[str, Any] = {}
     ex = IntegratePatchExecutor(session_dir=session)
@@ -859,7 +863,6 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
 
     monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
     monkeypatch.setattr(IntegratePatchExecutor, "_apply_artifacts", _fake_apply)
-    monkeypatch.setattr(IntegratePatchExecutor, "_revert_artifacts", lambda self, applied: None)
 
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(
@@ -875,6 +878,168 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     # in the stash. This is the regression the fix guards against.
     assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
     assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
+
+
+_UNAPPLIABLE_PATCH = """\
+diff --git a/src.py b/src.py
+--- a/src.py
++++ b/src.py
+@@ -10,2 +10,2 @@
+ def g():
+-    return 9
++    return 8
+"""
+
+_TWO_TARGET_PATCH = """\
+--- a/other.py
++++ b/other.py
+@@ -1 +1 @@
+-other
++other patched
+--- a/third.py
++++ b/third.py
+@@ -1 +1 @@
+-third
++third patched
+"""
+
+_needs_patch_cli = pytest.mark.skipif(shutil.which("patch") is None, reason="POSIX patch CLI unavailable")
+
+
+def _write_two_patch_workspace(session_dir: Path, task_id: str, second: str) -> Path:
+    """A specialist workspace whose second patch follows ``_VALID_PATCH``."""
+    workspace = session_dir / "runs" / "specialist" / task_id
+    patches = workspace / "worktree" / "patches"
+    patches.mkdir(parents=True, exist_ok=True)
+    (patches / "001.patch").write_text(_VALID_PATCH, encoding="utf-8")
+    (patches / "002.patch").write_text(second, encoding="utf-8")
+    (workspace / "specialist_done.json").write_text(
+        json.dumps({"patches_written": ["patches/001.patch", "patches/002.patch"], "proposal_set": []}),
+        encoding="utf-8",
+    )
+    return workspace
+
+
+def _nogit_tree(path: Path) -> Path:
+    """A plain (non-git) framework tree carrying the three patch targets."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (path / "other.py").write_text("other\n", encoding="utf-8")
+    (path / "third.py").write_text("third\n", encoding="utf-8")
+    return path
+
+
+def _force_artifact_spec(monkeypatch, *, source: Path, target: Path, root: Path) -> None:
+    source.write_text("{}\n", encoding="utf-8")
+    spec = ip._ArtifactSpec(
+        source=source,
+        target=target,
+        rel_target=target.name,
+        root=root,
+        kind="config_json",
+    )
+    monkeypatch.setattr(ip, "_resolve_artifact_specs", lambda **_kwargs: ([spec], []))
+
+
+@pytest.mark.asyncio
+async def test_a_patch_failing_before_the_artifact_install_is_not_a_restore_fault(tmp_path, monkeypatch):
+    """A planned artifact must not turn a normal apply failure into a stop.
+
+    The plan is recorded before the apply, so a patch that fails leaves an
+    artifact phase that never installed anything. Reading the plan as an
+    obligation made the revert report a missing artifact ledger, which is graded
+    ``integrate_restore_incomplete`` and stops the whole session -- while the
+    patch that did land stayed in the framework tree.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_two_patch_workspace(session, "spec", _UNAPPLIABLE_PATCH)
+    artifact_target = repo / "tuned.json"
+    _force_artifact_spec(monkeypatch, source=tmp_path / "tuned.json", target=artifact_target, root=repo)
+
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx("t", {"specialist_task_id": "spec", "framework_source_root": str(repo)})
+    )
+
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "git_apply_failed"
+    assert "recovery_errors" not in res
+    assert (repo / "src.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
+    assert not artifact_target.exists()
+    assert list(session.glob("runs/integrate_patch/**/artifact_backups/backup_ledger.jsonl")), (
+        "the artifact preimages were not committed before the patches ran"
+    )
+
+
+@_needs_patch_cli
+@pytest.mark.asyncio
+async def test_a_later_patch_failing_to_prepare_still_reverts_the_earlier_one(tmp_path, monkeypatch):
+    """One ledger serves every patch, so the second one's tail is uncommitted.
+
+    The first patch is applied with its preimage committed; the second cannot
+    copy its second target and so never runs at all. Refusing the whole ledger
+    over that uncommitted tail left the first patch in the framework tree and
+    graded an untouched-but-for-that tree as an environment fault.
+    """
+    from hyperloom.orchestrator.actions.executors import _nogit_patch
+
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = _nogit_tree(tmp_path / "fw")
+    _write_two_patch_workspace(session, "spec", _TWO_TARGET_PATCH)
+    real_copy2 = shutil.copy2
+
+    def refuse_third(src, dst, *args, **kwargs):
+        if Path(src).name == "third.py":
+            raise OSError("no space left on device")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(_nogit_patch.shutil, "copy2", refuse_third)
+
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx("t", {"specialist_task_id": "spec", "framework_source_root": str(repo)})
+    )
+
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "git_apply_failed"
+    assert "recovery_errors" not in res
+    assert (repo / "src.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
+    assert (repo / "other.py").read_text(encoding="utf-8") == "other\n"
+    assert (repo / "third.py").read_text(encoding="utf-8") == "third\n"
+
+
+@_needs_patch_cli
+@pytest.mark.asyncio
+async def test_a_crash_while_preparing_a_later_patch_still_reverts_the_earlier_one(tmp_path, monkeypatch):
+    """The same tail, reached by losing the process rather than by returning."""
+    from hyperloom.orchestrator.actions.executors import _nogit_patch
+
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = _nogit_tree(tmp_path / "fw")
+    _write_two_patch_workspace(session, "spec", _TWO_TARGET_PATCH)
+    real_append = _nogit_patch.append_record
+    appended: list[str] = []
+
+    def lose_the_process(backup_root, record):
+        if len(appended) == 2:
+            raise asyncio.CancelledError
+        appended.append(str(record.get("target")))
+        return real_append(backup_root, record)
+
+    monkeypatch.setattr(_nogit_patch, "append_record", lose_the_process)
+
+    with pytest.raises(asyncio.CancelledError):
+        await IntegratePatchExecutor(session_dir=session)(
+            _make_ctx("t", {"specialist_task_id": "spec", "framework_source_root": str(repo)})
+        )
+
+    assert [Path(t).name for t in appended] == ["src.py", "other.py"]
+    assert (repo / "src.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
+    assert (repo / "other.py").read_text(encoding="utf-8") == "other\n"
+    assert (repo / "third.py").read_text(encoding="utf-8") == "third\n"
 
 
 @pytest.mark.asyncio
@@ -994,6 +1159,136 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
     assert (repo / "src.py").read_text(encoding="utf-8").endswith("return 1\n"), (
         "the ungraded candidate was left applied in the framework tree"
     )
+
+
+@pytest.mark.asyncio
+async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hyperloom.agents.framework import isolation
+    from hyperloom.orchestrator.enablement.runtime import adapters
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+
+    session = tmp_path / "session"
+    workspace = _write_workspace(session, "spec")
+    (workspace / "specialist_done.json").write_text(json.dumps({"patches_written": []}))
+    runtime = tmp_path / "attempt-runtime" / "venv"
+    runtime.mkdir(parents=True)
+    (runtime / "installed").write_text("runtime")
+    monkeypatch.setattr(isolation, "disk_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        adapters,
+        "get_adapter",
+        lambda _fw: SimpleNamespace(
+            provision=lambda *_args: ProvisionResult(ok=True, runtime=FrameworkRuntime(venv_root=str(runtime))),
+            probe=lambda *_args: True,
+        ),
+    )
+    result = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "task",
+            {
+                "specialist_task_id": "spec",
+                "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+            },
+        )
+    )
+    assert result["status"] == "no_patches"
+    assert not runtime.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    session = tmp_path / "session"
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    state = SimpleNamespace(
+        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+    )
+
+    def fail_save(_path):
+        raise OSError("disk full")
+
+    async def cancel(**_kwargs):
+        state.save = fail_save
+        raise asyncio.CancelledError
+
+    executor = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(executor, "_bench_patch", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await executor(
+            _make_ctx(
+                "task", {"specialist_task_id": "spec", "framework_source_root": str(repo)}, {"shared_state": state}
+            )
+        )
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+    assert state.pending_integrate
+
+
+@pytest.mark.asyncio
+async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_merge(tmp_path):
+    from types import SimpleNamespace
+
+    session = tmp_path / "session"
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    user = repo / "user.txt"
+    user.write_text("USER")
+    state = SimpleNamespace(
+        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+    )
+    result = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "task",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "apply_only": True,
+            },
+            {"shared_state": state},
+        )
+    )
+    assert result["status"] == "applied_no_bench"
+    assert user.read_text() == "USER"
+    assert ip.restore_pending_integrate(state.pending_integrate)["failed"]
+    assert user.read_text() == "USER"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_cancel_mid_non_git_apply_restores_prepared_ledger_without_returned_records(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _nogit_patch
+
+    session = tmp_path / "session"
+    repo = tmp_path / "fw"
+    repo.mkdir()
+    (repo / "src.py").write_text("def f():\n    return 1\n")
+    _write_workspace(session, "spec")
+    real_run = subprocess.run
+
+    def interrupt(cmd, *args, **kwargs):
+        if cmd[0] == "patch":
+            if "--dry-run" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            (repo / "src.py").write_text("partial\n")
+            raise asyncio.CancelledError
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_nogit_patch.subprocess, "run", interrupt)
+    with pytest.raises(asyncio.CancelledError):
+        await IntegratePatchExecutor(session_dir=session)(
+            _make_ctx(
+                "task",
+                {
+                    "specialist_task_id": "spec",
+                    "framework_source_root": str(repo),
+                },
+            )
+        )
+    assert (repo / "src.py").read_text() == "def f():\n    return 1\n"
 
 
 # ---- patches_ungrounded forwarding in _no_patches --------------------------

@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.orchestrator.phases.machine_state import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -306,6 +307,599 @@ async def test_resume_restores_promoted_inferencex_checkout(
     assert os.environ["INFERENCEX_PATH"] == str(active)
 
 
+@pytest.fixture
+def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
+    """Apply real local files, then discard the live state before resume."""
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, integrate_patch as ip
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+    root = tmp_path / "candidate-framework"
+    init_git_repo(root, seed_file="cfg.json", seed_text="A\n")
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    workspace = runs_dir(coord.session_dir, "specialist", "spec-restore")
+    workspace.mkdir(parents=True)
+    output = tmp_path / "candidate-output"
+
+    async def apply(*, patches=False, two_artifacts=False):
+        params = {
+            "specialist_task_id": "spec-restore",
+            "framework_source_root": str(root),
+            "output_dir": str(output),
+            "apply_only": True,
+        }
+        if patches:
+            params["patches"] = []
+            for index, (before, after) in enumerate((("A", "B"), ("B", "C")), 1):
+                patch = workspace / f"p{index}.diff"
+                patch.write_text(
+                    "diff --git a/cfg.json b/cfg.json\n--- a/cfg.json\n+++ b/cfg.json\n"
+                    f"@@ -1 +1 @@\n-{before}\n+{after}\n",
+                    encoding="utf-8",
+                )
+                params["patches"].append(str(patch))
+        else:
+            source = workspace / "replacement.json"
+            source.write_text("B\n", encoding="utf-8")
+            params["artifacts"] = [{"source": str(source), "target": str(root / "cfg.json")}]
+            if two_artifacts:
+                params["artifacts"].append({"source": str(source), "target": str(root / "created.json")})
+        coord.shared_state.record_specialist_patch_verdict("spec-restore", "approve")
+        task = await coord.tasks.create(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        result = await ip.IntegratePatchExecutor(session_dir=coord.session_dir)(
+            RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state})
+        )
+        assert result["status"] == "applied_no_bench", result
+        assert (root / "cfg.json").read_text(encoding="utf-8") == ("C\n" if patches else "B\n")
+        coord.shared_state = SharedState.load_or_init(coord.session_dir)
+        assert coord.shared_state.pending_integrate["task_id"] == task.task_id
+        return SimpleNamespace(root=root, output=output, task=task, result=result)
+
+    return apply
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_unwinds_dependent_patches_to_original(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(patches=True)
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert coord.shared_state.pending_integrate == {}
+    assert report["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_artifact_only_survives_lost_memory_and_repeats(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(two_artifacts=True)
+    report = {"fixes": [], "warnings": []}
+    candidate.result.clear()
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert coord.shared_state.pending_integrate == {}
+    repeated = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(repeated)
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert repeated == {"fixes": [], "warnings": []}
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: Coordinator, pending_candidate):
+    candidate = await pending_candidate(two_artifacts=True)
+    backup = Path(candidate.result["artifacts_applied"][0]["backup"])
+    backup_content = backup.read_bytes()
+    evidence = backup.parent / "retained-evidence.bak"
+    evidence.write_bytes(backup_content)
+    runtime = candidate.output / "attempt-runtime" / "venv"
+    runtime.mkdir(parents=True)
+    runtime_marker = runtime / "installed-package"
+    runtime_marker.write_bytes(b"runtime evidence")
+    coord.shared_state.pending_integrate["attempt_venv_root"] = str(runtime)
+    sentinel_task = coord.shared_state.pending_integrate["task_id"]
+    backup.unlink()
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert coord.shared_state.pending_integrate.get("task_id") == sentinel_task
+    assert evidence.read_bytes() == backup_content
+    assert runtime_marker.read_bytes() == b"runtime evidence"
+    assert report["warnings"], report
+    backup.write_bytes(backup_content)
+    retry_report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(retry_report)
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not (candidate.root / "created.json").exists()
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_results", [0, 10_001])
+async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
+    coord: Coordinator, pending_candidate, newer_results: int
+):
+    candidate = await pending_candidate(patches=True)
+    kept = Message.new(
+        "coordinator",
+        "*",
+        "delegated_result",
+        {
+            "task_id": candidate.task.task_id,
+            "kind": "integrate_patch",
+            "state": "succeeded",
+            "result": {
+                "status": "kept",
+                "specialist_task_id": "spec-restore",
+                "output_throughput": 125.0,
+                "patches_applied": candidate.result["patches_applied"],
+                "workspace": str(candidate.output),
+            },
+        },
+    )
+    await coord.bus.append_and_seq(kept)
+    if newer_results:
+        async with coord.db.transaction() as cur:
+            cur.executemany(
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                (
+                    Message.new("coordinator", "*", "delegated_result", {"task_id": f"unrelated-{index}"}).to_db_row()
+                    for index in range(newer_results)
+                ),
+            )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    assert coord.shared_state.pending_integrate == {}
+    assert any(entry.get("kind") == "replayed_pending_integrate" for entry in report["fixes"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["task", "stack", "neither", "failed_with_keep_result"])
+async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pending_candidate, evidence):
+    from hyperloom.orchestrator.bus.db_maintenance import prune_events, prune_tasks
+
+    candidate = await pending_candidate(patches=True)
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    if evidence == "failed_with_keep_result":
+        await coord.tasks.transition(candidate.task.task_id, "failed")
+        await coord.tasks.append_completion_evidence(
+            candidate.task.task_id, {"outcome": {"result": {"status": "kept"}}}
+        )
+    else:
+        await coord.tasks.transition(candidate.task.task_id, "succeeded", evidence={"result_keys": ["status"]})
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": candidate.task.task_id,
+                "kind": "integrate_patch",
+                "result": {"status": "kept"},
+            },
+        )
+    )
+    await coord.bus.append_and_seq(Message.new("coordinator", "*", "event", {"newer": True}))
+    assert await prune_events(coord.db, keep_recent=1) > 0
+    if evidence not in ("task", "failed_with_keep_result"):
+        await prune_tasks(coord.db, keep_done=0)
+    if evidence == "stack":
+        coord.shared_state.optimization_stack = [{"task_id": candidate.task.task_id}]
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
+    assert (candidate.root / "cfg.json").read_text() == "C\n"
+    if evidence == "stack":
+        assert coord.shared_state.pending_integrate == {}
+    else:
+        assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+        assert report["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coord, tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, integrate_patch as ip
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    root = tmp_path / "plain-framework"
+    root.mkdir()
+    output = tmp_path / "reused-output"
+    target = root / "cfg.json"
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    executor = ip.IntegratePatchExecutor(session_dir=coord.session_dir)
+    for index, content in enumerate(("KEPT", "CANDIDATE")):
+        sid = f"reuse-{index}"
+        workspace = runs_dir(coord.session_dir, "specialist", sid)
+        workspace.mkdir(parents=True)
+        source = workspace / "cfg.json"
+        source.write_text(content)
+        coord.shared_state.record_specialist_patch_verdict(sid, "approve")
+        task = await coord.tasks.create(
+            kind="integrate_patch",
+            idempotency_key=sid,
+            params={
+                "specialist_task_id": sid,
+                "framework_source_root": str(root),
+                "output_dir": str(output),
+                "artifacts": [{"source": str(source), "target": str(target)}],
+                "apply_only": True,
+            },
+        )
+        result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state}))
+        assert result["status"] == "applied_no_bench", result
+        if index == 0:
+            coord.shared_state.pending_integrate = {}
+    assert target.read_text() == "CANDIDATE"
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
+    assert report["warnings"] == []
+    assert target.read_text() == "KEPT"
+
+
+@pytest.mark.asyncio
+async def test_failed_pending_restore_blocks_resume_before_followup_actions(coord, pending_candidate, monkeypatch):
+    candidate = await pending_candidate(two_artifacts=True)
+    Path(candidate.result["artifacts_applied"][0]["backup"]).unlink()
+    coord._resumed_from["is_resume"] = True
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("resume continued after an incomplete restore")
+
+    monkeypatch.setattr(coord.writeback, "_resume_recover_pending_targeted_build", forbidden)
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord._resume_consistency_pass()
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_rejects_legacy_artifact_without_backup_evidence(coord: Coordinator, tmp_path: Path):
+    target = tmp_path / "unknown-original.json"
+    target.write_text("possibly-kept-content", encoding="utf-8")
+    coord.shared_state.pending_integrate = {
+        "task_id": "legacy-artifact",
+        "artifacts": [{"target": str(target), "rel_target": target.name}],
+        "patches": [],
+        "workspace": str(tmp_path / "missing-backups"),
+    }
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert target.read_text(encoding="utf-8") == "possibly-kept-content"
+    assert coord.shared_state.pending_integrate.get("task_id") == "legacy-artifact"
+    assert report["warnings"]
+    assert report["fixes"] == []
+
+
+@pytest.fixture
+def crashed_integrate_window(coord: Coordinator, pending_candidate):
+    """Crash a real integration at a chosen point between verdict and publish.
+
+    Drives a genuinely applied candidate to the durable phase the executor
+    would have written, then lays down exactly the task-row evidence the runner
+    writes before the bus sees anything. ``outcome_status=None`` is the crash
+    that happened first: the phase is on disk, the runner never finished.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
+        candidate = await pending_candidate(patches=True)
+        summary = restore_pending_integrate(coord.shared_state.pending_integrate, keep=keep)
+        assert summary["failed"] == [], summary
+        assert coord.shared_state.pending_integrate["recovery"]["phase"] == ("accepted" if keep else "restored")
+        coord.shared_state.save(coord.session_dir)
+        await coord.tasks.transition(candidate.task.task_id, "running")
+        if outcome_status is not None:
+            await coord.tasks.transition(
+                candidate.task.task_id,
+                "succeeded",
+                evidence={
+                    "outcome": {
+                        "task_id": candidate.task.task_id,
+                        "state": "succeeded",
+                        "result": {
+                            "kind": "integrate_patch",
+                            "status": outcome_status,
+                            "specialist_task_id": "spec-restore",
+                            "output_throughput": 130.0,
+                        },
+                        "error": None,
+                        "error_class": "",
+                    },
+                    "cleanup_confirmed": cleanup_confirmed,
+                },
+            )
+        coord.shared_state = SharedState.load_or_init(coord.session_dir)
+        coord._resumed_from["is_resume"] = True
+        return candidate
+
+    return crash
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_accepted_integrate_whose_outcome_was_lost(coord, crashed_integrate_window):
+    """An accepted phase with no trustworthy verdict keeps its obligation."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    candidate = await crashed_integrate_window(keep=True)
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.current_best == {}
+    # The candidate was retained on purpose, so recovery must not revert it.
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    reloaded = SharedState.load_or_init(coord.session_dir)
+    assert reloaded.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert reloaded.pending_integrate["task_id"] == candidate.task.task_id
+
+
+@pytest.mark.asyncio
+async def test_resume_replays_an_accepted_integrate_from_its_task_row(coord, crashed_integrate_window):
+    """A KEEP that never reached the bus is still durable on the task row."""
+    from copy import deepcopy
+
+    candidate = await crashed_integrate_window(keep=True, outcome_status="kept")
+    coord.shared_state.baseline_tput = 100.0
+    marker = deepcopy(coord.shared_state.pending_integrate)
+
+    report = await coord._resume_consistency_pass()
+
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" and f["appended"] is True
+        for f in report["fixes"]
+    )
+    assert coord.shared_state.pending_integrate == {}
+    assert [row["variant_name"] for row in coord.shared_state.optimization_stack] == ["spec-restore"]
+    assert coord.shared_state.current_best["tput"] == 130.0
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+    assert not coord.shared_state.stop_reason
+
+    coord.shared_state.pending_integrate = marker
+    repeated = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(repeated)
+
+    assert [row["variant_name"] for row in coord.shared_state.optimization_stack] == ["spec-restore"]
+    assert coord.shared_state.pending_integrate == {}
+    assert repeated["warnings"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["reverted", "failed"])
+async def test_resume_settles_a_complete_non_keep_integrate(coord, crashed_integrate_window, status):
+    """A restored tree plus a confirmed non-KEEP verdict is a finished window."""
+    candidate = await crashed_integrate_window(keep=False, outcome_status=status)
+
+    report = await coord._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert coord.shared_state.optimization_stack == []
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not coord.shared_state.stop_reason
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "settled_pending_integrate" and f["status"] == status
+        for f in report["fixes"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_integrate_outcome_whose_cleanup_is_unconfirmed(coord, crashed_integrate_window):
+    """An unconfirmed cleanup makes the recorded verdict diagnostic only."""
+    candidate = await crashed_integrate_window(keep=False, outcome_status="reverted", cleanup_confirmed=False)
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
+    assert coord.shared_state.optimization_stack == []
+
+
+@pytest.mark.asyncio
+async def test_resume_clears_a_restored_marker_whose_runner_never_finished(coord, crashed_integrate_window):
+    """The phase alone discharges the window when the runner never got to write."""
+    candidate = await crashed_integrate_window(keep=False)
+
+    report = await coord._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert not coord.shared_state.stop_reason
+    assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
+
+
+@pytest.fixture
+def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
+    """Seed the durable marker and backup a completed executor hands to writeback."""
+    from copy import deepcopy
+
+    backup = tmp_path / "ordinary-integrate" / "before.bak"
+    backup.parent.mkdir()
+    backup.write_bytes(b"accepted source before candidate")
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.current_best = {"action": "baseline", "tput": 100.0, "extra_envs": {}, "extra_server_args": ""}
+    anchor = deepcopy(coord.shared_state.current_best)
+
+    async def prepare(*, phase="ready", status="kept", error_class="", recovery_errors=None, marker_task_id=None):
+        task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        pending = {
+            "task_id": task.task_id if marker_task_id is None else marker_task_id,
+            "workspace": str(backup.parent),
+        }
+        if phase is not None:
+            pending["recovery"] = {"phase": phase}
+        coord.shared_state.pending_integrate = pending
+        coord.shared_state.save(coord.session_dir)
+        result = {
+            "status": status,
+            "specialist_task_id": "ordinary-specialist",
+            "output_throughput": 125.0,
+        }
+        if error_class:
+            result["error_class"] = error_class
+        if recovery_errors:
+            result["recovery_errors"] = recovery_errors
+        return SimpleNamespace(task=task, result=result, pending=deepcopy(pending), backup=backup, anchor=anchor)
+
+    return prepare
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,status,error_class",
+    [
+        ("ready", "kept", ""),
+        ("files_restored", "kept", ""),
+        ("files_restored", "failed", "integrate_restore_incomplete"),
+        ("ready", "reverted", ""),
+        ("accepted", "reverted", ""),
+        ("accepted", "applied_no_bench", ""),
+        ("restored", "kept", ""),
+        (None, "apply_failed", "git_apply_failed"),
+        ("accepted", "kept", "integrate_restore_incomplete"),
+    ],
+)
+async def test_ordinary_integrate_completion_blocks_unconfirmed_before_promotion(
+    coord, ordinary_integrate_completion, phase, status, error_class
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status=status, error_class=error_class)
+    original_stack = list(coord.shared_state.optimization_stack)
+    original_levers = list(coord.shared_state.authored_framework_levers)
+    with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
+        await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert type(caught.value).__name__ == "IntegrateRecoveryIncomplete"
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == original_stack
+    assert coord.shared_state.authored_framework_levers == original_levers
+    assert coord.shared_state.stop_reason == "environment_fault"
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert persisted["stop_reason"] == "environment_fault"
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["accepted", "restored"])
+async def test_ordinary_integrate_completion_rejects_recovery_errors_even_with_terminal_phase(
+    coord, ordinary_integrate_completion, phase
+):
+    candidate = await ordinary_integrate_completion(
+        phase=phase, status="kept" if phase == "accepted" else "reverted", recovery_errors=["stash restore failed"]
+    )
+    with pytest.raises(RuntimeError, match="integrate.*recovery"):
+        await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert candidate.backup.exists()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_integrate_completion_restore_error_blocks_without_marker(coord, ordinary_integrate_completion):
+    candidate = await ordinary_integrate_completion(error_class="integrate_restore_incomplete")
+    coord.shared_state.pending_integrate = {}
+    with pytest.raises(RuntimeError, match="integrate.*recovery"):
+        await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.stop_reason == "environment_fault"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_integrate_completion_legacy_keep_with_stash_error_retains_recovery(
+    coord, ordinary_integrate_completion
+):
+    candidate = await ordinary_integrate_completion(phase=None, status="kept")
+    candidate.result["stash_restore_error"] = "user changes remain in stash after restore failed"
+
+    with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
+        await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert type(caught.value).__name__ == "IntegrateRecoveryIncomplete"
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.stop_reason == "environment_fault"
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert persisted["stop_reason"] == "environment_fault"
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,status,promoted",
+    [
+        ("accepted", "kept", True),
+        ("accepted", "advanced", False),
+        ("accepted", "kept_inert", False),
+        ("restored", "reverted", False),
+        ("restored", "apply_failed", False),
+        ("restored", "failed", False),
+        (None, "kept", True),
+    ],
+)
+async def test_ordinary_integrate_completion_clears_only_confirmed_matching_marker(
+    coord, ordinary_integrate_completion, phase, status, promoted
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status=status)
+    await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert coord.shared_state.pending_integrate == {}
+    assert not coord.shared_state.stop_reason
+    assert coord.shared_state.current_best["tput"] == (125.0 if promoted else 100.0)
+    assert bool(coord.shared_state.optimization_stack) is promoted
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == {}
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["applied", "applied_with_restored_stash"])
+async def test_ordinary_integrate_completion_apply_only_retains_ungraded_recovery(
+    coord, ordinary_integrate_completion, phase
+):
+    candidate = await ordinary_integrate_completion(phase=phase, status="applied_no_bench")
+    await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
+
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert coord.shared_state.optimization_stack == []
+    assert not coord.shared_state.stop_reason
+    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["pending_integrate"] == candidate.pending
+    assert candidate.backup.read_bytes() == b"accepted source before candidate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker_task_id,missing_task", [("other-task", False), ("", False), ("", True)])
+async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_other_marker(
+    coord, ordinary_integrate_completion, marker_task_id, missing_task
+):
+    candidate = await ordinary_integrate_completion(phase="restored", status="reverted", marker_task_id=marker_task_id)
+    await coord._promote_to_shared_state(
+        "integrate_patch", candidate.result, task=None if missing_task else candidate.task
+    )
+    assert coord.shared_state.pending_integrate == candidate.pending
+    assert coord.shared_state.current_best == candidate.anchor
+    assert candidate.backup.exists()
+
+
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
     coord._resumed_from["is_resume"] = True
@@ -388,6 +982,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
 @pytest.mark.asyncio
 async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
     coord._resumed_from["is_resume"] = True
+    await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
     coord.shared_state.pending_integrate = {
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
@@ -445,16 +1040,11 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
         lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
 
-    report = await coord._resume_consistency_pass()
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord._resume_consistency_pass()
 
     assert rolled_back == []
     assert coord.shared_state.pending_integrate == sentinel
-    warning = next(w for w in report["warnings"] if w.get("kind") == "pending_integrate_scan_failed")
-    assert warning["task_id"] == "ti-unreadable"
-    assert not any(
-        isinstance(f, dict) and f.get("kind") in {"rolled_back_pending_integrate", "cleared_stale_pending_integrate"}
-        for f in report["fixes"]
-    )
 
 
 @pytest.mark.asyncio
@@ -651,7 +1241,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coord: Coordinator, monkeypatch) -> None:
+async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.actions.executors.integrate_patch as ip
 
     reversed_calls: list[str] = []
@@ -669,11 +1259,12 @@ async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coor
         "patches": ["/tmp/fw/p1.diff"],
     }
 
-    report = await coord._resume_consistency_pass()
+    report = {"fixes": [], "warnings": []}
+    await coord.writeback._resume_recover_pending_integrate(report)
 
-    assert reversed_calls == ["/tmp/fw/p1.diff"]
-    assert any(isinstance(f, dict) and f.get("kind") == "rolled_back_pending_integrate" for f in report["fixes"])
-    assert coord.shared_state.pending_integrate == {}
+    assert reversed_calls == []
+    assert coord.shared_state.pending_integrate["task_id"] == "ti-crash"
+    assert any(row["kind"] == "pending_integrate_outcome_unknown" for row in report["warnings"])
 
 
 @pytest.mark.asyncio

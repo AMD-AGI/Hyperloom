@@ -353,8 +353,24 @@ class TestTunedCsvCoverage:
 
     def test_no_requested_shapes(self):
         report = tuned_config_coverage([(1, 2, 3)], [])
-        assert report["requested"] == 0
-        assert report["coverage_pct"] is None
+        assert report == {"requested": 0, "covered": 0, "coverage_pct": None, "tuned_rows": 1}
+
+    def test_coverage_deduplicates_and_keeps_first_ten_sorted_misses(self):
+        misses = [(m, 7, 9) for m in range(12, 0, -1)]
+        covered = [(3, 5120, 17408), (1082, 5120, 17408), (3000, 5120, 17408), (5, 17, 19)]
+        tuned = [(3, 5120, 17408), (1088, 5120, 17408), (4096, 5120, 17408)]
+        report = tuned_config_coverage(
+            iter([*tuned, tuned[0]]),
+            iter([*misses, *covered, misses[0], covered[0]]),
+            known_covered=iter([covered[-1], covered[-1], (999, 1, 1)]),
+        )
+        assert report == {
+            "requested": 16,
+            "covered": 4,
+            "coverage_pct": 25.0,
+            "tuned_rows": 3,
+            "uncovered_sample": [{"M": m, "N": 7, "K": 9} for m in range(1, 11)],
+        }
 
     def test_retry_integrate_dir_is_scanned(self, tmp_path):
         """A ``-2`` retry replaces the first attempt; it must not be ignored."""

@@ -15,20 +15,25 @@ import yaml
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import tokenize_server_args_preserving_json
-from ._grid_server_args import validate_server_args_shell_safe
+from ._grid_server_args import (
+    _MULTI_VALUE_FLAGS,
+    dedup_vllm_server_arg_tokens,
+    merge_server_args,
+    normalize_server_args_preserving_json,
+    tokenize_server_args_preserving_json,
+    validate_server_args_shell_safe,
+)
 from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
 
 
 @dataclass(frozen=True)
 class ServerArgv:
-    """The final server argument list for one benchmark configuration.
+    """A server argument string and its ordered tokens at one composition step.
 
     Attributes:
         framework: Framework the argv belongs to, lower-cased.
         env_name: Benchmark env the string is transported in.
-        text: The sealed argument string, exactly as the YAML now carries it.
+        text: The transport string; only the final seal writes it to the YAML.
         argv: ``text`` split into argv tokens.
         tokenized: False when the string could not be split without moving a
             token boundary; ``argv`` is then empty.
@@ -39,6 +44,28 @@ class ServerArgv:
     text: str
     argv: tuple[str, ...]
     tokenized: bool
+
+    @classmethod
+    def normalize(cls, framework: str | None, text: str) -> ServerArgv:
+        """Compact JSON and deduplicate known scalar flags in one token pass.
+
+        This is an internal composition step, not the sink-side safety seal.
+        Untokenizable text is still JSON-normalized but never deduplicated.
+        """
+        env_name = server_args_env_name(framework)
+        normalized, tokens = normalize_server_args_preserving_json(text)
+        if tokens is not None and env_name != "EXTRA_SGLANG_ARGS" and not any(f in text for f in _MULTI_VALUE_FLAGS):
+            kept = dedup_vllm_server_arg_tokens(tokens)
+            if kept != tokens:
+                normalized = " ".join(kept)
+                tokens = kept
+        return cls(
+            framework=(framework or "").strip().lower(),
+            env_name=env_name,
+            text=normalized,
+            argv=tuple(tokens or ()),
+            tokenized=tokens is not None,
+        )
 
     @property
     def digest(self) -> str:

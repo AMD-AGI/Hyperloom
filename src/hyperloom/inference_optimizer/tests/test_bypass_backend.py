@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -1791,6 +1792,67 @@ def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
     assert proc.terminated is True
     assert signals == [bypass_runner.signal.SIGTERM, bypass_runner.signal.SIGKILL]
     assert proc._bypass_log_fh.closed is True
+
+
+@pytest.mark.parametrize(
+    "framework,key",
+    [("sglang", "EXTRA_SGLANG_ARGS"), ("vllm", "EXTRA_VLLM_ARGS"), ("atom", "EXTRA_ATOM_ARGS")],
+)
+@pytest.mark.parametrize(
+    "ambient,configured,expected",
+    [
+        (None, None, []),
+        (None, '--label "yaml value"', ["--label", "yaml value"]),
+        ('--label "env value"', "--yaml ignored", ["--label", "env value"]),
+        ("", "--yaml fallback", ["--yaml", "fallback"]),
+        ("   ", "--yaml ignored", []),
+        (None, '--flag "unterminated', ["--flag", '"unterminated']),
+    ],
+)
+def test_tokenize_extra_args_serving_precedence_and_quoting(monkeypatch, framework, key, ambient, configured, expected):
+    keys = ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_ATOM_ARGS", "EXTRA_XDIT_ARGS", "EXTRA_CUSTOM_ARGS")
+    bench_envs = dict.fromkeys(keys, "--other-framework ignored")
+    for other_key in keys:
+        monkeypatch.setenv(other_key, "--other-framework ignored")
+    bench_envs[key] = configured
+    if ambient is None:
+        monkeypatch.delenv(key)
+    else:
+        monkeypatch.setenv(key, ambient)
+
+    assert bypass_runner._tokenize_extra_args(bench_envs, framework) == expected
+
+
+@pytest.mark.parametrize("framework", ["xdit", "custom"])
+def test_scriptable_dispatch_precedes_serving_args_lookup(tmp_path, monkeypatch, framework):
+    cfg = {
+        "benchmark": {
+            "framework": framework,
+            "model": "/models/scriptable",
+            "timeout_seconds": 60,
+            "envs": {"EXTRA_SGLANG_ARGS": "--must-not-use-serving-path"},
+        }
+    }
+    cfg_path = tmp_path / "scriptable.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    scriptable = Mock(return_value=7)
+    tokenize = Mock(side_effect=AssertionError("scriptable must not tokenize serving args"))
+    launch = Mock(side_effect=AssertionError("scriptable must not launch a server"))
+    monkeypatch.setattr(bypass_runner, "_run_scriptable_benchmark", scriptable)
+    monkeypatch.setattr(bypass_runner, "_tokenize_extra_args", tokenize)
+    monkeypatch.setattr(bypass_runner, "_launch_server", launch)
+
+    assert bypass_runner.run_benchmark(cfg_path, tmp_path / "out") == 7
+    assert scriptable.call_args.kwargs == {
+        "framework": framework,
+        "model": "/models/scriptable",
+        "bench": cfg["benchmark"],
+        "bench_envs": cfg["benchmark"]["envs"],
+        "timeout_s": 60.0,
+        "output_dir": tmp_path / "out",
+    }
+    tokenize.assert_not_called()
+    launch.assert_not_called()
 
 
 def test_tokenize_extra_args_falls_back_on_bad_quoting():

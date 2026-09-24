@@ -764,7 +764,14 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
+    def unexpected_operation(*_args, **_kwargs):
+        raise AssertionError("a matching live launch must not perform remote operations or rewrite state")
+
+    monkeypatch.setattr(inf, "_infera_fanout_launch", unexpected_operation)
+    for name in ("_infera_ssh_run_script", "_infera_ssh_bash_with_env", "_ray_dashboard_client", "_save_state"):
+        monkeypatch.setattr(inf._mn_cli, name, unexpected_operation)
     state = {
+        "last_restart_env_digest": inf._collect_launch_env().digest,
         "backend": "infera",
         "pd_mode": "aggregated",
         "worker_pod_ips": ["10.0.1.0"],

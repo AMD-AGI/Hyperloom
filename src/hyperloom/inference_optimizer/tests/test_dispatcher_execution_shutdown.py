@@ -16,7 +16,7 @@ from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict
 from functools import partial
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -27,8 +27,101 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult, SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+
+@pytest.mark.parametrize("phase", ["patch", "restart", "reclaim"])
+@pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("worker_raises", [False, True])
+@pytest.mark.asyncio
+async def test_multinode_cancel_retains_lock_until_blocking_operation_finishes(
+    monkeypatch, phase, cancel_count, worker_raises
+):
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    operations = []
+    first_restart = True
+    lock = asyncio.Lock()
+    monkeypatch.setattr(lifecycle, "_RESTART_LOCK", lock)
+    monkeypatch.setattr(lifecycle, "is_multi_node", lambda: True)
+    monkeypatch.setattr(lifecycle, "_read_state", lambda: {"backend": "rayjob", "nodes": 2})
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_RESTART_RECLAIM_RETRY", "1")
+    monkeypatch.setenv("TRACELENS_ROOT", "/test/tracelens" if phase == "patch" else "")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1" if phase == "patch" else "0")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+    for name in (
+        "_wait_for_workers_ready_async",
+        "_wait_for_server_health_async",
+        "_wait_for_published_service_ready_async",
+    ):
+        monkeypatch.setattr(lifecycle, name, AsyncMock())
+    monkeypatch.setattr(lifecycle, "_collect_worker_server_logs", Mock())
+
+    def work(stage):
+        operations.append(stage)
+        if stage == phase and not entered.is_set():
+            entered.set()
+            assert release.wait(10), "test failed to release the blocking worker"
+            finished.set()
+            if worker_raises:
+                raise RuntimeError("blocking operation failed after cancellation")
+        return 0
+
+    def restart(_args, **_kwargs):
+        nonlocal first_restart
+        result = work("restart")
+        if phase == "reclaim" and first_restart:
+            first_restart = False
+            return 1
+        return result
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unexpected remote operation")
+
+    monkeypatch.setattr(mncli, "cmd_apply_tracelens_patch", lambda *_args, **_kwargs: work("patch"))
+    monkeypatch.setattr(mncli, "cmd_restart_server", restart)
+    monkeypatch.setattr(mncli, "kill_inference_for_kernel_agent_best_effort", lambda: work("reclaim"))
+    for name in ("_ray_dashboard_client", "_infera_ssh_run_script", "_infera_ssh_bash_with_env"):
+        monkeypatch.setattr(mncli, name, unexpected)
+
+    async def run():
+        await lifecycle.restart_server_for_round(framework="sglang", model_path="/m", tp=8)
+
+    first = asyncio.create_task(run())
+    second = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        for _ in range(cancel_count):
+            first.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert not first.done(), "caller cancellation must wait for the actual operation"
+        assert lock.locked(), "the running worker still owns restart isolation"
+        count = len(operations)
+        second = asyncio.create_task(run())
+        await asyncio.sleep(0.02)
+        assert len(operations) == count, "a second restart must not overlap the cancelled worker"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert finished.is_set()
+        await asyncio.wait_for(second, 5)
+        assert not lock.locked()
+        expected = {
+            "patch": ["patch", "patch", "restart"],
+            "restart": ["restart", "restart"],
+            "reclaim": ["restart", "reclaim", "restart"],
+        }
+        assert operations == expected[phase], "cancellation must not advance the first restart to its next step"
+    finally:
+        release.set()
+        await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
 
 
 def _dispatcher(tmp_path):
@@ -487,6 +580,129 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         dispatcher.db.close()
 
 
+@pytest.fixture
+def completion_bookkeeping(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    dispatcher = _dispatcher(tmp_path)
+    calls = Mock()
+    for name, is_async in (
+        ("_maybe_auto_retry_specialist", True),
+        ("_record_specialist_result", True),
+        ("_record_framework_agent_authoring_empty_outcome", False),
+        ("_ingest_candidate_discovery", False),
+        ("_promote_to_shared_state", True),
+        ("_handle_unpromotable_result", True),
+        ("_fact_write_hook", True),
+        ("_record_coordinator_exception", False),
+    ):
+        hook = AsyncMock() if is_async else Mock()
+        setattr(dispatcher, name, hook)
+        calls.attach_mock(hook, name)
+    dispatcher._maybe_auto_retry_specialist.return_value = False
+    publish = AsyncMock()
+    monkeypatch.setattr(dispatcher.bus, "append_and_seq", publish)
+    calls.attach_mock(publish, "publish")
+    settle = Mock()
+    monkeypatch.setattr(phase_event, "record_settle", settle)
+    calls.attach_mock(settle, "settle")
+    try:
+        yield dispatcher, calls
+    finally:
+        dispatcher.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [
+        ("cancelled_exception", []),
+        ("exception", []),
+        ("retry", ["_maybe_auto_retry_specialist"]),
+        ("publish_error", ["publish", "_record_coordinator_exception"]),
+        ("cancelled", ["publish", "settle"]),
+        ("promote_error", ["publish", "settle", "_promote_to_shared_state", "_record_coordinator_exception"]),
+        ("succeeded", ["publish", "settle", "_promote_to_shared_state", "_fact_write_hook"]),
+    ],
+)
+async def test_completion_stops_at_each_terminal_boundary(completion_bookkeeping, outcome, expected):
+    dispatcher, calls = completion_bookkeeping
+    task = await dispatcher.tasks.create(
+        kind="specialist" if outcome == "retry" else "shutdown_test",
+        params={"reauthor_attempt": 2},
+        idempotency_key=outcome,
+    )
+    result = SubAgentResult(task.task_id, "cancelled" if outcome == "cancelled" else "succeeded", {"status": "ok"})
+    if outcome == "cancelled_exception":
+        result = asyncio.CancelledError()
+    elif outcome == "exception":
+        result = RuntimeError("execution failed")
+    elif outcome == "retry":
+        dispatcher._maybe_auto_retry_specialist.return_value = True
+    elif outcome == "publish_error":
+        dispatcher.bus.append_and_seq.side_effect = RuntimeError("publish failed")
+    elif outcome == "promote_error":
+        dispatcher._promote_to_shared_state.side_effect = RuntimeError("promote failed")
+
+    assert await dispatcher._reap_dispatched_task(task, result, gpu_lease=None) is None
+
+    assert [call[0] for call in calls.mock_calls] == expected
+    if "publish" in expected:
+        payload = dispatcher.bus.append_and_seq.await_args.args[0].payload
+        assert payload["task_id"] == task.task_id
+        assert payload["state"] == result.state
+        assert payload["result"]["reauthor_attempt"] == 2
+    if outcome in ("publish_error", "promote_error"):
+        expected_stage = "dispatcher_result" if outcome == "publish_error" else "dispatcher_promote"
+        assert dispatcher._record_coordinator_exception.call_args.kwargs["stage"] == expected_stage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation_fails", [False, True])
+async def test_retry_observation_failure_falls_through_after_creation(
+    completion_bookkeeping, monkeypatch, observation_fails
+):
+    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
+
+    dispatcher, calls = completion_bookkeeping
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX", "1")
+    dispatcher._registry_lanes_ttl = lambda _kind: (["research_lane"], 60)
+    dispatcher._maybe_auto_retry_specialist = partial(
+        SpecialistDispatchCollaborator._maybe_auto_retry_specialist, dispatcher
+    )
+    task = await dispatcher.tasks.create(
+        kind="specialist", params={"scope": "freeform", "needs_gpu": False}, idempotency_key="retry-observation"
+    )
+    create = AsyncMock(wraps=dispatcher.tasks.create_or_return_existing)
+    monkeypatch.setattr(dispatcher.tasks, "create_or_return_existing", create)
+    calls.attach_mock(create, "create_retry")
+    observation = AsyncMock(side_effect=RuntimeError("observation failed") if observation_fails else None)
+    dispatcher._record_observation = observation
+    calls.attach_mock(observation, "observation")
+    result = SubAgentResult(task.task_id, "failed", {"runner_status": "stale"}, "subprocess_timeout")
+
+    await dispatcher._reap_dispatched_task(task, result, gpu_lease=None)
+
+    expected = ["create_retry", "observation"]
+    if observation_fails:
+        expected += [
+            "publish",
+            "_record_specialist_result",
+            "_record_framework_agent_authoring_empty_outcome",
+            "_ingest_candidate_discovery",
+            "settle",
+            "_handle_unpromotable_result",
+            "_fact_write_hook",
+        ]
+    assert [call[0] for call in calls.mock_calls] == expected
+    retries = [queued for queued in await dispatcher.tasks.queued() if queued.task_id != task.task_id]
+    assert len(retries) == 1
+    assert retries[0].idempotency_key == "retry-observation-autoretry1"
+    assert retries[0].params["_auto_retry_attempt"] == 1
+    assert observation.await_args.args[2]["retry_task_id"] == retries[0].task_id
+
+
 def test_shutdown_drain_closes_after_clean_callback_failure(tmp_path, monkeypatch):
     dispatcher = _dispatcher(tmp_path)
     entered = asyncio.Event()
@@ -541,6 +757,50 @@ def test_terminal_race_preserves_unconfirmed_outcome(tmp_path):
 
     try:
         asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "child_kind,child_key,child_state,blocked",
+    [
+        ("integrate_patch", "parent-reconcile7", "queued", True),
+        ("integrate_patch", "parent-reconcile7", "running", True),
+        ("integrate_patch", "parent-reconcile7", "succeeded", True),
+        ("integrate_patch", "parent-reconcile7", "failed", False),
+        ("integrate_patch", "parent-reconcile7", "cancelled", False),
+        ("explore", "parent-reconcile7", "succeeded", False),
+        ("integrate_patch", "other-reconcile7", "succeeded", False),
+        ("integrate_patch", "parent-reconcile-any-suffix", "succeeded", True),
+    ],
+)
+async def test_reconcile_child_query_keeps_kind_prefix_and_state_filters(
+    tmp_path, child_kind, child_key, child_state, blocked
+):
+    dispatcher = _dispatcher(tmp_path)
+    dispatcher.sub.policy = SimpleNamespace(validate_dispatched_task=lambda *_args: None)
+    dispatcher.shared_state.get_specialist_patch_verdict = lambda _subject: "approve"
+    try:
+        parent = await dispatcher.tasks.create(
+            kind="integrate_patch", params={"specialist_task_id": "subject"}, idempotency_key="parent"
+        )
+        await dispatcher.tasks.transition(
+            parent.task_id,
+            "cancelled",
+            evidence={"reason": "policy_denied", "rule": "integrate_patch_requires_critic_verdict"},
+        )
+        child = await dispatcher.tasks.create(kind=child_kind, params={}, idempotency_key=child_key)
+        if child_state in ("running", "succeeded", "failed"):
+            await dispatcher.tasks.transition(child.task_id, "running")
+        if child_state not in ("queued", "running"):
+            await dispatcher.tasks.transition(child.task_id, child_state)
+
+        created = await dispatcher._reconcile_cancelled_policy_denied_integrate_tasks()
+        assert len(created) == int(not blocked)
+        if created:
+            assert (await dispatcher.tasks.get(created[0])).idempotency_key == "parent-reconcile1"
+        assert await dispatcher._reconcile_cancelled_policy_denied_integrate_tasks() == []
     finally:
         dispatcher.db.close()
 

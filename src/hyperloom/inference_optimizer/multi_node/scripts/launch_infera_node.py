@@ -152,6 +152,67 @@ _ENV_RECOVER_PREFIXES = (
 _ENV_RECOVER_NAMES = ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "VIRTUAL_ENV")
 
 
+# Keep the standalone boundary in sync with launch_multinode.py and the controller env policy.
+_LAUNCH_ENV_CONTROL = "HYPERLOOM_MN_LAUNCH_ENV_CONTROL"
+_PLATFORM_ENV_PREFIXES = ("LWS_", "POD_", "KUBERNETES_")
+_PROTECTED_LAUNCH_ENV = frozenset(
+    {
+        "BASH_ENV",
+        "CDPATH",
+        "ENV",
+        "GCONV_PATH",
+        "GIT_SSH_COMMAND",
+        "IFS",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "PATH",
+        "PERL5OPT",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "SHELLOPTS",
+        "VIRTUAL_ENV",
+        _LAUNCH_ENV_CONTROL,
+    }
+)
+
+
+def _launch_env_overrides(source: dict[str, str]) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Validate the key-only envelope and capture values before environment recovery."""
+    if _LAUNCH_ENV_CONTROL not in source:
+        return {}, ()
+    try:
+        control = json.loads(source[_LAUNCH_ENV_CONTROL])
+    except ValueError:
+        raise ValueError("invalid launch env control JSON") from None
+    if not isinstance(control, dict) or set(control) != {"set", "unset"}:
+        raise ValueError("invalid launch env control fields")
+    for keys in control.values():
+        if not isinstance(keys, list) or any(
+            not isinstance(key, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+            or key in _PROTECTED_LAUNCH_ENV
+            or key.startswith(_PLATFORM_ENV_PREFIXES)
+            for key in keys
+        ):
+            raise ValueError("invalid launch env control keys")
+    if any(key not in source for key in control["set"]):
+        raise ValueError("launch env control set value is missing")
+    return {key: source[key] for key in control["set"]}, tuple(control["unset"])
+
+
+def _apply_launch_env(env: dict[str, str], overrides: tuple[dict[str, str], tuple[str, ...]]) -> None:
+    explicit, unset = overrides
+    env.pop(_LAUNCH_ENV_CONTROL, None)
+    for key in unset:
+        env.pop(key, None)
+    env.update(explicit)
+
+
 def _recover_container_env() -> dict[str, str]:
     """Merge the current env with pid1's env for the recovered keys."""
     env = dict(os.environ)
@@ -417,9 +478,10 @@ _KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 _SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
 
 
-def _sglang_shape_mode() -> str:
+def _sglang_shape_mode(env: dict[str, str] | None = None) -> str:
     """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
-    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
+    env = os.environ if env is None else env
+    override = env.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
     if override in {"patch", "patched"}:
         return "patched"
     if override == "sitecustomize":
@@ -430,7 +492,7 @@ def _sglang_shape_mode() -> str:
 
         version = (getattr(sglang, "__version__", "") or "").strip()
     except Exception:  # noqa: BLE001
-        version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+        version = env.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
     m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
     if not m:
         return "patched"
@@ -440,8 +502,8 @@ def _sglang_shape_mode() -> str:
 
 def _maybe_activate_kernel_shape_tool(env: dict[str, str]) -> None:
     """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
-    root = (env.get("TRACELENS_ROOT") or os.environ.get("TRACELENS_ROOT") or "").strip()
-    if not root or _sglang_shape_mode() != "sitecustomize":
+    root = (env.get("TRACELENS_ROOT") or "").strip()
+    if not root or _sglang_shape_mode(env) != "sitecustomize":
         return
     tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
     if not tool.is_dir():
@@ -553,7 +615,6 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     env = dict(env)
-    env.setdefault("PYTHONUNBUFFERED", "1")
     inner = " ".join(shlex.quote(c) for c in cmd)
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
@@ -706,7 +767,13 @@ def main() -> int:
     p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
     args = p.parse_args()
 
+    overrides = _launch_env_overrides(dict(os.environ))
     env = _recover_container_env()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    _apply_launch_env(env, overrides)
+    if args.framework == "sglang" and not args.kill_only:
+        _maybe_activate_kernel_shape_tool(env)
+        _apply_launch_env(env, overrides)
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:
@@ -719,7 +786,7 @@ def main() -> int:
     pid_file = Path(args.pid_file)
     log_file = Path(args.log_file)
     # GPU metrics sampler paths (shared-FS, per-pod).
-    _samp_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+    _samp_dir = env.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
     _samp_csv = ""
     _samp_pid_file = ""
     if _samp_dir.startswith("/") and "$" not in _samp_dir:
@@ -761,11 +828,10 @@ def main() -> int:
     advertise_host = _resolve_pod_ip(env)
     # When a shared-FS (WekaFS) server-log dir is forwarded, write server.log there with a per-pod suffix so the
     # client can read it and prefill/decode do not collide.
-    _shared_log_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+    _shared_log_dir = env.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
     if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
         log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
     if args.framework == "sglang":
-        _maybe_activate_kernel_shape_tool(env)
         cmd = _build_sglang_cmd(args, node_rank, leader, advertise_host=advertise_host)
         pid = _detach_launch(cmd, log_file, pid_file, env)
     else:

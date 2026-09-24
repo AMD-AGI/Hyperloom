@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -340,6 +340,31 @@ class TaskRegistry:
                 (json.dumps(history), task_id),
             )
 
+    async def append_completion_evidence(self, task_id: str, evidence: dict[str, Any] | None = None) -> None:
+        """Append durable completion evidence without changing state or updated_at.
+
+        This is not progress and must survive progress-history pruning. A
+        repeated completion appends again; a missing row remains an error.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            history = json.loads(cur.fetchone()["history"])
+            history.append({"ts": _now_iso(), "evidence": evidence or {}})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+
+    async def integrate_reconcile_child_exists(self, base_key: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether an integrate-patch reconcile child exists in these states."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            (prefix, *states),
+        )
+        return row is not None
+
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
         """Return the task registered under ``idempotency_key``, or None."""
         row = await self.db.fetchone(
@@ -357,6 +382,43 @@ class TaskRegistry:
         """Return all running tasks ordered least-recently-updated-first."""
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
+
+    def running_context_sync(self) -> Iterator[tuple[Task, list[str], str, list[int]]]:
+        """Read running tasks, then project their lanes, soonest expiry and GPUs.
+
+        Only the task query runs eagerly. Iteration reads resources separately
+        before decoding tasks; these reads do not form a transactional snapshot.
+        """
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+            (),
+        )
+
+        def project() -> Iterator[tuple[Task, list[str], str, list[int]]]:
+            if not rows:
+                return
+            lanes_by_task: dict[str, list[str]] = {}
+            expiry_by_task: dict[str, str] = {}
+            for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+                tid = str(row["task_id"])
+                lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
+                expires = str(row["expires_at"])
+                prev = expiry_by_task.get(tid)
+                if prev is None or expires < prev:
+                    expiry_by_task[tid] = expires
+            gpus_by_task: dict[str, list[int]] = {}
+            for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+                gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
+            for row in rows:
+                task = Task.from_row(row)
+                yield (
+                    task,
+                    lanes_by_task.get(task.task_id, []),
+                    expiry_by_task.get(task.task_id, ""),
+                    gpus_by_task.get(task.task_id, []),
+                )
+
+        return project()
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""

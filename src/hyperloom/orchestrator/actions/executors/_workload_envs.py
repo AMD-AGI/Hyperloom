@@ -59,7 +59,6 @@ from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
 from ._benchmark_interpreter import _resolve_probe_python
 from ._grid_server_args import (
-    compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
@@ -70,11 +69,15 @@ from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
 from ._recipe_script import recipe_launch_contract
-from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
+from ._server_argv import ServerArgv, add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
+    kernel_shape_tool_dir,
+    resolve_sglang_shape_mode,
+    tracelens_patch_attempted,
+    tracelens_patch_enabled,
 )
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
@@ -981,30 +984,6 @@ def _visible_gpu_count() -> int:
     return 0
 
 
-def _tracelens_patch_enabled() -> bool:
-    """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
-
-    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
-    SGLang. Default on because the patches are backward-compatible.
-
-    With the switch off, no *server flag* that only a patched build accepts is
-    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
-    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
-    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
-    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
-    **kept**: they ride the ``/start_profile`` API, which an unpatched server
-    accepts, and the switch is also how a pre-patched image opts out of runtime
-    patching while still supporting them. Only a patch that was *attempted and
-    failed* clears them, which is why that gate reads
-    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
-    path) rather than ``tracelens_patch_ok``.
-
-    Returns:
-        True when runtime patching is enabled (default), else False.
-    """
-    return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
-
-
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -1113,8 +1092,8 @@ def _finalize_framework_server_args(
        first-request aiter JIT compile survives (the 300s default fires
        SIGQUIT mid-warmup on a cold aiter cache).
 
-    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
-    inline comments below carry the per-step rationale.
+    Framework-scoped injections precede one JSON normalization and vLLM/atom
+    scalar deduplication pass; the env mapping only receives the resulting text.
 
     ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
     already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
@@ -1154,22 +1133,8 @@ def _finalize_framework_server_args(
         bench.get("framework"),
         os.environ.get("EP", "").strip() or envs.get("EP"),
     )
-    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
-    #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
-    #    sglang.
-    resolved_server_args = dedup_vllm_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
-    # 6. JSON-valued flags (--speculative-config / --compilation-config /
-    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
-    #    compact each JSON blob to be space-free so it survives as one shell
-    #    word. No-op for sglang and for arg strings with no JSON.
-    resolved_server_args = compact_json_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
-    resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
+    argv = ServerArgv.normalize(bench.get("framework"), resolved_server_args)
+    resolved_server_args = validate_server_args_shell_safe(argv.text)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
 
@@ -1584,16 +1549,10 @@ def materialize_config_with_envs(
         # atom profiler envs and must NOT inject --profiler-config.* flags.
         is_atom = "atom" in fw
         # TraceLens profiler flags exist only in patched vLLM / SGLang builds;
-        # try to patch, fall back to the safe set on failure. Default-on
-        # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
+        # try to patch, fall back to the safe set on failure.
         tracelens_patch_ok = False
-        # Function-local import to stay out of the module-level import cycle
-        # (matches _multi_node_server_lifecycle).
-        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
-
-        is_sglang = "sglang" in fw
-        sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
+        sglang_sitecustomize = "sglang" in fw and resolve_sglang_shape_mode() == "sitecustomize"
+        patch_attempted = tracelens_patch_attempted(fw)
         # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
         # "never tried because the image already carries it", and those two call for different reactions when a
         # trace later turns up without annotations.
@@ -2093,7 +2052,7 @@ def materialize_config_with_envs(
     # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
     # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
     _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
+    if tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
         if not ensure_sglang_patched_for_ck_blockscale():
             log.warning(
                 "CK fp8 block-scale patch could not be applied; "

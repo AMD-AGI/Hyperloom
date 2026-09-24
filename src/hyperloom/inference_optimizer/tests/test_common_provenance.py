@@ -563,3 +563,55 @@ def test_an_explicit_stamp_still_outranks_the_derivation():
     )
 
     assert patch_lever_kind({"lever_kind": "upstream_pr", "extra_server_args": "--x"}) == LEVER_UPSTREAM_PR
+
+
+@pytest.mark.parametrize("lever", ["config", "source_patch", "upstream_pr", "enablement", "kernel"])
+def test_explicit_lever_kind_is_normalized_and_outranks_other_evidence(lever):
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import patch_lever_kind
+
+    evidence = {
+        "lever_kind": f" {lever.upper()} ",
+        "enablement": True,
+        "pr_url": "https://example.invalid/pull/1",
+        "patch_name": "candidate.patch",
+    }
+    assert patch_lever_kind(evidence) == lever
+
+
+@pytest.mark.parametrize(
+    ("evidence", "lever", "owner_phase"),
+    [
+        (None, "", ""),
+        ({}, "", ""),
+        ({"lever_kind": "unknown", "source_phase": "unknown"}, "", ""),
+        ({"source_phase": " framework "}, "", "FRAMEWORK_AGENT"),
+        ({"source_phase": "framework_agent"}, "", "FRAMEWORK_AGENT"),
+        ({"source_phase": " explore "}, "", "EXPLORE"),
+        ({"source_phase": "KERNEL"}, "", ""),
+        ({"lever_kind": "kernel", "source_phase": "KERNEL_AGENT"}, "kernel", ""),
+        ({"lever_kind": "config", "source_phase": "EXPLORE"}, "config", "EXPLORE"),
+        ({"lever_kind": "source_patch", "source_phase": "EXPLORE"}, "source_patch", "EXPLORE"),
+        ({"lever_kind": "upstream_pr", "source_phase": "EXPLORE"}, "upstream_pr", "FRAMEWORK_AGENT"),
+        ({"lever_kind": "enablement", "source_phase": "EXPLORE"}, "enablement", "FRAMEWORK_AGENT"),
+        ({"enablement": True, "pr_url": "pr", "patch_name": "diff"}, "enablement", "FRAMEWORK_AGENT"),
+        ({"pr_url": "pr", "patch_name": "diff"}, "upstream_pr", "FRAMEWORK_AGENT"),
+        ({"pr_lead": "pr"}, "upstream_pr", "FRAMEWORK_AGENT"),
+        ({"framework_agent_candidate_id": "remote:1"}, "upstream_pr", "FRAMEWORK_AGENT"),
+        ({"framework_agent_candidate_id": "local_explore:0"}, "config", "FRAMEWORK_AGENT"),
+        (
+            {"framework_agent_candidate_id": "local_explore:0", "patch_path": "diff.patch"},
+            "source_patch",
+            "FRAMEWORK_AGENT",
+        ),
+        ({"framework_agent_authoring": True, "source_phase": "EXPLORE"}, "", "FRAMEWORK_AGENT"),
+        ({"patch_name": "diff"}, "source_patch", ""),
+        ({"patches_applied": ["diff.patch"]}, "source_patch", ""),
+        ({"patch_path": "diff.patch"}, "", ""),
+        ({"specialist_task_id": "t1", "extra_server_args": "--x"}, "", ""),
+    ],
+)
+def test_patch_ownership_preserves_recorded_evidence_precedence(evidence, lever, owner_phase):
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import patch_lever_kind, patch_owner_phase
+
+    assert patch_lever_kind(evidence) == lever
+    assert patch_owner_phase(evidence) == owner_phase

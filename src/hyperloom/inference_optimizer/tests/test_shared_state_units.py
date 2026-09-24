@@ -509,6 +509,54 @@ class TestPersistence:
         assert s.session_id == "abc"
         assert not hasattr(s, "unknown_field")
 
+    def test_from_dict_rejects_bad_crash_timestamps_before_resume(self):
+        raw = {"session_id": "damaged", "crash_timestamps": "bad"}
+        with pytest.raises(ValueError, match=r"crash_timestamps.*list"):
+            SharedState.from_dict(raw)
+        assert raw == {"session_id": "damaged", "crash_timestamps": "bad"}
+
+    @pytest.mark.parametrize("value", [None, False, 1, 1.5, {}, ()])
+    def test_from_dict_rejects_non_list_crash_timestamps(self, value):
+        with pytest.raises(ValueError, match=r"crash_timestamps.*list"):
+            SharedState.from_dict({"crash_timestamps": value})
+
+    @pytest.mark.parametrize("value", [None, True, "bad", [], {}])
+    def test_from_dict_names_the_invalid_crash_timestamp(self, value):
+        with pytest.raises(ValueError, match=r"crash_timestamps\[1\].*number"):
+            SharedState.from_dict({"crash_timestamps": [100.0, value]})
+
+    @pytest.mark.parametrize("value", [None, True, "bad", 1.5, [], {}])
+    def test_from_dict_rejects_invalid_crash_count(self, value):
+        with pytest.raises(ValueError, match=r"crash_count.*int"):
+            SharedState.from_dict({"crash_count": value})
+
+    @pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
+    @pytest.mark.parametrize("value", [None, False, 1, 1.5, [], {}])
+    def test_from_dict_rejects_invalid_agent_text_fields(self, field_name, value):
+        with pytest.raises(ValueError, match=rf"{field_name}.*str"):
+            SharedState.from_dict({field_name: value})
+
+    def test_from_dict_missing_resume_fields_keep_legacy_defaults(self):
+        s = SharedState.from_dict({"session_id": "legacy", "unknown_future_key": "ignored"})
+        assert s.session_id == "legacy"
+        assert s.crash_count == 0
+        assert s.crash_timestamps == []
+        assert s.current_action == ""
+        assert s.target_summary == ""
+        assert not hasattr(s, "unknown_future_key")
+
+    @pytest.mark.parametrize("timestamps", [[], [100], [100.0], [100, 110.5]])
+    def test_from_dict_preserves_valid_crash_evidence_and_text(self, timestamps):
+        raw = {
+            "crash_count": 5,
+            "crash_timestamps": timestamps,
+            "current_action": "baseline",
+            "target_summary": "",
+        }
+        s = SharedState.from_dict(raw)
+        assert {name: getattr(s, name) for name in raw} == raw
+        assert s.recent_crash_count(window_sec=60, now=120) == len(timestamps)
+
 
 @pytest.mark.parametrize(
     "action,metric_key,metric_kind",

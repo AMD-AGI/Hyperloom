@@ -429,7 +429,7 @@ def _compute_tag_for_bytes(weight_bytes: float) -> str:
 
 
 def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
-    """Rescale ``meta`` weight bytes to the runtime weight dtype."""
+    """Rescale runtime weights while preserving any explicit expert dtype."""
     import dataclasses as _dc
 
     # Safe degrade for non-dataclass / fake meta (test doubles).
@@ -440,12 +440,18 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     if cfg_b <= 0 or rt_b <= 0 or abs(cfg_b - rt_b) < 1e-9:
         return _dc.replace(meta, weight_dtype_bytes=rt_b or cfg_b)
     scale = rt_b / cfg_b
+    expert_scale = 1.0 if meta.expert_weight_dtype_bytes > 0 else scale
+    non_expert_bytes = int((meta.weight_bytes - meta.expert_weight_bytes) * scale)
+    expert_bytes = int(meta.expert_weight_bytes * expert_scale)
+    active_bytes = int(meta.active_weight_bytes * scale)
+    if meta.num_experts > 0:
+        active_bytes = non_expert_bytes + int(expert_bytes * meta.experts_per_tok / meta.num_experts)
     return _dc.replace(
         meta,
         weight_dtype_bytes=rt_b,
-        weight_bytes=int(meta.weight_bytes * scale),
-        active_weight_bytes=int(meta.active_weight_bytes * scale),
-        expert_weight_bytes=int(meta.expert_weight_bytes * scale),
+        weight_bytes=non_expert_bytes + expert_bytes,
+        active_weight_bytes=active_bytes,
+        expert_weight_bytes=expert_bytes,
     )
 
 
@@ -479,7 +485,7 @@ class ModelMeta:
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
-    # Per-element bytes for the expert (routed FFN) weights.
+    # Explicit expert (routed FFN) bytes per element; 0 inherits weight_dtype_bytes.
     expert_weight_dtype_bytes: float = 0.0
     # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
     hidden_size: int = 0
@@ -689,7 +695,7 @@ def load_model_meta(
         dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
     # Routed experts may be stored at a distinct precision (DeepSeek-V4 ``expert_dtype: fp4`` under fp8 attention).
     expert_dtype_raw = str(cfg.get("expert_dtype") or "").strip()
-    expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else dtype_bytes
+    expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else 0.0
     active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = _compute_expert_decomposition(
         cfg,
         weight_bytes=weight_bytes,

@@ -1312,59 +1312,59 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
 
 @pytest.fixture(autouse=False)
-def _reset_help_cache():
-    """Clear the framework-keyed help-text caches before/after each test."""
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
-    yield
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
+def _reset_help_cache(monkeypatch):
+    """Isolate failed launches and the serving interpreter selection."""
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework: "/fake/python")
+    monkeypatch.setattr(_grid_variant_filter, "_HELP_PROBE_FAILURES", {})
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The atom probe returns the mocked help verbatim and caches it for the second call."""
-    call_count = {"n": 0}
+    """Each call sees current help from the selected interpreter."""
+    calls = []
     synthetic_help = "usage: atom-engine [-h] [--tensor-parallel-size INT] [--torch-profiler-dir DIR] ..."
 
     def fake_run(cmd, *args, **kwargs):
-        call_count["n"] += 1
+        calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, synthetic_help, "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     out = _grid_runner._probe_server_help_text("atom")
     assert "--tensor-parallel-size" in out
     assert "--torch-profiler-dir" in out
-    # Second call must hit the cache, not the subprocess.
+    synthetic_help += " --new-option"
     out2 = _grid_runner._probe_server_help_text("atom")
-    assert out2 == out
-    assert call_count["n"] == 1, (
-        f"_probe_server_help_text must cache atom's result; subprocess called {call_count['n']} times"
-    )
+    assert out2 == synthetic_help
+    assert "--new-option" not in out
+    assert len(calls) == 2
+    assert calls[0] == calls[1] == ["/fake/python", *_grid_variant_filter._HELP_PROBE_COMMANDS["atom"]]
 
 
 def test_probe_server_help_text_atom_returns_empty_on_failure(
     _reset_help_cache,
     monkeypatch,
 ):
-    """A failure surfaces as ``\"\"`` and is held off rather than re-paid at once."""
-    raised = {"n": 0}
+    """A failure is held off for 300 seconds only while its identity matches."""
+    parser_attempts = []
+    clock = [1000.0]
+    monkeypatch.setattr(_grid_variant_filter.time, "monotonic", lambda: clock[0])
 
-    def fake_run(*args, **kwargs):
-        raised["n"] += 1
-        raise RuntimeError("subprocess refused to run")
+    def fake_run(cmd, *args, **kwargs):
+        parser_attempts.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, "", "fake parser import failed")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert _grid_runner._probe_server_help_text("atom") == ""
-    assert raised["n"] == 1
+    assert len(parser_attempts) == 1
 
-    # The hold-off is bounded, so a framework that recovers is picked back up.
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
+    clock[0] += 300.0
     assert _grid_runner._probe_server_help_text("atom") == ""
-    assert raised["n"] == 2
+    assert len(parser_attempts) == 2
 
 
 def test_probe_server_help_text_ignores_a_failed_runs_stderr(
@@ -1380,26 +1380,19 @@ def test_probe_server_help_text_ignores_a_failed_runs_stderr(
     assert _grid_runner._probe_server_help_text("atom") == ""
 
 
-def test_probe_server_help_text_cache_keyed_by_framework(
+def test_probe_server_help_text_is_specific_to_the_framework(
     _reset_help_cache,
     monkeypatch,
 ):
-    """Cache slots must be per-framework so sglang's help text doesn't leak into the vllm/atom slot."""
+    """Each framework runs its own parser command without cross-contamination."""
     payload_map = {
         "sglang": "USAGE_SGLANG --enable-flashinfer-mla",
         "atom": "USAGE_ATOM --torch-profiler-dir",
     }
 
     def fake_run(cmd, *args, **kwargs):
-        # Identify the framework from the inline source code in cmd[-1].
-        src = cmd[-1] if cmd else ""
-        if "sglang.srt.server_args" in src:
-            payload = payload_map["sglang"]
-        elif "atom.model_engine" in src:
-            payload = payload_map["atom"]
-        else:
-            payload = ""
-        return subprocess.CompletedProcess(cmd, 0, payload, "")
+        framework = "sglang" if "sglang.srt.server_args" in cmd[-1] else "atom"
+        return subprocess.CompletedProcess(cmd, 0, payload_map[framework], "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     sgl = _grid_runner._probe_server_help_text("sglang")
@@ -1419,12 +1412,7 @@ def test_probe_server_help_text_supports_all_three_frameworks(
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd,
-            0,
-            f"help for {cmd[-1]!r}",
-            "",
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, 0, f"help for {cmd[-1]!r}", ""),
     )
     for fw in ("sglang", "vllm", "atom"):
         out = _grid_runner._probe_server_help_text(fw)
@@ -1463,20 +1451,15 @@ def test_probe_server_help_text_sglang(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The framework-keyed probe handles sglang and populates the sglang cache."""
+    """A successful sglang probe returns help and leaves no failure cooldown."""
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd,
-            0,
-            "USAGE_SGLANG_LEGACY",
-            "",
-        ),
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, 0, "USAGE_SGLANG", ""),
     )
     out = _grid_runner._probe_server_help_text("sglang")
-    assert "USAGE_SGLANG_LEGACY" in out
-    assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
+    assert "USAGE_SGLANG" in out
+    assert "sglang" not in _grid_variant_filter._HELP_PROBE_FAILURES
 
 
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
@@ -1488,8 +1471,9 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     # MoE keyword so the model-class predicate doesn't drop the variant first.
     monkeypatch.setenv("MODEL_PATH", "/path/models/DeepSeek-R1-0528")
 
-    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
-    _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
+    help_text = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, help_text, ""))
+    assert _grid_runner._probe_server_help_text("atom") == help_text
 
     # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
@@ -1639,6 +1623,17 @@ class TestDedupVllmServerArgs:
     def test_multi_value_flag_left_untouched(self):
         # cuda-graph-bs takes a list; never collapse a string that carries one.
         raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    @pytest.mark.parametrize("framework", ["vllm", "atom"])
+    def test_unknown_repeated_flags_and_explicit_empty_value_stay_ordered(self, framework):
+        raw = "--unknown a --block-size 16 --unknown b --max-model-len= --block-size 128"
+        assert _grid_runner.dedup_vllm_server_args(raw, framework) == (
+            "--unknown a --unknown b --max-model-len= --block-size 128"
+        )
+
+    def test_multi_value_json_is_not_normalized_by_legacy_dedup(self):
+        raw = '--cuda-graph-bs 1 2 --compilation-config {"custom_ops": ["+rms_norm"]} --cuda-graph-bs 4 8'
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
 

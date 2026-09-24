@@ -121,6 +121,251 @@ def test_tool_name_tuples():
     assert len(mct.CONTEXT_TOOL_NAMES) == len(mct.CONTEXT_TOOL_SPECS)
 
 
+# ---- synchronous conversation context readers ----
+
+
+@pytest.fixture
+def context_reader(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.bus.message_bus import MessageBus
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.loop import conversation
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+    db = SqliteConnection(tmp_path / "context.db", journal_mode="DELETE")
+    coordinator = SimpleNamespace(bus=MessageBus(db), tasks=TaskRegistry(db), session_dir=tmp_path)
+    reader = conversation.ConversationCollaborator(coordinator)
+    monkeypatch.setattr(conversation, "_format_inbox_event", lambda msg, **_kwargs: msg.msg_id)
+    monkeypatch.setattr(conversation.time, "time", lambda: 1000.0)
+    try:
+        yield reader, db, conversation
+    finally:
+        db.close()
+
+
+def _context_event(db, name, *, topic="observation", sender="worker", recipient="orchestration", payload=None):
+    from hyperloom.orchestrator.bus.message_bus import Message
+
+    msg = Message(name, sender, recipient, topic, payload or {})
+    cursor = db.raw.execute(
+        "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+        msg.to_db_row(),
+    )
+    return cursor.lastrowid
+
+
+def _context_task(db, name, *, state="running", updated_at="1970-01-01T00:15:00+00:00"):
+    db.raw.execute(
+        "INSERT INTO tasks (task_id, kind, state, params, idempotency_key, lease_ttl_sec, created_at, updated_at) "
+        "VALUES (?, 'explore', ?, ?, ?, 60, ?, ?)",
+        (name, state, json.dumps({"domain": "kernel", "gap_canonical_id": "gap-1"}), name, updated_at, updated_at),
+    )
+
+
+def test_context_reader_inbox_keeps_exact_recipient_cursor_and_unfiltered_topics(context_reader):
+    reader, db, _ = context_reader
+    since = _context_event(db, "at-cursor")
+    _context_event(db, "other-recipient", recipient="critic")
+    _context_event(db, "self-request", topic="request", sender="orchestration")
+    _context_event(db, "broadcast", topic="response", recipient="*")
+    for index in range(205):
+        _context_event(db, f"event-{index}")
+
+    assert reader._context_inbox_reader(str(since)).splitlines() == [
+        "self-request",
+        "broadcast",
+        *(f"event-{index}" for index in range(205)),
+    ]
+    assert reader._context_inbox_reader(9999) == "(no inbox events)"
+    assert reader._context_inbox_reader(None).splitlines()[0] == "at-cursor"
+    assert reader._context_inbox_reader("invalid").startswith("(inbox unavailable: ValueError(")
+
+
+@pytest.mark.parametrize("top_k, count", [(0, 8), (-5, 1), (999, 50), (3, 3), (None, 8), ("bad", 8)])
+def test_context_reader_recent_outcomes_filters_only_topics_and_keeps_latest_chronological(
+    context_reader, top_k, count
+):
+    reader, db, _ = context_reader
+    for index in range(55):
+        _context_event(
+            db,
+            f"outcome-{index}",
+            topic=("delegated_result", "review_verdict")[index % 2],
+            sender="orchestration",
+            recipient="critic",
+        )
+        _context_event(db, f"ignored-{index}", topic="observation")
+
+    assert reader._context_recent_outcomes_reader(top_k).splitlines() == [
+        "=== Recent action outcomes (newest last) ===",
+        *(f"outcome-{index}" for index in range(55 - count, 55)),
+    ]
+
+
+def test_context_reader_recent_outcomes_keeps_variant_and_total_tail_caps(context_reader, monkeypatch):
+    reader, db, conversation = context_reader
+    calls = []
+
+    def format_event(msg, *, max_variant_rows):
+        calls.append((msg.msg_id, max_variant_rows))
+        return "\n".join(f"{msg.msg_id}:{index}" for index in range(max_variant_rows + 1))
+
+    monkeypatch.setattr(conversation, "_format_inbox_event", format_event)
+    for index in range(10):
+        _context_event(db, f"outcome-{index}", topic="delegated_result")
+    expected = [f"outcome-{event}:{row}" for event in range(10) for row in range(13)]
+
+    assert reader._context_recent_outcomes_reader(10).splitlines() == [
+        "=== Recent action outcomes (newest last) ===",
+        *expected[-120:],
+        "(truncated at 120 lines; re-query with a smaller top_k)",
+    ]
+    assert calls == [(f"outcome-{index}", 12) for index in range(10)]
+
+
+@pytest.mark.parametrize(
+    "method, empty, unavailable",
+    [
+        ("_context_inbox_reader", "(no inbox events)", "inbox"),
+        ("_context_recent_outcomes_reader", "(no recent outcomes)", "recent outcomes"),
+        ("_context_running_tasks_reader", "(no tasks in flight)", "running tasks"),
+    ],
+)
+def test_context_reader_empty_and_first_query_failure(context_reader, monkeypatch, method, empty, unavailable):
+    reader, db, _ = context_reader
+    assert getattr(reader, method)() == empty
+
+    def fail(*_args):
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(db, "fetchall_sync", fail)
+    assert getattr(reader, method)() == f"({unavailable} unavailable: RuntimeError('read failed'))"
+
+
+@pytest.mark.parametrize("method", ["_context_inbox_reader", "_context_recent_outcomes_reader"])
+def test_context_reader_message_decode_error_is_not_a_query_failure(context_reader, method):
+    reader, db, _ = context_reader
+    _context_event(db, "malformed", topic="delegated_result")
+    db.raw.execute("UPDATE events SET payload='not-json'")
+    with pytest.raises(json.JSONDecodeError):
+        getattr(reader, method)()
+
+
+def test_context_reader_running_empty_short_circuits_resource_reads(context_reader, monkeypatch):
+    reader, db, _ = context_reader
+    _context_task(db, "queued", state="queued")
+    reads = []
+    fetch = db.fetchall_sync
+
+    def read(sql, params=()):
+        reads.append(sql)
+        return fetch(sql, params)
+
+    monkeypatch.setattr(db, "fetchall_sync", read)
+    assert reader._context_running_tasks_reader() == "(no tasks in flight)"
+    assert len(reads) == 1
+    assert "FROM tasks" in reads[0]
+
+
+def test_context_reader_running_order_resources_and_separate_reads(context_reader, monkeypatch):
+    reader, db, _ = context_reader
+    _context_task(db, "newer", updated_at="1970-01-01T00:16:00+00:00")
+    _context_task(db, "older")
+    _context_task(db, "finished", state="succeeded")
+    reads = []
+    fetch = db.fetchall_sync
+
+    def read(sql, params=()):
+        rows = fetch(sql, params)
+        reads.append(sql)
+        if "FROM tasks" in sql:
+            for lane, expiry in [
+                ("profile_lane", "1970-01-01T00:17:20+00:00"),
+                ("benchmark_lane", "1970-01-01T00:17:00+00:00"),
+            ]:
+                db.raw.execute(
+                    "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at) "
+                    "VALUES (?, 'holder', 'older', 'explore', 1, '', ?, '')",
+                    (lane, expiry),
+                )
+        elif "FROM leases" in sql:
+            for gpu in (3, 1):
+                db.raw.execute(
+                    "INSERT INTO gpu_leases VALUES (?, 'holder', 'older', '', '', '')",
+                    (gpu,),
+                )
+        return rows
+
+    monkeypatch.setattr(db, "fetchall_sync", read)
+    assert reader._context_running_tasks_reader().splitlines() == [
+        "=== Tasks in flight ===",
+        "  - task_id=older kind='explore' running_sec=100 domain='kernel' gap='gap-1' "
+        "idempotency_key='older' lease_ttl_sec=60 lease_expires_in_sec=20 "
+        "lanes=['benchmark_lane', 'profile_lane'] gpu_ids=[1, 3]",
+        "  - task_id=newer kind='explore' running_sec=40 domain='kernel' gap='gap-1' "
+        "idempotency_key='newer' lease_ttl_sec=60",
+    ]
+    assert len(reads) == 3
+    assert all(f"FROM {table}" in sql for table, sql in zip(("tasks", "leases", "gpu_leases"), reads))
+    assert db.raw.in_transaction is False
+
+
+@pytest.mark.parametrize("failing_table, expected_reads", [("leases", 2), ("gpu_leases", 3)])
+def test_context_reader_running_resource_errors_propagate(context_reader, monkeypatch, failing_table, expected_reads):
+    reader, db, _ = context_reader
+    _context_task(db, "running")
+    fetch = db.fetchall_sync
+    reads = []
+
+    def read(sql, params=()):
+        reads.append(sql)
+        if f"FROM {failing_table}" in sql:
+            raise RuntimeError(f"{failing_table} failed")
+        return fetch(sql, params)
+
+    monkeypatch.setattr(db, "fetchall_sync", read)
+    with pytest.raises(RuntimeError, match=f"{failing_table} failed"):
+        reader._context_running_tasks_reader()
+    assert len(reads) == expected_reads
+
+
+def test_context_reader_running_task_decode_follows_resource_reads(context_reader, monkeypatch):
+    reader, db, _ = context_reader
+    _context_task(db, "malformed")
+    db.raw.execute("UPDATE tasks SET params='not-json'")
+    fetch = db.fetchall_sync
+    reads = []
+
+    def read(sql, params=()):
+        reads.append(sql)
+        return fetch(sql, params)
+
+    monkeypatch.setattr(db, "fetchall_sync", read)
+    with pytest.raises(json.JSONDecodeError):
+        reader._context_running_tasks_reader()
+    assert len(reads) == 3
+
+
+@pytest.mark.parametrize("format_fails", [False, True])
+def test_context_reader_running_formats_each_task_before_decoding_the_next(context_reader, monkeypatch, format_fails):
+    reader, db, _ = context_reader
+    _context_task(db, "first")
+    _context_task(db, "malformed", updated_at="1970-01-01T00:16:00+00:00")
+    db.raw.execute("UPDATE tasks SET params='not-json' WHERE task_id='malformed'")
+    formatted = []
+
+    def heartbeat(task, *, now_unix):
+        formatted.append(task.task_id)
+        if format_fails:
+            raise RuntimeError("first format failed")
+        return None
+
+    monkeypatch.setattr(reader, "_task_heartbeat_age_sec", heartbeat)
+    error = RuntimeError if format_fails else json.JSONDecodeError
+    with pytest.raises(error):
+        reader._context_running_tasks_reader()
+    assert formatted == ["first"]
+
+
 # ---- _resolve_sdk ----
 
 

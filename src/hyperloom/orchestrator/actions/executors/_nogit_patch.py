@@ -14,7 +14,7 @@ from hyperloom.common.git_safety import safe_directory_args
 from pathlib import Path
 from typing import Any
 
-from ...delivery.ledger import append_record, merge_records
+from ...delivery.ledger import append_record, mark_prepared, merge_records
 from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
@@ -232,6 +232,14 @@ def _apply_patch_no_git(
         # (the patch that really made those edits owns the backups needed for a
         # correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
+            if not mark_prepared(backup_root):
+                err_msg = "backup prepare record could not be persisted"
+                return (
+                    False,
+                    err_msg,
+                    [],
+                    ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=err_msg),
+                )
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
@@ -430,6 +438,9 @@ def _apply_patch_no_git(
                 )
             if err:
                 return _fail(err, backups)
+
+    if not mark_prepared(backup_root):
+        return _fail("backup prepare record could not be persisted", backups)
 
     # Apply for real.
     rej_dir = backup_root / "rej"

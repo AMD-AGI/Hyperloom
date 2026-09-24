@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -269,3 +270,83 @@ def test_a_repaired_argv_reaches_the_launch_through_the_rendered_config(tmp_path
     assert resealed.argv == ("--tp", "8")
     # Read back off disk, because the file is what the launch opens.
     assert config_server_argv(config).argv == ("--tp", "8")
+
+
+@pytest.fixture
+def finalize_args(monkeypatch):
+    """Exercise only the CPU-local argument guard pipeline."""
+    from hyperloom.inference_optimizer import model_config_utils
+
+    monkeypatch.setattr(model_config_utils, "_load_model_max_position_embeddings", lambda _: None)
+    monkeypatch.setattr(model_config_utils, "_model_has_dual_chunk_attention", lambda _: False)
+    monkeypatch.setenv("EP", "1")
+    monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
+
+    def finalize(text, framework="vllm"):
+        env_name = server_args_env_name(framework)
+        envs = {env_name: text}
+        _workload_envs._finalize_framework_server_args(
+            envs,
+            {"framework": framework},
+            gpu_type=None,
+            isl_val=256,
+            osl_val=256,
+        )
+        assert isinstance(envs[env_name], str)
+        return envs[env_name]
+
+    return finalize
+
+
+@pytest.mark.parametrize("framework", ["vllm", "atom", "sglang"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "--unknown a --block-size 16 --compilation-config "
+            '\'{"custom_ops": ["+rms_norm", "-silu"], "nested": {"x": true}}\' '
+            "--unknown b --block-size=128",
+            "--unknown a --compilation-config "
+            '{"custom_ops":["+rms_norm","-silu"],"nested":{"x":true}} '
+            "--unknown b --block-size=128",
+        ),
+        (
+            "--block-size 16 --cuda-graph-bs 1 2 4 --block-size 128 --cuda-graph-bs 8 16",
+            "--block-size 16 --cuda-graph-bs 1 2 4 --block-size 128 --cuda-graph-bs 8 16",
+        ),
+        (
+            '--block-size 16 --tool-call-parser "my parser" --block-size 128',
+            '--block-size 16 --tool-call-parser "my parser" --block-size 128',
+        ),
+        (
+            "--compilation-config {mode:3,custom_ops:[+rms_norm]} --block-size=128",
+            '--compilation-config {"mode":3,"custom_ops":["+rms_norm"]} --block-size=128',
+        ),
+        ("--served-model-name= --unknown a --unknown b", "--served-model-name= --unknown a --unknown b"),
+        ("--compilation-config {not-json}", "--compilation-config {not-json}"),
+        ("", ""),
+    ],
+)
+def test_framework_finalization_keeps_transport_and_order(finalize_args, text, expected, framework):
+    if framework == "sglang":
+        from hyperloom.orchestrator.actions.executors._grid_server_args import compact_json_server_args
+
+        expected = compact_json_server_args(text, framework) + (" " if text else "") + "--watchdog-timeout 1800"
+    assert finalize_args(text, framework) == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["--block-size 16; true", "--served-model-name 'unterminated", "--compilation-config {not json}"]
+)
+def test_framework_finalization_still_rejects_unsafe_transport(finalize_args, text):
+    with pytest.raises(ValueError):
+        finalize_args(text)
+
+
+def test_framework_finalization_normalizes_json_once(finalize_args):
+    from hyperloom.orchestrator.actions.executors import _grid_server_args as args
+
+    text = '--block-size 16 --compilation-config {"custom_ops": ["+rms_norm"]} --block-size 128'
+    with patch.object(args, "_reserialize_json_blobs", wraps=args._reserialize_json_blobs) as normalize:
+        assert finalize_args(text) == '--compilation-config {"custom_ops":["+rms_norm"]} --block-size 128'
+    assert normalize.call_count == 1

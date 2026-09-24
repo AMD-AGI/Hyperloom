@@ -12,7 +12,6 @@ transitions the row to its terminal state.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict, dataclass, field
@@ -21,7 +20,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import logging
 
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..actions.cancel_channel import current_cancel_scope
 from ..bus.resource_lock import Lease, ResourceLockManager
@@ -220,12 +218,7 @@ class SubAgentRunner:
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
         except IllegalTransition:
-            # An outcome is durable evidence, not a prunable progress heartbeat.
-            async with self.tasks.db.transaction() as cur:
-                cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
-                history = json.loads(cur.fetchone()["history"])
-                history.append({"ts": now_iso(), "evidence": evidence or {}})
-                cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+            await self.tasks.append_completion_evidence(task_id, evidence)
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",

@@ -9,12 +9,12 @@ import os
 import re
 from typing import Any
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class InternalTasksPhase(PhaseHandler):
+class InternalTasksPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _enqueue_internal_research_scout_task(

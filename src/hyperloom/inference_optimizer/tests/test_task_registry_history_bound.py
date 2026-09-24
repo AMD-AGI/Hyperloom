@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -98,3 +100,107 @@ async def test_a_note_lands_whole_and_readable_under_the_bound(tmp_path):
     notes = [entry for entry in json.loads(row["history"]) if "progress" in entry]
     assert [entry["progress"]["label"] for entry in notes] == ["step-0", "step-1", "step-2"]
     assert all(entry["ts"] for entry in notes)
+
+
+def _terminal_runner(registry):
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+
+    return SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(registry.db)), registry)
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_keeps_repeated_results_and_survives_progress_pruning(tmp_path):
+    registry, task_id = await _running_task(tmp_path, "terminal-evidence")
+    try:
+        await registry.transition(task_id, "cancelled", evidence={"reason": "watchdog"})
+        before = await registry.get(task_id)
+        evidence = {"outcome": {"result": {"answer": [42]}, "state": "succeeded"}, "cleanup_confirmed": False}
+        runner = _terminal_runner(registry)
+        for _ in range(2):
+            await runner._write_terminal(task_id, "succeeded", evidence=evidence, context="test")
+        appended = await registry.get(task_id)
+        assert appended.state == "cancelled"
+        assert appended.updated_at == before.updated_at
+        assert appended.history[:-2] == before.history
+        for entry in appended.history[-2:]:
+            assert set(entry) == {"ts", "evidence"}
+            assert entry["ts"]
+            assert entry["evidence"] == evidence
+        await _report(registry, task_id, range(_MAX_PROGRESS_NOTES + 5))
+        retained = await registry.get(task_id)
+        assert retained.updated_at == before.updated_at
+        assert [row for row in retained.history if "progress" not in row] == appended.history
+        assert len(_notes(retained.history)) == _MAX_PROGRESS_NOTES
+    finally:
+        registry.db.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_successful_transition_keeps_transition_shape(tmp_path):
+    registry, task_id = await _running_task(tmp_path, "terminal-transition")
+    try:
+        await _terminal_runner(registry)._write_terminal(task_id, "succeeded", context="test")
+        task = await registry.get(task_id)
+        assert task.state == "succeeded"
+        assert len(task.history) == 2
+        assert task.history[-1] == {"from": "running", "to": "succeeded", "ts": task.updated_at, "evidence": {}}
+    finally:
+        registry.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disappear_after_transition", [False, True])
+async def test_terminal_evidence_does_not_hide_missing_rows(tmp_path, monkeypatch, disappear_after_transition):
+    from hyperloom.orchestrator.state.task_registry import IllegalTransition, TaskNotFound
+
+    registry, task_id = await _running_task(tmp_path, "terminal-missing")
+    try:
+        if disappear_after_transition:
+
+            async def lost_race(*_args, **_kwargs):
+                await registry.db.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+                raise IllegalTransition("already terminal")
+
+            monkeypatch.setattr(registry, "transition", lost_race)
+        else:
+            await registry.db.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+        error = TypeError if disappear_after_transition else TaskNotFound
+        with pytest.raises(error):
+            await _terminal_runner(registry)._write_terminal(task_id, "succeeded", context="test")
+        assert registry.db.raw.in_transaction is False
+    finally:
+        registry.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_append", [False, True])
+async def test_terminal_evidence_second_transaction_rolls_back_on_failure(tmp_path, monkeypatch, cancel_append):
+    registry, task_id = await _running_task(tmp_path, "terminal-rollback")
+    try:
+        await registry.transition(task_id, "cancelled")
+        before = await registry.get(task_id)
+        transaction = registry.db.transaction
+        transactions = []
+
+        @asynccontextmanager
+        async def tracked_transaction():
+            transactions.append("begin")
+            async with transaction() as cursor:
+                yield cursor
+                if cancel_append:
+                    raise asyncio.CancelledError()
+            transactions.append("commit")
+
+        monkeypatch.setattr(registry.db, "transaction", tracked_transaction)
+        evidence = {"result": 42} if cancel_append else {"not_json": object()}
+        with pytest.raises(asyncio.CancelledError if cancel_append else TypeError):
+            await _terminal_runner(registry)._write_terminal(task_id, "succeeded", evidence=evidence, context="test")
+        assert transactions == ["begin", "begin"]
+        assert await registry.get(task_id) == before
+        assert registry.db.raw.in_transaction is False
+        monkeypatch.setattr(registry.db, "transaction", transaction)
+        await registry.record_progress(task_id, {"after": "rollback"})
+        assert (await registry.get(task_id)).history[-1]["progress"] == {"after": "rollback"}
+    finally:
+        registry.db.close()

@@ -70,6 +70,38 @@ _AITER_LINE = (
 )
 
 
+class TestKernelRequestDispatch:
+    @pytest.mark.parametrize(
+        ("kind", "handler_name"),
+        [
+            ("trace_analyze", "trace_analyze_handler"),
+            ("run_gemm_tuning", "run_gemm_tuning_handler"),
+            ("integrate", "integrate_handler"),
+            ("apply_patch", "integrate_handler"),
+        ],
+    )
+    def test_registered_handlers_remain_public(self, kind, handler_name):
+        assert krh.has_handler(kind) is True
+        assert krh.get_handler(kind) is getattr(krh, handler_name)
+        assert handler_name in krh.__all__
+
+    @pytest.mark.parametrize("kind", ["run_fusion", "unknown"])
+    def test_unregistered_kinds_have_no_handler(self, kind):
+        assert krh.has_handler(kind) is False
+        assert krh.get_handler(kind) is None
+
+    def test_dispatch_uses_the_patchable_public_table(self, monkeypatch):
+        async def handler(payload, *, session_dir):
+            return payload
+
+        monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "integrate", handler)
+
+        assert krh.has_handler("integrate") is True
+        assert krh.get_handler("integrate") is handler
+        assert krh.get_handler("apply_patch") is krh.integrate_handler
+        assert {"KERNEL_REQUEST_HANDLERS", "get_handler", "has_handler"} <= set(krh.__all__)
+
+
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)

@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -278,6 +281,291 @@ def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
             }
         )
     return c
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "members",
+    [
+        {},
+        {"stack_kernel_ids": "a+b"},
+        {"stack_kernel_ids": None},
+        {"stack_kernel_ids": []},
+        {"stack_kernel_ids": ["a"]},
+        {"stack_kernel_ids": ["a", "a"]},
+        {"stack_kernel_ids": ["a", "b", "missing"]},
+        {"stack_kernel_ids": ["a", None]},
+        {"stack_kernel_ids": {"a": True, "b": True}},
+    ],
+    ids=[
+        "legacy_ambiguous",
+        "string",
+        "null",
+        "empty",
+        "short",
+        "duplicate",
+        "missing_member",
+        "non_string",
+        "mapping",
+    ],
+)
+async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_path, monkeypatch, members):
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(baseline_tput=100.0, current_best={"action": "baseline", "tput": 100.0})
+    for kid in ("a", "b"):
+        c.shared_state.kernel_integrate_attempts[kid] = {
+            "kernel_id": kid,
+            "patch_path": str(tmp_path / f"{kid}.patch"),
+            "target_file": str(tmp_path / f"{kid}.py"),
+            "stack_validation_in_progress": True,
+            "stack_validation_kernel_id": "a+b",
+            "stack_validation_started_at": "2026-01-01T00:00:00+00:00",
+        }
+    c.shared_state.pending_stack_validation_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "kernel_id": "a+b",
+        "patch_path": "display-only-paths",
+        "target_file": "display-only-targets",
+        "new_tput": 110.0,
+        "stack_validation": True,
+        **members,
+    }
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"kernel_id":"a","status":"applied"}\n', encoding="utf-8")
+    c.shared_state.pending_stack_validation_apply_results = [{"status": "ok", "manifest_path": str(manifest)}]
+    before = deepcopy(c.shared_state.to_dict())
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(before), encoding="utf-8")
+    original = state_path.read_bytes()
+    original_manifest = manifest.read_bytes()
+    revert = Mock(return_value={"status": "ok"})
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    c._maybe_enqueue_watermark_roofline = AsyncMock()
+
+    with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
+        await c._recover_interrupted_stack_validation()
+
+    revert.assert_not_called()
+    c._maybe_enqueue_watermark_roofline.assert_not_called()
+    assert c.shared_state.to_dict() == before
+    assert state_path.read_bytes() == original
+    assert manifest.read_bytes() == original_manifest
+
+
+@pytest.mark.parametrize("single", [{"stack_validation": False}, {"stack_kernel_ids": ["a+b"]}])
+def test_stack_members_explicit_single_id_preserves_plus(single):
+    from hyperloom.orchestrator.phases.kernel_stack import resolve_stack_members
+
+    assert resolve_stack_members({"kernel_id": "a+b", **single}) == ("a+b",)
+
+
+@pytest.mark.parametrize("flag", [None, 0, "", "false"])
+def test_stack_members_non_boolean_flag_is_not_single_evidence(flag):
+    from hyperloom.orchestrator.phases.kernel_stack import resolve_stack_members
+
+    with pytest.raises(ValueError, match="stack_validation"):
+        resolve_stack_members({"kernel_id": "a+b", "stack_validation": flag})
+
+
+@pytest.fixture
+def historical_stack_coord(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(baseline_tput=100.0, current_best={"action": "baseline", "tput": 100.0})
+    for kid, patch_name, decision, gain in (
+        ("a", "old-a.patch", "REVERT", -1.0),
+        ("a", "new-a.patch", "NEEDS_REVIEW", 0.8),
+        ("b", "b.patch", "NEEDS_REVIEW", 0.6),
+    ):
+        c.shared_state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": decision,
+                "kernel_id": kid,
+                "patch_path": str(tmp_path / patch_name),
+                "target_file": str(tmp_path / f"{kid}.py"),
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+            }
+        )
+    c._maybe_enqueue_watermark_roofline = AsyncMock()
+    return c
+
+
+@pytest.mark.asyncio
+async def test_stack_members_selected_patch_ignores_other_patch_history(historical_stack_coord):
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    c = historical_stack_coord
+    historical = next(e for e in c.shared_state.kernel_integrate_attempts.values() if e["last_decision"] == "REVERT")
+    original_history = deepcopy(historical)
+    selected = []
+
+    async def validate(entries):
+        selected.extend((entry["kernel_id"], Path(entry["patch_path"]).name) for entry in entries)
+        return {
+            **c.shared_state.pending_stack_validation_result,
+            "status": "ok",
+            "decision": "KEEP",
+            "new_tput": 110.0,
+            "patch_path": "+".join(entry["patch_path"] for entry in entries),
+            "target_file": "+".join(entry["target_file"] for entry in entries),
+        }
+
+    c.phase_kernel_stack._run_kernel_stack_validation_e2e = validate
+    with session_scope(c.session_dir):
+        await c._maybe_validate_positive_needs_review_stack()
+
+    assert selected == [("a", "new-a.patch"), ("b", "b.patch")]
+    assert historical == original_history
+    assert c.shared_state.current_best["variant_name"] == "a+b"
+    assert not c.shared_state.pending_stack_validation_result
+
+
+@pytest.mark.asyncio
+async def test_stack_members_checkpoint_selects_exact_patch_among_history(historical_stack_coord, monkeypatch):
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
+    c = historical_stack_coord
+    selected = c._positive_needs_review_integrates()
+    started = "2026-01-01T00:00:00+00:00"
+    for entry in selected:
+        entry.update(
+            stack_validation_in_progress=True,
+            stack_validation_kernel_id="a+b",
+            stack_validation_started_at=started,
+        )
+    c.shared_state.pending_stack_validation_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "new_tput": 110.0,
+        "kernel_id": "a+b",
+        "stack_validation": True,
+        "stack_validation_started_at": started,
+        "stack_kernel_ids": [entry["kernel_id"] for entry in selected],
+        "stack_member_identities": [
+            {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in selected
+        ],
+        "patch_path": "+".join(entry["patch_path"] for entry in selected),
+        "target_file": "+".join(entry["target_file"] for entry in selected),
+    }
+    historical = next(e for e in c.shared_state.kernel_integrate_attempts.values() if e["last_decision"] == "REVERT")
+    original_history = deepcopy(historical)
+    c.shared_state = SharedState.from_dict(c.shared_state.to_dict())
+    apply = Mock(side_effect=AssertionError("recovery must not apply patches"))
+    revert = Mock(side_effect=AssertionError("completed validation must not revert"))
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", apply)
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+
+    with session_scope(c.session_dir):
+        assert await c._recover_interrupted_stack_validation() is True
+
+    apply.assert_not_called()
+    revert.assert_not_called()
+    assert c.shared_state.kernel_integrate_attempts[original_history["key"]] == original_history
+    assert c.shared_state.current_best["variant_name"] == "a+b"
+    assert not c.shared_state.pending_stack_validation_result
+    assert not c.shared_state.pending_stack_validation_apply_results
+
+
+def test_stack_members_same_selected_identity_is_still_ambiguous(historical_stack_coord):
+    c = historical_stack_coord
+    selected = c._positive_needs_review_integrates()
+    c.shared_state.kernel_integrate_attempts["duplicate"] = deepcopy(selected[0])
+    before = deepcopy(c.shared_state.to_dict())
+
+    with pytest.raises(ValueError, match="(?i)stack|member"):
+        c._mark_stack_validation_in_progress(selected, "a+b")
+
+    assert c.shared_state.to_dict() == before
+
+
+@pytest.mark.asyncio
+async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_validation_stamp(tmp_path, monkeypatch):
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    c._mark_stack_validation_in_progress(stack, "k001+k004")
+    c.shared_state.pending_stack_validation_result.update(
+        status="ok",
+        decision="KEEP",
+        new_tput=120.0,
+        patch_path="display-patches",
+        target_file="display-targets",
+    )
+    stack[0]["patch_path"] = str(tmp_path / "different.patch")
+    before = deepcopy(c.shared_state.to_dict())
+    c._maybe_enqueue_watermark_roofline = AsyncMock()
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+
+    with pytest.raises(ValueError, match="(?i)stack|member"):
+        await c._recover_interrupted_stack_validation()
+
+    assert c.shared_state.to_dict() == before
+    c._maybe_enqueue_watermark_roofline.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["empty", "short", "duplicate", "non_string", "missing_patch"])
+async def test_stack_members_invalid_direct_run_refuses_before_apply(tmp_path, monkeypatch, case):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
+    c = _stack_validation_coordinator(tmp_path)
+    entries = [
+        {"kernel_id": kid, "patch_path": str(tmp_path / f"{kid}.patch"), "target_file": str(tmp_path / f"{kid}.py")}
+        for kid in ("a", "b")
+    ]
+    if case == "empty":
+        entries = []
+    elif case == "short":
+        entries = entries[:1]
+    elif case == "duplicate":
+        entries[1]["kernel_id"] = "a"
+    elif case == "non_string":
+        entries[1]["kernel_id"] = None
+    else:
+        entries[1]["patch_path"] = ""
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    before = deepcopy(c.shared_state.to_dict())
+    apply = Mock(return_value={"status": "failed", "error": "unexpected apply"})
+    revert = Mock(return_value={"status": "ok"})
+    bench = Mock(side_effect=AssertionError("unexpected benchmark"))
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", apply)
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", bench)
+
+    with pytest.raises(ValueError, match="(?i)stack|member"):
+        await c._run_kernel_stack_validation_e2e(entries)
+
+    apply.assert_not_called()
+    revert.assert_not_called()
+    bench.assert_not_called()
+    assert c.shared_state.to_dict() == before
+
+
+@pytest.mark.asyncio
+async def test_stack_members_legacy_display_id_is_not_split_during_selection(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    c = _stack_validation_coordinator(tmp_path)
+    c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "a+b", "tput": 110.0}]
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", Mock(side_effect=AssertionError("unexpected benchmark")))
+    before = deepcopy(c.shared_state.to_dict())
+    with pytest.raises(ValueError, match="(?i)stack|member"):
+        await c._maybe_validate_positive_needs_review_stack()
+    assert c.shared_state.to_dict() == before
 
 
 @pytest.mark.asyncio
@@ -617,15 +905,15 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         return {
             "status": "ok",
             "decision": "KEEP",
-            "kernel_id": "k001+k004",
-            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
-            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "kernel_id": "+".join(e["kernel_id"] for e in entries),
+            "patch_path": "+".join(e["patch_path"] for e in entries),
+            "target_file": "+".join(e["target_file"] for e in entries),
             "base_tput": 100.0,
             "new_tput": 102.0,
             "gain_pct": 2.0,
             "workspace": str(tmp_path / "integrate-stack"),
             "apply_result": {"status": "ok"},
-            "stack_kernel_ids": ["k001", "k004"],
+            "stack_kernel_ids": [e["kernel_id"] for e in entries],
             "stack_validation": True,
         }
 
@@ -637,8 +925,10 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
 
     await c._maybe_validate_positive_needs_review_stack()
 
+    expected_members = ["k004", "k001"]
+    expected_display_id = "+".join(expected_members)
     assert c.shared_state.current_best["action"] == "integrate"
-    assert c.shared_state.current_best["variant_name"] == "k001+k004"
+    assert c.shared_state.current_best["variant_name"] == expected_display_id
     assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
     assert validation_calls == 1
     resolved_entries = [
@@ -647,7 +937,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         if entry.get("kernel_id") in {"k001", "k004"}
     ]
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
-    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
+    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {expected_display_id}
 
     # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
@@ -657,10 +947,10 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     stack_entries = [
         item
         for item in c.shared_state.optimization_stack
-        if isinstance(item, dict) and item.get("kernel_id") == "k001+k004"
+        if isinstance(item, dict) and item.get("kernel_id") == expected_display_id
     ]
     assert stack_entries
-    assert stack_entries[0].get("stack_kernel_ids") == ["k001", "k004"]
+    assert stack_entries[0].get("stack_kernel_ids") == expected_members
 
 
 @pytest.mark.asyncio
@@ -688,6 +978,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     stack = c._stack_entries_for_validation(["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
+        **c.shared_state.pending_stack_validation_result,
         "status": "ok",
         "decision": "KEEP",
         "kernel_id": "k001+k004",
@@ -793,15 +1084,15 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
         return {
             "status": "ok",
             "decision": "KEEP",
-            "kernel_id": "k001+k004",
-            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
-            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "kernel_id": "+".join(e["kernel_id"] for e in entries),
+            "patch_path": "+".join(e["patch_path"] for e in entries),
+            "target_file": "+".join(e["target_file"] for e in entries),
             "base_tput": 100.0,
             "new_tput": 102.0,
             "gain_pct": 2.0,
             "workspace": str(tmp_path / "integrate-stack"),
             "apply_result": {"status": "ok"},
-            "stack_kernel_ids": ["k001", "k004"],
+            "stack_kernel_ids": [e["kernel_id"] for e in entries],
             "stack_validation": True,
         }
 
@@ -813,8 +1104,8 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
 
     await c._on_enter_sweep(from_phase="KERNEL")
 
-    assert len(validation_calls) == 1
-    assert c.shared_state.current_best["variant_name"] == "k001+k004"
+    assert validation_calls == [["k004", "k001"]]
+    assert c.shared_state.current_best["variant_name"] == "+".join(validation_calls[0])
 
 
 @pytest.mark.asyncio
@@ -1511,3 +1802,197 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     assert result["patch_cleanup_status"] == "recovery_required"
     assert result["patch_cleanup_action"] == "revert"
     assert result.get("error_class") == "patch_revert_incomplete"
+
+
+# A stack revert that does not finish leaves the source tree holding patches the ledger reports as gone. Everything
+# below runs the real apply / revert / manifest path over a real temporary source tree, faking only the measurement.
+
+_STACK_ORIGINAL_SOURCE = "def kernel():\n    return 1\n"
+_STACK_PATCHED_SOURCE = "def kernel():\n    return 2\n"
+
+
+def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> None:
+    """Give each member a real target file and a whole-file replacement patch."""
+    for entry in stack:
+        target = tmp_path / f"{entry['kernel_id']}.py"
+        patch = tmp_path / f"{entry['kernel_id']}_opt.py"
+        target.write_text(_STACK_ORIGINAL_SOURCE, encoding="utf-8")
+        patch.write_text(_STACK_PATCHED_SOURCE, encoding="utf-8")
+        entry.update(target_file=str(target), patch_path=str(patch))
+
+
+def _stub_python_cache_clear(monkeypatch) -> None:
+    """Keep the real apply away from this machine's Triton / inductor cache directories."""
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+
+
+def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
+    """Replace only the E2E measurement; apply, revert and manifests stay real."""
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    import hyperloom.orchestrator.actions.executors.benchmark_result as br
+
+    async def _benchmark(self, ctx):
+        return {"output_throughput": new_tput, "workspace": "/tmp/stack-bench"}
+
+    monkeypatch.setattr(baseline_mod.BaselineExecutor, "__call__", _benchmark)
+    monkeypatch.setattr(br, "is_valid_measurement", lambda result: True)
+
+
+def _break_backup_restore(monkeypatch, *, target: Path) -> None:
+    """Fail one member's backup->target copy; its apply (patch->target) still succeeds."""
+    import hyperloom.agents.kernel.tools.apply_kernel_patch as akp
+
+    # apply_kernel_patch resolves both paths, so the discriminator has to as well.
+    patched = target.with_name(f"{target.stem}_opt{target.suffix}").resolve()
+    restored = target.resolve()
+    real_copy2 = akp.shutil.copy2
+
+    def _copy2(src, dst, *args, **kwargs):
+        if Path(dst).resolve() == restored and Path(src).resolve() != patched:
+            raise OSError(5, "injected revert failure")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(akp.shutil, "copy2", _copy2)
+
+
+def _stack_member_guards(state: SharedState) -> dict[str, bool]:
+    """Per-member ``stack_validation_in_progress`` guards, by kernel id."""
+    return {
+        entry["kernel_id"]: bool(entry.get("stack_validation_in_progress"))
+        for entry in state.kernel_integrate_attempts.values()
+        if entry.get("kernel_id") in {"k001", "k004"}
+    }
+
+
+def _checkpointed_manifest_statuses(state: SharedState) -> dict[str, str]:
+    """Apply-manifest status per member, read off the persisted apply checkpoints."""
+    return {
+        applied["kernel_id"]: json.loads(Path(applied["manifest_path"]).read_text(encoding="utf-8"))["status"]
+        for applied in state.pending_stack_validation_apply_results
+    }
+
+
+def _session_manifest_statuses(tmp_path: Path) -> list[str]:
+    """Every apply manifest the session wrote, for the cases that clear their checkpoints."""
+    return sorted(
+        json.loads(path.read_text(encoding="utf-8"))["status"] for path in tmp_path.glob("patches/**/manifest.json")
+    )
+
+
+def _resumed_stack_coordinator(tmp_path: Path) -> Coordinator:
+    """A Coordinator over the session as a later resume would load it back from disk."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState.load_or_init(tmp_path)
+    c.phase_kernel_stack._run_kernel_stack_validation_e2e = Mock(
+        side_effect=AssertionError("recovery must not re-run the stack benchmark")
+    )
+    return c
+
+
+async def _halt_a_stack_revert(tmp_path: Path, monkeypatch) -> Path:
+    """Run a stack validation whose REVERT half-fails; return the target left holding its patch."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    _stub_python_cache_clear(monkeypatch)
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _materialize_stack_sources(tmp_path, stack)
+    stuck = Path(next(entry for entry in stack if entry["kernel_id"] == "k001")["target_file"])
+    with monkeypatch.context() as mp:
+        # 105 clears the 100 baseline but not the 110 current_best, so the stack decides REVERT.
+        _stub_stack_benchmark(mp, new_tput=105.0)
+        _break_backup_restore(mp, target=stuck)
+        with session_scope(tmp_path), pytest.raises(RuntimeError, match="revert incomplete"):
+            await c._maybe_validate_positive_needs_review_stack()
+    return stuck
+
+
+@pytest.mark.asyncio
+async def test_stack_revert_failure_retains_checkpoints_and_halts(tmp_path: Path, monkeypatch):
+    """An unfinished stack revert halts the session and persists everything a retry needs."""
+    from hyperloom.orchestrator.phases.machine_state import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+
+    saved = SharedState.load_or_init(tmp_path)
+    assert saved.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert saved.pending_stack_validation_result["decision"] == "REVERT"
+    assert saved.pending_stack_validation_result["patch_cleanup_action"] == "revert"
+    assert len(saved.pending_stack_validation_apply_results) == 2
+    assert _stack_member_guards(saved) == {"k001": True, "k004": True}
+    assert _checkpointed_manifest_statuses(saved) == {"k001": "applied", "k004": "reverted"}
+    assert stuck.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE
+    assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+
+
+@pytest.mark.asyncio
+async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Path, monkeypatch):
+    """The next resume retries the teardown; a clean tree returns the members to selectable."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    c = _resumed_stack_coordinator(tmp_path)
+
+    with session_scope(tmp_path):
+        assert await c._recover_interrupted_stack_validation() is True
+
+    assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert _session_manifest_statuses(tmp_path) == ["reverted", "reverted"]
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert not reloaded.pending_stack_validation_result
+    assert not reloaded.pending_stack_validation_apply_results
+    assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
+    assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
+
+
+@pytest.mark.asyncio
+async def test_stack_revert_recovery_that_fails_again_halts_again(tmp_path: Path, monkeypatch):
+    """A teardown that fails on the retry too keeps its checkpoints and asks for a human."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.phases.machine_state import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    _break_backup_restore(monkeypatch, target=stuck)
+
+    with session_scope(tmp_path), pytest.raises(RuntimeError, match="revert incomplete"):
+        await c._recover_interrupted_stack_validation()
+
+    assert stuck.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert reloaded.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert reloaded.pending_stack_validation_result["patch_cleanup_action"] == "revert"
+    assert len(reloaded.pending_stack_validation_apply_results) == 2
+    assert _stack_member_guards(reloaded) == {"k001": True, "k004": True}
+
+
+@pytest.mark.asyncio
+async def test_stack_revert_success_clears_checkpoints(tmp_path: Path, monkeypatch):
+    """The same real path with nothing injected still clears the guards and the checkpoints."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    _stub_python_cache_clear(monkeypatch)
+    _stub_stack_benchmark(monkeypatch, new_tput=105.0)
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _materialize_stack_sources(tmp_path, stack)
+
+    with session_scope(tmp_path):
+        await c._maybe_validate_positive_needs_review_stack()
+
+    assert all(
+        (tmp_path / f"{kid}.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE for kid in ("k001", "k004")
+    )
+    assert _session_manifest_statuses(tmp_path) == ["reverted", "reverted"]
+    saved = SharedState.load_or_init(tmp_path)
+    assert saved.stop_reason == ""
+    assert not saved.pending_stack_validation_result
+    assert not saved.pending_stack_validation_apply_results
+    assert _stack_member_guards(saved) == {"k001": False, "k004": False}

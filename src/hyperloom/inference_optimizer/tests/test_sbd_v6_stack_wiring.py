@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -22,6 +23,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
@@ -173,6 +175,62 @@ def test_the_lift_carries_the_backend_onto_the_row(session_dir):
         assert row["source"] == stack_event.SOURCE_KERNEL
         assert row["backend"] == "geak"
         assert row["kernel_id"] == "k-1"
+
+
+@pytest.mark.asyncio
+async def test_stack_members_structured_ids_preserve_report_display_and_atomic_ids(tmp_path):
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=1000.0, current_best={"action": "baseline", "tput": 1000.0})
+    coord._maybe_enqueue_watermark_roofline = AsyncMock()
+    entries = [
+        {"kernel_id": kid, "patch_path": str(tmp_path / f"{kid}.patch"), "target_file": str(tmp_path / f"{kid}.py")}
+        for kid in ("a+b", "c")
+    ]
+    coord.shared_state.kernel_integrate_attempts = {entry["kernel_id"]: entry for entry in entries}
+    coord._mark_stack_validation_in_progress(entries, "a+b+c")
+
+    with session_scope(tmp_path):
+        await coord._record_integrate_keep(
+            {
+                **coord.shared_state.pending_stack_validation_result,
+                "status": "ok",
+                "decision": "KEEP",
+                "kernel_id": "a+b+c",
+                "new_tput": 1100.0,
+                "stack_validation": True,
+                "stack_kernel_ids": ["a+b", "c"],
+            }
+        )
+        rows = _rows()
+
+    assert len(rows) == 1
+    assert rows[0]["kernel_id"] == "a+b+c"
+    assert rows[0]["variant_name"] == "a+b+c"
+    assert rows[0]["contribution_pct"] == pytest.approx(10.0)
+    assert coord.shared_state.optimization_stack[0]["stack_kernel_ids"] == ["a+b", "c"]
+    assert coord._stack_resolved_kernel_ids() == {"a+b", "c"}
+
+
+def test_stack_members_legacy_display_row_remains_reportable_without_inference(tmp_path):
+    entry = {"action": "integrate", "variant_name": "a+b", "kernel_id": "a+b", "tput": 1100.0}
+    state = SharedState.from_dict({"optimization_stack": [entry]})
+
+    with session_scope(tmp_path):
+        stack_event.record_adoption(
+            stack_index=0,
+            entry=state.optimization_stack[0],
+            throughput_before=1000.0,
+            throughput_after=1100.0,
+            baseline_tput=1000.0,
+        )
+        rows = _rows()
+
+    assert state.optimization_stack == [entry]
+    assert "stack_kernel_ids" not in state.optimization_stack[0]
+    assert rows[0]["kernel_id"] == "a+b"
+    assert rows[0]["variant_name"] == "a+b"
+    assert rows[0]["contribution_pct"] == pytest.approx(10.0)
 
 
 def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):

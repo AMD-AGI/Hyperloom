@@ -20,6 +20,11 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.bus.message_bus import MessageBus
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -29,6 +34,23 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
+
+
+@pytest.fixture
+def update_state_coordinator(session_dir, monkeypatch):
+    """Wire the real update route without boot-time GPU, source-tree or process work."""
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    bind_session(session_dir)
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = session_dir
+    c.shared_state = SharedState(current_action="before", target_summary="original")
+    c.db = SqliteConnection(session_dir / "coordinator.db", journal_mode="DELETE")
+    c.bus = MessageBus(c.db)
+    c.policy = PolicyGate(role_registry=default_role_registry(), shared_state=c.shared_state)
+    try:
+        yield c
+    finally:
+        c.db.close()
 
 
 def _heartbeat() -> Intent:
@@ -122,6 +144,47 @@ def test_save_is_atomic(tmp_path):
     assert leftovers == []
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"crash_count": "bad"},
+        {"crash_timestamps": "bad"},
+        {"crash_timestamps": [100.0, "bad"]},
+        {"current_action": None},
+        {"target_summary": []},
+    ],
+)
+def test_load_rejects_corrupt_state_without_rewriting_evidence(tmp_path, invalid):
+    path = tmp_path / "state.json"
+    raw = {"session_id": "damaged", "schema_version": 1, "incident_evidence": {"traceback": "original"}, **invalid}
+    original = json.dumps(raw, indent=2).encode("utf-8") + b"\n"
+    path.write_bytes(original)
+    modified_ns = path.stat().st_mtime_ns
+
+    with pytest.raises(ValueError, match=next(iter(invalid))):
+        SharedState.load_or_init(tmp_path)
+
+    assert path.read_bytes() == original
+    assert path.stat().st_mtime_ns == modified_ns
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
+def test_load_legacy_state_keeps_defaults_without_rewriting_file(tmp_path):
+    path = tmp_path / "state.json"
+    original = b'{"session_id": "legacy", "unknown_future_field": 42}\n'
+    path.write_bytes(original)
+
+    state = SharedState.load_or_init(tmp_path)
+
+    assert state.session_id == "legacy"
+    assert state.crash_count == 0
+    assert state.crash_timestamps == []
+    assert state.current_action == ""
+    assert state.target_summary == ""
+    assert not hasattr(state, "unknown_future_field")
+    assert path.read_bytes() == original
+
+
 def test_from_dict_drops_unknown_fields():
     raw = {"session_id": "s", "unknown_future_field": 42, "baseline_tput": 100.0}
     s = SharedState.from_dict(raw)
@@ -140,6 +203,54 @@ def test_apply_changes_only_known_fields():
     assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
     assert s.current_action == "baseline"
     assert s.cumulative_gain_validated == 5.0
+
+
+def test_apply_changes_untrusted_only_applies_allowed_text():
+    s = SharedState(current_action="before")
+    applied = s.apply_changes(
+        {
+            "current_action": "baseline",
+            "target_summary": "GEMM-bound",
+            "crash_timestamps": "bad",
+            "policy_denial_streak": "bad",
+            "pending_targeted_build": "bad",
+            "agent_last_active": "bad",
+            "bogus": 1,
+        },
+        allow_core=False,
+    )
+    assert applied == {"current_action": "baseline", "target_summary": "GEMM-bound"}
+    assert s.crash_timestamps == []
+    assert s.policy_denial_streak == {}
+    assert s.pending_targeted_build == {}
+    assert s.agent_last_active == {}
+    assert not hasattr(s, "bogus")
+
+
+@pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
+@pytest.mark.parametrize("value", [None, False, 1, [], {}])
+def test_apply_changes_untrusted_drops_wrong_text_types(field_name, value):
+    s = SharedState(current_action="before", target_summary="original")
+    assert s.apply_changes({field_name: value}, allow_core=False) == {}
+    assert s.current_action == "before"
+    assert s.target_summary == "original"
+
+
+def test_apply_changes_trusted_can_update_runtime_fields():
+    s = SharedState()
+    changes = {"crash_timestamps": [100.0], "agent_last_active": {"orchestration": 100.0}}
+    assert s.apply_changes(changes, allow_core=True) == changes
+    assert s.crash_timestamps == [100.0]
+    assert s.agent_last_active == {"orchestration": 100.0}
+
+
+def test_agent_update_schema_is_not_persisted_or_instance_writable():
+    s = SharedState()
+    assert "AGENT_UPDATE_FIELDS" not in s.to_dict()
+    assert s.apply_changes({"AGENT_UPDATE_FIELDS": {"crash_timestamps": str}}, allow_core=True) == {}
+    restored = SharedState.from_dict({"AGENT_UPDATE_FIELDS": {"crash_timestamps": "str"}})
+    assert "AGENT_UPDATE_FIELDS" not in restored.__dict__
+    assert restored.AGENT_UPDATE_FIELDS == {"current_action": str, "target_summary": str}
 
 
 def test_add_pruned_family_idempotent():
@@ -246,45 +357,118 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_update_state_persists_known_fields(session_dir):
-    """Orchestration may write non-core fields; core fields are gated by PolicyGate's CORE_STATE_FIELDS."""
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        assert c.shared_state.target_summary == "GEMM-bound 8B model"
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["current_action"] == "baseline"
-        assert on_disk["target_summary"] == "GEMM-bound 8B model"
-    finally:
-        await c.stop()
+async def test_update_state_route_rejects_crash_timestamps_before_mutation(update_state_coordinator):
+    c = update_state_coordinator
+    c.shared_state.crash_timestamps = [100.0]
+    c.shared_state.save(c.session_dir)
+    before = (c.session_dir / "state.json").read_bytes()
+
+    await c._handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.UPDATE_STATE,
+            payload={"changes": {"current_action": "must not apply", "crash_timestamps": "bad"}},
+        ),
+    )
+
+    assert c.shared_state.current_action == "before"
+    assert c.shared_state.crash_timestamps == [100.0]
+    assert (c.session_dir / "state.json").read_bytes() == before
+    obs = await c.bus.tail(topic="observation")
+    assert len(obs) == 1
+    assert obs[0].payload["kind"] == "policy_denied"
+    assert obs[0].payload["rule"] == "state_field"
+    assert c.shared_state.recent_crash_count(window_sec=60, now=120) == 1
+    assert c.shared_state.increment_crash_count() == 1
 
 
 @pytest.mark.asyncio
-async def test_coordinator_update_state_drops_unknown_fields(session_dir):
-    c = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"current_action": "baseline", "future_unknown_key": 42}},
-            ),
-        )
-        assert c.shared_state.current_action == "baseline"
-        obs = await c.bus.tail(topic="observation", n=20)
-        update_events = [m for m in obs if m.payload.get("kind") == "update_state"]
-        assert update_events
-        last = update_events[0]  # tail returns DESC
-        assert "future_unknown_key" in last.payload["rejected"]
-    finally:
-        await c.stop()
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"policy_denial_streak": "bad"},
+        {"pending_targeted_build": {"pid": 123}},
+        {"agent_last_active": {"orchestration": 0}},
+        {"phase": "CLOSE"},
+        {"target_summary": None},
+        {"current_action": ["bad"]},
+    ],
+)
+async def test_update_state_route_rejects_entire_invalid_batch(update_state_coordinator, invalid):
+    c = update_state_coordinator
+    c.shared_state.save(c.session_dir)
+    before = (c.session_dir / "state.json").read_bytes()
+    await c._handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.UPDATE_STATE,
+            payload={"changes": {"current_action": "new", "target_summary": "new", "unknown": 1, **invalid}},
+        ),
+    )
+    assert c.shared_state.current_action == "before"
+    assert c.shared_state.target_summary == "original"
+    assert c.shared_state.pending_targeted_build == {}
+    assert c.shared_state.agent_last_active == {}
+    assert c.shared_state.phase == ""
+    assert c.shared_state.policy_denial_streak == {"*:state_field": 1}
+    assert (c.session_dir / "state.json").read_bytes() == before
+    obs = await c.bus.tail(topic="observation")
+    assert len(obs) == 1
+    assert obs[0].payload["kind"] == "policy_denied"
+    assert obs[0].payload["rule"] == "state_field"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_update_state_persists_known_fields(update_state_coordinator):
+    """Orchestration may persist the two text fields advertised by its prompt."""
+    c = update_state_coordinator
+    await c._handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.UPDATE_STATE,
+            payload={"changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"}},
+        ),
+    )
+    assert c.shared_state.current_action == "baseline"
+    assert c.shared_state.target_summary == "GEMM-bound 8B model"
+    on_disk = json.loads((c.session_dir / "state.json").read_text())
+    assert on_disk["current_action"] == "baseline"
+    assert on_disk["target_summary"] == "GEMM-bound 8B model"
+    obs = await c.bus.tail(topic="observation")
+    assert obs[0].payload == {
+        "kind": "update_state",
+        "changes": {"current_action": "baseline", "target_summary": "GEMM-bound 8B model"},
+        "rejected": [],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_allowed", [False, True])
+async def test_coordinator_update_state_drops_unknown_fields(update_state_coordinator, include_allowed):
+    c = update_state_coordinator
+    changes = {"future_unknown_key": 42}
+    if include_allowed:
+        changes["current_action"] = "baseline"
+    await c._handle_intent(
+        "orchestration",
+        Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}),
+    )
+    assert c.shared_state.current_action == ("baseline" if include_allowed else "before")
+    assert not hasattr(c.shared_state, "future_unknown_key")
+    obs = await c.bus.tail(topic="observation")
+    assert len(obs) == 1
+    assert obs[0].payload == {
+        "kind": "update_state",
+        "changes": {"current_action": "baseline"} if include_allowed else {},
+        "rejected": ["future_unknown_key"],
+    }
+    state_path = c.session_dir / "state.json"
+    if include_allowed:
+        on_disk = json.loads(state_path.read_text())
+        assert on_disk["current_action"] == "baseline"
+        assert "future_unknown_key" not in on_disk
+    else:
+        assert not state_path.exists()
 
 
 def test_reference_fields_survive_resume(tmp_path):

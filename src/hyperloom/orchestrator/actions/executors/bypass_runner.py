@@ -63,7 +63,9 @@ def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
 
 def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
     """Return the framework's extra server args as a token list."""
-    key = {"sglang": "EXTRA_SGLANG_ARGS", "vllm": "EXTRA_VLLM_ARGS", "atom": "EXTRA_ATOM_ARGS"}.get(framework, "")
+    from hyperloom.inference_optimizer.framework_registry import extra_args_env
+
+    key = extra_args_env(framework)
     raw = str(os.environ.get(key) or bench_envs.get(key) or "").strip()
     if not raw:
         return []

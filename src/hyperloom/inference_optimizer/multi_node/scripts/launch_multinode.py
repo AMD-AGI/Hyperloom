@@ -316,9 +316,10 @@ _KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 _SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
 
 
-def _sglang_shape_mode() -> str:
+def _sglang_shape_mode(env: dict[str, str] | None = None) -> str:
     """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
-    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
+    env = os.environ if env is None else env
+    override = env.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
     if override in {"patch", "patched"}:
         return "patched"
     if override == "sitecustomize":
@@ -329,7 +330,7 @@ def _sglang_shape_mode() -> str:
 
         version = (getattr(sglang, "__version__", "") or "").strip()
     except Exception:  # noqa: BLE001
-        version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+        version = env.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
     m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
     if not m:
         return "patched"
@@ -339,8 +340,8 @@ def _sglang_shape_mode() -> str:
 
 def _maybe_activate_kernel_shape_tool(sub_env: dict[str, str]) -> None:
     """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
-    root = os.environ.get("TRACELENS_ROOT", "").strip()
-    if not root or _sglang_shape_mode() != "sitecustomize":
+    root = sub_env.get("TRACELENS_ROOT", "").strip()
+    if not root or _sglang_shape_mode(sub_env) != "sitecustomize":
         return
     tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
     if not tool.is_dir():
@@ -349,6 +350,67 @@ def _maybe_activate_kernel_shape_tool(sub_env: dict[str, str]) -> None:
     existing = sub_env.get("PYTHONPATH", "").strip()
     sub_env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)
     sub_env.setdefault("TRACELENS_SHAPE_DISCOVERY", "1")
+
+
+# Keep the standalone boundary in sync with launch_infera_node.py and the controller env policy.
+_LAUNCH_ENV_CONTROL = "HYPERLOOM_MN_LAUNCH_ENV_CONTROL"
+_PLATFORM_ENV_PREFIXES = ("LWS_", "POD_", "KUBERNETES_")
+_PROTECTED_LAUNCH_ENV = frozenset(
+    {
+        "BASH_ENV",
+        "CDPATH",
+        "ENV",
+        "GCONV_PATH",
+        "GIT_SSH_COMMAND",
+        "IFS",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "PATH",
+        "PERL5OPT",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "SHELLOPTS",
+        "VIRTUAL_ENV",
+        _LAUNCH_ENV_CONTROL,
+    }
+)
+
+
+def _launch_env_overrides(source: dict[str, str]) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Validate the key-only envelope and capture values before environment recovery."""
+    if _LAUNCH_ENV_CONTROL not in source:
+        return {}, ()
+    try:
+        control = json.loads(source[_LAUNCH_ENV_CONTROL])
+    except ValueError:
+        raise ValueError("invalid launch env control JSON") from None
+    if not isinstance(control, dict) or set(control) != {"set", "unset"}:
+        raise ValueError("invalid launch env control fields")
+    for keys in control.values():
+        if not isinstance(keys, list) or any(
+            not isinstance(key, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+            or key in _PROTECTED_LAUNCH_ENV
+            or key.startswith(_PLATFORM_ENV_PREFIXES)
+            for key in keys
+        ):
+            raise ValueError("invalid launch env control keys")
+    if any(key not in source for key in control["set"]):
+        raise ValueError("launch env control set value is missing")
+    return {key: source[key] for key in control["set"]}, tuple(control["unset"])
+
+
+def _apply_launch_env(env: dict[str, str], overrides: tuple[dict[str, str], tuple[str, ...]]) -> None:
+    explicit, unset = overrides
+    env.pop(_LAUNCH_ENV_CONTROL, None)
+    for key in unset:
+        env.pop(key, None)
+    env.update(explicit)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -363,6 +425,7 @@ def _subprocess_env() -> dict[str, str]:
     env["SGLANG_ROCM_FUSED_DECODE_MLA"] = "0"
     env.setdefault("SGLANG_USE_AITER", "1")
     env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
+    env.setdefault("PYTHONUNBUFFERED", "1")
     if "HSA_NO_SCRATCH_RECLAIM" not in env and _probe_mec_firmware_lt_177():
         env["HSA_NO_SCRATCH_RECLAIM"] = "1"
     venv_bin = "/opt/venv/bin"
@@ -382,7 +445,6 @@ def _detach_framework_launch(
 ) -> int:
     """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init; fails fast with a log tail)."""
     sub_env = dict(sub_env)
-    sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
     inner = " ".join(shlex.quote(c) for c in cmd)
@@ -465,10 +527,12 @@ def _spawn_remote(
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
+    overrides = _launch_env_overrides(dict(os.environ))
     sub_env = _subprocess_env()
+    _apply_launch_env(sub_env, overrides)
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared dir when a reused server skips this
     # launch.
-    tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    tpd = (torch_profiler_dir or "").strip() or sub_env.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:
@@ -525,6 +589,7 @@ def _spawn_remote(
     else:
         raise RuntimeError(f"unsupported framework: {framework!r}")
 
+    _apply_launch_env(sub_env, overrides)
     sys.stderr.write(f"[rank {node_rank}] launching: {' '.join(cmd)}\n")
     sys.stderr.write(f"[rank {node_rank}] log={log_file} pid={pid_file}\n")
     return _detach_framework_launch(cmd, log_file, pid_file, sub_env, node_rank)
