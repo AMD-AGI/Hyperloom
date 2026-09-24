@@ -30,7 +30,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -83,7 +83,7 @@ from ._grid_base import (
     VariantResult as VariantResult,
     variant_fingerprint as variant_fingerprint,
 )
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,

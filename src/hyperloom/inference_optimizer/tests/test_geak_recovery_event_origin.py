@@ -63,7 +63,9 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
     def no_runner(_name):
         pytest.fail("An existing unadjudicated result must use the disk recovery path")
 
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path", no_runner)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path", no_runner
+    )
     with session_scope(coord.session_dir):
         coord.phase_kernel._open_kernel_timeline(
             route=kernel_event.ROUTE_GEAK, route_reason="kernel_optimizer=geak", from_phase="FRAMEWORK_AGENT"

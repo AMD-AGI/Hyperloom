@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL, ESCALATE_HINT_SKIP_TO_SWEEP
 
 from ._optimize_fixtures import optimize_state
 
@@ -61,7 +62,7 @@ def test_switch_bottleneck_rides_every_exit_path():
     """It is dropped most easily on the paths that leave for another reason."""
     paths = {
         "both arms": optimize_state(**_DRY_SOURCE, **_DRY_CONFIG),
-        "skip_to_sweep hint": optimize_state(pending_escalate_hint=ps.ESCALATE_HINT_SKIP_TO_SWEEP),
+        "skip_to_sweep hint": optimize_state(pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP),
     }
     for label, state in paths.items():
         verdict = ps.exit_normal_optimize(state)
@@ -73,7 +74,7 @@ def test_switch_bottleneck_rides_every_exit_path():
 # --------------------------------------------------------------------------- #
 def test_a_skip_to_sweep_hint_leaves_with_an_arm_still_paying():
     """An explicit hint outranks the two-arm rule; that is the point of it."""
-    state = optimize_state(pending_escalate_hint=ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    state = optimize_state(pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP)
     verdict = ps.exit_normal_optimize(state)
     assert verdict is not None
     assert verdict[0] == "optimize_no_more_leverage"
@@ -114,7 +115,7 @@ def test_the_config_arm_needs_a_trailing_no_keep_streak_to_report_dry():
 def test_skip_to_kernel_leaves_on_an_optimize_reason():
     """Every exit from the merged phase names it; ``plateau_explore`` named a phase that is gone."""
     state = optimize_state(source_no_keep=0, config_keep_gain_pct=9.0)
-    state.pending_escalate_hint = ps.ESCALATE_HINT_SKIP_TO_KERNEL
+    state.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_KERNEL
     state.explore_search = {"tested": {"fp0": {"cycle": 0}}, "winners_history": []}
 
     out = ps.exit_normal_optimize(state)
@@ -127,7 +128,7 @@ def test_skip_to_kernel_leaves_on_an_optimize_reason():
 def test_skip_to_kernel_is_refused_before_either_arm_has_run():
     """A phase that dispatched nothing must not end with zero validated work."""
     state = optimize_state(config_keep_gain_pct=9.0)
-    state.pending_escalate_hint = ps.ESCALATE_HINT_SKIP_TO_KERNEL
+    state.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_KERNEL
     state.specialist_rounds = []
     state.explore_search = {"tested": {}, "winners_history": []}
     state.framework_agent_phase_progress = []

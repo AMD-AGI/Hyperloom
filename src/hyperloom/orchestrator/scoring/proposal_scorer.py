@@ -22,9 +22,9 @@ from hyperloom.common.llm_config import (
 )
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
-from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
-from ..trace.parse_usage import reasoning_output_tokens
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 
 log = logging.getLogger(__name__)
 

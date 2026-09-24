@@ -98,7 +98,7 @@ def grading_block(state: Any) -> dict[str, Any]:
     object without a recorded axis still uses :func:`resolved_grading`.
     """
     from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
-    from hyperloom.orchestrator.state.shared_state import resolved_grading
+    from hyperloom.inference_optimizer.grading import resolved_grading
 
     recorded = _field(state, "grading", None)
     recorded = recorded if isinstance(recorded, dict) else {}
@@ -123,7 +123,7 @@ def workload_signature(config: Mapping[str, Any]) -> str:
     fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
     if not any(str(value or "").strip() for value in fields.values()):
         return ""
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    from hyperloom.inference_optimizer.canonical_fingerprint import (
         workload_signature as digest,
     )
 

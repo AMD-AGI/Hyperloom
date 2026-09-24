@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -201,7 +202,7 @@ def _arm_explore_to_sweep(st):
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
     st.kernel_enabled = False
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
 
 @pytest.mark.asyncio
@@ -241,7 +242,7 @@ async def test_geak_revalidation_blocks_sweep_transition_while_queued(cyclic_coo
         "status": "awaiting_rebench",
         "revalidation_task_id": "geak-revalidate-1",
     }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
     queued = await c.tasks.create(
         kind="explore",
@@ -276,7 +277,7 @@ async def test_failed_geak_revalidation_releases_sweep_transition(cyclic_coordin
         "status": "awaiting_rebench",
         "revalidation_task_id": "geak-revalidate-failed",
     }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
     task = await c.tasks.create(
         kind="explore",

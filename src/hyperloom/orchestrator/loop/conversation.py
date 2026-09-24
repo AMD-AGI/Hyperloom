@@ -1,21 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator prompt composition: inbox rendering, per-tick phase/mission/advisory blocks, MCP context readers, and reactor conversation tracing."""
 
 from __future__ import annotations
 import json
 import time
 from typing import Any
 from ..phases import machine_state as _phase_state
+from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
-from ..trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
+from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
+from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from .coordinator import (
-    _format_inbox_event,
-)
-from .coordinator_helpers import _parse_iso_unix
+from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
@@ -26,6 +27,161 @@ log = _logging.getLogger(__name__)
 # the turn.
 _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
+
+# Result keys surfaced in delegated_result inbox line; first match wins per group.
+_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
+    "validated_gain_pct",
+    "gain_pct",
+    "predicted_gain_pct",
+    "delta_pct",
+)
+_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
+    "tokens_per_s",
+    "tput",
+    "throughput",
+    "tput_tok_s",
+)
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+# Notes rendered per inbox line.
+_OUTCOME_NOTES_MAX: int = 3
+
+
+def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
+    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def _defang_alert_payload(value: Any) -> Any:
+    """Recursively defang string leaves of an alert payload (keys untouched)."""
+    if isinstance(value, str):
+        return _defang_prompt_structure(value)
+    if isinstance(value, dict):
+        return {k: _defang_alert_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_defang_alert_payload(v) for v in value]
+    return value
+
+
+def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
+    """Render one inbox ``Message`` as a compact, high-signal line."""
+    topic = (m.topic or "").strip()
+    payload = m.payload if isinstance(m.payload, dict) else {}
+    # Canonical inbox header ordering that downstream parsers anchor on.
+    if getattr(m, "msg_id", None):
+        head = f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
+    else:
+        head = f"seq={m.seq} from={m.from_agent} topic={topic}"
+
+    if topic == "delegated_result":
+        kind = payload.get("kind")
+        state = payload.get("state")
+        error = payload.get("error")
+        result = payload.get("result")
+        parts = [head, f"kind={kind!r}", f"state={state!r}"]
+        notes: list[Any] = []
+        if isinstance(result, dict):
+            status = _first_present(result, _OUTCOME_STATUS_KEYS)
+            gain = _first_present(result, _OUTCOME_GAIN_KEYS)
+            tput = _first_present(result, _OUTCOME_TPUT_KEYS)
+            kept = result.get("kept")
+            if status is not None:
+                parts.append(f"status={status!r}")
+            if kept is not None:
+                parts.append(f"kept={kept!r}")
+            if gain is not None:
+                parts.append(f"gain={gain}")
+            if tput is not None:
+                parts.append(f"tput={tput}")
+            # Executors that never raise report the failure inside the result envelope, leaving the top-level error
+            # None.
+            if not error:
+                error = result.get("error")
+            raw_notes = result.get("notes")
+            if isinstance(raw_notes, list):
+                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
+                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
+                    :_OUTCOME_NOTES_MAX
+                ]
+            done = result.get("specialist_done") if kind == "specialist" else None
+            if isinstance(done, dict):
+                summary = str(done.get("summary") or "").strip()
+                if summary:
+                    parts.append(f"summary={summary[:400]!r}")
+                if done.get("confidence") is not None:
+                    parts.append(f"confidence={done['confidence']}")
+                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
+                    items = done.get(key)
+                    if isinstance(items, list) and items:
+                        parts.append(f"{label}={len(items)}")
+        if error:
+            parts.append(f"error={str(error)[:200]!r}")
+        if notes:
+            shown = "; ".join(str(n) for n in notes)
+            parts.append(f"notes={shown[:300]!r}")
+        header_line = " ".join(parts)
+        if max_variant_rows <= 0 or not isinstance(result, dict):
+            return header_line
+        pvos = result.get("per_variant_outcomes")
+        if not isinstance(pvos, list):
+            return header_line
+        failures = [
+            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
+        ]
+        if not failures:
+            return header_line
+        lines = [header_line]
+        for vo in failures[:max_variant_rows]:
+            row = dict(vo)
+            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
+            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        elided = len(failures) - max_variant_rows
+        if elided > 0:
+            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        return "\n".join(lines)
+
+    if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
+        return (
+            f"{head} action={payload.get('action_name')!r} "
+            f"rule={payload.get('rule')!r} "
+            f"hint={str(payload.get('hint') or '')[:140]!r}"
+        )
+
+    if topic == "review_verdict":
+        parts = [
+            f"{head} target={payload.get('target_proposal_msg_id')!r} "
+            f"verdict={payload.get('verdict')!r} "
+            f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
+        ]
+        advisory = serialize_verdict_advisory(payload)
+        required_evidence = advisory.get("required_evidence")
+        if required_evidence:
+            shown = "; ".join(str(item) for item in required_evidence[:3])
+            parts.append(f"required_evidence[{len(required_evidence)}]={shown[:140]!r}")
+        risks = advisory.get("risks")
+        if risks:
+            parts.append(f"risks={len(risks)}")
+        advice_text = advisory.get("advice_text")
+        if advice_text:
+            parts.append(f"advice={advice_text[:140]!r}")
+        return " ".join(parts)
+
+    if topic == "observation":
+        kind = payload.get("kind")
+        if kind is not None:
+            return f"{head} kind={kind!r} payload={payload}"
+
+    if topic == "alert":
+        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
+        # can't inject prompt structure.
+        return f"{head} payload={_defang_alert_payload(payload)}"
+
+    return f"{head} payload={payload}"
 
 
 class ConversationCollaborator:
@@ -254,7 +410,8 @@ class ConversationCollaborator:
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        phase_block = self.shared_state.to_phase_status_summary(
+        phase_block = _phase_state.phase_status_summary(
+            self.shared_state,
             budget_pct=self._phase_budget_pct,
         )
         if phase_block:
@@ -290,7 +447,7 @@ class ConversationCollaborator:
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         sections.append("=== Resource pools ===")
-        sections.append(self.shared_state.to_resource_pools_summary())
+        sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
@@ -598,7 +755,7 @@ class ConversationCollaborator:
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
-        from ..kernel.roofline_snapshot import dominant_direction
+        from hyperloom.inference_optimizer.roofline_snapshot import dominant_direction
 
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
         if not snaps or not isinstance(snaps[-1], dict):
@@ -654,7 +811,7 @@ class ConversationCollaborator:
                 f"(within_delta={shift.get('within_delta')} gap_delta={shift.get('gap_delta')})"
             )
         if direction:
-            from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+            from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
             hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
             if hint:
@@ -715,7 +872,7 @@ class ConversationCollaborator:
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return ""
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         target = _research_hints.load_competitor_target(self.session_dir)
         if not target:
@@ -729,7 +886,7 @@ class ConversationCollaborator:
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return None
         try:
-            from ..knowledge import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             target = _research_hints.load_competitor_target(self.session_dir)
             if not target:
@@ -775,7 +932,7 @@ class ConversationCollaborator:
         ``confidence``: that field is an audit record of what the specialist
         claimed, never an input to a decision here.
         """
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
         rounds = [
@@ -815,7 +972,7 @@ class ConversationCollaborator:
     def _priors_match_advisory_block(self) -> str:
         """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
         try:
-            from ..knowledge import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             variants = self._recent_proposed_variants()
             if not variants:

@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.phases import machine_state as ms
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
@@ -85,13 +86,13 @@ def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
 
 def test_skip_to_sweep_hint_still_exits_when_no_work(monkeypatch):
     # The explicit escalate-hint path (when available) still yields the non-terminal leverage exit.
-    _patch(monkeypatch, work_pending=False, hint=ms.ESCALATE_HINT_SKIP_TO_SWEEP)
+    _patch(monkeypatch, work_pending=False, hint=ESCALATE_HINT_SKIP_TO_SWEEP)
     state = _state(0)
     result = ms.exit_normal_kernel(state, now_unix=10_000.0)
     assert result is not None
     reason, evidence = result
     assert reason == "kernel_no_more_leverage"
-    assert evidence["hint"] == ms.ESCALATE_HINT_SKIP_TO_SWEEP
+    assert evidence["hint"] == ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def test_default_idle_max_ticks_is_three(monkeypatch):

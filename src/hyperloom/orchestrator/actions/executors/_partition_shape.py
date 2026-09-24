@@ -96,7 +96,7 @@ def per_stream_footprint_gib(
     precision = str((params or {}).get("precision") or getattr(shared_state, "precision", "") or "")
     # Lazy: the kernel package pulls in the analytical stack, and this module is imported whether a partition shape is
     # in play or not.
-    from hyperloom.orchestrator.kernel.roofline_ceiling import load_model_meta
+    from hyperloom.inference_optimizer.roofline_ceiling import load_model_meta
 
     meta = load_model_meta(model_path, precision_hint=precision)
     if meta is None or meta.weight_bytes <= 0:

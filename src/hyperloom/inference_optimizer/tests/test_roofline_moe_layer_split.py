@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def _split(cfg: dict, layers: int, experts: int) -> tuple[int, int]:

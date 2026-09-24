@@ -64,7 +64,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-from ..trace.parse_usage import (
+from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
     parse_claude_stream_json_turn_usages,

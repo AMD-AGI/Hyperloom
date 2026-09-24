@@ -287,12 +287,13 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -320,7 +321,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -339,7 +340,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()
@@ -379,7 +380,8 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
@@ -401,7 +403,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: rebuilt.append(s) or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: rebuilt.append(s) or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda _s: None)
     monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda _s: None)
@@ -1681,7 +1683,7 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# orchestrator.trace.trace_env
+# inference_optimizer.trace.trace_env
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:

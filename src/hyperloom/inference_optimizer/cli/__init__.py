@@ -91,7 +91,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -1384,7 +1384,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
-        from hyperloom.orchestrator.trace.langfuse_emitter import flush_session, record_session_breakdown
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
 
         with timed_teardown_step(state, "langfuse"):
             flush_session(session_dir)
@@ -2080,7 +2080,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _persist_install_event(args, session_dir)
         # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
         try:
-            from hyperloom.orchestrator.trace.langfuse_emitter import record_session_start
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
             record_session_start(session_dir)
         except Exception:
