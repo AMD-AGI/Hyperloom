@@ -13,6 +13,7 @@ import kernelforge.kernel_backends as _kernel_backends_pkg
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.loop.scoring import canonical_gate_prompt, runs_task_suite_acceptance
 
 
 _GPU = "gfx950"
@@ -73,16 +74,39 @@ def forge_loop_prompts(monkeypatch):
 # Each time the rendered prompts were diffed line by line against their previous
 # rendering; for the card renames every changed line was a card name and nothing
 # else moved. See test_rename_completeness.py for the tree-wide check.
+# The acceptance-gate correction moved all nine, the only re-snapshot so far
+# that had to: the loop stopped running the task's declared suite for every
+# backend but assembly, and each prompt still described the removed step.
+# Diffed line by line. The eight non-assembly prompts swapped the nine-line
+# task-config paragraph for the seven-line driver one; assembly kept its
+# paragraph less the warm-start clause, which no path performs any more; the
+# five agent-facing sentences that repeated the claim outside the shared
+# paragraph were corrected (aiter/ck/hip/triton step 4, flydsl step 4, ck's
+# iron rule, fusion's stop condition, gluon's smaller-shape trap); "GATE" as a
+# name for the performance target became "performance target" in ck/hip/
+# hipblaslt, since the word now has a defined meaning beside it; and hipblaslt
+# gained the paragraph it had never rendered despite three stop conditions
+# resting on it.
+# Keeping sweep knobs out of the deliverable moved the eight source backends and
+# left assembly byte-identical, which is the expected shape: the two edits are
+# both in the shared prompt_utils.py preamble, and assembly renders neither
+# card. Diffed line by line against main: the changed content is one identical
+# block in all eight (same md5 over the diff bodies). The edit-surface bullet
+# gained the converse it had always implied but never said (reaching someone
+# else's environment constant is in scope, authoring a new read in the
+# deliverable is not), and the sweep bullet replaced "KEEP the knobs ... strip
+# at submission" with a collapse to the selected literals before the
+# implementer ends its turn.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
-    "assembly": "30244b18035a169b81cf7874d1ab2cdaadcb34bcab21027e4f0e5baf7230a10e",
-    "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
-    "flydsl": "270def2d0c6600290b3d9b7ccf468f03e3a0f1ced7481b7128dde2a9f74cc7c9",
-    "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
-    "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
-    "hip": "7399928977cf188ae30f49fc0087386285d0fd5c131cd70b3a9064095f03fba7",
-    "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
-    "triton": "67345584efeba90afc87959e75583167c11bb9b9ac9a0275dbddbed2f945037a",
+    "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
+    "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
+    "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
+    "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
+    "fusion": "47a08e347027db64ef09da42fe73e8248d35c22c05084bc850e23a7d013c61e5",
+    "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
+    "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
+    "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",
+    "triton": "e73f10c4a2bc4fbe59da1e619605401b8f4c602bf0b4480d956584162473c650",
 }
 
 
@@ -94,6 +118,33 @@ class TestRenderedPromptSnapshots:
             got = _sha256(prompt)
             assert got == _SHA256_FORGE_LOOP[backend], (
                 f"{backend}: forge-loop prompt changed (got {got!r}, expected {_SHA256_FORGE_LOOP[backend]!r})"
+            )
+
+
+class TestAcceptanceGateMatchesTheLoop:
+    """Every prompt states the gate the loop will actually apply to that backend.
+
+    The description and the loop's Step 7 were two copies of one fact, and they
+    drifted: the step became assembly's alone while all eight other prompts kept
+    telling their agent that forge runs the task's `compile_command` and
+    `correctness_command` on every candidate. An agent optimizes against the
+    criterion it is given, so that is not a stale sentence -- it points the
+    implementer at a verdict no longer formed and at a diagnostic never
+    produced. Both sides now read ``runs_task_suite_acceptance``.
+    """
+
+    def test_each_prompt_carries_the_gate_its_backend_is_judged_by(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            assert canonical_gate_prompt(backend) in prompt, (
+                f"{backend}: prompt does not state the acceptance gate the loop applies to it"
+            )
+
+    def test_only_a_task_suite_backend_claims_forge_runs_the_task_config(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            claims = "`correctness_command`" in prompt
+            assert claims is runs_task_suite_acceptance(backend), (
+                f"{backend}: prompt {'claims' if claims else 'omits'} the task-config gate while the loop "
+                f"{'runs' if runs_task_suite_acceptance(backend) else 'does not run'} it"
             )
 
 
@@ -191,18 +242,29 @@ class TestEditSurfaceAndSweepContract:
                 f"{backend}: prompt does not warn that a bool-cast swept string is always True"
             )
 
-    def test_no_kernel_backend_tells_the_implementer_to_collapse_the_knobs(self, source_loop_prompts):
-        """A knob deleted mid-campaign is an axis no later session re-opens."""
+    def test_every_kernel_backend_keeps_sweep_plumbing_out_of_what_it_submits(self, source_loop_prompts):
+        """Sweep knobs last one turn; the kernel that ships carries the literal they picked.
+
+        The prompt used to say the opposite -- keep the knobs in the source for the whole search, strip them at
+        submission if anyone asks. Nobody asked, so every campaign delivered its scaffolding: sixty environment reads
+        and three hundred echo lines in one shipped kernel, indistinguishable to a reader from live configuration.
+        The collapse is now the implementer's own last edit of every turn. It stays in place rather than on a copy:
+        only the rewrite driver can be pointed at another kernel file, so for every other backend a copy is a file no
+        sweep point runs.
+        """
         for backend, prompt in source_loop_prompts.items():
-            lowered = prompt.lower()
-            assert "collapse the knobs back" not in lowered, (
-                f"{backend}: prompt still tells the implementer to delete its own sweep knobs"
+            lowered = " ".join(prompt.lower().split())
+            assert "keep the knobs" not in lowered, (
+                f"{backend}: prompt still tells the implementer to ship its own sweep knobs"
             )
-            assert "dead weight in the delivered kernel" not in lowered, (
-                f"{backend}: prompt still calls a shipped sweep knob dead weight"
+            assert "before you end the turn" in lowered, (
+                f"{backend}: prompt does not make removing the knobs part of the implementer's own turn"
             )
-            assert "keep the knobs" in lowered, (
-                f"{backend}: prompt does not tell the implementer to keep the sweep knobs through the search"
+            assert "with the literal it selected" in lowered, (
+                f"{backend}: prompt does not say the submitted kernel carries the literal, not the read"
+            )
+            assert "kernelforge_rewrite_candidate_kernel" not in lowered, (
+                f"{backend}: the shared prompt prescribes a candidate path only the rewrite driver has"
             )
 
     def test_sweep_contract_is_not_owned_by_one_kernel_backend(self):
@@ -293,7 +355,7 @@ class TestDocumentedSweepHelper:
         blocks = re.findall(r"```python\n(.*?)```", card.read_text(encoding="utf-8"), re.DOTALL)
         assert len(blocks) == 1, f"{_SWEEP_CARD}: expected exactly one python block to lock, found {len(blocks)}"
         namespace: dict = {"os": os}
-        exec(compile(blocks[0], str(card), "exec"), namespace)  # noqa: S102
+        exec(compile(blocks[0], str(card), "exec"), namespace)
         assert "_sweep_const" in namespace, f"{_SWEEP_CARD}: the documented block no longer defines _sweep_const"
         return namespace["_sweep_const"]
 

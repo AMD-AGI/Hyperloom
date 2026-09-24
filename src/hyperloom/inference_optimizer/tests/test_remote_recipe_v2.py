@@ -43,6 +43,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     MAX_FILE_BYTES,
     MAX_PATH_BYTES,
     Artifact,
+    KBSelectionProfile,
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
@@ -57,7 +58,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_publishable_recipe_config,
     has_replay_material,
 )
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 _DOWNLOAD_BYTES = b"verified artifact"
 _DOWNLOAD_SHA256 = hashlib.sha256(_DOWNLOAD_BYTES).hexdigest()
@@ -87,7 +89,12 @@ def _build(state, files_dir, *, sections=None):
     files_dir = Path(files_dir)
     if sections is None:
         sections = KnowledgeSections(files_dir.with_name(f"{files_dir.name}-draft"))
-    return build_remote_knowledge(state, files_dir, sections=sections)
+    return build_remote_knowledge(
+        state,
+        files_dir,
+        sections=sections,
+        metrics=KBSelectionProfile.from_state(state).metrics,
+    )
 
 
 def _state(tmp_path: Path) -> SimpleNamespace:
@@ -539,6 +546,8 @@ def test_remote_recipe_projects_workload_shape_for_donor_gating(
         "isl": 1024,
         "osl": 256,
     }
+    assert row["validated_gain_pct"] == pytest.approx(state.cumulative_gain_validated)
+    assert "interactivity_gain_pct" not in row
 
 
 def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
@@ -1265,7 +1274,8 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
                 status="written",
                 reason="",
                 session_id=session_id,
-                optimized_throughput=10.0,
+                primary_metric="optimized_throughput",
+                primary_value=10.0,
             )
 
     monkeypatch.setattr(
@@ -1299,6 +1309,9 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     assert audit_rows[-1]["status"] == "written"
     assert audit_rows[-1]["generator"] == "close"
     assert audit_rows[-1]["result"]["canonical_id"] == ("inference:m:h:f:mt:a:v:p")
+    assert audit_rows[-1]["result"]["primary_metric"] == "optimized_throughput"
+    assert audit_rows[-1]["result"]["primary_value"] == 10.0
+    assert audit_rows[-1]["result"]["best_throughput"] == 10.0
 
 
 def test_remote_close_transport_failure_is_nonfatal(
@@ -1347,6 +1360,77 @@ def test_remote_close_transport_failure_is_nonfatal(
     row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
     assert row["status"] == "error"
     assert row["error"]["type"] == "OSError"
+
+
+def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(
+        current_best={"tput": 120.0},
+        optimization_stack=[{"action": "explore", "variant_name": "a"}, {"action": "explore", "variant_name": "b"}],
+        cumulative_gain_validated=10.0,
+        cumulative_gain_validated_stack_len=1,
+        working_recipe_generation=2,
+        validated_recipe_generation=1,
+    )
+    coordinator = SimpleNamespace(
+        shared_state=state,
+        session_dir=tmp_path,
+        recipe_kb=None,
+        knowledge_plane=None,
+        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
+        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
+    )
+
+    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert outcome["result_type"] == "unvalidated_recipe"
+
+
+def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    collaborator = WritebackCollaborator(
+        SimpleNamespace(
+            shared_state=SimpleNamespace(
+                current_best={"tput": 2200.0},
+                cumulative_gain_validated=20.0,
+                kernel_optimizer="forge",
+                tp=8,
+                conc=64,
+                isl=1024,
+                osl=256,
+            ),
+            session_dir=tmp_path,
+        )
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",
+        lambda *args, **kwargs: captured.update(kwargs),
+    )
+
+    collaborator._record_write_back_settled(
+        {
+            "status": "skipped",
+            "reason": "unvalidated_recipe_stack",
+            "backend": "none",
+            "result_type": "unvalidated_recipe",
+        },
+        attempt=1,
+        source="close",
+    )
+
+    assert captured["optimized_throughput"] is None
+    assert captured["validated_gain_pct"] is None
 
 
 class _FakeStore:
@@ -1455,8 +1539,18 @@ class _FakeStore:
         session_id="",
         mode="merge",
         scope=None,
+        objective_schema="",
     ):
-        self.calls.append(("put_knowledge", canonical_id, session_id, mode, scope))
+        self.calls.append(
+            (
+                "put_knowledge",
+                canonical_id,
+                session_id,
+                mode,
+                scope,
+                objective_schema,
+            )
+        )
         self.published_knowledge = json.loads(json.dumps(knowledge))
 
     def set_champion(self, canonical_id, session_id, *, metric, value, scope=None):
@@ -1532,10 +1626,11 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     names = [call[0] for call in store.calls]
     assert names[:4] == ["get_rollup", "put_dir", "put_knowledge", "set_champion"]
     assert names[-2:] == ["get_rollup", "set_champion"]
-    assert store.calls[2][-2] == "replace"
+    assert store.calls[2][3] == "replace"
+    assert store.calls[2][-1] == "single_throughput"
     assert store.calls[3][-3:-1] == ("optimized_throughput", 130.0)
     assert store.calls[0][-1] == _SCOPE.as_dict()
-    assert store.calls[2][-1] == _SCOPE.as_dict()
+    assert store.calls[2][4] == _SCOPE.as_dict()
     assert store.calls[3][-1] == _SCOPE.as_dict()
     assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
     assert all(not str(call[1]).startswith("kernel:") for call in store.calls if len(call) > 1)
@@ -1567,7 +1662,8 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         "session-1",
         bundle,
         scope=_SCOPE,
-        optimized_throughput=130.0,
+        primary_metric="optimized_throughput",
+        primary_value=130.0,
         files_dir=tmp_path,
     )
 
@@ -1612,7 +1708,8 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
         "session-1",
         bundle,
         scope=_SCOPE,
-        optimized_throughput=200.0,
+        primary_metric="optimized_throughput",
+        primary_value=200.0,
         files_dir=tmp_path,
     )
     assert result.status == "skipped"
@@ -1694,6 +1791,142 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
         "put_knowledge",
         "set_champion",
     ]
+
+
+def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.benchmark_mode = "agentx"
+    state.cumulative_gain_validated = 20.0
+    state.ep = 4
+    state.compute_partition = {"mode": "CPX", "partitions": 8}
+    state.baseline_perf = {
+        "e2e_norm_intvty_p90": 20.0,
+        "total_throughput": 1000.0,
+    }
+    state.current_best.update(
+        {
+            "e2e_norm_intvty_p90": 24.0,
+            "total_throughput": 960.0,
+        }
+    )
+    store = _FakeStore(metric="interactivity_gain_pct")
+    result = write_final_remote_recipe(
+        state,
+        "agentx:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert result.status == "written"
+    put = next(call for call in store.calls if call[0] == "put_knowledge")
+    assert put[4] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
+    assert put[5] == "agentx_keep"
+    assert store.published_knowledge["interactivity_gain_pct"] == pytest.approx(20.0)
+    assert "validated_e2e_gain" not in store.published_knowledge
+    assert store.published_knowledge["total_throughput"] == 960.0
+    assert store.published_knowledge["baseline_interactivity"] == 20.0
+    assert store.published_knowledge["workload_shape"] == {
+        "tp": 8,
+        "conc": 64,
+        "ep": 4,
+        "partitions": 8,
+    }
+    warm = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "agentx:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "knowledge": store.published_knowledge,
+            "view": {"replayable": True},
+        }
+    )
+    assert warm["validated_gain_pct"] == pytest.approx(20.0)
+    assert "interactivity_gain_pct" not in warm
+    assert "isl" not in warm
+    assert "osl" not in warm
+    assert warm["ep"] == 4
+    assert warm["partitions"] == 8
+    promote = next(call for call in store.calls if call[0] == "set_champion")
+    assert promote[3] == "interactivity_gain_pct"
+    assert promote[4] == pytest.approx(20.0)
+
+
+def test_agentx_selection_rejects_incomplete_baseline_axes(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.benchmark_mode = "agentx"
+    state.baseline_perf = {"e2e_norm_intvty_p90": 20.0}
+    state.current_best.update(
+        {
+            "e2e_norm_intvty_p90": 24.0,
+            "total_throughput": 960.0,
+        }
+    )
+
+    with pytest.raises(RemoteRecipeValidationError, match="baseline_axes_missing"):
+        KBSelectionProfile.from_state(state)
+
+    store = _FakeStore(metric="interactivity_gain_pct")
+    result = write_final_remote_recipe(
+        state,
+        "agentx:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert result.status == "skipped"
+    assert result.reason == "invalid_recipe_selection_profile"
+    assert store.calls == []
+    assert _remote_result_type(result.status, result.reason) == _close_out.RESULT_INVALID_SELECTION_PROFILE
+
+
+def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:
+    store = _FakeStore(metric="interactivity_gain_pct")
+    scope = RecipeScope("forge", 8, 64)
+    store.envelope["canonical_id"] = "agentx:m:h:f:mt:a:v:p"
+    store.envelope["scope"] = {
+        **scope.as_dict(),
+        "scope_schema": "agentx_trace/v1",
+    }
+    store.envelope["knowledge"]["workload_shape"] = {"tp": 8, "conc": 64}
+    store.envelope["knowledge"]["interactivity_gain_pct"] = 20.0
+    store.envelope["knowledge"]["total_throughput"] = 960.0
+
+    selected = RemoteRecipeClient(store).get_view(
+        "agentx:m:h:f:mt:a:v:p",
+        scope,
+    )
+    assert selected is not None
+    assert selected["scope"]["tp"] == 8
+    call = next(call for call in store.calls if call[0] == "get_hyperloom_recipe_view")
+    assert call[-1] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
+
+
+def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
+    query = kb_store_client.KBStoreClient._scope_query({"kernel_optimizer": "forge", "tp": 8, "conc": 64})
+    assert "kernel_optimizer=forge" in query
+    assert "tp=8" in query
+    assert "conc=64" in query
+    assert "isl" not in query
+    assert "osl" not in query
+
+
+def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+        recipe_canonical_id,
+    )
+
+    kwargs = {
+        "model": "m",
+        "hardware": "h",
+        "framework_name": "f",
+        "model_type": "mt",
+        "architectures": "a",
+        "framework_version": "v",
+        "precision": "p",
+    }
+    inference = recipe_canonical_id(**kwargs)
+    agentx = recipe_canonical_id(**kwargs, scheme="agentx")
+    assert inference == "inference:m:h:f:mt:a:v:p"
+    assert agentx == "agentx:m:h:f:mt:a:v:p"
+    assert inference.split(":", 1)[1] == agentx.split(":", 1)[1]
 
 
 def test_non_throughput_champion_metric_is_rejected(tmp_path: Path) -> None:
@@ -2283,13 +2516,27 @@ def test_nonfinite_write_throughput_skips_without_remote_calls(tmp_path: Path) -
     assert store.calls == []
 
 
-def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
+def test_invalid_inference_scope_keeps_scope_error_reason(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.kernel_optimizer = "unsupported"
+    store = _FakeStore()
+    result = write_final_remote_recipe(
+        state,
+        "inference:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert result.status == "skipped"
+    assert result.reason == "invalid_recipe_scope"
+    assert store.calls == []
+
+
+def test_nonfinite_selection_metrics_are_rejected(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.current_best["tput"] = float("nan")
     state.cumulative_gain_validated = float("inf")
-    bundle = _build(state, tmp_path / "finite-knowledge")
-    assert bundle.knowledge["optimized_throughput"] == 0.0
-    assert bundle.knowledge["validated_e2e_gain"] == 0.0
+    with pytest.raises(RemoteRecipeValidationError, match="optimized_throughput"):
+        KBSelectionProfile.from_state(state)
 
 
 def _current_knowledge(*, timeline: list[str] | None = None) -> dict:
@@ -2594,6 +2841,26 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
     )
     assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
+    assert remote.kwargs["scheme"] == "inference"
+
+
+def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:
+    class _Remote:
+        def __init__(self) -> None:
+            self.kwargs = {}
+
+        def search_identities(self, **kwargs):
+            self.kwargs = dict(kwargs)
+            return {"items": [], "total": 0, "next_offset": None}
+
+    remote = _Remote()
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        remote,
+        tmp_path / "unused",
+        scope=RecipeScope("forge", 8, 64),
+    )
+    assert adapter.search(label_match={"framework": "sglang"}) == []
+    assert remote.kwargs["scheme"] == "agentx"
 
 
 def test_remote_adapter_stops_on_empty_page_with_next_offset(
@@ -2786,7 +3053,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "3402092b4cac1e85e9ad9baae77b8b0020259158"
+    assert digest == "9dbb293ccab87b33555ef48b7e27ec93e726e86c"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:

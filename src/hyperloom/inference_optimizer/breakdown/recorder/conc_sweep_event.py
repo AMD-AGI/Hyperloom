@@ -825,18 +825,22 @@ class ConcSweepEventRecorder:
             }
         )
         from .assembler import conc_sweep_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_conc_sweep_ext(conc_sweep_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_conc_sweep_ext(conc_sweep_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing conc_sweep event {self.event_id}")
 
 
 def _assemble_arm(
@@ -987,10 +991,12 @@ def make_conc_sweep_recorder(
 ) -> ConcSweepEventRecorder | None:
     """Build a recorder, or ``None`` when one cannot be constructed. Sweep
     behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", as does the absent sink a caller with no session
+    that are not recorder bugs degrade to "no event", as does the absent sink a caller with no session
     bound has."""
     if sink is None:
         return None
+    from .recorder_warnings import RECORDING_ERRORS
+
     try:
         recorder = ConcSweepEventRecorder(
             sink,
@@ -999,7 +1005,7 @@ def make_conc_sweep_recorder(
             reason=reason,
             params=params,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
+    except RECORDING_ERRORS:
         log.warning(
             "conc_sweep timeline: recorder construction failed; this sweep's facts will be missing from the event",
             exc_info=True,

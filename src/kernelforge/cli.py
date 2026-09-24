@@ -18,12 +18,10 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.knowledge.experience_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
@@ -196,12 +194,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:
@@ -666,10 +659,10 @@ def _make_lane_agent_factory(
     "--snr-threshold",
     default=DEFAULT_SNR_THRESHOLD_DB,
     type=float,
-    help="Fresh campaign: SNR pre-filter threshold in dB (stored "
-    "immutably in the campaign config; ignored on --resume). A "
-    "KEEP is decided by the task's own correctness_command, not "
-    "by this value.",
+    help="Fresh campaign: threshold in dB the driver's correctness "
+    "suite must clear (stored immutably in the campaign config; "
+    "ignored on --resume). A KEEP needs this and a measured gain "
+    "over the incumbent; assembly adds the task's own suite.",
 )
 @click.option(
     "--max-hours",
@@ -1521,7 +1514,6 @@ def forge_loop(
                 source_files=source_files_list,
                 operator_name=operator_name,
                 bench_repeat=bench_repeat,
-                canonical_timeout_cap_sec=(iter_config.validate_stage_timeout_sec),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
@@ -1566,7 +1558,7 @@ def forge_loop(
                     "  [warm-start] published recoverable best before iteration 1",
                     flush=True,
                 )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - translated into a rollback below
                 try:
                     rollback_unpublished_warm_start(
                         workspace_dir,
@@ -1884,7 +1876,7 @@ def forge_loop(
         if not best_commit:
             try:
                 published = json.loads((campaign_root / "best_result.json").read_text())
-            except Exception:
+            except (OSError, ValueError):
                 published = {}
             if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
@@ -1950,12 +1942,11 @@ def forge_loop(
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
-                result["iteration_count"] = len(completed_experiment.iterations)
-                result["checkpoint"] = completed_experiment.checkpoint
-            except Exception:
-                # Tracker metadata is optional on incomplete runs; final result emission must remain available so
-                # callers can reject it cleanly.
-                pass
+            except FileNotFoundError:
+                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+                return result
+            result["iteration_count"] = len(completed_experiment.iterations)
+            result["checkpoint"] = completed_experiment.checkpoint
         return result
 
     def _write_result_json(result: dict) -> None:
@@ -2153,14 +2144,14 @@ def forge_loop(
         try:
             if loop_runner.llm_usage.get("calls"):
                 tracker.set_llm_usage(experiment_id, loop_runner.llm_usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
             click.echo(
                 f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
                 err=True,
             )
         try:
             tracker.set_kb_experience(experiment_id, kb_experience)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
             click.echo(
                 f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
                 err=True,
@@ -2309,6 +2300,15 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
 @click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
 @click.option(
+    "--applyback/--no-applyback",
+    default=True,
+    show_default=True,
+    help="Integrate the optimized kernel back into the framework repository and "
+    "publish the patch. Disable it to deliver only the standalone kernel: the "
+    "stage is skipped, its 20-minute reserve returns to the search, and the "
+    "run's success no longer depends on a patch the caller did not ask for.",
+)
+@click.option(
     "--max-applyback-attempts",
     default=2,
     show_default=True,
@@ -2374,6 +2374,7 @@ def forge_rewrite(
     model,
     permission_mode,
     max_port_attempts,
+    applyback,
     max_applyback_attempts,
     max_hours,
     deadline_unix,
@@ -2406,10 +2407,7 @@ def forge_rewrite(
     rewrite_kb_enabled = bool(rewrite_kb)
     # A disabled KB must not validate ambient remote credentials.
     try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(
-            mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     config = Config.from_env(
@@ -2456,6 +2454,7 @@ def forge_rewrite(
         invocation_spec_file=invocation_spec_file,
         applyback_import_modules=applyback_import_modules,
         max_applyback_attempts=max_applyback_attempts,
+        applyback_enabled=bool(applyback),
         rewrite_kb_enabled=rewrite_kb_enabled,
     )
     # The structured result and sentinel were already emitted for callers to parse.

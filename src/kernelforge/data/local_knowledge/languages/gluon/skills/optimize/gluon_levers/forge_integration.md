@@ -29,8 +29,9 @@ measurement honest, and which version traps burn a whole session.
 3. **Environment variables are part of the measurement, not part of the kernel.** `TRITON_ENABLE_LLIR_SCHED`
    and `TRITON_ENABLE_AMDGCN_AS` change the generated code. A number measured with them set is not
    comparable to one measured without unless they travel with the candidate.
-4. **SNR is a pre-filter, not the gate.** A layout or scale-packing error produces plausible garbage;
-   the task's own `correctness_command` is what decides.
+4. **A high SNR is not a correctness proof.** A layout or scale-packing error produces plausible
+   garbage that still averages well; the driver's correctness suite is what decides a KEEP, so read
+   what it reports per case rather than the aggregate figure.
 
 ## 1. Change shape: same file, same entry, dispatch inside
 
@@ -162,10 +163,14 @@ the AMD ladder. Inside a campaign there are exactly two honest ways to use them:
 
 - **Make them travel with the candidate** — set them from the kernel module's own import path (e.g.
   `os.environ.setdefault(...)` before the first compile) so any measurement of that source includes
-  them, and the committed kernel keeps behaving the way it was measured. This is usually right, because
-  the flags are properties of the kernel design, not of the run.
+  them, and the committed kernel keeps behaving the way it was measured. These flags are properties of
+  the kernel design, not of the run, and Triton reads them only from the environment. That makes this
+  the narrow exception to the rule that a submitted kernel reads no `os.environ`: name the flag, say
+  in a comment that Triton exposes it no other way, and set nothing else that way. A dispatch constant
+  of your own is not covered — that one is a literal.
 - **Sweep them explicitly** as `FORGE_SWEEP_*` knobs when the question is whether they help. One data
-  point per command, echoed, per `common_methodology/optimization/lever_cheap_sweeps.md`.
+  point per command, echoed, and collapsed to the chosen setting before the turn ends, per
+  `common_methodology/optimization/lever_cheap_sweeps.md`.
 
 What is **not** honest is exporting them in your shell and then reporting the number as the kernel's.
 The loop's own canonical measurement will not have them set, and the candidate will regress on the
@@ -186,9 +191,10 @@ Gluon's two most common wrong-answer bugs are **silent**, and both clear a loose
   (`op_0, op_2, op_1, op_3`) and `mfma_scaled_32x32x64` (`op_0, op_1, op_2, op_3`);
 - and inherited from Triton, the **fp8 FNUZ (gfx942) vs OCP (gfx950)** dialect mismatch.
 
-Run the task's own `compile_command` and then its `correctness_command` yourself before you propose a
-change. SNR ≥ 30 dB is a fast pre-filter; the task's tolerances are what decide, and they are not
-forge's.
+Verify through the driver before you propose a change. SNR ≥ 30 dB is the threshold it must clear,
+not evidence that the numerics are right. Whoever consumes the kernel may also build it at a shape
+forge never measures, under tolerances that are not forge's, so run the task's own commands yourself
+when it declares them.
 
 ### Reference-check against the incumbent, not against a table
 The ceilings in [`overview.md`](overview.md) are AMD-measured on gfx950 at large K. Your baseline is

@@ -46,6 +46,16 @@ _BENCH_SERVING_PATCHED = (
 )
 _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
 _BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_patcher.lock")
+#: Contract name for the patch above; shared with ``_ANCHOR_CONTRACT`` so the resolver and the
+#: contract cannot drift apart.
+_BENCH_SERVING_ANCHOR_NAME = "profile_extra_body"
+#: Layouts the implementation has shipped under, newest first. SemiAnalysisAI/InferenceX#3022
+#: moved the Python tools into ``infx/`` and left ``utils/`` as a forwarding shim, so a checkout
+#: can carry both paths while only one of them holds the line this patch rewrites.
+_BENCH_SERVING_REL_PARTS: tuple[tuple[str, ...], ...] = (
+    ("infx", "bench_serving", "benchmark_serving.py"),
+    ("utils", "bench_serving", "benchmark_serving.py"),
+)
 
 # ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process cwd (the InferenceX checkout),
 # escaping the session.
@@ -594,7 +604,6 @@ def _apply_line_replacement_atomic(
     legacy: str,
     patched_line: str,
     *,
-    tmp_prefix: str,
     missing_msg: str,
     success_msg: str,
 ) -> bool:
@@ -616,7 +625,6 @@ def _apply_line_replacement_atomic(
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=tmp_prefix,
         log_prefix="_inferencex_patcher",
     ):
         return False
@@ -669,7 +677,6 @@ def ensure_benchmark_lib_patched(
             _apply_line_replacement_atomic,
             legacy=_LEGACY_LINE,
             patched_line=_PATCHED_LINE,
-            tmp_prefix=".benchmark_lib.sh.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy line not found in %s; "
                 "the file may already have been hand-patched to a "
@@ -690,11 +697,52 @@ def ensure_benchmark_lib_patched(
 
 
 # PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
+def _pick_benchmark_serving(candidates: list[Path]) -> Path:
+    """Return the copy this patch acts on: the one already patched or still holding the anchor.
+
+    Args:
+        candidates: Existing files, in ``_BENCH_SERVING_REL_PARTS`` order.
+
+    Returns:
+        The anchored copy, else the legacy path so a tree carrying neither still
+        reports where the patch belongs.
+    """
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _BENCH_SERVING_SENTINEL in text or _BENCH_SERVING_LEGACY in text:
+            return path
+    return candidates[-1]
+
+
+def benchmark_serving_path_in(root: Path | str) -> Path:
+    """Return the ``benchmark_serving.py`` this patch targets under exactly one checkout.
+
+    Callers that read the file back to confirm the patch landed must resolve it the
+    same way the patcher wrote it: a fixed path reads the forwarding shim on a
+    post-#3022 checkout and concludes the patch is missing. Scoped to one root
+    because a gate speaks for the tree the run will execute, not for whatever else
+    the environment can reach.
+    """
+    base = Path(root)
+    existing = [path for path in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
+    if not existing:
+        return base.joinpath(*_BENCH_SERVING_REL_PARTS[-1])
+    return _pick_benchmark_serving(existing)
+
+
 def _resolve_benchmark_serving_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing ``<root>/utils/bench_serving/benchmark_serving.py`` to patch (one per :func:`_discover_inferencex_roots` root, including Magpie's bundled copy)."""
-    return _resolve_inferencex_files(inferencex_path, "utils", "bench_serving", "benchmark_serving.py")
+    """Return the ``benchmark_serving.py`` to patch, one per :func:`_discover_inferencex_roots` root."""
+    out: list[Path] = []
+    for root in _discover_inferencex_roots(inferencex_path):
+        existing = [path for path in (root.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
+        if existing:
+            out.append(_pick_benchmark_serving(existing))
+    return out
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
@@ -713,7 +761,6 @@ def ensure_benchmark_serving_patched(
             _apply_line_replacement_atomic,
             legacy=_BENCH_SERVING_LEGACY,
             patched_line=_BENCH_SERVING_PATCHED,
-            tmp_prefix=".benchmark_serving.py.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy `extra_body=` line not "
                 "found in %s; InferenceX layout may have changed and Hyperloom "
@@ -759,7 +806,6 @@ def ensure_benchmark_lib_eval_dest_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_DEST_LEGACY,
             patched_line=_EVAL_DEST_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_dest_",
             missing_msg=(
                 "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
                 "found in %s; upstream layout may have changed. Eval artifacts "
@@ -797,7 +843,6 @@ def ensure_benchmark_lib_eval_start_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_START_LEGACY,
             patched_line=_EVAL_START_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_start_",
             missing_msg=(
                 "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
                 "in %s; upstream layout may have changed. The overtime kill will "
@@ -843,12 +888,7 @@ def _apply_eval_probe_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
     patched = original + _EVAL_PROBE_PY
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".lm_eval_sitecustomize.eval_probe_",
-        log_prefix="_inferencex_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_inferencex_patcher"):
         return False
     log.info("_inferencex_patcher: appended eval generation-pathology probe to %s", src)
     return True
@@ -1004,7 +1044,8 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
     (
-        "profile_extra_body",
+        _BENCH_SERVING_ANCHOR_NAME,
+        # The pinned revision's layout; newer checkouts are resolved by name, not by this path.
         ("utils", "bench_serving", "benchmark_serving.py"),
         _BENCH_SERVING_SENTINEL,
         _BENCH_SERVING_LEGACY,
@@ -1036,14 +1077,23 @@ def verify_patch_anchors(
         One :class:`AnchorStatus` per (patch, existing file) pair, in
         ``_ANCHOR_CONTRACT`` order. Empty when no InferenceX tree resolves.
     """
-    return _verify_anchors(lambda parts: _resolve_inferencex_files(inferencex_path, *parts))
+
+    def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
+        """Name the files one patch targets across every discovered root."""
+        if name == _BENCH_SERVING_ANCHOR_NAME:
+            return _resolve_benchmark_serving_paths(inferencex_path)
+        return _resolve_inferencex_files(inferencex_path, *parts)
+
+    return _verify_anchors(_resolve)
 
 
-def _verify_anchors(resolve: Callable[[tuple[str, ...]], list[Path]]) -> list[AnchorStatus]:
+def _verify_anchors(resolve: Callable[[str, tuple[str, ...]], list[Path]]) -> list[AnchorStatus]:
     """Report anchor status for whichever files ``resolve`` names per patch.
 
     Args:
-        resolve: Maps a patch's relative path parts to the files to inspect.
+        resolve: Maps a patch's contract name and relative path parts to the files
+            to inspect. The name is what lets a patch whose file moved upstream
+            resolve across layouts instead of through one fixed path.
 
     Returns:
         One :class:`AnchorStatus` per (patch, readable file) pair, in
@@ -1051,7 +1101,7 @@ def _verify_anchors(resolve: Callable[[tuple[str, ...]], list[Path]]) -> list[An
     """
     out: list[AnchorStatus] = []
     for name, rel_parts, sentinel, anchor in _ANCHOR_CONTRACT:
-        for path in resolve(rel_parts):
+        for path in resolve(name, rel_parts):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -1092,15 +1142,19 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
     """
     base = Path(root)
 
-    def _resolve(parts: tuple[str, ...]) -> list[Path]:
+    def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
         """Name the one file under ``base`` a patch targets, when it exists.
 
         Args:
+            name: The patch's contract name.
             parts: The patch's relative path components.
 
         Returns:
             A single-entry list, or ``[]`` when the file is absent.
         """
+        if name == _BENCH_SERVING_ANCHOR_NAME:
+            existing = [p for p in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if p.is_file()]
+            return [_pick_benchmark_serving(existing)] if existing else []
         path = base.joinpath(*parts)
         return [path] if path.is_file() else []
 
@@ -1109,6 +1163,7 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
 
 __all__ = [
     "AnchorStatus",
+    "benchmark_serving_path_in",
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",

@@ -43,7 +43,7 @@ def _visited_kernel(*, macro_cycle: int) -> None:
     assert recorder is not None
     recorder.begin(tput_before=1000.0)
     recorder.record_kernel_rewrite(run_id="attempt-1", kernel_id="k001", status="success", micro_decision="keep")
-    recorder.finish(verdict="needs_review", status="succeeded", tput_after=1000.0)
+    recorder.finish(tput_after=1000.0)
 
 
 def _state(*, macro_cycle: int) -> SharedState:
@@ -87,7 +87,7 @@ def test_the_verdict_also_reaches_the_rewrite_row_it_ruled_on(tmp_path: Path) ->
     _state(macro_cycle=2).record_kernel_integrate_result(_result())
 
     events = [event for event in read_timeline_events(tmp_path) if event.get("type") == "kernel"]
-    e2e = events[0]["ext"]["forge"]["lanes"]["kernel_rewrites"][0]["e2e"]
+    e2e = events[0]["ext"]["attempts"][0]["e2e"]
     assert e2e["integrated"] is True
     assert e2e["e2e_gain_pct"] == 5.5
     assert e2e["target_file"] == "vllm/attention.py"

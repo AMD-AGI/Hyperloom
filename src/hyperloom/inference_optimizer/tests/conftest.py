@@ -371,7 +371,7 @@ class _RayDoubleActorHandle:
 class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
-    class exceptions:  # noqa: N801 — mirrors the ray.exceptions namespace
+    class exceptions:
         class RayActorError(Exception):
             pass
 

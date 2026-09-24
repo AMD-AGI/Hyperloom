@@ -14,6 +14,7 @@ import pytest
 import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
+    AgentProviderError,
     AgentRunResult,
     AgentRuntimeConfig,
 )
@@ -89,6 +90,37 @@ def _write_staged_task(staging_root: Path, repo: Path) -> str:
     return operator_id
 
 
+def _repair_staged_task(draft: Path, repo: Path) -> None:
+    identity = {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "standalone",
+        "framework_version": "unknown",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+    (draft / REJECTION_FILENAME).unlink(missing_ok=True)
+    (draft / "task.json").write_text(
+        json.dumps(
+            {
+                "identity": identity,
+                "base_commit": "",
+                "repo_root": str(repo.resolve()),
+                "kernel_path": "kernel.py",
+                "operator_name": "kernel",
+                "driver_path": "driver.py",
+                "source_files": ["kernel.py"],
+                "target_functions": ["kernel"],
+                "shape_cases": [],
+                "priority": 0,
+                "reason": "hot operator",
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class _Backend:
     name = "fake"
     runtime = AgentRuntimeConfig(provider="fake", model="fake")
@@ -116,6 +148,29 @@ class _Backend:
         if self.error is not None:
             raise self.error
         return self.result if self.result is not None else AgentRunResult(text="done")
+
+
+class _HooklessResumableBackend(_Backend):
+    capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=True)
+
+    def __init__(self, callback, *, on_resume=None, resume_error: Exception | None = None):
+        super().__init__(callback)
+        self.on_resume = on_resume
+        self.resume_error = resume_error
+        self.resumed: list[str] = []
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        return AgentRunResult(text="done", end_reason="agent_stopped", session_id="session-1")
+
+    async def resume(self, spec, session_id, feedback, usage=None):
+        self.resumed.append(feedback)
+        if self.resume_error is not None:
+            raise self.resume_error
+        if self.on_resume is not None:
+            self.on_resume(Path(spec.cwd))
+        return AgentRunResult(text="continued", end_reason="agent_stopped", session_id=session_id)
 
 
 class _ResumableBackend(_Backend):
@@ -413,12 +468,19 @@ def test_incomplete_staging_directory_is_not_published(tmp_path: Path) -> None:
     assert not list(layout.tasks_root.glob("*")) if layout.tasks_root.exists() else True
 
 
-def test_analysis_requires_a_hook_capable_provider() -> None:
+def test_analysis_requires_hooks_or_a_resumable_provider() -> None:
     backend = _Backend(lambda _staging: None)
-    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=False)
 
-    with pytest.raises(ValueError, match="requires a provider with tool hooks"):
+    with pytest.raises(ValueError, match="tool hooks or a resumable session"):
         OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+
+def test_analysis_accepts_a_resumable_hookless_provider() -> None:
+    backend = _Backend(lambda _staging: None)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False, resumable=True)
+
+    OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
 
 
 def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:
@@ -533,6 +595,81 @@ def test_the_analysis_records_what_it_spent(tmp_path: Path, monkeypatch: pytest.
     assert outcome.llm_usage["input_tokens"] == 11
     assert outcome.llm_usage["output_tokens"] == 22
     assert outcome.agent_model == "fake"
+
+
+def _invalid_staged_draft(staging_root: Path) -> None:
+    draft = staging_root / "draft"
+    draft.mkdir(parents=True)
+    (draft / "task.json").write_text("{}", encoding="utf-8")
+    (draft / "driver.py").write_text("print('x')\n", encoding="utf-8")
+
+
+def test_hookless_resume_republication_clears_a_corrected_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer Stop loop must republish between resumes, not reuse stale rejection.json."""
+    repo, _commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+
+    def _fix_on_resume(staging: Path) -> None:
+        _repair_staged_task(staging / "draft", repo)
+
+    backend = _HooklessResumableBackend(
+        lambda staging: _invalid_staged_draft(staging),
+        on_resume=_fix_on_resume,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=30, max_turns=5)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert len(backend.resumed) == 1
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+
+
+def test_hookless_resume_stops_when_the_analysis_deadline_is_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+
+    class _SlowHookless(_HooklessResumableBackend):
+        async def resume(self, spec, session_id, feedback, usage=None):
+            await asyncio.sleep(0.6)
+            return await super().resume(spec, session_id, feedback, usage=usage)
+
+    backend = _SlowHookless(
+        lambda staging: _refused_draft(staging),
+        on_resume=lambda _staging: None,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=1, max_turns=5)
+
+    started = time.monotonic()
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5
+    assert result.status == ANALYSIS_STATUS_TIMED_OUT
+    assert len(backend.resumed) <= 2
+
+
+def test_hookless_resume_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    backend = _HooklessResumableBackend(
+        lambda staging: _refused_draft(staging),
+        resume_error=AgentProviderError("resume unavailable"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=5)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "resume unavailable" in result.reason
+    assert len(backend.resumed) == 1
 
 
 def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:

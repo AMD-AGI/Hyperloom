@@ -103,6 +103,13 @@ from ._grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
+from ._grid_variant_filter import (
+    apply_aiter_moe_pin_filter,
+    apply_multi_node_invalid_variants,
+    apply_user_skip_list,
+    resolve_skip_spec,
+)
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -261,7 +268,7 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
         return inherited_args
     merged = merge_server_args(inherited_args, round_args)
     if tokenize_server_args_preserving_json(merged) is not None:
-        from ...loop.coordinator_helpers import _dedupe_extra_server_args  # noqa: PLC0415
+        from ...loop.coordinator_helpers import _dedupe_extra_server_args
 
         return _dedupe_extra_server_args(merged)
     # The combined string carries a quoted value with embedded whitespace, which
@@ -523,7 +530,7 @@ def _execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path
     """
     log.info("integrate_patch: enablement setup replay: %s", cmd)
     try:
-        proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+        proc = subprocess.run(  # nosec B602 - allowlisted install-only shell command.
             cmd,
             shell=True,
             cwd=str(cwd),
@@ -618,10 +625,7 @@ def _run_setup_commands(
             # carry on, so a row handed back through the return value is lost
             # for a command that actually ran -- and the ledger is what says a
             # round installed into the shared venv at all.
-            try:
-                on_execution(row)
-            except Exception:  # noqa: BLE001 - the ledger must not fail the install
-                log.debug("integrate_patch: durable setup ledger append failed", exc_info=True)
+            on_execution(row)
 
     with cancel_scope_listener():
         for cmd_index, cmd in enumerate(commands):
@@ -1114,6 +1118,28 @@ def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     if b <= 0.0:
         return None
     return (m - b) / b * 100.0
+
+
+def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:
+    """The configuration this patch was measured on top of.
+
+    Only the executor can answer this. The task's own params hold the stack as
+    of dispatch, and a task queued before another KEEP landed is rebound onto
+    the live stack top before it runs; ``base_tput`` is the drift-resolved
+    anchor it was actually graded against. Carried on the result for the reason
+    the configuration arm carries it -- what the session serves once this
+    returns is no longer what the patch was judged against, so a reader that
+    reconstructs the stack from the current config gets the wrong one.
+    """
+    return {
+        "throughput": base_tput or None,
+        "accuracy": float(params.get("accuracy_baseline") or 0.0) or None,
+        "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+        "extra_envs": dict(params.get("base_extra_envs") or {}),
+        "remove_args": to_str_list(params.get("base_remove_args")),
+        "unset_envs": to_str_list(params.get("base_unset_envs")),
+        "args_mode": str(params.get("base_args_mode") or "append"),
+    }
 
 
 def _preflight_missing_targets(
@@ -2485,7 +2511,7 @@ class IntegratePatchExecutor:
 
         try:
             result = await asyncio.to_thread(_provision_and_probe)
-        except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
+        except Exception as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2533,7 +2559,7 @@ class IntegratePatchExecutor:
         try:
             if attempt_dir.exists():
                 shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001 — GC is best-effort
+        except Exception:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(
@@ -2589,7 +2615,7 @@ class IntegratePatchExecutor:
                 fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
                 fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
             )
-        except Exception as exc:  # noqa: BLE001 — fetch failure is a clean revert
+        except Exception as exc:
             log.exception("integrate_patch: localization fetch raised")
             return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
 
@@ -2969,7 +2995,7 @@ class IntegratePatchExecutor:
                     "ts": _now_iso(),
                 }
                 shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — sentinel is best-effort
+            except Exception:
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         # Normally already recorded before the setup commands; a root that
@@ -3192,7 +3218,7 @@ class IntegratePatchExecutor:
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
-        except FrameworkScriptMismatchError as exc:
+        except (FrameworkScriptMismatchError, RecipeLeverUnavailableError) as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
@@ -3201,7 +3227,11 @@ class IntegratePatchExecutor:
                 stash_note,
                 {
                     "status": "reverted",
-                    "error_class": "framework_script_mismatch",
+                    "error_class": (
+                        "framework_script_mismatch"
+                        if isinstance(exc, FrameworkScriptMismatchError)
+                        else "recipe_lever_unavailable"
+                    ),
                     "error": str(exc),
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
@@ -4238,8 +4268,8 @@ class IntegratePatchExecutor:
             fw = str(getattr(action, "framework", "") or "")
             argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
             if argv:
-                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)  # noqa: S603
-        except Exception:  # noqa: BLE001 — refresh is best-effort
+                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
+        except Exception:
             log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
         # Manifest via the existing snapshot mechanism.
         try:
@@ -4264,7 +4294,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:  # noqa: BLE001 — manifest is best-effort durability
+        except Exception:
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -4301,6 +4331,7 @@ class IntegratePatchExecutor:
             )
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        measured_against = _measured_against(params, base_tput=base_tput)
 
         stopped = stopped_by_the_run_class(bench_result.get("error_class"))
         if stopped is not None:
@@ -4456,6 +4487,7 @@ class IntegratePatchExecutor:
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
                         "base_tput": base_tput,
+                        "measured_against": measured_against,
                         "keep_threshold_pct": keep_threshold_pct,
                         "reason": str(parity.get("reason") or "switch-off parity failed"),
                         "switch_off_parity": parity,
@@ -4547,6 +4579,7 @@ class IntegratePatchExecutor:
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
                     "base_tput": base_tput,
+                    "measured_against": measured_against,
                     "keep_threshold_pct": keep_threshold_pct,
                     "reason": "; ".join(reasons) or "gate failed",
                     "bench_result": bench_result,
@@ -4591,6 +4624,7 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
+                    "measured_against": measured_against,
                     "bench_result": bench_result,
                     "reason": f"KEEP could not be committed: {commit_failure}",
                     "workspace": str(output_root),
@@ -4680,7 +4714,7 @@ class IntegratePatchExecutor:
                             rel_paths,
                             Path(source_snapshot_dir) / "realized.patch",
                         )
-        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
+        except Exception:
             log.exception("integrate_patch: source-layer snapshot failed")
 
         return _with_stash_restore(
@@ -4707,6 +4741,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": measured_against,
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
                 "bench_result": bench_result,
@@ -4985,6 +5020,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": _measured_against(params, base_tput=base_tput),
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": "; ".join(reason_bits),
                 "bench_result": bench_result,
@@ -5388,7 +5424,7 @@ class IntegratePatchExecutor:
                     if target.exists():
                         target.unlink()
                 reverted.append(str(rec.get("rel_target") or target))
-            except OSError as exc:  # noqa: BLE001 — best-effort restore
+            except OSError as exc:
                 log.warning("integrate_patch: failed to revert artifact %s: %r", target, exc)
         return reverted
 
@@ -5490,6 +5526,27 @@ class IntegratePatchExecutor:
             # Preserve list/dict values; apply_runtime_override expects them.
             variant.runtime_override = dict(_rt)
 
+        # The explore grid's origin-independent guards: an authored variant is no
+        # more exempt from a known-bad multi-node lever, an operator's env pin or
+        # the operator's skip list than a proposed one. The compatibility filter
+        # is deliberately absent -- it shells out to build the framework's arg
+        # parser, and a single authored variant must not pay for that probe.
+        grid, mn_dropped = apply_multi_node_invalid_variants([variant])
+        grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
+        grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
+        if not grid:
+            rejected = (mn_dropped + pin_dropped + skip_dropped)[0]
+            return (
+                {
+                    "status": "skipped",
+                    "error_class": "filtered_before_bench",
+                    "error": str(rejected.get("reason") or rejected.get("source") or ""),
+                    "workspace": "",
+                    "materialized_config": str(config_path),
+                },
+                {"accuracy_pass": None, "eval_probe": None},
+            )
+
         # Ray-managed GPU execution: hold a serving lease
         # (num_gpus=TP + serving_slot) for the whole run_grid so
         # the patch benchmark serializes against other serving on the
@@ -5504,7 +5561,7 @@ class IntegratePatchExecutor:
             results: list[VariantResult] = await run_grid(
                 base_yaml_path=config_path,
                 base_extra_args=str(params.get("base_extra_args") or "").strip(),
-                grid=[variant],
+                grid=grid,
                 output_root=output_root,
                 magpie_python=params.get("magpie_python") or None,
                 keep_going_on_failure=False,
@@ -5595,33 +5652,27 @@ class IntegratePatchExecutor:
         # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
         measured_accuracy: float | None = None
         if bench.get("status") == "succeeded":
-            try:
-                measured = parse_eval_results(
-                    eval_search_root,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                ).get("accuracy")
-                if isinstance(measured, (int, float)):
-                    measured_accuracy = float(measured)
-            except Exception:  # noqa: BLE001 — advisory value only
-                log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
+            measured = parse_eval_results(
+                eval_search_root,
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            ).get("accuracy")
+            if isinstance(measured, (int, float)):
+                measured_accuracy = float(measured)
 
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
         enablement_accuracy_task = ""
         enablement_accuracy_metric = ""
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
-            try:
-                eval_results = parse_eval_results(
-                    eval_search_root,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                )
-                acc = eval_results.get("accuracy")
-                if isinstance(acc, (int, float)):
-                    enablement_accuracy = float(acc)
-                enablement_accuracy_task = str(eval_results.get("task") or "")
-                enablement_accuracy_metric = str(eval_results.get("metric") or "")
-            except Exception:  # noqa: BLE001 — eval may not produce a result
-                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+            eval_results = parse_eval_results(
+                eval_search_root,
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            )
+            acc = eval_results.get("accuracy")
+            if isinstance(acc, (int, float)):
+                enablement_accuracy = float(acc)
+            enablement_accuracy_task = str(eval_results.get("task") or "")
+            enablement_accuracy_metric = str(eval_results.get("metric") or "")
 
         # Guarded: an empty root would send the recursive scan over the cwd.
         eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
@@ -5724,20 +5775,17 @@ class IntegratePatchExecutor:
             baseline_value = float(baseline_accuracy)
         except (TypeError, ValueError):
             baseline_value = 0.0
-        try:
-            eval_results = parse_eval_results(result_dir, framework=framework)
-            new_accuracy = eval_results.get("accuracy")
-            if new_accuracy is not None and baseline_value > 0:
-                return accuracy_passed(baseline_value, float(new_accuracy))
-            if baseline_value <= 0:
-                log.warning(
-                    "integrate_patch: no baseline accuracy; accuracy gate skipped "
-                    "(throughput-only KEEP). Accuracy regressions will not be caught.",
-                )
-            else:
-                log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
-        except Exception:  # noqa: BLE001
-            log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        eval_results = parse_eval_results(result_dir, framework=framework)
+        new_accuracy = eval_results.get("accuracy")
+        if new_accuracy is not None and baseline_value > 0:
+            return accuracy_passed(baseline_value, float(new_accuracy))
+        if baseline_value <= 0:
+            log.warning(
+                "integrate_patch: no baseline accuracy; accuracy gate skipped "
+                "(throughput-only KEEP). Accuracy regressions will not be caught.",
+            )
+        else:
+            log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
         return None
 
 

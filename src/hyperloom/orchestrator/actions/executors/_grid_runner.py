@@ -19,7 +19,7 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -43,6 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
+from ._recipe_script import recipe_launch_contract
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -476,6 +477,11 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # The recipe re-exports these unconditionally, so a value carried here is
+    # one the run never used.
+    for k in recipe_launch_contract(bench)[1] & envs.keys():
+        log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
+        envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
     _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
@@ -526,7 +532,7 @@ def _build_variant_yaml(
         )
 
     # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -588,10 +594,7 @@ async def _settled_measurement(
 
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
-    if raw is None and os.environ.get("PYTEST_CURRENT_TEST"):
-        return False
-    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
+    return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:
@@ -935,7 +938,7 @@ def _resolve_mn_effective_server_args(
         _variant_envs = _variant_bench.get("envs") or {}
         _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
         return str(_variant_envs.get(_variant_framework_env) or "")
-    except Exception:  # noqa: BLE001 - restart path still reports validation errors
+    except Exception:
         log.debug(
             "grid_runner: failed to read materialized variant args from %s",
             cfg_path,
@@ -1039,6 +1042,7 @@ async def run_grid(
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
     deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+    lifecycle_boot_only: bool = False,
 ) -> list[VariantResult]:
     """Execute variants; ``deadline_stop`` names the owner of the supplied deadline."""
     silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
@@ -1629,35 +1633,28 @@ async def run_grid(
             # The measurement is discarded, but the returncode is not: a warmup the run stopped is the same stop as
             # one in the measured round, and discarding it launches the measured round after the cancel.
             _mn_warm_rc: int | None = None
-            try:
-                _mn_warm_rc, _, _ = await _reported_magpie(
-                    i,
-                    "mn_warmup",
-                    magpie_python=magpie_python,
-                    config_path=cfg_path,
-                    output_dir=_mn_warm_slot,
-                    timeout_sec=benchmark_timeout_sec,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=True,
-                    cwd=cwd,
-                    result_dir=None,
-                    preclean=False,
-                    serving_lease=serving_lease,
-                    session_deadline_sec=session_deadline_sec,
-                )
-                log.info(
-                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
-                    i + 1,
-                    len(grid),
-                    variant.name,
-                    _mn_warm_rc,
-                )
-            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-                log.warning(
-                    "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
-                    variant.name,
-                    exc,
-                )
+            _mn_warm_rc, _, _ = await _reported_magpie(
+                i,
+                "mn_warmup",
+                magpie_python=magpie_python,
+                config_path=cfg_path,
+                output_dir=_mn_warm_slot,
+                timeout_sec=benchmark_timeout_sec,
+                silence_timeout_sec=silence_timeout_sec,
+                server_already_ready=True,
+                cwd=cwd,
+                result_dir=None,
+                preclean=False,
+                serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+            )
+            log.info(
+                "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
+                i + 1,
+                len(grid),
+                variant.name,
+                _mn_warm_rc,
+            )
             _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
             if _mn_warm_stopped is not None:
                 grid_is_over = _record_round_stop(
@@ -2004,6 +2001,22 @@ async def run_grid(
             warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
+            if lifecycle_boot_only and rc == 0:
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="succeeded",
+                        workspace=str(workspace),
+                        report_path=str(report_path) if report_path.exists() else None,
+                        returncode=rc,
+                        nonfatal_warnings=warnings,
+                        note="server_lifecycle_boot_only",
+                    )
+                )
+                await _report_finished_variant(i)
+                continue
             death_excerpt = server_log_death_excerpt(str(server_log))
             if rc != 0:
                 error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])

@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_INTVTY
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -546,7 +548,7 @@ async def test_stack_validation_preserves_actual_measurement(
         assert ctx.extra["shared_state"] is c.shared_state
         assert ctx.task.params["extra_server_args"] == "--max-model-len 8192"
         assert ctx.task.params["quality_ref_exempt"] is True
-        assert ctx.task.params[baseline_mod.SBD_INNER_STEP_PARAM] is True
+        assert ctx.task.params[INLINE_EVENT_PARAM] == kernel_event_id(0)
         assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == optimized_source for entry in stack)
         return bench_result
 

@@ -13,6 +13,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from hyperloom.common.unified_diff import touched_paths
+
 from kernelforge.llm.git import git
 from kernelforge.loop.scoring import aggregate_regression_detail
 from kernelforge.durable_io import atomic_write_text, fsync_directory
@@ -492,14 +494,7 @@ class BestResultPublisher:
         explicit = metadata.get("changed_files") or []
         if explicit:
             return [str(path) for path in explicit]
-        changed: list[str] = []
-        for line in str(metadata.get("change_diff") or "").splitlines():
-            if not line.startswith("diff --git a/"):
-                continue
-            parts = line.split()
-            if len(parts) >= 4 and parts[2].startswith("a/"):
-                changed.append(parts[2][2:])
-        return changed
+        return touched_paths(str(metadata.get("change_diff") or ""))
 
     def publish_history(
         self,

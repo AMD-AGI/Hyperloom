@@ -439,13 +439,14 @@ def test_sweep_dead_compiler_keeps_fresh_ownerless_lock(tmp_path, monkeypatch):
     assert lock.exists()
 
 
-def test_csv_kernel_names_skips_blank_rows(tmp_path):
+def test_csv_jit_kernel_rows_skips_blank_kernel_names(tmp_path):
     csv_path = tmp_path / "tuned.csv"
     csv_path.write_text(
-        "M,N,K,kernelName\n16,512,7168,kernel_a\n32,512,7168,\n64,512,7168,kernel_b\n",
+        "M,N,K,kernelName,libtype\n16,512,7168,kernel_a,ck\n32,512,7168,,ck\n64,512,7168,kernel_b,ck\n",
         encoding="utf-8",
     )
-    assert aj.csv_kernel_names(csv_path) == {"kernel_a", "kernel_b"}
+    names = {name for name, _ in aj.csv_jit_kernel_rows(csv_path)}
+    assert names == {"kernel_a", "kernel_b"}
 
 
 def test_serving_modules_cover_csv_when_names_are_in_so(tmp_path):

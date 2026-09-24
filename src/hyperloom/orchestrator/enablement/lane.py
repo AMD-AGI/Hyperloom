@@ -139,7 +139,7 @@ class EnablementLane(CoordinatorCollaborator):
         try:
             await self._maybe_enqueue_specialist_requested_build()
             await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
-        except Exception:  # noqa: BLE001 — a build escalation must not cost the round
+        except Exception:
             log.exception("enablement: build escalation failed")
         await self._warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
@@ -567,7 +567,7 @@ class EnablementLane(CoordinatorCollaborator):
                     max_model_len=state.max_model_len or None,
                     gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
                 )
-        except Exception:  # noqa: BLE001 — the settle below must run or the round leaks the machine
+        except Exception:
             log.warning("enablement: artifact write failed", exc_info=True)
         # Absolute and not the session-relative path the archive records: the
         # revalidation baseline opens this file directly. Only a copy that
@@ -622,8 +622,14 @@ class EnablementLane(CoordinatorCollaborator):
         ):
             try:
                 await pump()
-            except Exception:  # noqa: BLE001 — a wedged pump must not strand the phase
+            except Exception as exc:
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
+                stage = f"enablement_pump:{pump.__name__}:{caller}"
+                # Named here rather than by the coordinator's generic handler:
+                # the lane's event is open for the whole session, so only the
+                # lane knows which exceptions are its own to answer for.
+                enablement_event.record_fault(stage=stage, exc=exc)
+                self._record_coordinator_exception(stage=stage, exc=exc)
 
 
 def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:

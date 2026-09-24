@@ -363,7 +363,7 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
     for path in source_paths:
         try:
             text = path.read_text(errors="replace").lower()
-        except Exception:
+        except OSError:
             text = ""
         path_text = str(path).lower()
         suffix = path.suffix.lower()
@@ -403,7 +403,7 @@ def _derive_target_functions(
         if source is None:
             try:
                 source = Path(absolute).read_text(errors="replace")
-            except Exception:
+            except OSError:
                 continue
         for name in derive_kernel_names(source):
             if name not in functions:

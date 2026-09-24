@@ -56,7 +56,7 @@ class ConversationCollaborator:
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)
-        except Exception:  # noqa: BLE001 — context pull is best-effort
+        except Exception:
             log.exception("Coordinator: failed to attach orchestration context tools")
 
     def _context_reference_reader(self, name: str = "") -> str:
@@ -205,12 +205,9 @@ class ConversationCollaborator:
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text."""
-        try:
-            blob = self.shared_state._format_analysis_md_full()
-            if blob and blob.strip():
-                return blob
-        except Exception:  # noqa: BLE001 — fall through to path read
-            log.exception("Coordinator: _format_analysis_md_full failed")
+        blob = self.shared_state._format_analysis_md_full()
+        if blob and blob.strip():
+            return blob
         # Fallback: read the path recorded on last_trace_analyze.
         lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
         path = str(lta.get("analysis_md_path") or "")
@@ -229,32 +226,25 @@ class ConversationCollaborator:
         result: BackendTurnResult,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn."""
-        try:
-            metadata = result.metadata or {}
-            prompt = metadata.get("prompt")
-            response = metadata.get("response")
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component=agent_name,
-                # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
-                # stamped one.
-                call_id=metadata.get("call_id"),
-                role=agent_name,
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                model=metadata.get("model"),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
-            log.debug(
-                "full-trace: reactor conversation append failed for %s",
-                agent_name,
-                exc_info=True,
-            )
+        metadata = result.metadata or {}
+        prompt = metadata.get("prompt")
+        response = metadata.get("response")
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component=agent_name,
+            # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
+            # stamped one.
+            call_id=metadata.get("call_id"),
+            role=agent_name,
+            tick=int(self.shared_state.tick or 0),
+            phase=(self.shared_state.phase or "") or None,
+            model=metadata.get("model"),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     async def _compose_prompt(self, agent_name: str) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
@@ -264,13 +254,9 @@ class ConversationCollaborator:
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        try:
-            phase_block = self.shared_state.to_phase_status_summary(
-                budget_pct=self._phase_budget_pct,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("Coordinator: phase status summary failed")
-            phase_block = ""
+        phase_block = self.shared_state.to_phase_status_summary(
+            budget_pct=self._phase_budget_pct,
+        )
         if phase_block:
             sections.append("=== Phase ===")
             sections.append(phase_block)
@@ -281,11 +267,7 @@ class ConversationCollaborator:
             self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            try:
-                cycle_strategy_block = self._cycle_strategy_block()
-            except Exception:  # noqa: BLE001 — advisory only
-                log.exception("Coordinator: cycle strategy render failed")
-                cycle_strategy_block = ""
+            cycle_strategy_block = self._cycle_strategy_block()
             if cycle_strategy_block:
                 sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
@@ -321,71 +303,39 @@ class ConversationCollaborator:
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration":
-            try:
-                warm_block = self.shared_state.to_warm_start_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: warm_start_summary failed")
-                warm_block = ""
+            warm_block = self.shared_state.to_warm_start_summary()
             if warm_block:
                 sections.append("=== Warm start (Recipe KB T0) ===")
                 sections.append(warm_block)
-            try:
-                gaps_block = self.shared_state.to_gaps_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: gaps_summary failed")
-                gaps_block = ""
+            gaps_block = self.shared_state.to_gaps_summary()
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
-            try:
-                research_block = self._specialist_findings_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: specialist findings render failed")
-                research_block = ""
+            research_block = self._specialist_findings_block()
             if research_block:
                 sections.append(research_block)
-            try:
-                gap_block = self._target_gap_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: target gap advisory failed")
-                gap_block = ""
+            gap_block = self._target_gap_advisory_block()
             if gap_block:
                 sections.append("=== External target gap (advisory) ===")
                 sections.append(gap_block)
             # Advisory multi-model proposal scores (ProposalScorer); not a ranking directive.
-            try:
-                scores_block = self.shared_state.to_proposal_scores_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: proposal_scores_summary failed")
-                scores_block = ""
+            scores_block = self.shared_state.to_proposal_scores_summary()
             if scores_block:
                 sections.append("=== Specialist proposal scores (advisory) ===")
                 sections.append(scores_block)
             # Priors-match: recently proposed variants aligning with research hints/external gap (advisory only).
-            try:
-                priors_block = self._priors_match_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: priors-match advisory failed")
-                priors_block = ""
+            priors_block = self._priors_match_advisory_block()
             if priors_block:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
             # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
-            try:
-                mix_block = self.shared_state.to_intervention_mix_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: intervention_mix_summary failed")
-                mix_block = ""
+            mix_block = self.shared_state.to_intervention_mix_summary()
             if mix_block:
                 sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
 
-            try:
-                plateau_block = self._plateau_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: plateau advisory failed")
-                plateau_block = ""
+            plateau_block = self._plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
@@ -399,7 +349,7 @@ class ConversationCollaborator:
                         self.session_dir,
                         self.shared_state,
                     )
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception("Coordinator: trajectory review failed")
                     trajectory_block = ""
                 if trajectory_block:
@@ -407,21 +357,13 @@ class ConversationCollaborator:
                     sections.append(trajectory_block)
 
             # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
-            try:
-                redirect_block = self._bottleneck_redirect_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: bottleneck redirect advisory failed")
-                redirect_block = ""
+            redirect_block = self._bottleneck_redirect_advisory_block()
             if redirect_block:
                 sections.append("=== Bottleneck redirect (advisory) ===")
                 sections.append(redirect_block)
 
             # Decaying acceptance bar + prior variants now re-testable under it.
-            try:
-                accept_block = self._acceptance_threshold_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: acceptance threshold advisory failed")
-                accept_block = ""
+            accept_block = self._acceptance_threshold_advisory_block()
             if accept_block:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
@@ -464,10 +406,7 @@ class ConversationCollaborator:
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
-        try:
-            pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
-        except Exception:  # noqa: BLE001 — never break prompt composition
-            return rendered
+        pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
         if not pending:
             return rendered
         seen = {getattr(m, "msg_id", None) for m in rendered}
@@ -512,21 +451,13 @@ class ConversationCollaborator:
             overrides = {}
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            # Both arms, always: the phase leaves only when both are dry, so reporting one alone would say "plateau"
-            # about a phase that is still paying on the other lever.
-            config_dry, config_ev = _phase_state.compute_plateau_explore(
-                state,
-                lookback=int(
-                    overrides.get("explore_lookback", _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK),
-                ),
-                keep_gain_threshold_pct=float(
-                    overrides.get("explore_keep_gain_pct", _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT),
-                ),
-                empty_streak_threshold=int(
-                    overrides.get("explore_empty_streak", _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK),
-                ),
-            )
-            source_dry, source_ev = _phase_state.source_arm_plateaued(state)
+            # The advisory reads the same predicate the exit rule does, so the
+            # model is never shown a plateau the phase machine disagrees with.
+            _, evidence = _phase_state.per_lever_dryness(state)
+            config_dry = bool(evidence.get("config_arm_plateaued"))
+            source_dry = bool(evidence.get("source_arm_plateaued"))
+            config_ev = evidence
+            source_ev = evidence
             try:
                 self._record_advisory_plateau(
                     config=(config_dry, config_ev),
@@ -623,11 +554,8 @@ class ConversationCollaborator:
         not either fired -- "evaluated and did not trip" is the reading that
         explains a phase staying open.
 
-        Best-effort: the advisory must render whether or not it is recorded.
-        The recorder is reached defensively because this method's caller gets
-        borrowed onto lightweight stand-ins by tests, which carry none of the
-        phase-handler machinery -- and an advisory that raised because its
-        observability was absent would be a worse bug than a missing row.
+        The recorder is reached through ``getattr`` because tests borrow this
+        method onto lightweight stand-ins that carry no phase-handler machinery.
         """
         getter = getattr(self, "_framework_timeline", None)
         recorder = getter() if callable(getter) else None
@@ -641,35 +569,32 @@ class ConversationCollaborator:
 
         config_dry, config_ev = config
         source_dry, source_ev = source
-        try:
-            recorder.record_plateau(
-                arm=ARM_CONFIG,
-                path=PLATEAU_PATH_ADVISORY,
-                triggered=config_dry,
-                inputs={
-                    "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
-                    "empty_streak": config_ev.get("empty_streak"),
-                    "winners_seen": config_ev.get("winners_seen"),
-                    "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
-                },
-                thresholds={
-                    "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
-                    "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
-                    "lookback": config_ev.get("lookback"),
-                },
-            )
-            recorder.record_plateau(
-                arm=ARM_SOURCE,
-                path=PLATEAU_PATH_ADVISORY,
-                triggered=source_dry,
-                inputs={
-                    "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
-                    "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
-                },
-                thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change the advisory
-            log.debug("framework timeline: advisory plateau record failed", exc_info=True)
+        recorder.record_plateau(
+            arm=ARM_CONFIG,
+            path=PLATEAU_PATH_ADVISORY,
+            triggered=config_dry,
+            inputs={
+                "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
+                "empty_streak": config_ev.get("empty_streak"),
+                "winners_seen": config_ev.get("winners_seen"),
+                "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
+            },
+            thresholds={
+                "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
+                "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
+                "lookback": config_ev.get("lookback"),
+            },
+        )
+        recorder.record_plateau(
+            arm=ARM_SOURCE,
+            path=PLATEAU_PATH_ADVISORY,
+            triggered=source_dry,
+            inputs={
+                "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
+                "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
+            },
+            thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
+        )
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""

@@ -18,11 +18,7 @@ from kernelforge.knowledge.experience_sink import (
     hash_implementation_identity,
     write_run_experience,
 )
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_GBRAIN,
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.rewrite_by_flydsl import identity as rewrite_identity
 from kernelforge.rewrite_by_flydsl import record_store
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
@@ -94,14 +90,8 @@ def _read_args(config, workspace, **overrides):
 
 # --- the paths that yield no candidate ------------------------------------- #
 def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid",
-        gbrain_token="secret",
-        remote_backend=REMOTE_BACKEND_GBRAIN,
-    )
+    # Built directly: from_env refuses remote mode without KB Store credentials.
+    knowledge = KnowledgeConfig(mode=KnowledgeStoreMode.REMOTE, local_root=tmp_path / "knowledge")
     config = Config.from_env(
         workspace=str(workspace),
         gpu_target="gfx942",
@@ -189,7 +179,6 @@ def test_remote_read_falls_back_across_known_framework_version_and_gpu(
         local_root=tmp_path / "knowledge",
         kb_store_url="http://in-memory",
         kb_store_token="token",
-        remote_backend=REMOTE_BACKEND_KB_STORE,
     )
     config = Config.from_env(
         workspace=str(workspace),
@@ -354,3 +343,29 @@ def test_read_error_is_sanitized_and_bounded():
     assert "user:pw@" not in message
     assert "[REDACTED]" in message
     assert len(message) <= 500
+
+
+def test_a_failed_read_does_not_leak_the_kb_store_token(tmp_path, workspace, monkeypatch):
+    knowledge = KnowledgeConfig.from_env(
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        kb_store_url="http://in-memory",
+        kb_store_token="kb-secret-value",
+    )
+    config = Config.from_env(
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
+    )
+
+    def _fail(**_kwargs):
+        raise RuntimeError("store rejected kb-secret-value")
+
+    monkeypatch.setattr(reader, "_read_top_solutions_impl", _fail)
+    status: dict[str, str] = {}
+
+    assert read_top_solutions(**_read_args(config, workspace), read_status=status) == []
+    assert "kb-secret-value" not in status["read_error"]

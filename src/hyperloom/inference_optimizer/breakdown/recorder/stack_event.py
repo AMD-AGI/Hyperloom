@@ -307,7 +307,14 @@ def finish(*, end_time: str = "") -> None:
     Called at close, where the stack stops changing. A run that ended without
     reaching close leaves the event open and finalize recovers it as
     ``interrupted``: the ledger was never settled.
+
+    A spool that cannot be read at close is noted and dropped: the close-out
+    that asked for this must not raise, and finalize recovers an event left
+    open as interrupted.
     """
+    from .assembler import event_parts
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
+
     sink = _sink()
     if sink is None:
         return
@@ -315,18 +322,22 @@ def finish(*, end_time: str = "") -> None:
     closed = str(end_time or "") or _now()
     sink.record(SECTION_EVENT, {"end_time": closed})
 
-    from .assembler import event_parts
-
-    ext, status = assemble_stack_ext(event_parts(STACK_EVENT_SECTIONS, event=stack_event_id()), event=stack_event_id())
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=stack_event_id(),
-        sequence=sequence,
-        status=status or STATUS_SKIPPED,
-        ext=ext,
-        kind=EVENT_KIND,
-        end_time=closed,
-    )
+    try:
+        ext, status = assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS, event=stack_event_id()),
+            event=stack_event_id(),
+        )
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=stack_event_id(),
+            sequence=sequence,
+            status=status or STATUS_SKIPPED,
+            ext=ext,
+            kind=EVENT_KIND,
+            end_time=closed,
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"closing stack event {stack_event_id()}")
 
 
 def _pct(value: Any, against: Any, denominator: Any) -> float | None:

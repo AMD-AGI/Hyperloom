@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common import provenance
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -1111,9 +1112,6 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     raise SystemExit(2)
 
 
-# RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 # Probed one subprocess each: the base package and the [api] extra can arrive from different places (image vs pip),
 # and only the truly absent one is installed.
 _LM_EVAL_DEPS = ("lm_eval", "tenacity")
@@ -1237,7 +1235,7 @@ def _ensure_lm_eval_dep(
             "message": "accuracy evaluation is disabled",
         }
     run_eval = os.environ.get("RUN_EVAL")
-    if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(run_eval, default=True):
         return {
             "status": "skipped",
             "skip_reason": "eval_disabled",
@@ -1828,7 +1826,7 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
         from ..session.sbd_v6 import set_pending_install_event
 
         set_pending_install_event(args, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to initialize SBD V6 install event", exc_info=True)
     return event
 
@@ -1898,7 +1896,7 @@ def _mark_pending_install_event_failed(
                 exc=exc,
             )
         return event
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to finalize SBD V6 install failure", exc_info=True)
         return None
 
@@ -1917,26 +1915,23 @@ def _run_install_step(
     except BaseException as exc:
         try:
             _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:  # noqa: BLE001 — preserve the original preflight exception
+        except Exception:
             log.warning("failed to record SBD V6 install-step failure", exc_info=True)
         raise
-    try:
-        outcome = dict(result) if isinstance(result, dict) else {}
-        status = str(outcome.pop("status", success_status) or success_status)
-        skip_reason = outcome.pop("skip_reason", None)
-        message = outcome.pop("message", None)
-        fields = {**success_fields, **outcome}
-        _record_install_step(
-            event,
-            step_id=step_id,
-            category=category,
-            status=status,
-            skip_reason=skip_reason,
-            message=message,
-            **fields,
-        )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
-        log.warning("failed to record SBD V6 install step", exc_info=True)
+    outcome = dict(result) if isinstance(result, dict) else {}
+    status = str(outcome.pop("status", success_status) or success_status)
+    skip_reason = outcome.pop("skip_reason", None)
+    message = outcome.pop("message", None)
+    fields = {**success_fields, **outcome}
+    _record_install_step(
+        event,
+        step_id=step_id,
+        category=category,
+        status=status,
+        skip_reason=skip_reason,
+        message=message,
+        **fields,
+    )
     return result
 
 
@@ -1992,7 +1987,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
 
     try:
         path = persist_pending_install_event(args, session_dir)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("failed to persist SBD V6 install event", exc_info=True)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
             log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
@@ -2529,7 +2524,7 @@ def _preflight(
             inferencex_path=inferencex_path,
             resolved_urls=resolved_urls,
         )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to finalize SBD V6 install event", exc_info=True)
 
     return resolved_urls

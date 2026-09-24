@@ -39,8 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 log = logging.getLogger(__name__)
 
 
-# Declarative action_kind -> ExecutorFn map. Keep in sync with
-# session_paths._RUNS_ACTIONS (not enforced by a test).
+# Declarative action_kind -> ExecutorFn map.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.

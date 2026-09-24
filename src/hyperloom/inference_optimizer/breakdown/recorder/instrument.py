@@ -33,8 +33,6 @@ log = logging.getLogger(__name__)
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-_FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
-
 
 def _recorder(session_dir: Path | str, producer: str):
     """Return the process-cached recorder for ``session_dir`` and ``producer``."""
@@ -53,13 +51,7 @@ def snapshot_state_sections(
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
-    rec = None
-    try:
-        rec = _recorder(session_dir, producer)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("recorder unavailable", exc_info=True)
-        trace_skip(reason="writer raised", section="session", error=exc)
-        return
+    rec = _recorder(session_dir, producer)
 
     for name, fn in (
         ("session", _snapshot_session),
@@ -67,7 +59,7 @@ def snapshot_state_sections(
     ):
         try:
             fn(rec, state)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("snapshot section %s failed", name, exc_info=True)
             trace_skip(reason="writer raised", section=name, error=exc)
 
@@ -142,7 +134,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
     delegated optimizer's own campaign, which is a different producer's account
     of a different run.
     """
-    from .kernel_event import active_kernel_recorder
+    from .kernel_event import LANE_FAULTED_STATUSES, active_kernel_recorder
 
     recorder = active_kernel_recorder()
     if recorder is None:
@@ -174,7 +166,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
             is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
             status_lower = str(att.get("status") or "").lower()
             decision = str(att.get("decision") or "").upper()
-            if not decision and status_lower in _FAILED_STATUSES:
+            if not decision and status_lower in LANE_FAULTED_STATUSES:
                 decision = "FAILED"
             if is_adopted and kernel_decision:
                 decision = kernel_decision
@@ -206,6 +198,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
                 started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
                 ended_at=str(att.get("ended_at") or ""),
                 duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
+                error_class=str(att.get("error_class") or ""),
                 failure_reason=str(att.get("error") or att.get("error_message") or ""),
             )
         return
@@ -213,7 +206,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     decision = str(proposal.get("decision") or "").upper()
-    failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
+    failed = status in LANE_FAULTED_STATUSES or (decision == "REVERT" and bool(err_class))
     skipped = status == "skipped"
     if not failed and not skipped:
         return
@@ -233,6 +226,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
         # distinction this row exists to draw.
         skip_reason=str(result.get("reason") or result.get("skip_reason") or err_class or status or ""),
         micro_decision=decision or ("SKIPPED" if skipped else "FAILED"),
+        error_class=err_class,
         failure_reason=str(result.get("error") or err_class or ""),
     )
 
@@ -291,7 +285,7 @@ def record_backend_versions_and_timeline(
                     producer=producer,
                 )
         _mirror_backend_attempts_to_kernel_timeline(result)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record_backend_versions_and_timeline failed", exc_info=True)
         trace_skip(reason="writer raised", section="versions", error=exc)
 

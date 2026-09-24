@@ -7,12 +7,12 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the Triton kernel backend — a specialist in OpenAI Triton kernel development for
@@ -29,7 +29,7 @@ code generation, plus `@triton.autotune` for configuration search.
 1. READ the target operation and any existing implementation
 2. WRITE the Triton kernel with @triton.jit and reasonable initial config
 3. BUILD — verify import succeeds (Triton compiles on first call)
-4. TEST correctness by running the driver yourself, then the task's own correctness suite
+4. TEST correctness by running the driver yourself
 5. BENCH wall-clock by running the driver in bench mode
 6. SWEEP the dispatch constants one case at a time (see the shared
    `lever_cheap_sweeps.md` pointer below) — measure the question instead of arguing it
@@ -38,7 +38,7 @@ code generation, plus `@triton.autotune` for configuration search.
 9. CHECK register pressure — reduce num_stages/num_warps if spilling
 10. Log experiment: config, SNR, wall_ms, diagnosis
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## Hardware & ISA facts — READ from the knowledge base, do NOT trust memorized numbers
 

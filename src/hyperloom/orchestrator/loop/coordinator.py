@@ -18,6 +18,7 @@ from typing import AbstractSet, Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -60,7 +61,7 @@ from ..bus.message_bus import Message, MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.gate import (
     PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,  # noqa: F401 - re-exported for callers/tests
+    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
@@ -463,7 +464,7 @@ class CoordinatorState:
 class _CoordinatorMeta(type):
     """Class-level delegation for extracted collaborator methods."""
 
-    def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
+    def __getattr__(cls, name):
         prop = cls._DELEGATED.get(name)
         if prop is not None:
             import importlib
@@ -487,7 +488,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_internal": ("phases.internal", "InternalTasksPhase"),
         "phase_kernel_stack": ("phases.kernel_stack", "KernelStackPhase"),
         "phase_kernel": ("phases.kernel", "KernelPhase"),
-        "phase_explore": ("phases.explore", "ExplorePhase"),
+        "phase_macro_cycle": ("phases.macro_cycle", "MacroCycleCollaborator"),
+        "cycle_memory": ("loop.cycle_memory", "CycleMemoryCollaborator"),
+        "specialist_dispatch": ("specialists.dispatch", "SpecialistDispatchCollaborator"),
+        "gap_refresh": ("state.gaps", "GapRefreshCollaborator"),
         "phase_framework": ("phases.framework", "FrameworkPhase"),
         "gpu_lanes": ("gpu_lanes", "GpuLanes"),
         "enablement_params": ("enablement.params", "EnablementParams"),
@@ -599,7 +603,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+        except Exception:
             log.exception("failed to sync research_lane_capacity to leases DB")
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
@@ -651,16 +655,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
         # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
         # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
         # ON within the soft restart.
-        self._cycle_restart_servers: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -686,20 +684,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        _inline_raw = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS",
-                "",
-            )
-            .strip()
-            .lower()
-        )
-        self._inline_fast_actions_enabled: bool = _inline_raw not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        self._inline_fast_actions_enabled: bool = env_flag("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", default=True)
         self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -755,6 +740,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kernel_enabled": "phase_machine",
         "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
+        "_await_kernel_entry_task": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
@@ -774,6 +760,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_revalidate_stack_for_close": "phase_close",
         "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
@@ -833,33 +820,36 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_needs_roofline_for_watermark": "phase_kernel",
         "_maybe_enqueue_watermark_roofline": "phase_kernel",
         "_cached_kernel_request": "phase_kernel",
-        "_negative_ledger_domain_counts": "phase_explore",
-        "_plan_cycle_focus": "phase_explore",
-        "_record_cycle_strategy_for_current_cycle": "phase_explore",
-        "_cycle_strategy_block": "phase_explore",
-        "_cycle_directive_fallback": "phase_explore",
-        "_reseed_orch_prompt_for_cycle": "phase_explore",
-        "_apply_macro_cycle_reloop": "phase_explore",
-        "_run_cycle_soft_restart": "phase_explore",
-        "_restart_inference_servers": "phase_explore",
-        "_on_cycle_start_reprofile": "phase_explore",
-        "_maybe_force_stalled_domain_specialist": "phase_explore",
-        "_seed_gaps_from_research_hints": "phase_explore",
-        "_fan_out_specialist_wave": "phase_explore",
-        "_maybe_auto_retry_specialist": "phase_explore",
-        "_record_specialist_retry_exhausted": "phase_explore",
-        "_warm_specialist_params": "phase_explore",
-        "_refresh_gaps": "phase_explore",
-        "_extract_gaps_from_baseline": "phase_explore",
-        "_extract_gaps_from_attempts": "phase_explore",
-        "_gap_layer_for_action": "phase_explore",
-        "_record_explore_round_gaps": "phase_explore",
-        "_record_explore_variant_failures": "phase_explore",
-        "_task_id_from_specialist_source": "phase_explore",
-        "_maybe_materialize_mn_explore": "phase_explore",
-        "_maybe_autosubmit_specialist_patches": "phase_explore",
-        "_maybe_autosubmit_framework_config": "phase_explore",
-        "_build_specialist_round_entry": "phase_explore",
+        "_negative_ledger_domain_counts": "phase_macro_cycle",
+        "_plan_cycle_focus": "phase_macro_cycle",
+        "_record_cycle_strategy_for_current_cycle": "phase_macro_cycle",
+        "_cycle_strategy_block": "phase_macro_cycle",
+        "_apply_macro_cycle_reloop": "phase_macro_cycle",
+        "_run_cycle_soft_restart": "phase_macro_cycle",
+        "_restart_inference_servers": "phase_macro_cycle",
+        "_on_cycle_start_reprofile": "phase_macro_cycle",
+        "_capture_cycle_memory": "cycle_memory",
+        "_cycle_directive_fallback": "cycle_memory",
+        "_reseed_orch_prompt_for_cycle": "cycle_memory",
+        "_maybe_force_stalled_domain_specialist": "specialist_dispatch",
+        "_fan_out_specialist_wave": "specialist_dispatch",
+        "_maybe_auto_retry_specialist": "specialist_dispatch",
+        "_record_specialist_retry_exhausted": "specialist_dispatch",
+        "_warm_specialist_params": "specialist_dispatch",
+        "_build_specialist_round_entry": "specialist_dispatch",
+        "_task_id_from_specialist_source": "specialist_dispatch",
+        "_refresh_gaps": "gap_refresh",
+        "_extract_gaps_from_baseline": "gap_refresh",
+        "_extract_gaps_from_attempts": "gap_refresh",
+        "_framework_authoring_domain": "gap_refresh",
+        "_gap_layer_for_action": "gap_refresh",
+        "_seed_gaps_from_research_hints": "gap_refresh",
+        "_record_explore_round_gaps": "phase_framework",
+        "_record_explore_variant_failures": "phase_framework",
+        "_maybe_materialize_mn_explore": "phase_framework",
+        "_maybe_autosubmit_specialist_patches": "phase_framework",
+        "_maybe_autosubmit_framework_config": "phase_framework",
+        "_config_lever_known_bad": "phase_framework",
         "_on_enter_framework": "phase_framework",
         "_open_framework_timeline": "phase_framework",
         "_close_framework_timeline": "phase_framework",
@@ -868,7 +858,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "gpu_lanes",
         "_framework_gpu_params": "gpu_lanes",
         "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
@@ -1101,10 +1090,28 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_phase_kernel", KernelPhase)
 
     @property
-    def phase_explore(self):
-        from ..phases.explore import ExplorePhase
+    def phase_macro_cycle(self):
+        from ..phases.macro_cycle import MacroCycleCollaborator
 
-        return self._collaborator("_phase_explore", ExplorePhase)
+        return self._collaborator("_phase_macro_cycle", MacroCycleCollaborator)
+
+    @property
+    def cycle_memory(self):
+        from ..loop.cycle_memory import CycleMemoryCollaborator
+
+        return self._collaborator("_cycle_memory", CycleMemoryCollaborator)
+
+    @property
+    def specialist_dispatch(self):
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
+
+        return self._collaborator("_specialist_dispatch", SpecialistDispatchCollaborator)
+
+    @property
+    def gap_refresh(self):
+        from ..state.gaps import GapRefreshCollaborator
+
+        return self._collaborator("_gap_refresh", GapRefreshCollaborator)
 
     @property
     def phase_framework(self):
@@ -1240,7 +1247,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+        except Exception:
             log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
@@ -1278,7 +1285,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
-        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+        except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
@@ -1289,7 +1296,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except asyncio.CancelledError:
                 # Expected: we just cancelled these tasks.
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
 
@@ -1347,20 +1354,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "disabled",
         }:
             return
-        try:
-            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-            if config.mode is KnowledgeStoreMode.LOCAL:
-                if self.recipe_kb is None:
-                    return
-                sid = (self.shared_state.recipe_kb_session_id or "").strip()
-                if not sid:
-                    return
-            self.ensure_recipe_finalized(source="t4_fallback")
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("recipe KB T4 fact_finalize fallback failed")
+        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        if config.mode is KnowledgeStoreMode.LOCAL:
+            if self.recipe_kb is None:
+                return
+            sid = (self.shared_state.recipe_kb_session_id or "").strip()
+            if not sid:
+                return
+        self.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
     # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
@@ -1371,8 +1375,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
@@ -1387,6 +1389,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+
+    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
+    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
+    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
@@ -1435,6 +1441,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         agent: str = "",
     ) -> None:
         """Record a Coordinator-side exception without killing the session."""
+        self._fault_open_phase_event(stage=stage, exc=exc)
         try:
             self.shared_state.record_tick_exception(
                 tick=int(tick if tick is not None else self.shared_state.tick or 0),
@@ -1446,8 +1453,31 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist Coordinator exception metadata")
+
+    def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
+        """Name this exception on the phase event it struck, if one is open.
+
+        Every other timeline event is closed on the exception by the executor
+        that raised it. A KERNEL visit and a FRAMEWORK entry have no such frame
+        -- each spans the ticks the machine sits in its phase, and is closed
+        when that span ends -- so the exceptions swallowed here were the ones
+        that reached their event nowhere, leaving it to close clean and report
+        an outcome for a phase that had blown up.
+
+        Both recorders are absent unless their phase is the one running, which
+        is what keeps a fault on the event that was open for it. The enablement
+        lane is deliberately not here: it spans the whole session, so it is
+        open for every exception and is the thing that raised for almost none
+        of them. Its own pump records what it is responsible for.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
+
+        for recorder in (active_kernel_recorder(), self._framework_timeline()):
+            if recorder is None:
+                continue
+            recorder.record_fault(stage=stage, exc=exc)
 
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded."""
@@ -1594,7 +1624,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 self._advance_phase_if_needed,
                                 stage="advance_phase_hint",
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance before reactors (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase_pre_reactor",
@@ -1624,7 +1654,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             self._advance_phase_if_needed,
                             stage="advance_phase",
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase",
@@ -1632,16 +1662,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             tick=tick_n,
                         )
                     # Periodic reaper + DB retention; time-gated.
-                    try:
-                        now = time.monotonic()
-                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                            await self._run_maintenance(tick=tick_n)
-                            self._last_maintenance_ts = now
-                    except Exception:  # noqa: BLE001
-                        log.exception("maintenance tick raised")
+                    now = time.monotonic()
+                    if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+                        await self._run_maintenance(tick=tick_n)
+                        self._last_maintenance_ts = now
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     last_tick_exc = exc
                     log.exception("Coordinator.run: tick %d body raised", tick_n)
                     self._record_coordinator_exception(
@@ -1710,6 +1737,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
+            try:
+                await self._await_kernel_entry_task()
+            except (asyncio.CancelledError, Exception):
+                log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
                 final_signals = self._signals.close()
@@ -1727,7 +1758,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
             try:
                 await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
             log.info(
@@ -1756,7 +1787,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 continue
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+            except Exception:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
@@ -1770,14 +1801,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         backend_self_traces = callable(_set_trace_ctx)
         if backend_self_traces:
-            try:
-                _set_trace_ctx(
-                    tick=int(self.shared_state.tick or 0),
-                    phase=(self.shared_state.phase or "") or None,
-                    macro_cycle=int(self.shared_state.macro_cycle or 0),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         try:
@@ -1810,7 +1838,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             await self._advance_rendered_cursor(agent_name)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1850,7 +1878,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 setup = setup_getter()
                 if isinstance(setup, dict):
                     write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("orchestration mcp setup trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
@@ -1884,7 +1912,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
                 agent_name,
@@ -1910,7 +1938,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,

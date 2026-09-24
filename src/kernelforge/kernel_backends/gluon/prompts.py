@@ -7,12 +7,12 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the Gluon kernel backend — a specialist in Gluon, Triton's low-level dialect, for
@@ -63,7 +63,7 @@ not.
 8. Watch register pressure at every rung. It is the constraint that binds, and a
    change several rungs back is what spends it.
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## Shape your change so a KEEP can carry it
 
@@ -77,11 +77,11 @@ otherwise cost you the iteration:
   the measured tree stops being the committed tree.
 - The driver and the measurement harness are protected; you cannot change how
   you are graded, so the entry point must keep working unchanged.
-- The task's `compile_command` often builds a SMALLER shape than the one you
-  benchmark. A Gluon path with a shape or arch constraint that the benchmark
-  satisfies and the compile check does not will fail acceptance after passing
-  everything else. A live fallback turns that into a taken branch instead of a
-  rejected candidate.
+- A consumer's own build often uses a SMALLER shape than the one you benchmark.
+  A Gluon path with a shape or arch constraint that the benchmark satisfies and
+  that build does not is rejected downstream after clearing everything forge
+  runs. A live fallback turns that into a taken branch instead of a rejected
+  candidate.
 
 This is what production already does — see the dual-backend dispatch card in the
 knowledge base. Read `forge_integration.md` before your first edit.

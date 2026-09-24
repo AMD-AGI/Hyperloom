@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.remote_exp.kb_store_client import KBStoreClient, KBStoreError
-from kernelforge.durable_io import fsync_directory
+from kernelforge.durable_io import atomic_write_bytes, fsync_directory
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -310,14 +310,13 @@ def _write_bytes_synced(path: Path, content: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def _write_json_synced(path: Path, document: Mapping[str, Any]) -> None:
-    content = json.dumps(
+def _json_bytes(document: Mapping[str, Any]) -> bytes:
+    return json.dumps(
         dict(document),
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     ).encode("utf-8")
-    _write_bytes_synced(path, content)
 
 
 def _copy_file_synced(source: Path, target: Path) -> None:
@@ -821,7 +820,7 @@ class LocalRewriteRecords:
                 files_root.mkdir()
                 for rel_path, source in normalized_files.items():
                     _copy_file_synced(source, files_root / rel_path)
-                _write_json_synced(staging / KNOWLEDGE_FILENAME, payload)
+                _write_bytes_synced(staging / KNOWLEDGE_FILENAME, _json_bytes(payload))
                 if _safe_files(files_root) != set(normalized_files):
                     raise RewriteRecordError("staged rewrite artifacts failed validation")
                 loaded = json.loads((staging / KNOWLEDGE_FILENAME).read_text(encoding="utf-8"))
@@ -853,19 +852,7 @@ class LocalRewriteRecords:
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
             knowledge[MEASURED_SPEEDUP_KEY] = measured
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{KNOWLEDGE_FILENAME}.",
-                dir=session_dir,
-            )
-            os.close(descriptor)
-            temporary = Path(temporary_name)
-            temporary.unlink()
-            try:
-                _write_json_synced(temporary, knowledge)
-                os.replace(temporary, document_path)
-                fsync_directory(session_dir)
-            finally:
-                temporary.unlink(missing_ok=True)
+            atomic_write_bytes(document_path, _json_bytes(knowledge))
 
     def champion_speedup(self, canonical_id: str) -> float | None:
         with self._identity_lock(canonical_id, exclusive=False):
@@ -881,20 +868,7 @@ class LocalRewriteRecords:
             "value": float(speedup),
         }
         with self._identity_lock(canonical_id, exclusive=True):
-            identity_dir = self._identity_dir(canonical_id)
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{CHAMPION_FILENAME}.",
-                dir=identity_dir,
-            )
-            os.close(descriptor)
-            temporary = Path(temporary_name)
-            temporary.unlink()
-            try:
-                _write_json_synced(temporary, document)
-                os.replace(temporary, identity_dir / CHAMPION_FILENAME)
-                fsync_directory(identity_dir)
-            finally:
-                temporary.unlink(missing_ok=True)
+            atomic_write_bytes(self._identity_dir(canonical_id) / CHAMPION_FILENAME, _json_bytes(document))
 
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:

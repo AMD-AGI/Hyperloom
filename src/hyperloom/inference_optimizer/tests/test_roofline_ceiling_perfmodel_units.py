@@ -147,6 +147,14 @@ def test_perfmodel_decode_sits_between_its_own_memory_and_compute_ceilings():
     assert out.bound_kind == slower
 
 
+def test_perfmodel_uses_vendor_peak_when_achievable_spec_is_absent():
+    out = _perfmodel(gpu_type="mi355x")
+
+    assert out is not None
+    assert out.hbm_bw_gbps == pytest.approx(8000.0)
+    assert out.peak_achievable_tflops == pytest.approx(2516.6)
+
+
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
     """A MoE model replaces the three dense FFN GEMMs with one fused op."""
     out = _perfmodel(_dense_meta(num_experts=8, experts_per_tok=2, moe_intermediate_size=256))

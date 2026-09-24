@@ -36,11 +36,14 @@ def coord(session_dir) -> Coordinator:
 
 
 # _framework_config_levers_from_done
-def test_config_levers_non_dict_and_patch_precedence() -> None:
+def test_config_levers_non_dict_and_missing() -> None:
     f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
-    # A patch deliverable is not a config-only outcome.
-    assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
+    # A patch takes precedence over a lever that merely accompanies it, unless the
+    # lane says the pair is inseparable.
+    patched = {"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}
+    assert f(patched) == {}
+    assert f(patched, levers_ride_with_patches=True).get("extra_envs") == {"X": "1"}
     assert f({"proposal_set": "nope"}) == {}
     assert f({}) == {}
 
@@ -174,7 +177,7 @@ class _FakeStream:
     async def __anext__(self):
         try:
             return next(self._it)
-        except StopIteration:  # noqa: PERF203
+        except StopIteration:
             raise StopAsyncIteration from None
 
 
@@ -197,7 +200,7 @@ class _FakeClient:
 
 
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, seen: list | None = None):
-    def _fake(args, timeout=None):  # noqa: ANN001
+    def _fake(args, timeout=None):
         sub = args[2] if len(args) > 2 else ""
         if seen is not None:
             seen.append(sub)

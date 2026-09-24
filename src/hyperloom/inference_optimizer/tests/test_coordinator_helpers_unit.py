@@ -123,26 +123,8 @@ def test_baseline_params_fingerprint_bad_envs():
     assert out["extra_envs"] is None
 
 
-# ---- _resolve_roofline_watermark_ratio ----
-
-
-def test_watermark_ratio_default():
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_below_one_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "0.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
-
-
-def test_watermark_ratio_invalid_env_is_ignored(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "abc")
-    assert ch._resolve_roofline_watermark_ratio() == 1.10
+def test_roofline_watermark_ratio():
+    assert ch.ROOFLINE_WATERMARK_RATIO == 1.10
 
 
 # ---- _dedupe_extra_server_args ----

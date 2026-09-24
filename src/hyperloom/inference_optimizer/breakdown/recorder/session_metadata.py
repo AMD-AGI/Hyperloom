@@ -33,7 +33,7 @@ SECTION = "metadata"
 PRODUCER_COORDINATOR = "coordinator"
 
 # Structural model fields carried verbatim from ``summarize_model_config``.
-# ``model_class`` is derived (see :func:`_architecture`) and is not on this
+# ``model_class`` is derived (see :func:`architecture_block`) and is not on this
 # list; everything else is a straight lift so the exported architecture block
 # is the parsed config rather than a five-field digest of it.
 _ARCHITECTURE_FIELDS = (
@@ -81,7 +81,7 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
         return
     try:
         recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record metadata failed", exc_info=True)
         trace_skip(reason="writer raised", section=SECTION, error=exc)
 
@@ -187,7 +187,7 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
         "task_config": _launch_config(state),
         "grading": _grading(state),
     }
-    architecture = _architecture(
+    architecture = architecture_block(
         getattr(state, "model_info", None) or {},
         model_class=_text(getattr(state, "model_class", "")),
     )
@@ -229,7 +229,7 @@ def _grading(state: Any) -> dict[str, Any]:
     }
 
 
-def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
+def architecture_block(model_info: Any, *, model_class: Any = "") -> dict[str, Any]:
     """The structural model block, or ``{}`` when nothing is known."""
     info = dict(model_info or {}) if isinstance(model_info, Mapping) else {}
     resolved_class = _text(model_class)

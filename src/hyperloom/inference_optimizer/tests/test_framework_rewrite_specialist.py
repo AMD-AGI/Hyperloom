@@ -300,7 +300,7 @@ class _Tasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+    async def create_or_return_existing(self, **kwargs: Any):
         """Record the dispatch and return a fresh-task sentinel."""
         self.created.append(kwargs)
         from types import SimpleNamespace
@@ -313,19 +313,17 @@ class _DispatchStub:
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
         from hyperloom.orchestrator.phases.framework import FrameworkPhase
+        from hyperloom.orchestrator.state.shared_state import SharedState
 
         self.session_dir = tmp_path
         self.tasks = _Tasks()
-        self.shared_state = _State(framework, evidence)
-        self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_specialist_candidate_map = {}
-        self.shared_state.save = lambda _dir: None
+        self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
         for name in (
             "_authoring_specialist_domain",
             "_render_rewrite_evidence_for_prompt",
             "_rewrite_evidence_absence_note",
             "_enqueue_framework_agent_local_explore_specialist",
-            "_next_local_explore_candidate_id",
+            "_map_authoring_specialist",
         ):
             setattr(self, name, getattr(FrameworkPhase, name).__get__(self))
         # A staticmethod on the real class; binding it would pass ``self`` as the candidate row.
@@ -335,7 +333,7 @@ class _DispatchStub:
         """Macro-cycle 0, as the Coordinator would report it."""
         return ""
 
-    def _render_framework_memory_for_prompt(self, _memory) -> str:  # noqa: ANN001
+    def _render_framework_memory_for_prompt(self, _memory) -> str:
         """Suppress the working-memory block; not under test here."""
         return ""
 
@@ -347,11 +345,11 @@ class _DispatchStub:
         """Provide no GPU params; not under test here."""
         return {}
 
-    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:  # noqa: ANN001
+    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Provide fixed lanes/TTL; lane accounting is not under test here."""
         return [], base_ttl_sec
 
-    async def _warm_specialist_params(self, _params) -> None:  # noqa: ANN001
+    async def _warm_specialist_params(self, _params) -> None:
         """Skip warm-start enrichment; not under test here."""
         return None
 

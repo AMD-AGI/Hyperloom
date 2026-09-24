@@ -446,13 +446,12 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    # ``profiler=torch`` and a trace dir have to be asserted here too, not left to
-    # Magpie's launcher script alone: that script appends its own flags *after*
-    # EXTRA_VLLM_ARGS at actual launch, but the argv preflight probe only sees
-    # EXTRA_VLLM_ARGS, and vLLM's ProfilerConfig validator rejects
-    # delay/max_iterations without both present in the checked fragment.
+    # ``profiler=torch`` belongs in the launched fragment; do not add
+    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
+    # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
     assert "--profiler-config.profiler torch" in extra, extra
-    assert "--profiler-config.torch_profiler_dir" in extra, extra
+    assert "--profiler-config.torch_profiler_dir" not in extra, extra
 
 
 def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
@@ -2418,8 +2417,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 
 @pytest.mark.asyncio
-async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
+async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2448,10 +2446,12 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
                 }
             )
         )
-        capture_dir = output_dir / "capture_traces"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(exist_ok=True)
+        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
+        capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
-        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
-        (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
@@ -2464,12 +2464,16 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
 
-    capture_dir = output_dir / "capture_traces"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    torch_trace = workspace / "torch_trace"
+    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(capture_dir)
-    assert len(res.result["trace_files"]) == 2
-    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    assert res.result["trace_dir"] == str(torch_trace)
+    assert res.result["trace_files"] == [str(complete_trace)]
+    assert res.result["main_trace_path"] == str(torch_trace)
+    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
+    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 

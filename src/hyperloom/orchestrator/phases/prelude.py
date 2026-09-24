@@ -58,6 +58,11 @@ _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
 # and the later tick that harvests it, and the replay only ever runs in PRELUDE.
 _WARM_REPLAY_EVENT_PHASE = "prelude"
 
+#: The marker reason a PRELUDE arm refused for budget is filed under. A
+#: constant because a consumer asking "was the initial analysis refused, or
+#: never considered" selects on it.
+PRELUDE_ARM_DROPPED = "prelude_arm_dropped"
+
 # The donor's identity, carried flattened on the outcome and re-nested for the
 # event. Listed once so the two directions cannot drift apart.
 _WARM_REPLAY_DONOR_FIELDS = (
@@ -191,16 +196,20 @@ class PreludePhase(PhaseHandler):
         )
 
     def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
-        """Record a PRELUDE arm dropped for budget on the current phase record."""
-        if not _phase_state.append_phase_evidence_row(
-            getattr(self.shared_state, "phase_history", None),
-            key="budget_dropped_arms",
-            row={"arm": arm, **evidence},
-        ):
-            return
+        """Record a PRELUDE arm the budget refused, as a marker on the phase.
+
+        A marker rather than a key on the entry row's ``evidence``: that row is
+        snapshotted into the phase event when the phase is entered, so anything
+        appended to it afterwards reaches ``state`` and never the breakdown --
+        where a refused arm then reads identically to one never considered.
+        """
+        self.shared_state.append_phase_history_event(
+            reason=PRELUDE_ARM_DROPPED,
+            evidence={"arm": arm, **evidence},
+        )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort record
+        except Exception:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
@@ -307,11 +316,7 @@ class PreludePhase(PhaseHandler):
         )
         plan: list[dict[str, Any]] = []
         for column, reader, list_key in readers:
-            try:
-                data = reader() or {}
-            except Exception:  # noqa: BLE001 — a bad column must not block others
-                log.warning("warm-kernel KB: reading %s column failed", column, exc_info=True)
-                continue
+            data = reader() or {}
             rows = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(rows, list):
                 continue
@@ -613,7 +618,7 @@ class PreludePhase(PhaseHandler):
                             or f"kernel revert status={reverted.get('status')}"
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("warm-kernel KB: revert failed", exc_info=True)
                 errors.append(f"{type(exc).__name__}:{exc}")
         if snapshots:
@@ -757,7 +762,7 @@ class PreludePhase(PhaseHandler):
         # resume.
         try:
             state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning(
                 "warm-kernel KB: one-shot state save failed",
                 exc_info=True,
@@ -771,7 +776,7 @@ class PreludePhase(PhaseHandler):
         if kb is None:
             try:
                 kb = self._open_warm_kernel_section()
-            except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+            except Exception as exc:
                 log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
                 return self._set_warm_kernel_outcome(
                     {
@@ -788,7 +793,7 @@ class PreludePhase(PhaseHandler):
             outcome = self._set_warm_kernel_outcome({"status": "empty"})
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug(
                     "warm-kernel KB: empty-state save failed",
                     exc_info=True,
@@ -880,7 +885,7 @@ class PreludePhase(PhaseHandler):
                     "kernel_apply_results": list(applied),
                 }
                 state.save(self.session_dir)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning(
                     "warm-kernel KB: pre-mutation snapshot persist failed for %s",
                     targets,
@@ -892,7 +897,7 @@ class PreludePhase(PhaseHandler):
                 break
             try:
                 apply_result = self._apply_warm_kernel_patch(entry, anchor_target)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning(
                     "warm-kernel KB: apply failed for %s",
                     anchor_target,
@@ -972,7 +977,7 @@ class PreludePhase(PhaseHandler):
         )
         try:
             state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning(
                 "warm-kernel KB: prepared state save failed",
                 exc_info=True,
@@ -1007,7 +1012,7 @@ class PreludePhase(PhaseHandler):
             self._set_warm_kernel_outcome(outcome)
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "warm-kernel KB: rollback state save failed",
                     exc_info=True,
@@ -1160,7 +1165,7 @@ class PreludePhase(PhaseHandler):
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {
                 "status": "error",
@@ -1572,7 +1577,7 @@ class PreludePhase(PhaseHandler):
         }
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("combined warm replay pending save failed", exc_info=True)
         # Opened after the outcome is persisted so the request block reads the
         # donor identity the outcome just stamped, and a session killed between
@@ -1944,28 +1949,86 @@ class PreludePhase(PhaseHandler):
         can see the two diverge across a re-baseline.
         """
         params = dict(getattr(task, "params", None) or {})
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
+
+        recorder = make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            task_id=str(getattr(task, "task_id", "") or ""),
+            tier=str(params.get("warm_recipe_tier") or ""),
+            config_source=str(params.get("config_source") or ""),
+            config_donor_tier=str(params.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+            expected_gain_pct=params.get("warm_expected_gain_pct"),
+            confidence=params.get("warm_recipe_conf"),
+            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+            session_baseline_tput=session_baseline_tput,
+            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            recipe_suppressed=not str(params.get("config_source") or ""),
+        )
+        if recorder is not None:
+            self._record_warm_kernel_apply_items(recorder)
+
+    def _record_warm_kernel_apply_items(self, recorder: Any) -> None:
+        """State which kernel items the replay carried and which of them landed.
+
+        Recorded as the replay is dispatched, because the ruling replaces the
+        plan with the subset it kept: by the time the bench has a verdict, the
+        items that never applied are gone from state and unrecoverable.
+
+        ``PENDING`` is an item that applied and awaits the bench. ``DEFERRED``
+        resolved to no target under this checkout. ``ERROR`` stops the
+        sequence, so the items behind it hold no decision and record nothing --
+        they were never attempted.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import APPLY_KERNEL
+
+        for position, entry in enumerate(getattr(self.shared_state, "warm_kernel_kb_plan", None) or []):
+            if not isinstance(entry, Mapping) or not str(entry.get("decision") or ""):
+                continue
+            outcome = entry.get("apply_result") if isinstance(entry.get("apply_result"), Mapping) else {}
+            sources = entry.get("source_paths") or []
+            recorder.record_apply_item(
+                str(entry.get("patch_path") or (sources[0] if sources else "")),
+                kind=APPLY_KERNEL,
+                position=position,
+                applied=str(entry.get("decision") or "") == "PENDING",
+                reason=str(
+                    outcome.get("reason")
+                    or outcome.get("error")
+                    or outcome.get("exception")
+                    or entry.get("resolution_error")
+                    or ""
+                ),
+                target=str(entry.get("apply_root") or ""),
             )
 
-            make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                task_id=str(getattr(task, "task_id", "") or ""),
-                tier=str(params.get("warm_recipe_tier") or ""),
-                config_source=str(params.get("config_source") or ""),
-                config_donor_tier=str(params.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
-                expected_gain_pct=params.get("warm_expected_gain_pct"),
-                confidence=params.get("warm_recipe_conf"),
-                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-                session_baseline_tput=session_baseline_tput,
-                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-                recipe_suppressed=not str(params.get("config_source") or ""),
+    def _record_warm_patch_apply_items(self, recorder: Any, result: Mapping[str, Any]) -> None:
+        """State which of the recipe's code patches landed.
+
+        The executor reports one status per patch it reached, keyed by the
+        timeline position the recipe gave it. A required timeline stops at its
+        first failure, so the patches behind that one carry no status and
+        record nothing.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import APPLY_PATCH
+
+        patch_result = result.get("warm_patch_result")
+        if not isinstance(patch_result, Mapping):
+            return
+        for position, row in enumerate(patch_result.get("patches") or []):
+            if not isinstance(row, Mapping):
+                continue
+            recorder.record_apply_item(
+                str(row.get("patch_ref") or ""),
+                kind=APPLY_PATCH,
+                position=row.get("timeline_index", position),
+                applied=str(row.get("status") or "") != "failed",
+                reason=str(row.get("reason") or row.get("detail") or ""),
+                target=str(row.get("target_repo") or ""),
             )
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: opening the event failed", exc_info=True)
 
     def _warm_replay_timeline(self, task: "Task | None" = None):
         """Rebind to the in-flight replay's event, or ``None`` when one could not be built.
@@ -1975,31 +2038,27 @@ class PreludePhase(PhaseHandler):
         """
         params = dict(getattr(task, "params", None) or {})
         outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
 
-            return make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
-                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
-                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
-                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(outcome) or None,
-                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
-                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-                session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
-                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-                # Rebinding, not opening: the enqueue seam already put this event
-                # on the timeline, and opening it twice would restate its start.
-                open_event_on_timeline=False,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: rebinding to the event failed", exc_info=True)
-            return None
+        return make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+            tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+            config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+            config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(outcome) or None,
+            expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+            confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+            session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
+            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            # Rebinding, not opening: the enqueue seam already put this event
+            # on the timeline, and opening it twice would restate its start.
+            open_event_on_timeline=False,
+        )
 
     def _skip_warm_replay(
         self,
@@ -2039,28 +2098,28 @@ class PreludePhase(PhaseHandler):
         earliest refusals have no identity fields on ``outcome`` yet, and state
         an empty request rather than an invented one.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
 
-            recorder = make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                tier=str(outcome.get("warm_recipe_tier") or ""),
-                config_source=str(outcome.get("config_source") or ""),
-                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(outcome) or None,
-                expected_gain_pct=outcome.get("expected_gain_pct"),
-                confidence=outcome.get("warm_recipe_conf"),
-            )
-            if recorder is None:
-                return
-            if rollback := (outcome.get("rollback") if isinstance(outcome.get("rollback"), Mapping) else None):
-                recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
-            recorder.finish_skipped(code=code, outcome=outcome, details=details)
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: recording the skip failed", exc_info=True)
+        recorder = make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            tier=str(outcome.get("warm_recipe_tier") or ""),
+            config_source=str(outcome.get("config_source") or ""),
+            config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(outcome) or None,
+            expected_gain_pct=outcome.get("expected_gain_pct"),
+            confidence=outcome.get("warm_recipe_conf"),
+        )
+        if recorder is None:
+            return
+        # A refusal rooted in the kernel preparation has a plan behind it,
+        # and which item refused to apply is the whole of what it means.
+        self._record_warm_kernel_apply_items(recorder)
+        if rollback := (outcome.get("rollback") if isinstance(outcome.get("rollback"), Mapping) else None):
+            recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
+        recorder.finish_skipped(code=code, outcome=outcome, details=details)
 
     def _promote_warm_replay(
         self,
@@ -2251,6 +2310,7 @@ class PreludePhase(PhaseHandler):
                 extra_server_args=str(decision_params.get("extra_server_args") or ""),
                 extra_envs=dict(decision_params.get("extra_envs") or {}),
             )
+            self._record_warm_patch_apply_items(recorder, result)
         keep_threshold = 0.0
         if combined_current_contract:
             raw_threshold = decision_params.get("combined_keep_threshold_pct")
@@ -2501,7 +2561,7 @@ class PreludePhase(PhaseHandler):
                         tick=int(state.tick or 0),
                     )
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("warm-replay journal append failed")
         else:
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
@@ -2570,6 +2630,8 @@ class PreludePhase(PhaseHandler):
             rl_task = await self._enqueue_internal_analysis_task(
                 reason="prelude_initial",
             )
+            if rl_task is None:
+                return
             state.auto_roofline_pending_task_id = rl_task.task_id
             log.info(
                 "PRELUDE: baseline landed (tput=%.2f); auto-enqueued initial %s task=%s",
@@ -2577,7 +2639,7 @@ class PreludePhase(PhaseHandler):
                 rl_task.kind,
                 rl_task.task_id,
             )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:
             log.exception(
                 "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
                 exc,
@@ -2593,11 +2655,26 @@ class PreludePhase(PhaseHandler):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> Task:
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>."""
-        from ..actions.executors.roofline import INLINE_EVENT_PARAM
+    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> "Task | None":
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
+        internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
+        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
+        if unsupported:
+            log.error(
+                "internal-analysis (%s): not enqueued -- %s; relying on static-source evidence for the rest of "
+                "the session",
+                reason,
+                unsupported,
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
+            )
+            return None
         kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -107,6 +108,24 @@ def test_a_sink_writes_the_event_id_into_both_the_key_and_the_payload(tmp_path):
     fragment = json.loads(path.read_text(encoding="utf-8"))
     assert fragment["payload"]["event_id"] == _EID
     assert path.name.startswith("kernel_lane_run__orchestrator__kernel_agent-3-kernel-lane-att-7-")
+
+
+def test_a_long_kernel_identity_uses_a_short_stable_filename(tmp_path):
+    kernel_id = "kernel-" + ("x" * 500)
+    key = rec.fragment_key(_EID, "lane", kernel_id)
+
+    with session_scope(tmp_path):
+        path = rec.make_sink(_EID, producer="orchestrator").record(
+            "kernel_lane_run",
+            {"kernel_id": kernel_id},
+            row_type="lane",
+            natural_ids=kernel_id,
+        )
+
+    assert path is not None
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    assert path.name == f"kernel_lane_run__orchestrator__id-{digest}.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["payload"]["kernel_id"] == kernel_id
 
 
 def test_a_sink_drops_a_payload_that_claims_a_different_event_and_says_so_loudly(tmp_path, caplog):
@@ -354,10 +373,11 @@ def test_a_recovered_event_is_marked_interrupted_rather_than_guessed_complete(tm
             status=rec.EVENT_STATUS_INTERRUPTED,
             ext={"macro_cycle": 3},
         )
+        # Recovery is itself a close, so a second export must not recover it again.
+        assert rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel") == []
 
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
     assert event["status"] == rec.EVENT_STATUS_INTERRUPTED
-    assert rec.EVENT_STATUS_INTERRUPTED in rec.TERMINAL_EVENT_STATUSES
 
 
 def _killed_kernel_entry(session_dir: Path):
@@ -397,7 +417,7 @@ def test_finalize_keeps_the_rows_the_killed_phase_had_already_recorded(tmp_path)
 
     rec.finalize_events(tmp_path)
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
-    assert [row["kernel_id"] for row in event["ext"]["forge"]["lanes"]["kernel_rewrites"]] == ["k001"]
+    assert [row["kernel_id"] for row in event["ext"]["attempts"]] == ["k001"]
 
 
 def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
@@ -405,10 +425,11 @@ def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
         recorder = make_kernel_recorder(macro_cycle=3, route="forge")
         assert recorder is not None
         recorder.begin(tput_before=1000.0)
-        recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+        recorder.finish(tput_after=1000.0)
 
     assert rec.finalize_events(tmp_path) == []
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
+    # The status its own close derived, not the ``interrupted`` finalize writes.
     assert event["status"] == "succeeded"
 
 

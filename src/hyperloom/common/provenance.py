@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import gzip
 import re
 import subprocess  # nosec B404 - best-effort, guarded provenance probes only.
 import sys
@@ -29,6 +30,9 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "aiter": ("AITER_COMMIT", "AITER_VERSION", "AITER_REF"),
     "sglang": ("SGLANG_VERSION", "SGL_VERSION"),
     "vllm": ("VLLM_VERSION",),
+    # Probe-only: no env var pins torch, and inventing one nothing writes would be a pin that never fires. It is
+    # recorded because the torch build selects Kineto's GPU backend, which decides whether a trace has any kernel.
+    "torch": (),
 }
 
 # The interpreter preflight resolved for the serving framework. ``--framework-env
@@ -164,7 +168,11 @@ def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> d
 def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str] | None:
     """``site-packages`` dirs of the interpreter preflight resolved, if any."""
     resolved_for = _env_first(env, RESOLVED_FRAMEWORK_ENV)
-    if not resolved_for or resolved_for.strip().lower() != component:
+    resolved_for = resolved_for.strip().lower() if resolved_for else ""
+    # torch rides whichever interpreter serves: the isolated vLLM overlay pins its own, and the orchestrator's answer
+    # would name a build the run never executed on.
+    rides_framework_venv = component == "torch" or (resolved_for == "vllm" and component == "aiter")
+    if component != resolved_for and not rides_framework_venv:
         return None
     python_exe = _env_first(env, RESOLVED_FRAMEWORK_PYTHON_ENV)
     if not python_exe or python_exe == sys.executable:
@@ -185,13 +193,48 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
     return hits or None
 
 
+#: Kineto names its GPU backend in the trace's top-level metadata, which PyTorch writes ahead of ``traceEvents``, so
+#: only the head of the file is read rather than the whole (often multi-hundred-MB) event array.
+_KINETO_BACKEND_RE = re.compile(r"\"(rocprofiler-sdk|roctracer)_version\"\s*:\s*\"?([0-9][0-9.]*)\"?")
+_TRACE_HEAD_BYTES = 65536
+
+
+def detect_kineto_backend(trace_path: str | Path) -> str:
+    """The GPU backend Kineto recorded a trace with, e.g. ``rocprofiler-sdk 1.3``, or ``""`` when unreadable.
+
+    The torch build selects this backend and the trace is the only place that states it outright; an unreadable trace
+    yields empty rather than a guess, because this is recorded as provenance.
+    """
+    path = Path(trace_path)
+    if path.is_dir():
+        # Profile executors record the workspace, not the file; the backend is named inside the trace.
+        traces = sorted(path.glob("*.trace.json.gz")) or sorted(path.glob("*.trace.json"))
+        if not traces:
+            return ""
+        path = traces[-1]
+    try:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rb") as handle:  # type: ignore[operator]
+            head = handle.read(_TRACE_HEAD_BYTES)
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return ""
+    found = _KINETO_BACKEND_RE.search(head.decode("utf-8", errors="replace"))
+    return f"{found.group(1)} {found.group(2)}" if found else ""
+
+
 def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> str:
     """Best-effort installed-package version for a stack component."""
     # AITER renamed its distribution from ``aiter`` to ``amd-aiter`` at v0.1.8, so ``aiter`` was simply the wrong
     # name. It is not kept as a fallback: on PyPI that name belongs to an unrelated async-iterator library, and
     # recording its ``0.13.20191203`` as the AITER version would be worse than recording nothing, because it looks
     # like an answer. Installs older than v0.1.8 are covered by ``AITER_REF`` instead, which is exact.
-    dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "amd-aiter"}.get(component)
+    dist = {
+        "rocm": "rocm-sdk-core",
+        "sglang": "sglang",
+        "vllm": "vllm",
+        "aiter": "amd-aiter",
+        "torch": "torch",
+    }.get(component)
     if not dist:
         return ""
     if venv_path is not None:
@@ -200,12 +243,12 @@ def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> st
                 name = (found.metadata["Name"] or "").strip().lower().replace("_", "-")
                 if name == dist:
                     return (found.version or "").strip()
-        except Exception:  # noqa: BLE001 — an unreadable venv is not a failure.
-            return ""
+        except OSError:
+            pass
         return ""
     try:
         return (_im.version(dist) or "").strip()
-    except Exception:  # noqa: BLE001 — a missing package is normal.
+    except _im.PackageNotFoundError:
         return ""
 
 

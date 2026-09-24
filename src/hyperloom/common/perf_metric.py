@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool, env_str
+from hyperloom.common.env import env_bool, env_str, is_truthy
 
 INTVTY_V1 = "intvty_v1"
 
@@ -49,7 +49,7 @@ VERDICT_RECORDED = "RECORDED"
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether the AgentX benchmark wrapper is explicitly enabled."""
     raw = (env or os.environ).get(_AGENTX_ENV, "")
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return is_truthy(raw)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:

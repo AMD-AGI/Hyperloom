@@ -28,6 +28,7 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
+    benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
@@ -888,10 +889,7 @@ class ProfileExecutor(BaselineExecutor):
 
         from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
+        roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(
             probe_dir=probe_dir,
             source_roots=roots,
@@ -935,7 +933,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+        except Exception as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1003,7 +1001,10 @@ class ProfileExecutor(BaselineExecutor):
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
+        # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
+        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
+        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
+        serving_path = benchmark_serving_path_in(ix_root)
 
         def _contains(path: Path, needle: str) -> bool:
             """Check whether ``needle`` appears in ``path``'s text."""
@@ -1059,7 +1060,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+        except Exception as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,

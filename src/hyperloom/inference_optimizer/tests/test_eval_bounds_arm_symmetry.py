@@ -295,10 +295,7 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     }
     assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
 
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs, baseline
+    from hyperloom.orchestrator.actions.executors import _grid_runner, baseline
 
     for arm in (_grid_runner, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
-    # The env materializer decides the same question from raw envs rather than a written config, so it shares the
-    # spellings instead of the reader.
-    assert _workload_envs._RUN_EVAL_FALSE_VALUES is _accuracy_gate._RUN_EVAL_FALSE_VALUES

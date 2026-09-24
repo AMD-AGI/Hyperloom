@@ -8,6 +8,7 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
@@ -16,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..state.task_registry import Task
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -39,6 +40,19 @@ _CLOSE_STEP_WAIT_FLOOR_SEC: float = 60.0
 # Ceiling on the same wait.
 _CLOSE_STEP_WAIT_CEILING_SEC: float = 600.0
 
+# Stops that ask the process to go away now. A full-stack benchmark would outlive the request, so CLOSE publishes
+# nothing for an unvalidated stack instead of measuring it.
+_NO_REVALIDATION_STOP_REASONS: frozenset[str] = frozenset(
+    {
+        "signal",
+        "emergency",
+        "coordinator_exception",
+        "supervisor_coordinator_died",
+        "supervisor_tick_stalled",
+        "unknown",
+    }
+)
+
 
 def _task_is_dead(task: Task | None) -> bool:
     """True when ``task`` reached a terminal state without producing its artifact."""
@@ -59,6 +73,14 @@ class ClosePhase(PhaseHandler):
             if (row.get("to_phase") or "").strip().upper() != _phase_state.PHASE_CLOSE:
                 continue
             reason = (row.get("reason") or "").strip()
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            if (
+                reason == "sweep_done"
+                and evidence.get("sweep_was_skipped")
+                and evidence.get("sweep_skip_budget_exhausted")
+                and str(evidence.get("sweep_skip_reason") or "") == "budget_exhausted_no_successful_pairs"
+            ):
+                return "sweep_failed"
             if reason and _phase_state.is_valid_stop_reason(reason):
                 return reason
             # Newest CLOSE-bound row had no usable reason — stop rather than use a stale older one.
@@ -88,6 +110,8 @@ class ClosePhase(PhaseHandler):
             # Roofline disabled for this run; nothing to profile.
             return
         task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
+        if task is None:
+            return
         log.info(
             "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
             task.task_id,
@@ -119,7 +143,7 @@ class ClosePhase(PhaseHandler):
                         "failed",
                         {"reason": "close_post_opt_roofline_timeout"},
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug(
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
@@ -127,6 +151,100 @@ class ClosePhase(PhaseHandler):
             return
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
+
+    def _close_stack_revalidation_timeout_sec(self) -> float:
+        """How long CLOSE waits for its full-stack revalidation to settle."""
+        runtime_sec = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        return max(float(self.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC), 2.0 * runtime_sec)
+
+    async def _abandon_close_task(self, task: Task, *, reason: str) -> None:
+        """Settle a close-owned task CLOSE stopped waiting for, so nothing dispatches or promotes it later."""
+        try:
+            current = await self.tasks.get(task.task_id)
+            if current.state == "queued":
+                await self.tasks.transition(task.task_id, "cancelled", {"reason": reason})
+            elif current.state == "running":
+                await self.tasks.transition(task.task_id, "failed", {"reason": reason})
+        except (TaskNotFound, IllegalTransition):
+            log.debug("CLOSE: failed to settle abandoned task %s", task.task_id, exc_info=True)
+
+    async def _revalidate_stack_for_close(self) -> None:
+        """Measure the working stack once when it changed after the last validation.
+
+        Fact finalize publishes only a Recipe whose gain was measured on it, so a
+        KEEP lifted after the last validation would otherwise leave the session
+        with nothing to publish. The rebench promotes through the ordinary
+        ``resume_stack_revalidate`` path, which is what moves the validated
+        generation; a failed or incomparable run leaves it where it was and
+        fact finalize skips.
+        """
+        state = self.shared_state
+        has_unvalidated_keeps = getattr(state, "optimization_stack_has_unvalidated_keeps", None)
+        if not (callable(has_unvalidated_keeps) and has_unvalidated_keeps()):
+            return
+        step = "stack_revalidation"
+        stop_reason = str(getattr(state, "stop_reason", "") or "")
+        if bool(getattr(state, "closing_phase", False)) or stop_reason in _NO_REVALIDATION_STOP_REASONS:
+            await self._record_close_step(step, status="skipped", detail=f"stop_reason={stop_reason or '<none>'}")
+            return
+        if float(getattr(state, "baseline_tput", 0.0) or 0.0) <= 0.0:
+            await self._record_close_step(step, status="skipped", detail="no_baseline")
+            return
+        # Explore refuses a variant the budget cannot fit, so asking here only
+        # names the reason in the close section instead of in a no-op task.
+        usable_sec = _phase_state.session_usable_seconds(state)
+        needed_sec = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
+            state, "baseline_runtime_sec"
+        )
+        if usable_sec is not None and needed_sec is not None and usable_sec < needed_sec:
+            await self._record_close_step(
+                step,
+                status="skipped",
+                detail=f"session_budget usable={usable_sec:.0f}s needed={needed_sec:.0f}s",
+            )
+            return
+        generation = int(getattr(state, "working_recipe_generation", 0) or 0)
+        summary = await self._enqueue_internal_stack_rebench(
+            reason="close_unvalidated_stack",
+            idempotency_key=f"close-stack-revalidate-g{generation}",
+            include_geak=False,
+        )
+        task_id = str(summary.get("task_id") or "")
+        if not task_id:
+            await self._record_close_step(step, status="skipped", detail=str(summary.get("reason") or "not_enqueued"))
+            return
+        task = await self.tasks.get(task_id)
+        if task.state != "queued":
+            # Only a row this CLOSE can run end to end is worth waiting on; a
+            # settled one already promoted (or failed to) under its own run.
+            await self._record_close_step(step, status="skipped", task_id=task_id, detail=f"task_state={task.state}")
+            return
+        timeout_sec = self._close_stack_revalidation_timeout_sec()
+        log.info("CLOSE: revalidating the working stack task=%s (timeout=%.0fs)", task_id, timeout_sec)
+        try:
+            result = await asyncio.wait_for(
+                self.run_task_registered(
+                    task,
+                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=None),
+                ),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            log.warning("CLOSE: stack revalidation timed out after %.0fs; the stack stays unvalidated", timeout_sec)
+            await self._abandon_close_task(task, reason="close_stack_revalidation_timeout")
+            await self._record_close_step(step, status="failed", task_id=task_id, detail="timeout")
+            return
+        if result is None:
+            await self._abandon_close_task(task, reason="close_stack_revalidation_lanes_busy")
+            await self._record_close_step(step, status="skipped", task_id=task_id, detail="lanes_busy")
+            return
+        validated = not has_unvalidated_keeps()
+        await self._record_close_step(
+            step,
+            status="done" if validated else "failed",
+            task_id=task_id,
+            detail=f"task_state={getattr(result, 'state', '')} validated={validated}",
+        )
 
     def _record_close_roofline_progress(self) -> None:
         """Snapshot the session's roofline progress into the close section."""
@@ -143,7 +261,7 @@ class ClosePhase(PhaseHandler):
                 cumulative_gain_pct=state.cumulative_gain_validated,
                 failure_streak=state.roofline_failure_streak,
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: roofline progress record failed", exc_info=True)
 
     def _close_stack_ledger(self) -> None:
@@ -157,7 +275,7 @@ class ClosePhase(PhaseHandler):
             from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
             stack_event.finish()
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: stack ledger close failed", exc_info=True)
 
     def _record_close_baseline_progress(self) -> None:
@@ -170,7 +288,7 @@ class ClosePhase(PhaseHandler):
                 total_failures=state.baseline_total_failures,
                 arg_error_streak=state.baseline_arg_error_streak,
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: baseline progress record failed", exc_info=True)
 
     def _record_close_final_recipe(self) -> None:
@@ -195,7 +313,7 @@ class ClosePhase(PhaseHandler):
                 extra_server_args=config.get("extra_server_args") or "",
                 extra_envs=config.get("extra_envs") or {},
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: final recipe record failed", exc_info=True)
 
     def _record_close_geak_candidate(self) -> None:
@@ -207,7 +325,7 @@ class ClosePhase(PhaseHandler):
                 pending=state.geak_pending if isinstance(getattr(state, "geak_pending", None), dict) else {},
                 revalidation_pending=getattr(state, "resume_pending_revalidation", False),
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
     async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
@@ -236,7 +354,7 @@ class ClosePhase(PhaseHandler):
                 log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("%s: geak_pending settle save failed", reason)
             await self._record_observation(
                 "coordinator",
@@ -248,7 +366,7 @@ class ClosePhase(PhaseHandler):
                     "pending_settled": bool(settled),
                 },
             )
-        except Exception:  # noqa: BLE001 — wind-down must proceed even if this fails
+        except Exception:
             log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
             await self._record_close_step(
                 "geak_rebench_drain",
@@ -257,7 +375,7 @@ class ClosePhase(PhaseHandler):
             )
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE sequencer (fixed order): post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
+        """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
         # Opened before anything can record a step into it. It stands at
         # ``running`` until the verdict below, so a session killed mid-sequence
@@ -272,8 +390,16 @@ class ClosePhase(PhaseHandler):
             self.shared_state.set_stop_reason(derived)
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
+
+        # Ahead of the roofline and every close-section record, so they all
+        # describe the stack after its last validation settled.
+        try:
+            await self._revalidate_stack_for_close()
+        except Exception as exc:
+            log.exception("CLOSE: stack revalidation failed")
+            await self._record_close_step("stack_revalidation", status="failed", detail=repr(exc)[:240])
 
         # Post-optimization roofline (best-effort): profile the final optimized service once so the before/after
         # kernel roofline chart has its "after" column.
@@ -317,7 +443,7 @@ class ClosePhase(PhaseHandler):
                 status=close_status,
                 detail=detail,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 0.5 (fact_finalize) failed")
             await self._record_close_step(
                 "fact_finalize",
@@ -379,7 +505,7 @@ class ClosePhase(PhaseHandler):
                     task_id=report_task.task_id,
                     detail=detail,
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 1 (report) failed")
             self._emit_lifecycle(
                 step="report",
@@ -411,7 +537,7 @@ class ClosePhase(PhaseHandler):
                     task_id=bd_task.task_id,
                     detail=f"task_state={terminal_state!r}",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 2 (session_breakdown) failed")
             await self._record_close_step(
                 "session_breakdown",
@@ -435,7 +561,7 @@ class ClosePhase(PhaseHandler):
             # Attach the final breakdown JSON to the trace as a ``session_breakdown`` observation (no-op when live
             # push is disabled).
             record_session_breakdown(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
                 "langfuse_flush",
@@ -474,7 +600,7 @@ class ClosePhase(PhaseHandler):
                     status="skipped",
                     detail="no artifacts matched or dest unwritable",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 2.6 (artifact_package) failed")
             await self._record_close_step(
                 "artifact_package",
@@ -492,7 +618,7 @@ class ClosePhase(PhaseHandler):
             self.shared_state.set_stop_reason(self._derive_close_stop_reason())
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
@@ -537,7 +663,7 @@ class ClosePhase(PhaseHandler):
                         "nothing; %s still carries the pre-refresh close section",
                         pkg_path,
                     )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning(
                 "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
                 "the pre-refresh close section",
@@ -590,11 +716,10 @@ class ClosePhase(PhaseHandler):
         """Build + enqueue a Coordinator-internal ``report`` task (idempotency_key internal-report-<reason>)."""
         existing_id = (self.shared_state.closing_report_task_id or "").strip()
         if existing_id:
-            task = None
             try:
                 task = await self.tasks.get(existing_id)
-            except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                pass  # Stale id; fall through to fresh enqueue.
+            except TaskNotFound:
+                task = None
             if task is not None and not _task_is_dead(task):
                 log.info(
                     "internal-report task already enqueued by wall-clock "
@@ -630,7 +755,7 @@ class ClosePhase(PhaseHandler):
             self.shared_state.closing_report_task_id = task.task_id
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("internal-report: closing_report_task_id save failed")
         return task
 
@@ -676,12 +801,8 @@ class ClosePhase(PhaseHandler):
         while True:
             try:
                 state = str(getattr(await self.tasks.get(task.task_id), "state", "") or "")
-            except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                log.warning(
-                    "CLOSE step %s: task_id=%s vanished while the sequencer waited for it",
-                    step,
-                    task.task_id,
-                )
+            except TaskNotFound:
+                log.warning("CLOSE step %s: task_id=%s vanished while the sequencer waited for it", step, task.task_id)
                 return state
             if state != _TASK_STATE_RUNNING:
                 log.info(
@@ -787,7 +908,7 @@ class ClosePhase(PhaseHandler):
             return
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "close_step save failed for step=%r status=%r",
                 step,
@@ -824,7 +945,7 @@ class ClosePhase(PhaseHandler):
                     "cancelled",
                     evidence={"reason": "closing_phase"},
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
@@ -836,23 +957,18 @@ class ClosePhase(PhaseHandler):
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
-        try:
-            task, _existing = await self.tasks.create_or_return_existing(
-                kind="report",
-                params={
-                    "session_dir": str(self.session_dir),
-                    "max_highlights": 50,
-                },
-                idempotency_key=idempotency_key,
-                requires_lanes=[],
-                side_effects=["writes_results"],
-                lease_ttl_sec=120,
-            )
-            task_id = task.task_id
-        except Exception:  # noqa: BLE001 — the closing phase is already armed in persisted state
-            # A blank id is the honest record of a failed enqueue, and the
-            # closing check reads it as "nothing to wait for".
-            log.exception("closing_phase: enqueueing the report task failed; the close sequence will write it")
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params={
+                "session_dir": str(self.session_dir),
+                "max_highlights": 50,
+            },
+            idempotency_key=idempotency_key,
+            requires_lanes=[],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id
         self.shared_state.save(self.session_dir)
 
@@ -907,8 +1023,6 @@ class ClosePhase(PhaseHandler):
         if not task_id:
             log.warning("closing_phase: no report task was enqueued; closing without waiting on one")
             return True
-        from ..state.task_registry import TaskNotFound
-
         try:
             task = await self.tasks.get(task_id)
         except TaskNotFound:

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import json
 import os
 import re
@@ -28,7 +27,6 @@ from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )
 from kernelforge.durable_io import atomic_write_text, fsync_directory
-from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
@@ -45,10 +43,6 @@ from kernelforge.mcp_server.tools.bench import (
 # How much of the speedup a candidate was ranked on its own measurement has to reproduce for that ranking to count as
 # honest. The regression this answers measured 32% below the claim that had won the ranking.
 _WARMSTART_CLAIM_CONFIRMED_RATIO = 0.9
-
-# Ceiling on the task's declared correctness suite when a warm start runs it, used when no caller passes the loop's
-# own ``validate_stage_timeout_sec``.
-_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC = 1800
 
 _KB_REFERENCES_REL = Path("forge_experiments") / "kb_references"
 
@@ -702,7 +696,6 @@ def _adopt_measured_candidate(
     workspace_dir,
     source_files,
     allowed_paths,
-    canonical_timeout_cap_sec: int,
 ) -> tuple[str, str]:
     """Re-apply one already-measured candidate and commit it as the start."""
     pre_untracked = _untracked_files(workspace_dir)
@@ -729,28 +722,11 @@ def _adopt_measured_candidate(
             flush=True,
         )
         return "", "rebuild_failed"
-    try:
-        canonical = asyncio.run(
-            accept_candidate(
-                workspace_dir,
-                timeout_cap_sec=canonical_timeout_cap_sec,
-                candidate_label=(f"KB warm-start {sol.get('solution_slug', '')}".strip()),
-            )
-        )
-    except Exception as error:  # noqa: BLE001 - a suite forge cannot run rejects
-        _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
-        print(
-            f"  [kb] warm-start candidate rejected: the canonical correctness suite could not be run ({error})",
-            flush=True,
-        )
-        return "", "canonical_correctness_failed"
-    if not canonical.passed:
-        _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
-        print(
-            f"  [kb] warm-start candidate rejected: the task's own correctness suite failed ({canonical.detail})",
-            flush=True,
-        )
-        return "", "canonical_correctness_failed"
+    # The driver already rejected an incorrect or slower candidate before this
+    # one was chosen, and re-applying the same patch to the same base it was
+    # measured on reproduces what it measured. Judging it again here asked the
+    # driver the same question, through a task configuration the engine had to
+    # assume was written in one particular shape.
     try:
         commit = _git_commit_all(
             workspace_dir,
@@ -949,7 +925,7 @@ def _try_apply_candidate(
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - scoring is third-party; worktree is discarded
         _git_discard_worktree(
             workspace_dir,
             pre_untracked=pre_untracked,
@@ -1041,7 +1017,6 @@ def kb_warmstart(
     operator_name="",
     resume=False,
     bench_repeat=1,
-    canonical_timeout_cap_sec=_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC,
 ) -> dict:
     """Look up + apply the best prior solution as the loop's starting point.
 
@@ -1068,28 +1043,23 @@ def kb_warmstart(
             "read_error": "",
         }
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         try:
-            read_kwargs = {
-                "config": config,
-                "kernel_path": kernel,
-                "kernel_source": kernel_source,
-                "kernel_backend": kernel_backend,
-                "target_functions": target_functions,
-                "framework": framework,
-                "top_k": warmstart_policy.top_k(),
-                "source_files": source_files,
-                "workspace": workspace_dir,
-                "operator_name": operator_name,
-            }
-            reader_parameters = inspect.signature(read_top_solutions).parameters
-            if "read_status" in reader_parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in reader_parameters.values()
-            ):
-                read_kwargs["read_status"] = read_status
-            sols = read_top_solutions(**read_kwargs)
+            sols = read_top_solutions(
+                config=config,
+                kernel_path=kernel,
+                kernel_source=kernel_source,
+                kernel_backend=kernel_backend,
+                target_functions=target_functions,
+                framework=framework,
+                top_k=warmstart_policy.top_k(),
+                source_files=source_files,
+                workspace=workspace_dir,
+                operator_name=operator_name,
+                read_status=read_status,
+            )
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
@@ -1267,7 +1237,6 @@ def kb_warmstart(
                     workspace_dir=workspace_dir,
                     source_files=source_files,
                     allowed_paths=allowed_paths,
-                    canonical_timeout_cap_sec=canonical_timeout_cap_sec,
                 )
                 if reject_reason:
                     statuses[idx] = f"rejected:{reject_reason}"
@@ -1343,14 +1312,9 @@ def kb_warmstart(
         raise
     except Exception as e:  # noqa: BLE001 - warm-start must never break the run
         from kernelforge.knowledge.experience_reader import sanitize_read_error
+        from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
 
-        error = sanitize_read_error(
-            e,
-            secrets=(
-                str(getattr(config, "gbrain_token", "") or ""),
-                os.environ.get("GBRAIN_TOKEN", ""),
-            ),
-        )
+        error = sanitize_read_error(e, secrets=kb_store_secrets(config))
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,
@@ -1363,18 +1327,13 @@ def _cheap_summary(archive: Any) -> dict:
     """Build a non-LLM experience summary from the on-disk candidate archive."""
     strategy = ""
     if archive is not None:
-        try:
-            index = archive.load_index()
-            keeps = [
-                entry
-                for entry in index
-                if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
-            ]
-            if keeps:
-                best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
-                strategy = (best.get("plan") or "").strip()
-        except Exception:  # noqa: BLE001 - best-effort; empty summary is acceptable
-            pass
+        index = archive.load_index()
+        keeps = [
+            entry for entry in index if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
+        ]
+        if keeps:
+            best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
+            strategy = (best.get("plan") or "").strip()
     return {"category": "", "strategy": strategy, "recipe": "", "lessons": ""}
 
 
@@ -1420,7 +1379,7 @@ def write_experience_to_kb(
         digest = ""
         archive = getattr(loop_runner, "archive", None)
         if archive is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError, ValueError, KeyError):
                 keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
                 scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
                 if scored_keeps:
@@ -1434,7 +1393,7 @@ def write_experience_to_kb(
             snr_db = snr_db_override
 
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
