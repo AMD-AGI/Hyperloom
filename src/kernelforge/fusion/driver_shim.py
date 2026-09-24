@@ -124,20 +124,31 @@ def main():
         print("PARITY MISSING: harness reported no comparable shape")
         return 1
 
-    # A skipped microbench (the Mamba/SSM backend cannot init on ROCm) is not a
-    # failure: parity still decided correctness, so report the eager time for
-    # both arms and let the loop see no speedup rather than an error.
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
-    if report.get("skipped") or not fused_us:
+    if report.get("skipped"):
+        # A microbench the harness declined to run (the Mamba/SSM backend cannot init on
+        # ROCm) is not a failure: parity still decided correctness, so report the eager
+        # time for both arms and let the loop see no speedup rather than an error.
         print("SKIPPED: " + str(report.get("skip_reason") or "microbench unavailable"))
         if eager_us:
             print("case_ms: %s %.6f" % (CASE_ID, float(eager_us) / 1000.0))
             print("wall_ms: %.6f" % (float(eager_us) / 1000.0))
         return 0
 
-    print("case_ms: %s %.6f" % (CASE_ID, float(fused_us) / 1000.0))
-    print("wall_ms: %.6f" % (float(fused_us) / 1000.0))
+    if not fused_us and _fused_kernel_authored():
+        print("BENCH MISSING: harness ran the microbench but reported no fused_us")
+        return 1
+
+    # With no kernel authored yet there is no fused arm to time, so the eager time
+    # anchors the case: that pristine run IS the baseline, not a failed measurement.
+    case_us = fused_us or eager_us
+    if not case_us:
+        print("BENCH MISSING: harness reported no timing for either arm")
+        return 1
+
+    print("case_ms: %s %.6f" % (CASE_ID, float(case_us) / 1000.0))
+    print("wall_ms: %.6f" % (float(case_us) / 1000.0))
     if eager_us:
         print("eager_ms: %.6f" % (float(eager_us) / 1000.0))
     return 0
