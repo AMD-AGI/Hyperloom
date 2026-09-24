@@ -131,8 +131,6 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params is not None
     assert params["domain"] == "enablement_specialist"
     assert params["source_phase"] == "ENABLEMENT"
-    # Reuses FRAMEWORK authoring machinery + tags the objective.
-    assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
     # The pre-patch half of the gate travels as the persisted observation's

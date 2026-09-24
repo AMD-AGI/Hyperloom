@@ -124,7 +124,7 @@ def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     params = payload.get("params")
     if not isinstance(params, dict):
         return False
-    return bool(params.get("enablement")) or bool(params.get("framework_agent_authoring"))
+    return bool(params.get("enablement"))
 
 
 def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | None = None) -> str:
