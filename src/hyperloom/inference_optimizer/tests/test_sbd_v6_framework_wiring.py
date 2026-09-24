@@ -242,6 +242,30 @@ def test_failed_discovery_round_records_the_failure(session_dir: Path):
     assert event["status"] == "failed"
 
 
+@pytest.mark.asyncio
+async def test_a_specialist_round_merges_onto_the_run_that_dispatched_it(session_dir: Path):
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, ROLE_DISCOVERY
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord._open_framework_timeline()
+    coord._framework_timeline().record_run("sp-9", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded")
+
+    await coord._record_specialist_result(
+        task=SimpleNamespace(task_id="sp-9", params={}),
+        done_payload={"domain": "serving_specialist", "summary": "nothing left to bench", "proposal_set": []},
+        source="specialist:sp-9",
+    )
+    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+
+    (run,) = _events(session_dir)[0]["ext"]["runs"]
+    assert run["role"] == "discovery"
+    assert run["summary"] == "nothing left to bench"
+    assert run["proposals_total"] == 0
+
+
 def test_terminal_row_settles_the_proposal(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
