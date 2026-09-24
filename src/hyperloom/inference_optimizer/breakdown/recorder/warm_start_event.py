@@ -38,7 +38,6 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
-from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 log = logging.getLogger(__name__)
 

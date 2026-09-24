@@ -658,8 +658,17 @@ def test_the_recorder_fragment_overlays_the_collected_section():
         {"session_id": "", "stop_reason": "", "image": "registry.example/hyperloom:test"},
     )
     assert merged["session_id"] == "sess-1178"
-    assert merged["stop_reason"] == ""
+    assert merged["stop_reason"] == "target_reached"
     assert merged["image"] == "registry.example/hyperloom:test"
+
+
+def test_a_missing_collector_keeps_recorded_lifecycle_fields():
+    merged = ex._merge_session(
+        {"stop_reason": "target_reached", "ended_at_utc": "2026-08-08T02:00:00Z"},
+        None,
+    )
+    assert merged["stop_reason"] == "target_reached"
+    assert merged["ended_at_utc"] == "2026-08-08T02:00:00Z"
 
 
 def test_a_section_with_no_fragment_is_returned_untouched():

@@ -59,6 +59,11 @@
 /src/hyperloom/agents/kernel/tools/source_env.py                @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/kernel_source_index.py       @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
 
+# KERNEL opt (the kernel_optimization.py CLI wrapper was retired)
+/src/hyperloom/orchestrator/kernel/request_handlers.py          @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/kernelforge/cli.py                                         @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+
 # GEAK integration
 /src/hyperloom/agents/kernel/tools/backends/geak_runner.py      @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE

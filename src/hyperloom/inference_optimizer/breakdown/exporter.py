@@ -44,13 +44,14 @@ def _merge_session(fragment: Any, collector_value: Any) -> Any:
     """Overlay the recorder's live ``session`` fields on the collected section.
 
     Lifecycle fields the collector derives from CLOSE and timestamps stay
-    collector-owned: a later state snapshot must not cover them up.
+    collector-owned when the collector actually produced a value. A degraded
+    collect (``None`` / empty) keeps the recorder fragment.
     """
     if not isinstance(fragment, dict) or not fragment:
         return collector_value
     merged = dict(collector_value) if isinstance(collector_value, dict) else {}
     for key, value in fragment.items():
-        if key in _COLLECTOR_OWNED_SESSION:
+        if key in _COLLECTOR_OWNED_SESSION and _recorded_session_value(merged.get(key)):
             continue
         if _recorded_session_value(value) or key not in merged:
             merged[key] = value
