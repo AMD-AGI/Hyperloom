@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id as _arm_review_row_id
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     patch_lever_kind,
@@ -114,9 +115,10 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:
     """True for an ``integrate_patch`` proposal that pre-screens a PR candidate."""
-    if getattr(pending, "action_name", "") != "integrate_patch":
-        return False
-    return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
+    return is_upstream_pr_prescreen(
+        getattr(pending, "action_name", ""),
+        getattr(pending, "payload", None),
+    )
 
 
 def _record_config_proposal(router: Any, pending: Any) -> None:
@@ -206,16 +208,10 @@ def _review_subject(pending: Any) -> str:
     """Return the proposal row a ruling belongs on.
 
     The two arms identify a proposal differently, so this is the candidate id
-    when the proposal carries one and the bus message id otherwise. Resolving it
-    here keeps a review on the proposal it judged instead of opening a second,
-    near-empty row beside it.
+    when the proposal carries one and the bus message id otherwise.
     """
     payload = getattr(pending, "payload", None) or {}
-    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    candidate = str(
-        payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
-    ).strip()
-    return candidate or str(getattr(pending, "proposal_msg_id", "") or "")
+    return _arm_review_row_id(payload, fallback_msg_id=str(getattr(pending, "proposal_msg_id", "") or ""))
 
 
 def _phase_scope(router: Any) -> tuple[str, int]:

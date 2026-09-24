@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX as _LOCAL_EXPLORE_PREFIX
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
@@ -1345,9 +1346,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
         progress = getattr(state, "framework_agent_phase_progress", None) or []
         settled = sum(
-            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
+            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith(_LOCAL_EXPLORE_PREFIX)
         )
-        cand_id = self._framework_candidate_key(candidate) or f"local_explore:{settled}"
+        cand_id = self._framework_candidate_key(candidate) or f"{_LOCAL_EXPLORE_PREFIX}{settled}"
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()

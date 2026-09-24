@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolved_within,
 )
 from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.framework_arm import verdict_subject as _arm_verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -131,20 +132,8 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 
 
 def patch_verdict_subject(params: Mapping[str, Any]) -> str:
-    """Return the id an ``integrate_patch``'s Critic verdict is filed under.
-
-    An authored patch is reviewed as the specialist that wrote it. An
-    upstream-PR candidate is pre-screened before any specialist exists, so the
-    candidate id is what the verdict names.
-
-    Args:
-        params: The action's params.
-
-    Returns:
-        The subject id, or ``""`` when the params name neither.
-    """
-    sid = str(params.get("specialist_task_id") or "").strip()
-    return sid or str(params.get("framework_agent_candidate_id") or "").strip()
+    """Return the id an ``integrate_patch``'s Critic verdict is filed under."""
+    return _arm_verdict_subject(params)
 
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
