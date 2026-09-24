@@ -12,15 +12,22 @@ name: AMD Skills Checks
 # .github/federation.json, and the nightly importer raises on a path that is
 # no longer there.
 #
-# Deliberately has NO ``paths-ignore``, for the same reason as
-# ``packaging.yml``: the skill is markdown, which is exactly what ``lint.yml``
-# and ``tests-coverage.yml`` skip.
+# ``paths`` matches the parent directory rather than the skill itself, so a
+# rename still triggers: git reports both the old and the new path as changed.
+# Nothing else can break this skill -- skillscope is pinned below -- so any
+# other change has nothing here to check.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
   push:
     branches: [main]
+    paths:
+      - "examples/skills/**"
+      - ".github/workflows/amd-skills-evals.yml"
   pull_request:
+    paths:
+      - "examples/skills/**"
+      - ".github/workflows/amd-skills-evals.yml"
   workflow_dispatch:
     inputs:
       structural:
