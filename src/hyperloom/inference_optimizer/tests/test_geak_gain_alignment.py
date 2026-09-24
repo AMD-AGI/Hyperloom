@@ -327,7 +327,6 @@ async def test_persisted_legacy_mode_allows_existing_geak_replay(
         "missing_axes",
         "missing_output",
         "identity_mismatch",
-        "total_regression",
         "lift_refused",
     ],
 )
@@ -357,8 +356,6 @@ async def test_agentx_2b_uses_current_canonical_measurement(
     elif case == "missing_output":
         measured = None
         measurement.pop("tput")
-    elif case == "total_regression":
-        measurement.update(input_throughput=350.0, total_throughput=550.0)
     elif case == "lift_refused":
         monkeypatch.setattr(coord, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
 
@@ -401,7 +398,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert state.resume_pending_revalidation is True
         # ``output_drop`` joins them: the guard reads output throughput, which this case regresses past the band.
-        if case in {"total_regression", "lift_refused", "missing_axes", "output_drop"}:
+        if case in {"lift_refused", "missing_axes", "output_drop"}:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"

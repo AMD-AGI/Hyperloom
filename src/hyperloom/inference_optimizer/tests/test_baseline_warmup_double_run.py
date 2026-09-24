@@ -982,7 +982,7 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
         "e2e_norm_intvty_p50": 100.0,
-        "duration_seconds": 900.0,
+        "duration_seconds": 25.0,
         "request_error_rate": 0.0,
     }
     shared.current_best = {"action": "baseline", "tput": 100.0, **shared.baseline_perf}
@@ -1006,7 +1006,7 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 100.0,
         "e2e_norm_intvty_p50": 100.0,
-        "duration_seconds": 900.0,
+        "duration_seconds": 25.0,
         "request_error_rate": 0.0,
     }
     captured: list = []
@@ -1024,7 +1024,7 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
                 "total_token_throughput": 99999.0,
                 "e2e_norm_intvty_p90": 999.0,
                 "e2e_norm_intvty_p50": 999.0,
-                "duration_seconds": 900.0,
+                "duration_seconds": 25.0,
                 "request_error_rate": 0.0,
             }
         )
@@ -1066,17 +1066,16 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct",
     [
-        pytest.param(90.0, 1100.0, 110.0, False, True, 10.0, id="intvty-win-output-drop"),
-        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-output-floor-does-not-apply"),
-        pytest.param(100.1, 1509.0, 150.9, True, False, 0.6, id="stack-below-primary"),
-        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-below-agentx-floor"),
-        pytest.param(100.1, 1500.0, 153.0, True, True, 2.0, id="stack-exact-agentx-floor"),
-        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="primary-below-agentx-floor"),
-        pytest.param(90.0, 950.0, 102.0, False, True, 2.0, id="exact-floor-and-throughput-guard"),
-        pytest.param(110.0, 949.9, 110.0, False, False, 10.0, id="throughput-guard-breach"),
-        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="interactivity-tradeoff-recorded"),
-        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="flat-interactivity-recorded"),
-        pytest.param(110.0, 900.0, 90.0, False, False, -10.0, id="both-axes-regress"),
+        pytest.param(90.0, 1100.0, 110.0, False, False, 10.0, id="output-guard-breach"),
+        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-median-just-above-flat"),
+        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-median-below-the-bar"),
+        pytest.param(100.1, 1500.0, 154.5, True, True, 3.0, id="stack-median-at-the-bar"),
+        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="median-below-the-bar"),
+        pytest.param(110.0, 1030.0, 103.0, False, True, 3.0, id="median-at-the-bar"),
+        pytest.param(90.0, 950.0, 102.0, False, False, 2.0, id="median-below-bar-and-output-breach"),
+        pytest.param(110.0, 949.9, 110.0, False, True, 10.0, id="total-no-longer-participates"),
+        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="median-regresses"),
+        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="median-flat"),
     ],
 )
 def test_deferred_accuracy_keep_policy_uses_graded_performance(
@@ -1084,11 +1083,19 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
 ):
     case = deferred_accuracy_keep_policy
     case.measurement.update(
-        output_throughput=output_tput, total_token_throughput=total_tput, e2e_norm_intvty_p90=intvty
+        output_throughput=output_tput,
+        total_token_throughput=total_tput,
+        e2e_norm_intvty_p90=intvty,
+        e2e_norm_intvty_p50=intvty,
     )
     reference = 150.0 if stack else 100.0
     if stack:
-        case.shared.current_best.update(action="integrate", total_throughput=1500.0, e2e_norm_intvty_p90=reference)
+        case.shared.current_best.update(
+            action="integrate",
+            total_throughput=1500.0,
+            e2e_norm_intvty_p90=reference,
+            e2e_norm_intvty_p50=reference,
+        )
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
 
     result = case.run()
@@ -1121,9 +1128,9 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
     else:
         assert result.get("accuracy") is None
         assert stage["status"] == "skipped"
-        both_axes_regress = intvty < reference * 0.95 and total_tput < (1500.0 if stack else 1000.0) * 0.95
-        assert stage["reason"] == ("intvty_regression" if both_axes_regress else "performance_keep_not_eligible")
-        assert stage["graded_objective"] == "e2e_norm_intvty_p90"
+        # Every non-KEEP on the graded axis is a revert now, so the skip always names the objective.
+        assert stage["reason"] == "intvty_regression"
+        assert stage["graded_objective"] == "e2e_norm_intvty_p50"
         assert stage["candidate"] == pytest.approx(intvty)
         assert stage["reference"] == pytest.approx(reference)
         assert stage["gain_pct"] == pytest.approx(gain_pct)
@@ -1227,9 +1234,15 @@ def test_deferred_accuracy_skips_incomparable_performance(
         case.shared.current_best["action"] = "integrate"
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
     if missing_from == "candidate":
-        case.measurement.pop("total_token_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_token_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.measurement.pop(_axis, None)
     else:
-        case.shared.current_best.pop("total_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.shared.current_best.pop(_axis, None)
 
     result = case.run()
 
