@@ -157,6 +157,9 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -176,6 +179,9 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
         "submission_valid": True,
@@ -231,6 +237,9 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -242,6 +251,9 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "completed_requests": 80,
         "submission_valid": True,
         "accuracy": 0.80,
@@ -318,6 +330,9 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.reference_server_args = "--disable-cuda-graph --max-running-requests 64"
     state.reference_envs = {"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"}
@@ -345,6 +360,9 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
             "input_throughput": tput * 9,
             "total_token_throughput": tput * 10,
             "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "completed_requests": 80,
             "submission_valid": True,
         }
@@ -623,6 +641,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     if stack:
@@ -658,6 +679,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
             "input_throughput": round_total - round_output,
             "total_token_throughput": round_total,
             "e2e_norm_intvty_p90": round_intvty,
+            "e2e_norm_intvty_p50": round_intvty,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "tpot_p90_ms": round_tpot,
             "completed_requests": 80,
             "submission_valid": True,

@@ -977,7 +977,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
     shared.framework = "vllm"
     shared.benchmark_mode = "synthetic"
     shared.baseline_tput = 100.0
-    shared.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    shared.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     shared.current_best = {"action": "baseline", "tput": 100.0, **shared.baseline_perf}
     shared.optimization_stack = []
     output_dir = tmp_path / "ws"
@@ -998,6 +1005,9 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         "output_throughput": 90.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     captured: list = []
     inner, calls = _cold_then_hot_fake_run(captured)
@@ -1009,7 +1019,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         axes = (
             measurement
             if slot.name == "measure_round"
-            else {"output_throughput": 9999.0, "total_token_throughput": 99999.0, "e2e_norm_intvty_p90": 999.0}
+            else {
+                "output_throughput": 9999.0,
+                "total_token_throughput": 99999.0,
+                "e2e_norm_intvty_p90": 999.0,
+                "e2e_norm_intvty_p50": 999.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
+            }
         )
         report_path = workspace / "benchmark_report.json"
         report = json.loads(report_path.read_text())

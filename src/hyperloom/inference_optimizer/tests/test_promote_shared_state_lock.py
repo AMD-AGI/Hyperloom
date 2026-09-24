@@ -467,12 +467,22 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     anchor = {
         "action": "explore",
         "tput": 100.0,
         "total_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "extra_server_args": "",
         "extra_envs": {},
     }
@@ -486,6 +496,9 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "total_token_throughput": 1200.0,
         "input_throughput": 1110.0,
         "e2e_norm_intvty_p90": 50.0 if vetoed else 120.0,
+        "e2e_norm_intvty_p50": 50.0 if vetoed else 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "ttft_mean_ms": 12.0,
         "e2el_mean_ms": 23.0,
@@ -513,6 +526,9 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "total_throughput": 2000.0,
         "input_throughput": 1860.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 99.0,
         "ttft_mean_ms": 99.0,
         "e2el_mean_ms": 99.0,
@@ -1908,13 +1924,23 @@ class TestWritebackRequiredAxes:
         state.framework = "sglang"
         state.benchmark_mode = "agentx"
         state.baseline_tput = 100.0
-        state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+        state.baseline_perf = {
+            "output_throughput": 100.0,
+            "total_throughput": 1000.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        }
         state.current_best = {
             "action": "explore",
             "variant_name": "prior",
             "tput": 120.0,
             "total_throughput": 1200.0,
             "e2e_norm_intvty_p90": 120.0,
+            "e2e_norm_intvty_p50": 120.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "extra_server_args": "--page-size 16",
             "extra_envs": {"PRIOR_ENV": "1"},
         }
@@ -1943,6 +1969,9 @@ class TestWritebackRequiredAxes:
             "tput": 150.0,
             "total_throughput": 1600.0,
             "e2e_norm_intvty_p90": 150.0,
+            "e2e_norm_intvty_p50": 150.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "extra_server_args": "--page-size 32",
             "extra_envs": {"NEXT_ENV": "1"},
             "unset_envs": ["PRIOR_ENV"],
@@ -2148,6 +2177,9 @@ class TestWritebackRequiredAxes:
                 "extra_server_args": f"--page-size {64 << step}",
                 "total_throughput": total,
                 "e2e_norm_intvty_p90": intvty,
+                "e2e_norm_intvty_p50": intvty,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             }
             assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
             assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
@@ -2292,8 +2324,23 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
-    s.current_best = {"action": "baseline", "tput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
+    s.current_best = {
+        "action": "baseline",
+        "tput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     first = {
         "name": "first",
         "fingerprint": "fp_first",
@@ -2301,6 +2348,9 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "total_throughput": 1200.0,
         "input_throughput": 1080.0,
         "e2e_norm_intvty_p90": 120.0,
+        "e2e_norm_intvty_p50": 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "gain_pct": 20.0,
         "candidate_extra_server_args": "--flag-a 1",
@@ -2316,6 +2366,9 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "total_throughput": last_total,
         "input_throughput": last_total - last_tput,
         "e2e_norm_intvty_p90": last_intvty,
+        "e2e_norm_intvty_p50": last_intvty,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 9.0,
         "gain_pct": 4.0,
         "candidate_extra_server_args": "--flag-b 2",

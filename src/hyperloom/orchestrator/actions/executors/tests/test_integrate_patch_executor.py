@@ -2292,7 +2292,14 @@ async def test_executor_grades_real_patch_bench(
     state = SimpleNamespace(
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
-        current_best={"tput": 100.0, "total_throughput": 20000.0, "e2e_norm_intvty_p90": 450.0},
+        current_best={
+            "tput": 100.0,
+            "total_throughput": 20000.0,
+            "e2e_norm_intvty_p90": 450.0,
+            "e2e_norm_intvty_p50": 450.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
