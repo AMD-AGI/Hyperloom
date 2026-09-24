@@ -57,6 +57,17 @@ class SingleTaskResult:
     reason: str = ""
 
 
+def _persist_forge_loop_output(task_dir: Path, outcome: ForgeLoopOutcome) -> None:
+    """Keep one forge-loop's console output beside its result."""
+    for name, text in (("forge-loop.stdout.log", outcome.stdout), ("forge-loop.stderr.log", outcome.stderr)):
+        if not (text or "").strip():
+            continue
+        try:
+            (Path(task_dir) / name).write_text(text, encoding="utf-8")
+        except OSError:
+            log.warning("could not persist %s for %s", name, task_dir, exc_info=True)
+
+
 def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     if outcome.timed_out:
         return "forge-loop timed out"
@@ -212,6 +223,7 @@ def dispatch_single_task(
                 update_state=False,
             ),
         )
+        _persist_forge_loop_output(task_path, outcome)
         recovered = recover_task_result(
             layout,
             task_path,
@@ -250,7 +262,7 @@ def dispatch_single_task(
             status=TASK_STATUS_FAILED,
             reason=reason,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - translated into a dispatch failure
         reason = f"single-task dispatch failed: {error}"
         state_store.transition(TASK_STATUS_FAILED, reason=reason)
         return SingleTaskResult(
@@ -269,7 +281,7 @@ def dispatch_single_task(
         # and the branch still exist, so a recovery that failed for a passing
         # reason gets one more attempt here. Publication is idempotent.
         if worktree is not None and worktree.inplace:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: last-chance recovery; the tree goes either way
                 recover_task_result(layout, task_path, update_state=False)
         # After that, never before: the patch is what the campaign was for, and
         # this returns the tree the patch was built in. A private checkout is

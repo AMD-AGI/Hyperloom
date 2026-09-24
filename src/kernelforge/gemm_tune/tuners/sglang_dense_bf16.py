@@ -469,8 +469,20 @@ class SglangDenseBf16Tuner(BaseTuner):
         if rc == 124:
             # Killed by the outer timeout -- but the tuner writes rows as it goes, so some shapes may already be on
             # disk.
-            self._dropped_inaccurate = drop_inaccurate_rows(tuned_csv)
+            accuracy = drop_inaccurate_rows(tuned_csv)
+            self._dropped_inaccurate = accuracy.dropped
             salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
+            if salvaged and not accuracy.completed:
+                return TuneResult(
+                    tuner_name=self.name,
+                    status="failed",
+                    error=(
+                        f"Tuning timed out after {self.ctx.timeout_s}s and aiter's accuracy figures "
+                        f"were not applied to {tuned_csv}: {accuracy.reason}"
+                    ),
+                    error_class="accuracy_filter_incomplete",
+                    expected_shapes=n_expected,
+                )
             if salvaged:
                 log.warning(
                     "Dense BF16: timed out after %ds but %d of %d shapes were already written; keeping them",
@@ -514,7 +526,8 @@ class SglangDenseBf16Tuner(BaseTuner):
         defaults = _parse_profile_defaults(profile_csv)
         # Before anything reads the artifact: this file IS what gets deployed, so a row aiter measured as wrong must
         # not survive to serving.
-        self._dropped_inaccurate = drop_inaccurate_rows(tuned_csv)
+        accuracy = drop_inaccurate_rows(tuned_csv)
+        self._dropped_inaccurate = accuracy.dropped
         shape_results = _parse_tuner_results(tuned_csv, defaults)
         total = len(shape_results)
         not_finished = _NOT_FINISHED_MARKER in (stdout or "") or _NOT_FINISHED_MARKER in (stderr or "")
@@ -531,6 +544,15 @@ class SglangDenseBf16Tuner(BaseTuner):
                 expected_shapes=n_expected,
                 error=(f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} ({detail}): {stderr[-300:]}"),
                 error_class="empty_output",
+            )
+
+        if not accuracy.completed:
+            return TuneResult(
+                tuner_name=self.name,
+                status="failed",
+                error=f"aiter's accuracy figures were not applied to {tuned_csv}: {accuracy.reason}",
+                error_class="accuracy_filter_incomplete",
+                expected_shapes=n_expected,
             )
 
         return self._build_result(

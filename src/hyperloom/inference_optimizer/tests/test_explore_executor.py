@@ -17,16 +17,11 @@ import yaml
 from hyperloom.orchestrator.actions.executors import (
     ExploreExecutor,
 )
-from hyperloom.orchestrator.actions.executors.explore import (
-    DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
-    DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC,
-    _compute_explore_variant_timeout,
-)
 from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
-    _SESSION_KILL_GRACE_SEC,
+    GridVariant,
     apply_compatibility_filter,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -37,14 +32,12 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
-)
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -52,6 +45,10 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+
+def _eval_off(value: object) -> bool:
+    return not is_truthy(value, default=True)
 
 
 @pytest.fixture(autouse=True)
@@ -211,239 +208,60 @@ def test_apply_explore_search_update_preserves_accepted():
     assert "bb" * 8 in state.explore_search["tested"]
 
 
-def test_compute_explore_variant_timeout_floor_when_no_baseline():
-    """No baseline yet (cold start / failed baseline) → floor."""
-    assert _compute_explore_variant_timeout(0.0, 1.10) == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
-    assert _compute_explore_variant_timeout(-1.0, 1.10) == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
-    assert _compute_explore_variant_timeout(0.0, 1.10, floor_sec=1800) == 1800
+def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
+    """One round's worth of executor ledger writes."""
+    return {
+        "schema_version": 1,
+        "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
+        "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
+        "name_index": {name: fingerprint},
+        "last_round": {"round_id": f"explore-{round_no:03d}"},
+    }
 
 
-def test_compute_explore_variant_timeout_scales_with_baseline():
-    """Hard cap auto-scales above the soft kill (kill_ratio + safety_margin)."""
-    derived = _compute_explore_variant_timeout(4140.0, 1.10)
-    assert derived == 6624
+def test_apply_explore_search_update_accumulates_across_rounds():
+    """The executor reports one round; the ledger has to remember the ones before it."""
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    state.apply_explore_search_update(_round_update(2, "bb" * 8, "b"))
 
-    derived_small = _compute_explore_variant_timeout(300.0, 1.10)
-    assert derived_small == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
-
-
-def test_compute_explore_variant_timeout_ceiling_caps_runaway():
-    """Pathological baseline value can't push the cap past the ceiling."""
-    at_ceiling = _compute_explore_variant_timeout(9000.0, 1.10)
-    assert at_ceiling == DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
-
-    over = _compute_explore_variant_timeout(20000.0, 1.10)
-    assert over == DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
+    search = state.explore_search
+    assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
+    assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
+    assert search["name_index"] == {"a": "aa" * 8, "b": "bb" * 8}
 
 
-def test_compute_explore_variant_timeout_kill_ratio_below_one_clamps():
-    """A non-positive / sub-1 kill_ratio still gives a sensible cap (clamped to max(1.0, kill_ratio))."""
-    derived = _compute_explore_variant_timeout(4140.0, 0.0)
-    assert derived == int(4140.0 * 1.5)
+def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    second = _round_update(2, "aa" * 8, "a")
+    second["tested"]["aa" * 8]["outcome"] = "KEEP"
+    state.apply_explore_search_update(second)
+
+    assert state.explore_search["tested"]["aa" * 8]["outcome"] == "KEEP"
+    assert len(state.explore_search["rejected"]) == 1
 
 
-def test_compute_explore_variant_timeout_safety_margin_override():
-    """Operator can shrink/expand the safety margin (e.g. for torch.compile AOTI cold-start tax)."""
-    generous = _compute_explore_variant_timeout(4140.0, 1.10, safety_margin=1.0)
-    assert generous == 8694
-
-    tight = _compute_explore_variant_timeout(4140.0, 1.10, safety_margin=0.0)
-    assert tight == 4554
-
-
-@pytest.mark.asyncio
-async def test_explore_executor_auto_derives_variant_timeout(
-    sub_agent_runner,
-    tmp_path,
-):
-    """No ``variant_timeout_sec`` + injected baseline/kill_ratio → executor auto-derives the cap."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-derive"
-
-    captured_timeouts: list[int] = []
-
-    async def _spy_run_grid(*args, **kwargs):
-        captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            VariantResult,
-        )
-
-        slot = Path(kwargs["output_root"])
-        slot.mkdir(parents=True, exist_ok=True)
-        ws = _fake_workspace(slot, tput=805.0)
-        return [
-            VariantResult(
-                name="v_smoke",
-                extra_server_args="--smoke",
-                extra_envs={},
-                status="succeeded",
-                output_throughput=805.0,
-                workspace=str(ws),
-            )
-        ]
-
-    grid = [
-        {
-            "name": "v_smoke",
-            "extra_args": "--smoke",
-            "extra_envs": {},
-            "provenance": "default_grid",
-        }
-    ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "baseline_runtime_sec": 4140.0,
-            "explore_overtime_kill_ratio": 1.10,
-        },
-        idempotency_key="ex-derive",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore.run_grid",
-        side_effect=_spy_run_grid,
-    ):
-        res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    assert captured_timeouts, "run_grid was not invoked"
-    assert captured_timeouts[0] == 6624
+def test_apply_explore_search_update_advances_the_cursor_per_round():
+    """The cursor is the round ordinal: round ids and idempotency keys derive from it."""
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    assert state.explore_search["cursor"] == 1
+    # A round that benched three variants still advances the ordinal by one.
+    third = _round_update(2, "bb" * 8, "b")
+    third["tested"].update({"cc" * 8: {"name": "c"}, "dd" * 8: {"name": "d"}})
+    state.apply_explore_search_update(third)
+    assert state.explore_search["cursor"] == 2
 
 
-@pytest.mark.asyncio
-async def test_explore_executor_safety_margin_param_overrides_default(
-    sub_agent_runner,
-    tmp_path,
-):
-    """``params['variant_timeout_safety_margin']`` adjusts auto-derived headroom absent an explicit timeout."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-margin"
-
-    captured_timeouts: list[int] = []
-
-    async def _spy_run_grid(*args, **kwargs):
-        captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            VariantResult,
-        )
-
-        slot = Path(kwargs["output_root"])
-        slot.mkdir(parents=True, exist_ok=True)
-        ws = _fake_workspace(slot, tput=805.0)
-        return [
-            VariantResult(
-                name="v_smoke",
-                extra_server_args="--smoke",
-                extra_envs={},
-                status="succeeded",
-                output_throughput=805.0,
-                workspace=str(ws),
-            )
-        ]
-
-    grid = [
-        {
-            "name": "v_smoke",
-            "extra_args": "--smoke",
-            "extra_envs": {},
-            "provenance": "default_grid",
-        }
-    ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "baseline_runtime_sec": 4140.0,
-            "explore_overtime_kill_ratio": 1.10,
-            "variant_timeout_safety_margin": 1.0,
-        },
-        idempotency_key="ex-margin",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore.run_grid",
-        side_effect=_spy_run_grid,
-    ):
-        res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    assert captured_timeouts and captured_timeouts[0] == 8694
-
-
-@pytest.mark.asyncio
-async def test_explore_executor_explicit_variant_timeout_wins(
-    sub_agent_runner,
-    tmp_path,
-):
-    """Operator-pinned ``variant_timeout_sec`` takes precedence over auto-derive."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-pinned"
-
-    captured_timeouts: list[int] = []
-
-    async def _spy_run_grid(*args, **kwargs):
-        captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            VariantResult,
-        )
-
-        slot = Path(kwargs["output_root"])
-        slot.mkdir(parents=True, exist_ok=True)
-        ws = _fake_workspace(slot, tput=805.0)
-        return [
-            VariantResult(
-                name="v_smoke",
-                extra_server_args="--smoke",
-                extra_envs={},
-                status="succeeded",
-                output_throughput=805.0,
-                workspace=str(ws),
-            )
-        ]
-
-    grid = [
-        {
-            "name": "v_smoke",
-            "extra_args": "--smoke",
-            "extra_envs": {},
-            "provenance": "default_grid",
-        }
-    ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "variant_timeout_sec": 9000,
-            "baseline_runtime_sec": 4140.0,
-            "explore_overtime_kill_ratio": 1.10,
-        },
-        idempotency_key="ex-pin",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore.run_grid",
-        side_effect=_spy_run_grid,
-    ):
-        res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    assert captured_timeouts and captured_timeouts[0] == 9000
+def test_warm_history_rejected_rows_survive_the_first_round():
+    """Warm-start pre-fills ``rejected`` so the dedup gate denies re-tests; a round must not wipe it."""
+    state = SharedState()
+    state.explore_search = {
+        "rejected": [{"fingerprint": "ee" * 8, "name": "warm", "reason": "warm_recipe_what_failed"}]
+    }
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    assert {r["fingerprint"] for r in state.explore_search["rejected"]} == {"ee" * 8, "aa" * 8}
 
 
 @pytest.mark.asyncio
@@ -495,7 +313,6 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
             "output_dir": str(output_dir),
             "base_tput": 800.0,
             "grid": grid,
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-1",
     )
@@ -556,7 +373,6 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
             "source": "resume_stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": fingerprint,
-            "variant_timeout_sec": 10,
         },
         idempotency_key="geak-axis-rejection",
     )
@@ -646,7 +462,6 @@ async def test_explore_missing_axes_fails_closed(
             "output_dir": str(tmp_path / "explore-missing-axes"),
             "base_tput": base_tput,
             "grid": [{"name": "v_incomplete", "extra_args": "--incomplete-flag"}],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-missing-axes",
     )
@@ -735,7 +550,6 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
                 {"name": "v_incomplete", "extra_args": "--incomplete-flag"},
                 {"name": "v_next", "extra_args": "--next-flag"},
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-anchor-sequence",
     )
@@ -805,7 +619,6 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
             "output_dir": str(tmp_path / "explore-output-mode"),
             "base_tput": 200.0,
             "grid": [{"name": "v_output", "extra_args": "--output-flag"}],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-output-mode",
     )
@@ -867,7 +680,6 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
             "base_tput": 800.0,
             "accuracy_baseline": 0.80,
             "grid": grid,
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-acc-revert",
     )
@@ -933,7 +745,6 @@ async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_a
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-uncatalogued-acc",
     )
@@ -982,7 +793,6 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-shared-acc",
     )
@@ -1035,7 +845,6 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-remove-keep",
     )
@@ -1095,7 +904,6 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
             "output_dir": str(output_dir),
             # base_tput intentionally omitted to exercise SharedState recovery.
             "grid": grid,
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-base-tput-recovery",
     )
@@ -1155,7 +963,6 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-verdict-carry",
     )
@@ -1224,7 +1031,6 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
             "config_path": str(base),
             "output_dir": str(output_dir),
             "grid": grid,
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-cb-recovery",
     )
@@ -1298,7 +1104,6 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
             # Snapshotted when the task was queued, before the warm replay landed.
             "base_tput": 2192.52,
             "grid": grid,
-            "variant_timeout_sec": 10,
             **({"source": source} if source else {}),
         },
         idempotency_key="ex-stale-anchor",
@@ -1360,7 +1165,6 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-live-base-args",
     )
@@ -1434,7 +1238,6 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
                 "accepted": [],
                 "name_index": {},
             },
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-dedup",
     )
@@ -1490,10 +1293,8 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 30,
             "baseline_runtime_sec": 10.0,
             "baseline_warm_runtime_sec": 5.0,
-            "explore_overtime_kill_ratio": 1.20,
         },
         idempotency_key="ex-warm",
     )
@@ -1554,10 +1355,8 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 30,
             "baseline_runtime_sec": 10.0,
             "baseline_warm_runtime_sec": 5.0,
-            "explore_overtime_kill_ratio": 1.20,
         },
         idempotency_key="ex-noeval",
     )
@@ -1570,8 +1369,8 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
     warmup = [ev for slot, ev in seen if "warmup_round" in slot]
     decision = [ev for slot, ev in seen if "warmup_round" not in slot]
-    assert warmup and warmup[0] not in _RUN_EVAL_FALSE
-    assert decision and all(ev in _RUN_EVAL_FALSE for ev in decision)
+    assert warmup and not _eval_off(warmup[0])
+    assert decision and all(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio
@@ -1611,10 +1410,8 @@ async def test_explore_no_eval_disables_magpie_warmup_and_decision(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 30,
             "baseline_runtime_sec": 10.0,
             "baseline_warm_runtime_sec": 5.0,
-            "explore_overtime_kill_ratio": 1.20,
         },
         idempotency_key="ex-session-noeval",
     )
@@ -1626,9 +1423,9 @@ async def test_explore_no_eval_disables_magpie_warmup_and_decision(
         await sub.run_task(task)
 
     assert seen
-    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    assert all(_eval_off(ev) for _slot, ev in seen)
     base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
-    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+    assert _eval_off(base_yaml["benchmark"]["envs"].get("RUN_EVAL", ""))
 
 
 @pytest.mark.asyncio
@@ -1667,9 +1464,7 @@ async def test_explore_cold_decision_keeps_eval(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 30,
             "baseline_runtime_sec": 10.0,
-            "explore_overtime_kill_ratio": 1.20,
         },
         idempotency_key="ex-coldeval",
     )
@@ -1682,7 +1477,7 @@ async def test_explore_cold_decision_keeps_eval(
 
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
     decision = [ev for _slot, ev in seen]
-    assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
+    assert decision and not any(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio
@@ -1715,7 +1510,6 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
             "output_dir": str(tmp_path / "explore-singleround"),
             "base_tput": 800.0,
             "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
-            "variant_timeout_sec": 30,
         },
         idempotency_key="ex-no-double-run",
     )
@@ -1764,7 +1558,6 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
                     "provenance": "llm_direct",
                 }
             ],
-            "variant_timeout_sec": 30,
         },
         idempotency_key="ex-warmfail",
     )
@@ -1792,96 +1585,6 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_killed_overtime_no_tput_no_keep(
-    sub_agent_runner,
-    tmp_path,
-    monkeypatch,
-):
-    """A fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
-    _force_cold_decision(monkeypatch)
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-overtime"
-
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        OVERTIME_KILL_RETURNCODE,
-    )
-
-    def _fake_kill(cmd, *args, **kwargs):
-        assert kwargs.get("soft_deadline_sec") == pytest.approx(11.0)
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=OVERTIME_KILL_RETURNCODE,
-            stdout="",
-            stderr="",
-        )
-
-    grid = [
-        {
-            "name": "slow_variant",
-            "extra_args": "--slow-flag",
-            "extra_envs": {},
-            "provenance": "default_grid",
-        }
-    ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "variant_timeout_sec": 60,
-            "baseline_runtime_sec": 10.0,
-            "explore_overtime_kill_ratio": 1.10,
-        },
-        idempotency_key="ex-overtime",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_kill,
-    ):
-        res = await sub.run_task(task)
-
-    out = res.result
-    assert out["status"] == "succeeded"
-    assert out["winners"] == []
-    assert len(out["losers"]) == 1
-    loser = out["losers"][0]
-    assert loser["name"] == "slow_variant"
-    assert loser["reason"] == "killed_overtime"
-    assert loser["tput"] is None
-    assert loser["gain_pct"] is None
-    assert loser["runtime_sec"] is not None
-    assert loser["wall_clock_ratio_vs_baseline"] is not None
-    fp = canonical_fingerprint("--slow-flag", {})
-    ledger = out["explore_search_update"]
-    te = ledger["tested"][fp]
-    assert te["outcome"] == "KILLED_OVERTIME"
-    assert te["tput"] is None
-    assert te["gain_pct"] is None
-    assert te["runtime_sec"] is not None
-    assert te["wall_clock_ratio_vs_baseline"] is not None
-    assert te["baseline_runtime_sec"] == pytest.approx(10.0)
-    assert te["overtime_kill_ratio"] == pytest.approx(1.10)
-    rejected_reasons = {r["reason"] for r in ledger["rejected"]}
-    assert "killed_overtime" in rejected_reasons
-    outcomes = {row["variant_name"]: row["outcome"] for row in out["per_variant_outcomes"]}
-    assert outcomes["slow_variant"] == "KILLED_OVERTIME"
-    assert fp in out["explore_search_update"]["last_round"]["killed_overtime"]
-    # KILLED_OVERTIME rows must carry the decision stage and a distinct error_class.
-    killed_pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "KILLED_OVERTIME"]
-    assert killed_pvo
-    assert killed_pvo[0]["stage"] == "decision"
-    assert "failure_id" in killed_pvo[0]
-    assert killed_pvo[0]["failure_id"].startswith("fail.")
-    assert te["stage"] == "decision"
-    assert te["error_class"] == "killed_overtime"
-
-
-@pytest.mark.asyncio
 async def test_explore_executor_overtime_disabled_when_ratio_zero(
     sub_agent_runner,
     tmp_path,
@@ -1895,7 +1598,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     received_deadlines: list[float | None] = []
 
     def _fake_kill(cmd, *args, **kwargs):
-        received_deadlines.append(kwargs.get("soft_deadline_sec"))
+        received_deadlines.append(kwargs.get("silence_timeout_sec"))
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=820.0)  # +2.5% KEEP
@@ -1920,9 +1623,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
                     "provenance": "default_grid",
                 }
             ],
-            "variant_timeout_sec": 60,
             "baseline_runtime_sec": 10.0,
-            "explore_overtime_kill_ratio": 0.0,
         },
         idempotency_key="ex-overtime-off",
     )
@@ -1934,7 +1635,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
         res = await sub.run_task(task)
 
     assert received_deadlines, "no Magpie calls were made"
-    assert all(d is None for d in received_deadlines)
+    assert all(d == 600 for d in received_deadlines)
     out = res.result
     assert out["status"] == "succeeded"
 
@@ -1984,7 +1685,6 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
                     "provenance": "default_grid",
                 }
             ],
-            "variant_timeout_sec": 3600,
             "baseline_runtime_sec": 20.0,
         },
         idempotency_key="ex-budget-clamp",
@@ -1998,12 +1698,7 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
 
     assert res.result["status"] == "succeeded"
     assert granted, f"the variant should have been admitted (20s expected, ~{usable_sec:.0f}s left)"
-    # The hard cap is allowed to sit a grace window past the deadline so the in-process session watchdog reaps the
-    # tree first and the kill is attributed to the budget rather than to a slow variant.
-    assert all(t <= usable_sec + _SESSION_KILL_GRACE_SEC for t in granted), (
-        f"caps must be clamped to the ~{usable_sec:.0f}s budget, got {granted}"
-    )
-    assert all(t < 3600 for t in granted), f"the declared 3600s cap must not survive the budget, got {granted}"
+    assert all(t == 7800 for t in granted)
 
 
 @pytest.mark.asyncio
@@ -2046,7 +1741,6 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
                     "provenance": "default_grid",
                 }
             ],
-            "variant_timeout_sec": 3600,
             "baseline_runtime_sec": 600.0,
         },
         idempotency_key="ex-budget-nofit",
@@ -2124,7 +1818,6 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
                     "provenance": "default_grid",
                 },
             ],
-            "variant_timeout_sec": 3600,
             "baseline_runtime_sec": 20.0,
         },
         idempotency_key="ex-budget-reaped",
@@ -2202,7 +1895,6 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
                     "provenance": "default_grid",
                 }
             ],
-            "variant_timeout_sec": 3600,
             "baseline_runtime_sec": 20.0,
         },
         idempotency_key="ex-budget-warmup-reaped",
@@ -2263,7 +1955,6 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
                     "provenance": "default_grid",
                 }
             ],
-            "variant_timeout_sec": 3600,
             "baseline_runtime_sec": 20.0,
         },
         idempotency_key="ex-budget-cancelled",
@@ -2509,6 +2200,187 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     assert res.result["error_class"] == "empty_grid"
 
 
+@pytest.mark.asyncio
+async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
+    sub_agent_runner,
+    tmp_path,
+):
+    sub, tr, _ = sub_agent_runner
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    config = yaml.safe_load(base.read_text(encoding="utf-8"))
+    config["benchmark"]["model"] = str(model)
+    config["benchmark"]["precision"] = "fp8"
+    config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--page-size 1 --kv-cache-dtype auto"
+    base.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    state = SharedState()
+    state.model_path = str(model)
+    state.model_name = "Qwen3-14B-FP8"
+    state.model_type = "qwen3"
+    state.gpu_type = "mi355x"
+    state.baseline_double_run = False
+    state.stack_fingerprint_meta = {
+        "sglang": "0.5.20.dev20260920+gc610c40399",
+        "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+        "rocm": "10.0.0",
+    }
+    sub.shared_state = state
+
+    output_dir = tmp_path / "explore-unified-attn-filter"
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        benchmarked.append(slot.relative_to(output_dir).as_posix())
+        _fake_workspace(slot, tput=800.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "unified",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+                {
+                    "name": "unified_combo",
+                    "extra_args": "--chunked-prefill-size 32768",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {"name": "master", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+                {
+                    "name": "per_token",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {
+                    "name": "unified_page16",
+                    "extra_args": "--page-size 16",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+            ],
+        },
+        idempotency_key="ex-unified-attn-filter",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        result = await sub.run_task(task)
+
+    assert benchmarked == [
+        "v00_master/variant_00_master",
+        "v01_per_token/variant_00_per_token",
+        "v02_unified_page16/variant_00_unified_page16",
+    ]
+    assert result.result["skipped_dup"] == [
+        {
+            "name": "unified",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+        {
+            "name": "unified_combo",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+    ]
+    other_stack = dict(state.stack_fingerprint_meta)
+    other_stack["aiter"] = "newer-aiter"
+    other_variant = GridVariant(
+        "other_stack_unified",
+        extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"},
+    )
+    kept, dropped = apply_compatibility_filter(
+        [other_variant],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint=other_stack,
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (["other_stack_unified"], [])
+
+
+def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
+    """The aiter fingerprint degrades to a git-describe dist version when ``AITER_COMMIT`` is unset; the same source
+    tree must still be recognised, otherwise the filter fails open and the unsafe lever reaches the benchmark.
+    """
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    kept, dropped = apply_compatibility_filter(
+        [GridVariant("unified", extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"})],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint={
+            "sglang": "0.5.20.dev20260920+gc610c40399",
+            # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
+            "aiter": "0.1.21.dev48+g4ad998328.d20260920",
+            "rocm": "10.0.0",
+        },
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (
+        [],
+        [
+            {
+                "name": "unified",
+                "source": "compatibility_filter",
+                "reason": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+            }
+        ],
+    )
+
+
 def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
@@ -2636,7 +2508,6 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
                 ],
                 "name_index": {},
             },
-            "variant_timeout_sec": 10,
         },
         idempotency_key="ex-rerun-all",
     )

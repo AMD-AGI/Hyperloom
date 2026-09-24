@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -17,11 +19,7 @@ from typing import Any
 
 # Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy  # noqa: E402
-
-sys.path.pop(0)
-sys.path.insert(0, str(Path(__file__).resolve().parent / "backends"))
-from _llm_stability_env import apply_llm_stability_env  # noqa: E402
+from _io_utils import truthy
 
 sys.path.pop(0)
 
@@ -52,7 +50,7 @@ def _validated_agent_sandbox_mode(value: Any) -> str:
     if not stated:
         raise ValueError("agent_sandbox_mode is required")
 
-    from hyperloom.common.codex_session import (  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common.codex_session import (
         resolve_codex_sandbox_mode,
     )
 
@@ -64,7 +62,7 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     if _validated_agent_backend(agent_backend) == "codex":
         return
 
-    from hyperloom.common import llm_config  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common import llm_config
 
     options = llm_config.claude_sdk_env_options(
         env=os.environ,
@@ -81,7 +79,8 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
                 os.environ.setdefault(name, value)
     # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
     # merged in here or the run arrives at the gateway anonymous.
-    from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common.llm_attribution import inject_env
+    from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
     inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
@@ -368,6 +367,128 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     return result
 
 
+_DIFF_TARGET_RE = re.compile(r"^diff --git a/(\S+) b/\S+", re.MULTILINE)
+#: ``driver_shim`` renders this as a module-level literal, so it reads back without importing.
+_DRIVER_ENV_FLAGS_RE = re.compile(r"^ENV_FLAGS\s*=\s*(.+)$", re.MULTILINE)
+
+#: Where a campaign's best manifest sits under the shadow repo it was built in.
+_SHADOW_EXPERIMENTS_MARKER = "/forge_experiments/"
+
+
+def _campaign_env_flag(root: Path, stem: str) -> str:
+    """Read back the env flags the campaign gated its fused path behind.
+
+    ``run_campaign`` splits ``recipe.env_flag`` on whitespace and renders the result into
+    ``driver_<stem>.py`` beside the loop result, so the driver is where a killed run still
+    says which flags turn the fusion on.
+    """
+    driver = root / f"driver_{stem}.py"
+    try:
+        source = driver.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _DRIVER_ENV_FLAGS_RE.search(source)
+    if not match:
+        return ""
+    try:
+        flags = ast.literal_eval(match.group(1))
+    except (SyntaxError, ValueError):
+        return ""
+    if isinstance(flags, str):
+        flags = (flags,)
+    if not isinstance(flags, (tuple, list)):
+        return ""
+    return " ".join(str(flag).strip() for flag in flags if str(flag).strip())
+
+
+def _patch_target_file(patch_path: Path) -> str:
+    """Return the first path a unified diff touches, or empty when it names none."""
+    try:
+        head = patch_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return ""
+    match = _DIFF_TARGET_RE.search(head)
+    return match.group(1) if match else ""
+
+
+def _published_best_patch(best_manifest: Path) -> Path | None:
+    """Return the patch the shadow repo published for a campaign's best iteration."""
+    try:
+        manifest = json.loads(best_manifest.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    rel = str(manifest.get("patch_path") or "")
+    if not rel:
+        return None
+    # ``patch_path`` is relative to the experiments root, which holds the ``best/`` the manifest sits in.
+    patch = best_manifest.parent.parent / rel
+    return patch if patch.is_file() else None
+
+
+def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
+    """Collect the per-recipe keepers a killed run left proof of.
+
+    ``run_campaign`` writes ``forge_loop_<pattern_id>.json`` as each campaign returns and
+    publishes its winning iteration to the shadow repo's ``forge_experiments/best/``, while
+    ``on_keep`` exports ``fusion_<pattern_id>.patch`` only once the loop gates the keeper and
+    the aggregate ``fusion_manifest.json`` only once every campaign has returned. A run
+    killed at any of those points leaves proven work with nothing the aggregate can see.
+
+    Args:
+        root: The fusion output directory.
+
+    Returns:
+        Nomination rows for every campaign whose own loop result says it won, strongest
+        first.
+    """
+    rows: list[dict[str, Any]] = []
+    for loop_file in sorted(root.glob("forge_loop_*.json")):
+        stem = loop_file.name[len("forge_loop_") : -len(".json")]
+        try:
+            loop = json.loads(loop_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loop, dict) or not loop.get("improved"):
+            continue
+        best_manifest = str(loop.get("best_manifest") or "")
+        patch_file = root / f"fusion_{stem}.patch"
+        if not patch_file.is_file():
+            published = _published_best_patch(Path(best_manifest)) if best_manifest else None
+            if published is None:
+                continue
+            patch_file = published
+        target_file = _patch_target_file(patch_file)
+        if not target_file:
+            continue
+        env_flag = _campaign_env_flag(root, stem)
+        if not env_flag:
+            # An authored fusion is env-gated, and the flag is the only way the fused path
+            # reaches the re-baseline server. Salvaging the patch without it queues a win to be
+            # measured on the eager path and REVERTed, which loses it one stage later instead.
+            sys.stderr.write(
+                f"forge_fusion: not salvaging {stem}: its driver names no env flag, and without one "
+                "the patch would be re-baselined un-gated and rejected\n"
+            )
+            continue
+        rows.append(
+            {
+                "kernel_name": stem,
+                "patch_path": str(patch_file),
+                "target_file": target_file,
+                "env_flag": env_flag,
+                "kernel_repo": best_manifest.split(_SHADOW_EXPERIMENTS_MARKER)[0]
+                if _SHADOW_EXPERIMENTS_MARKER in best_manifest
+                else "",
+                "micro_speedup": float(loop.get("total_speedup") or 0.0),
+                "kind": "fusion",
+            }
+        )
+    rows.sort(key=lambda row: row["micro_speedup"], reverse=True)
+    return rows
+
+
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
     """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
     root = Path(output_dir or "")
@@ -415,7 +536,18 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
     if patch_path.is_file():
         patch = str(patch_path)
     if not kept or not patch or not Path(str(patch)).is_file():
-        return None
+        campaign = _campaign_patches_on_disk(root)
+        if not campaign:
+            return None
+        strongest = campaign[0]
+        siblings = campaign
+        patch = strongest["patch_path"]
+        speedup = strongest["micro_speedup"]
+        source_file = source_file or strongest["target_file"]
+        repo_root = repo_root or strongest["kernel_repo"]
+        # There is no checkpoint and no aggregate on this path, so the top-level flags are
+        # empty too; the strongest row read its own out of the campaign's driver.
+        env_flag = env_flag or strongest["env_flag"]
     flags = [f for f in env_flag.split() if f]
     result: dict[str, Any] = {
         "status": "ok",
@@ -535,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
         "fusion.patch",
     ):
         (output_root / stale_name).unlink(missing_ok=True)
+    for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
+        for stale in output_root.glob(stale_glob):
+            stale.unlink(missing_ok=True)
     timeout_sec = _timeout_sec(payload)
     try:
         proc = _run_with_tree_timeout(cmd, timeout_sec)

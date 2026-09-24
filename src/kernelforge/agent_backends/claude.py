@@ -17,6 +17,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -28,8 +29,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from hyperloom.common.llm_headers import format_custom_headers
 from kernelforge.llm import (
-    format_custom_headers,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
@@ -39,7 +40,6 @@ from kernelforge.llm.process_reaping import (
     reap_processes_under,
 )
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 log = logging.getLogger(__name__)
 
 
@@ -182,28 +182,6 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
         if entries:
             translated[name] = [_hook_matcher(entry, hook_type) for entry in entries]
     return translated
-
-
-def _options_accept(options_type: Any, field: str) -> bool:
-    """Whether this SDK's options type carries ``field``.
-
-    Read off the dataclass when it is one and off the constructor otherwise, so
-    a fake options object in a test is treated as accepting everything -- the
-    same as the real type it stands in for.
-    """
-    import dataclasses
-    import inspect
-
-    if dataclasses.is_dataclass(options_type):
-        return any(item.name == field for item in dataclasses.fields(options_type))
-    try:
-        signature = inspect.signature(options_type)
-    except (TypeError, ValueError):
-        return True
-    parameters = signature.parameters
-    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
-        return True
-    return field in parameters
 
 
 def _load_claude_sdk() -> tuple[Any, Any]:
@@ -563,11 +541,6 @@ class ClaudeBackend:
         provider_options = self._provider_options(spec)
         if resume_session_id:
             provider_options["resume"] = resume_session_id
-        if "tools" in provider_options and not _options_accept(self._options_type, "tools"):
-            # Naming the built-in base set is a saving, not a requirement: an SDK
-            # too old to have the field must still run rather than fail to build
-            # its options at all.
-            provider_options.pop("tools")
         options = self._options_type(**provider_options)
         text_parts: list[str] = []
         tool_calls: list[tuple[str, dict[str, Any]]] = []
@@ -620,7 +593,7 @@ class ClaudeBackend:
                                             getattr(block, "input", {}) or {},
                                         )
                                     )
-            except Exception as exc:  # noqa: BLE001 - convert to a resumable result
+            except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
                     if not session_id:
@@ -663,7 +636,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):
+                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
@@ -705,7 +678,7 @@ class ClaudeBackend:
         except Exception:
             # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
             # must not mask them.
-            with suppress(Exception):
+            with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.target_edit_count = guard.count_target_edits()
@@ -718,6 +691,5 @@ __all__ = [
     "ClaudeBackendError",
     "ClaudeTimeoutError",
     "ClaudeUnavailableError",
-    "DEFAULT_CLAUDE_MODEL",
     "resolve_claude_cli",
 ]

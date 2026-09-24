@@ -36,12 +36,8 @@ from hyperloom.common import codex_session, llm_config
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
-from hyperloom.orchestrator.roles.agent_role import (
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
-)
-
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
     LANE_FUSION,
@@ -56,29 +52,7 @@ from ..trace.task_progress import heartbeat_while_output_flows
 
 from ._recorder_trace import trace_recording_skipped
 
-# Re-exported: callers patch these at ``request_handlers.<name>``.
-from ._kernel_decisions import (
-    _honest_flag as _honest_flag,
-    _entry_by_kernel_id as _entry_by_kernel_id,
-    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
-    enqueue_nominated_patch as enqueue_nominated_patch,
-)
-from .nomination_result import parse_outcome as parse_outcome
+from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 
 
 log = logging.getLogger(__name__)
@@ -155,7 +129,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     if not logs:
         try:
             logs = sorted(ws.rglob("server.log"))[:1]
-        except Exception:
+        except OSError:
             logs = []
     if not logs:
         return None
@@ -164,7 +138,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
         return None
     try:
         text = logs[0].read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    except OSError:
         return None
     if stem not in text:
         return False
@@ -767,7 +741,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:  # noqa: BLE001 — fall back so apply surfaces the real failure.
+    except Exception:
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -1655,8 +1629,8 @@ def _gemm_router_targets(
             which leaves the lane ceiling on its own per-target default.
     """
     try:
-        from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
-        from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
+        from kernelforge.gemm_tune.model_analyzer import analyze_model
+        from kernelforge.gemm_tune.router import select_tuners
 
         specs = select_tuners(
             analyze_model(model_path),
@@ -1669,7 +1643,7 @@ def _gemm_router_targets(
             has_shapes_json=has_shapes_json,
             has_tunableop_input=has_tunableop_input,
         )
-    except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
+    except Exception:
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
         return ()
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
@@ -1727,7 +1701,7 @@ def _fusion_session_serve_args(
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
     if block_size <= 0 and "vllm" in (framework or "").strip().lower():
-        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+        from hyperloom.inference_optimizer.model_config_utils import (
             _sparse_kv_block_size,
         )
 
@@ -1926,7 +1900,7 @@ def _forge_gemm_tune_available() -> bool:
 
 
 def _resolve_aiter_root_for_forge() -> str:
-    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    """Resolve AITER's source root from split wheels or editable installs."""
     explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
     if explicit:
         return explicit
@@ -1938,6 +1912,19 @@ def _resolve_aiter_root_for_forge() -> str:
     for location in locations:
         root = Path(location)
         if (root / "csrc").is_dir():
+            return str(root)
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = list(getattr(spec, "submodule_search_locations", None) or [])
+    origin = getattr(spec, "origin", None)
+    if origin:
+        locations.append(str(Path(origin).parent))
+    for location in locations:
+        package = Path(location)
+        root = package.parent
+        if package.name == "aiter" and (root / "csrc").is_dir():
             return str(root)
     return ""
 
@@ -2683,13 +2670,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     return "per_token"
 
 
-_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
-
-
 def _is_gfx950(gpu_type: str) -> bool:
     """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
     key = (gpu_type or "").strip().lower()
-    if key in _GFX950_GPU_TYPES:
+    if is_gfx_arch(key, "gfx950"):
         return True
     if not key or key == "auto":
         return _is_gfx950_rocminfo()
@@ -3320,10 +3304,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
             'an incomplete install; reinstall with pip install -e ".[forge]"'
         )
         return
-    try:
-        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
-        return
+    moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
     if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
         log.warning(
             "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
@@ -3762,6 +3743,9 @@ async def _capture_vllm_tunableop_shapes(
         capture_remove_args = [str(arg) for arg in inherited_remove]
     if not profile_mode:
         capture_remove_args.append("--port")
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+
     task_params: dict[str, Any] = {
         "output_dir": str(capture_dir),
         "framework": "vllm",
@@ -3772,6 +3756,10 @@ async def _capture_vllm_tunableop_shapes(
         "remove_args": capture_remove_args,
         "unset_envs": capture_unset_envs,
         "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+        # Either arm of the capture is a sub-step of the KERNEL phase's own
+        # event, not a dispatched measurement, so it records into that event
+        # rather than leaving one of its own.
+        INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
     }
     if profile_mode:
         task_params["workspace_path"] = str(capture_dir / "tracelens")
@@ -3781,17 +3769,12 @@ async def _capture_vllm_tunableop_shapes(
             if benchmark_script:
                 task_params["benchmark_script"] = benchmark_script
     else:
-        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM
-
         task_params.update(
             {
                 "config_path": config_path,
                 "timeout_sec": timeout_sec,
                 "disable_run_eval": True,
                 "baseline_double_run": False,
-                # Shape capture is a sub-step of the KERNEL phase's own event,
-                # not a dispatched measurement, so it leaves no baseline event.
-                SBD_INNER_STEP_PARAM: True,
             }
         )
     task = Task(
@@ -4465,7 +4448,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             shutil.copy2(src_path, dst)
             updated[env_key] = str(dst)
             rel_paths.append(rel)
-    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
+    except Exception:
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
@@ -4487,7 +4470,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
-    except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
+    except Exception:
         log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
     return updated, snap_dir
 
@@ -4684,38 +4667,46 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_fusion_decode_trace(state, payload: dict) -> str:
-    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
+def _resolve_fusion_decode_trace(state) -> str:
+    """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
-    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
-    re-profiling. Explicit ``payload['trace_path']`` wins.
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace.
+    PRELUDE/roofline already captured one and promoted it into
+    ``state.last_profile_trace`` alongside the workload it was measured on
+    (``SharedState.record_profile_workload``), so the lane reuses that rather than
+    re-profiling. ``state.last_profile_trace`` is the only source: the fusion
+    opportunities discovered below are attributed to the run that produced the trace,
+    and a caller-supplied path would file this run's decisions under another workload.
+
+    ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
+    round that merged its ranks, and the capture directory otherwise --
+    ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
+    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
+    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    newest capture in it, which is this run's too: the directory is the round's own
+    ``trace_dir``.
+
+    Args:
+        state: The session ``SharedState``.
+
+    Returns:
+        str: The decode trace file to discover against, or ``""`` when this run has
+            no usable trace yet.
     """
-
-    def _trace_file(path_str: str) -> str:
-        path = Path(path_str)
-        if path.is_file():
-            return str(path)
-        if not path.is_dir():
-            return ""
-        candidates = sorted(
-            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return str(candidates[0]) if candidates else ""
-
-    explicit = str(payload.get("trace_path") or "").strip()
-    if explicit:
-        resolved = _trace_file(explicit)
-        if resolved:
-            return resolved
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace:
-        resolved = _trace_file(trace)
-        if resolved:
-            return resolved
-    return ""
+    if not trace:
+        return ""
+    path = Path(trace)
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(
+        list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(captures[0]) if captures else ""
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -4774,12 +4765,10 @@ def _resolve_forge_agent(
         raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
 
     agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
-    default_model = DEFAULT_CODEX_MODEL if agent_backend == llm_config.AGENT_BACKEND_CODEX else DEFAULT_CLAUDE_MODEL
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,
         explicit=str(payload.get("llm_model") or ""),
-        default=default_model,
     )
     return agent_backend, llm_model
 
@@ -4874,8 +4863,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = _resolve_fusion_decode_trace(state, payload)
+    trace_path = _resolve_fusion_decode_trace(state)
     if not trace_path:
+        recorded = str(getattr(state, "last_profile_trace", "") or "").strip()
         return {
             "status": "skipped",
             "backend": "forge",
@@ -4883,7 +4873,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "error_class": "decode_trace_missing",
             "error": (
                 "no decode trace available for fusion discovery "
-                "(state.last_profile_trace empty; run profile/roofline first)"
+                f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)"
             ),
             "decision": "REVERT",
             "kept": False,
@@ -4966,7 +4956,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (  # noqa: PLC0415
+        from hyperloom.agents.kernel.tools.forge_fusion import (
             salvage_forge_fusion_from_workspace,
         )
 
@@ -5123,7 +5113,7 @@ def _build_trace_analyze_cmd(
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
-        "python3",
+        "python3" if is_bypass else sys.executable,
         str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
@@ -5735,12 +5725,24 @@ def _workspace_log_sizes(workspace: Path) -> dict[str, int]:
     return sizes
 
 
-def _workspace_has_compiled_registry_error(
+def _compiled_registry_error_text(
     workspace: Path,
     *,
     after_sizes: dict[str, int] | None = None,
-) -> bool:
-    """True when an integrate workspace log shows a compiled-registry miss."""
+) -> str:
+    """Return the integrate log excerpt that shows a compiled-registry miss.
+
+    The excerpt names the kernel aiter could not find, which is the only thing that
+    identifies the module at fault when the round's env does not.
+
+    Args:
+        workspace: The integrate run's workspace.
+        after_sizes: Per-log byte offsets to read from, so a retry does not re-read
+            the failure that armed it.
+
+    Returns:
+        The matching log text, empty when no log shows a mismatch.
+    """
     from ..actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
 
     for name in _INTEGRATE_LOG_NAMES:
@@ -5765,8 +5767,17 @@ def _workspace_has_compiled_registry_error(
         except OSError:
             continue
         if is_aiter_jit_registry_mismatch(text):
-            return True
-    return False
+            return text
+    return ""
+
+
+def _workspace_has_compiled_registry_error(
+    workspace: Path,
+    *,
+    after_sizes: dict[str, int] | None = None,
+) -> bool:
+    """True when an integrate workspace log shows a compiled-registry miss."""
+    return bool(_compiled_registry_error_text(workspace, after_sizes=after_sizes))
 
 
 def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
@@ -5802,13 +5813,28 @@ async def _run_integrate_rebaseline_with_lock_retry(
     if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
         envs = _integrate_extra_envs(ctx)
         log_sizes = _workspace_log_sizes(workspace)
+        # The env does not always reach the module at fault: a round that pins one
+        # table leaves every other AITER_CONFIG_* unset, and each of those resolves to
+        # the shipped default plus its matching model_configs overlays, and
+        # AITER_CONFIG_FMOE maps to no serving module at all. Read the module out of
+        # the kernel the error named, or the drop unlinks nothing and the retry
+        # repeats the failure.
+        from ..actions.executors._aiter_jit import registry_mismatch_modules
+
+        named_modules = registry_mismatch_modules(
+            str(result.get("error") or ""),
+            _compiled_registry_error_text(workspace),
+        )
         cleanup = drop_serving_so_for_envs(
             envs,
             backup_dir=workspace / "aiter_jit_backup",
+            also_modules=named_modules,
         )
         log.warning(
-            "integrate_handler: classified %s as aiter_jit_registry_mismatch; retrying once after so drop",
+            "integrate_handler: classified %s as aiter_jit_registry_mismatch; "
+            "retrying once after so drop (env modules + %s from the error)",
             reason,
+            list(named_modules) or "none",
         )
         retry_result = await executor(ctx)
         if not isinstance(retry_result, dict):
@@ -5943,7 +5969,7 @@ def _grade_integrate_accuracy(
         from ..state.shared_state import SharedState
 
         baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:  # noqa: BLE001 - an unresolvable baseline degrades, never raises
+    except Exception:
         log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
 
     measured = bench_result.get("accuracy")
@@ -5952,16 +5978,13 @@ def _grade_integrate_accuracy(
     metric = str(bench_result.get("accuracy_metric") or "")
     source_file = str(bench_result.get("accuracy_source") or "")
     if new_accuracy is None:
-        try:
-            eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-            parsed = eval_out.get("accuracy")
-            if isinstance(parsed, (int, float)):
-                new_accuracy = float(parsed)
-                task = str(eval_out.get("task") or "")
-                metric = str(eval_out.get("metric") or "")
-                source_file = str(eval_out.get("source_file") or "")
-        except Exception:  # noqa: BLE001 - a failed parse degrades to "no verdict"
-            log.debug("integrate_handler: accuracy re-parse failed", exc_info=True)
+        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            new_accuracy = float(parsed)
+            task = str(eval_out.get("task") or "")
+            metric = str(eval_out.get("metric") or "")
+            source_file = str(eval_out.get("source_file") or "")
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:
@@ -6020,135 +6043,6 @@ def _grade_integrate_accuracy(
     }
 
 
-def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -> int:
-    """Raise a re-baseline timeout to what an AgentX round needs.
-
-    Same shape, and the same root cause, as
-    :func:`_cold_start_rebaseline_timeout`: the explicit ``timeout_sec`` that
-    integrate passes suppresses the baseline executor's own AgentX branch, so a
-    value sized for the synthetic shape becomes the only budget the round gets.
-    Observed values are 7200s and 9000s; a canonical AgentX warmup is 10
-    requests per lane over real agentic traces and does not fit either.
-
-    Measured on Qwen3.8: a round whose server answered all 685
-    chat/completions with 200 was cut at exactly its 7200s param, mid-warmup,
-    after which the client could no longer connect. Nothing in the abort reason
-    names the timeout -- aiperf reports the cancelled warmup credit as
-    ``warmup_failure``, so it reads as a workload problem.
-
-    Raised here, where the param is produced, rather than in the executor that
-    consumes it: ``_resolve_timeout`` deliberately lets an explicit param
-    outrank the AgentX derivation, and that contract has a test on it. AgentX
-    is an opt-in branch, so with it disabled this returns ``resolved_sec``
-    untouched and the default path is unaffected.
-
-    Args:
-        resolved_sec: The timeout the payload/contract resolved to.
-        shared_state: Session state, so a persisted ``benchmark_mode`` still
-            triggers the raise when this integrate call runs in a subprocess
-            that did not inherit ``HYPERLOOM_AGENTX``.
-
-    Returns:
-        int: ``resolved_sec``, or the AgentX-derived cap when that is larger.
-    """
-    from ..actions.executors._workload_envs import agentx_active
-
-    if not agentx_active(shared_state):
-        return resolved_sec
-    from ..actions.executors.baseline import agentx_baseline_timeout_sec
-
-    agentx_sec = agentx_baseline_timeout_sec()
-    if agentx_sec <= resolved_sec:
-        return resolved_sec
-    log.warning(
-        "integrate_handler: raising re-baseline timeout %ds -> %ds "
-        "(AgentX: AGENTX_DURATION + overhead; a synthetic-sized param cannot "
-        "cover a canonical agentic warmup and kills the round mid-warmup)",
-        resolved_sec,
-        agentx_sec,
-    )
-    return agentx_sec
-
-
-def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
-    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
-
-    An apply moves the cache aside, so the re-baseline recompiles from scratch;
-    the explicit ``timeout_sec`` integrate passes also suppresses the baseline
-    executor's own cold-start branch, leaving the warm budget as the only one.
-    """
-    from ..actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-        probe_aiter_jit_cache,
-    )
-
-    cache = probe_aiter_jit_cache()
-    if cache.get("probe_status") != "found" or not cache.get("is_cold"):
-        return resolved_sec
-    cold_cap = int(
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-            BASELINE_COLD_START_TIMEOUT_SEC,
-        )
-    )
-    if cold_cap <= resolved_sec:
-        return resolved_sec
-    log.warning(
-        "integrate_handler: aiter JIT cache is cold (%s kernels); raising "
-        "re-baseline timeout %ds -> %ds for the recompile the patch forces",
-        cache.get("kernel_count"),
-        resolved_sec,
-        cold_cap,
-    )
-    return cold_cap
-
-
-def _integrate_rebaseline_timeout_sec(
-    payload: dict,
-    *,
-    default_timeout_sec: int,
-) -> int:
-    """Resolve the E2E timeout from explicit input or benchmark contract."""
-    explicit = payload.get("timeout_sec")
-    if explicit is not None:
-        try:
-            value = int(explicit)
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            log.debug(
-                "integrate_handler: invalid timeout_sec; trying fallback timeout sources",
-                exc_info=True,
-            )
-    if "budget_minutes" in payload:
-        try:
-            value = int(float(payload["budget_minutes"]) * 60)
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            log.debug(
-                "integrate_handler: invalid budget_minutes; trying fallback timeout sources",
-                exc_info=True,
-            )
-    config_path = str(payload.get("config_path") or "")
-    if config_path and Path(config_path).is_file():
-        try:
-            import yaml  # type: ignore[import-untyped]
-
-            config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            benchmark = config.get("benchmark")
-            if isinstance(benchmark, dict):
-                value = int(benchmark.get("timeout_seconds") or 0)
-                if value > 0:
-                    return value
-        except (OSError, TypeError, ValueError, yaml.YAMLError):
-            log.debug(
-                "integrate_handler: invalid benchmark timeout config; using executor default",
-                exc_info=True,
-            )
-    return max(1, int(default_timeout_sec))
-
-
 async def integrate_handler(
     payload: dict,
     *,
@@ -6168,9 +6062,8 @@ async def integrate_handler(
     SharedState when a baseline has been recorded, so a bare ``{kernel_id}`` (or
     ``{integration_id}``) payload is accepted. Optional: patch_path,
     target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
-    extra_envs, source, task_group_key, keep_threshold_pct (1.0), timeout_sec,
-    or budget_minutes. Without an explicit timeout, the benchmark config's
-    timeout contract is used. Returns ``{status, decision, base_tput, new_tput,
+    extra_envs, source, task_group_key, keep_threshold_pct (1.0). The baseline
+    benchmark launch applies the invocation's fixed benchmark timeout policy. Returns ``{status, decision, base_tput, new_tput,
     gain_pct, kernel_id, patch_path, report_path, workspace}``.
 
     Args:
@@ -6186,7 +6079,9 @@ async def integrate_handler(
         ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
         follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
     """
-    from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+    from ..actions.executors.baseline import BaselineExecutor
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..measurement.integrate_performance import assess_integrate_performance
@@ -6353,15 +6248,6 @@ async def integrate_handler(
     fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
-    rebaseline_timeout_sec = _agentx_rebaseline_timeout(
-        _cold_start_rebaseline_timeout(
-            _integrate_rebaseline_timeout_sec(
-                payload,
-                default_timeout_sec=baseline_executor.default_timeout_sec,
-            )
-        ),
-        shared_state=state,
-    )
     fake_task = Task(
         task_id=fake_task_id,
         kind="baseline",
@@ -6369,7 +6255,6 @@ async def integrate_handler(
         params={
             "config_path": payload.get("config_path"),
             "output_dir": str(workspace),
-            "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
             "remove_args": to_str_list(payload.get("remove_args")),
@@ -6381,14 +6266,14 @@ async def integrate_handler(
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             **({"post_measure_accuracy_keep_policy": performance_policy} if not paired_measurement else {}),
-            "accuracy_timeout_sec": rebaseline_timeout_sec,
             # Synthetic kind="baseline": candidate A/B validation against the
             # already-anchored reference. It runs eval for the kernel accuracy
             # gate but never establishes a replacement quality reference.
             "quality_ref_exempt": True,
             # A sub-step of the KERNEL phase's own event, not a dispatched
-            # measurement, so it leaves no baseline event.
-            SBD_INNER_STEP_PARAM: True,
+            # measurement, so it records into that event rather than leaving a
+            # baseline event of its own.
+            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )

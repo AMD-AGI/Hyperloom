@@ -556,7 +556,7 @@ class SpecialistAgent:
                 message=f"{type(error).__name__}: {error}",
                 probe_setup=probe_setup,
             )
-        except Exception as error:  # noqa: BLE001 - failures are isolated by design
+        except Exception as error:
             log.exception(
                 "specialist %s failed unexpectedly",
                 assignment.role_id,

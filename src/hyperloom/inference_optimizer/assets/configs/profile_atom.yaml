@@ -17,18 +17,15 @@
 #     unchanged.
 #   - There is NO equivalent of vLLM's `--profiler-config.delay_iterations`
 #     / `--profiler-config.max_iterations` or SGLang's
-#     `PROFILE_EXTRA_BODY` start/stop protocol. The start/stop boundary
-#     is purely HTTP-driven; the profile window is deferred to Magpie's
-#     atom wrapper (`atom_mi*x.sh`, via the Magpie-side `ATOM_PROFILE_OSL` /
-#     `ATOM_PROFILE_NUM_PROMPTS`). `_workload_envs` sets
-#     `profile_num_prompts = None` for atom, skipping the sglang/vllm
-#     TraceLens steady-state `NUM_PROMPTS` override; any `NUM_PROMPTS` it
-#     still emits comes from the generic seq_cost default.
-#   - atom does have an `ATOM_PROFILER_MORE=1` toggle for detailed shape
-#     / callstack annotations (`atom/model_engine/model_runner.py::
-#     start_profiler`). It is intentionally left OFF here to match the
-#     safe default of `profile_sglang.yaml` / `profile_vllm.yaml`; the
-#     `--mark-trace` follow-up may revisit this.
+#     `PROFILE_EXTRA_BODY` start/stop protocol. The start/stop boundary is
+#     HTTP-driven. `_workload_envs` therefore sets NUM_PROMPTS=CONC on
+#     PROFILE=1 (ATOM cannot bound a capture window, so extra prompts only
+#     grow the trace).
+#   - `--mark-trace`, `ATOM_ENABLE_DETAILED_ANNOTATION=1`, and
+#     `ATOM_PROFILER_MORE=1` are injected at materialize time only when a
+#     one-shot probe of the installed atom reports them (`EngineArgs --help`
+#     + `atom.utils.envs`). They are not pinned here: an older argparse
+#     rejects `--mark-trace`. Never inject vLLM/SGLang `--profiler-config.*`.
 #
 # IMPORTANT — fields kept identical to baseline_atom.yaml:
 #   - `EXTRA_ATOM_ARGS: --trust-remote-code` (most production atom-served

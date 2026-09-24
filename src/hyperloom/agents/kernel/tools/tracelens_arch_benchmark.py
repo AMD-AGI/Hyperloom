@@ -80,7 +80,7 @@ def list_candidate_physical_gpus() -> list[int]:
         try:
             if torch.cuda.is_available():
                 return list(range(int(torch.cuda.device_count())))
-        except Exception as exc:
+        except RuntimeError as exc:
             print(
                 f"[tracelens_arch_benchmark] Failed to query CUDA devices via torch: {exc}",
                 file=sys.stderr,
@@ -150,12 +150,15 @@ _HYPERLOOM_DTYPE_TO_MATRIX_KEY: dict[str, str] = {
 
 
 def build_hyperloom_arch_spec(platform: str) -> dict | None:
-    """Build a TraceLens arch spec from hyperloom's own achievable-TFLOPS table."""
-    try:
-        from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS_ACHIEVABLE
-    except Exception:
-        return None
-    spec = HW_SPECS_ACHIEVABLE.get((platform or "").strip().lower())
+    """Build a TraceLens arch spec from hyperloom's own hardware tables."""
+    from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
+
+    key = (platform or "").strip().lower()
+    # Achievable first, vendor theoretical when a GPU has no measured entry: the same order the
+    # model-level ceiling and the bypass roofline already resolve peaks in.
+    spec = HW_SPECS_ACHIEVABLE.get(key)
+    if not isinstance(spec, dict):
+        spec = HW_SPECS.get(key)
     if not isinstance(spec, dict):
         return None
     table = spec.get("peak_tflops")

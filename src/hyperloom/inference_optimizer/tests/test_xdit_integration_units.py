@@ -494,16 +494,12 @@ class TestHyperloomArchSpec:
 
         return tab
 
-    def test_build_spec_mi355x(self):
+    def test_build_spec_mi355x_falls_back_to_vendor(self):
         tab = self._tab()
         spec = tab.build_hyperloom_arch_spec("mi355x")
         assert spec is not None
         assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
-        maf = spec["max_achievable_tflops"]
-        assert maf["matrix_bf16"] == pytest.approx(1686.0)
-        assert maf["matrix_fp8"] == pytest.approx(3567.0)
-        assert maf["matrix_fp4"] == pytest.approx(5663.0)
-        assert all(v > 0 for v in maf.values())
+        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
 
     def test_build_spec_case_insensitive_and_named(self):
         tab = self._tab()
@@ -517,11 +513,11 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
+        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
         assert out is not None and out.is_file()
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
 
 
 class TestValidateTraceStructureScriptable:

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
 import subprocess
 import sys
@@ -14,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env, parse_custom_headers
+from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
@@ -201,7 +201,7 @@ def test_preflight_still_exports_an_explicit_url_for_a_subscription_token(
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
 
 
-def test_preflight_resolves_urls_and_fans_out_auth_aliases(
+def test_preflight_resolves_urls_and_fans_out_only_the_url_alias(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -215,7 +215,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     )
     # ANTHROPIC_BASE_URL unset -> the Anthropic side stays disabled, never derived.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    # Derived aliases start unset so the provider key fills them.
+    # Alias names start unset, so anything present afterwards was written here.
     for name in (
         "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
         "_".join(("ANTHROPIC", "API", "KEY")),
@@ -241,13 +241,10 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
     assert "ANTHROPIC_BASE_URL" not in cli.os.environ
     assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
-    # The OpenAI key fills its own name plus the internal LLM aliases.
-    for name in (
-        "_".join(("OPENAI", "API", "KEY")),
-        "_".join(("LLM", "API", "KEY")),
-        "_".join(("AMD_LLM", "API", "KEY")),
-    ):
-        assert cli.os.environ[name] == "new-gateway-key"
+    # The OpenAI key travels under its own name only; the retired aliases stay unset.
+    assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "new-gateway-key"
+    for name in ("_".join(("LLM", "API", "KEY")), "_".join(("AMD_LLM", "API", "KEY"))):
+        assert name not in cli.os.environ, name
     # The Anthropic-side keys are never cross-filled from the OpenAI key.
     assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
@@ -270,7 +267,7 @@ def test_preflight_keeps_explicit_provider_keys(
     clean_url_env,
     stub_install_steps,
 ):
-    """Explicit provider keys are preserved; only the internal GEAK/LLM aliases are gap-filled."""
+    """Explicit provider keys are preserved, and no alias is gap-filled from either of them."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -907,25 +904,37 @@ def test_ensure_bench_serving_deps_probe_failure_installs_all(monkeypatch):
         assert dep in install
 
 
-# _unset_hip_visible_devices
-def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
-    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+# _normalize_hip_visible_devices
+def test_normalize_hip_visible_devices_reindexes_the_rocr_view(monkeypatch, capsys):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
 
-    cli_preflight._unset_hip_visible_devices()
+    cli_preflight._normalize_hip_visible_devices()
 
     import os as _os
 
-    assert "HIP_VISIBLE_DEVICES" not in _os.environ
-    assert _os.environ["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert _os.environ["HIP_VISIBLE_DEVICES"] == "0"
+    assert _os.environ["ROCR_VISIBLE_DEVICES"] == "3"
     assert "WARNING" in capsys.readouterr().out
 
 
-def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
+def test_normalize_hip_visible_devices_keeps_an_already_reindexed_view(monkeypatch, capsys):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
+
+    cli_preflight._normalize_hip_visible_devices()
+
+    import os as _os
+
+    assert _os.environ["HIP_VISIBLE_DEVICES"] == "0"
+    assert capsys.readouterr().out == ""
+
+
+def test_normalize_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
 
-    cli_preflight._unset_hip_visible_devices()
+    cli_preflight._normalize_hip_visible_devices()
 
     import os as _os
 
@@ -944,41 +953,6 @@ def _make_args(**overrides) -> argparse.Namespace:
         base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "agent"
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-def test_resolve_robustness_choice_defaults_to_agent():
-    args = _make_args(robustness_backend=None)
-
-    assert cli.DEFAULT_ROBUSTNESS_BACKEND == "agent"
-    assert cli._resolve_robustness_choice(args) == "agent"
-
-
-def test_resolve_robustness_choice_explicit_mock_wins():
-    args = _make_args(robustness_backend="mock")
-
-    assert cli._resolve_robustness_choice(args) == "mock"
-
-
-def test_resolve_robustness_choice_keeps_the_agent_on_multi_node():
-    """Multi-node runs the agent on its node-agnostic signals; the local probe is what gets disabled, not the whole backend."""
-    args = _make_args(robustness_backend=None, nodes=4)
-
-    assert cli._resolve_robustness_choice(args) == "agent"
-
-
-def test_resolve_robustness_choice_env_override_still_works(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "mock")
-    reloaded_cli = importlib.reload(cli)
-    try:
-        args = _make_args(robustness_backend=None)
-        assert reloaded_cli.DEFAULT_ROBUSTNESS_BACKEND == "mock"
-        assert reloaded_cli._resolve_robustness_choice(args) == "mock"
-    finally:
-        monkeypatch.delenv(
-            "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
-            raising=False,
-        )
-        importlib.reload(cli)
 
 
 def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
@@ -1807,6 +1781,7 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
 def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, capsys):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     def _no_probe(**kw):
         raise AssertionError("Anthropic-only fallback does not use CodexBackend")
@@ -1822,6 +1797,7 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     """With only Anthropic configured, an empty CODEX_MODEL follows CLAUDE_MODEL."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1838,7 +1814,11 @@ def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monke
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1859,7 +1839,11 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
@@ -1912,6 +1896,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     """Generated setup env defaults must not force GPT on an Anthropic-only run."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
 
@@ -1957,6 +1942,9 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -1985,6 +1973,9 @@ def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     """OpenAI-only runs validate the followed orchestration model against the OpenAI catalog."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")

@@ -10,6 +10,8 @@ import contextlib
 import os
 import signal
 
+from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
+
 
 async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill and reap a subprocess's isolated process group."""
@@ -20,13 +22,10 @@ async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     except (ProcessLookupError, PermissionError):
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=10)
     # AITER's zero-byte FileBaton lock is not released when the child receives SIGKILL.
-    with contextlib.suppress(Exception):
-        from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-
-        cleanup_current_owned_aiter_locks()
+    cleanup_current_owned_aiter_locks()
 
 
 async def communicate_process_group(

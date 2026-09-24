@@ -16,6 +16,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import _to_int
+from ..session_facts import recovery_block
 
 
 log = logging.getLogger(__name__)
@@ -132,40 +133,7 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 # Session metadata
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     """Project SharedState's crash / interruption / resume signals."""
-    crash_count = _to_int(state.get("crash_count")) or 0
-    crash_ts_iso: list[str] = []
-    raw_ts = state.get("crash_timestamps")
-    if isinstance(raw_ts, list):
-        for t in raw_ts:
-            try:
-                crash_ts_iso.append(datetime.fromtimestamp(float(t), tz=timezone.utc).isoformat())
-            except (TypeError, ValueError, OSError, OverflowError):
-                continue
-
-    last_exc: dict[str, Any] | None = None
-    lte = state.get("last_tick_exception")
-    if isinstance(lte, dict) and lte:
-        # Drop the large traceback; keep the compact postmortem header.
-        last_exc = {
-            "tick": lte.get("tick"),
-            "ts": lte.get("ts"),
-            "stage": lte.get("stage"),
-            "agent": lte.get("agent"),
-            "type": lte.get("type"),
-            "message": (str(lte.get("message") or "")[:500] or None),
-        }
-
-    resume_pending = bool(state.get("resume_pending_revalidation"))
-    degraded = bool(state.get("degraded_mode"))
-    recovered = bool(crash_count > 0 or crash_ts_iso or resume_pending or last_exc)
-    return {
-        "recovered": recovered,
-        "crash_count": crash_count,
-        "crash_timestamps": crash_ts_iso,
-        "degraded_mode": degraded,
-        "resume_pending_revalidation": resume_pending,
-        "last_tick_exception": last_exc,
-    }
+    return recovery_block(state)
 
 
 def collect_session(

@@ -354,7 +354,6 @@ async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert len(results) == 1
     assert results[0].status == "failed"
@@ -375,7 +374,6 @@ async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "magpie_timeout"
@@ -395,72 +393,10 @@ async def test_run_grid_server_dead_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "server_init_dead"
     assert results[0].returncode == gr.SERVER_DEAD_RETURNCODE
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_branch(tmp_path, monkeypatch):
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, **_k):
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    assert results[0].status == "failed"
-    assert results[0].killed_overtime is True
-    assert results[0].estimated_output_throughput is None
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
-    tmp_path,
-    monkeypatch,
-):
-    """A killed-overtime variant salvages a rough output tput from the engine's partial ``server.log`` decode-throughput logs."""
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, output_dir, **_k):
-        # Mimic the engine dumping periodic decode throughput before the reaper.
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "server.log").write_text(
-            "Decode batch. gen throughput (token/s): 100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 900.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1000.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1200.0, #queue-req: 0\n"
-        )
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    r = results[0]
-    assert r.status == "failed"
-    assert r.killed_overtime is True
-    assert r.output_throughput is None
-    # warmup trim drops the 100.0 ramp -> mean(900,1000,1100,1200)=1050.0
-    assert r.estimated_output_throughput == pytest.approx(1050.0)
-    assert any(w.startswith("estimated_output_throughput_from_server_log:") for w in r.nonfatal_warnings)
 
 
 @pytest.mark.asyncio
@@ -477,7 +413,6 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
         base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert len(results) == 1
@@ -502,7 +437,6 @@ async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkey
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert len(results) == 1
@@ -526,7 +460,6 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
         base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB"), GridVariant("vC")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=True,  # would otherwise walk every point
     )
     assert [r.status for r in results] == ["failed", "skipped", "skipped"], (
@@ -552,7 +485,6 @@ async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, mon
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert (results[0].error or "").strip(), "an empty diagnosis reached the result"
@@ -578,7 +510,6 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class in {
@@ -618,7 +549,6 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"
@@ -627,6 +557,135 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
     markers = list((tmp_path / "out").rglob("abort_reason.json"))
     assert len(markers) == 1
     assert json.loads(markers[0].read_text())["error_class"] == "magpie_nonzero_after_valid_measurement"
+
+
+def _valid_report_body(completed: int, requested: int) -> str:
+    """A parseable Magpie report for ``completed`` of ``requested`` requests."""
+    return json.dumps(
+        {
+            "success": True,
+            "framework": "sglang",
+            "throughput": {
+                "output_throughput": 1200.0,
+                "request_throughput": 120.0,
+                "completed_requests": completed,
+                "num_prompts": requested,
+                "duration_seconds": 120.0,
+            },
+        }
+    )
+
+
+def _magpie_writing(completed: int, requested: int, rc: int, stderr: str):
+    """A fake ``_run_magpie`` that writes one report and exits ``rc``."""
+
+    def _run(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(_valid_report_body(completed, requested))
+        return rc, "", stderr
+
+    return _run
+
+
+_STALE_HANDLE = "benchmarks/sglang_mi355x.sh: error reading input file: Stale file handle"
+
+
+@pytest.mark.asyncio
+async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, monkeypatch):
+    """A wrapper that exits non-zero after serving the whole protocol keeps its measurement.
+
+    The bash wrapper reads its own script off the InferenceX checkout for the
+    whole round, so a mount flap at the tail exits non-zero on a benchmark that
+    already ran to completion. Nothing about that measurement is short.
+
+    The variant carries no ``NUM_PROMPTS`` of its own, which is the shape every
+    caller but conc_sweep uses: the count is read back off the run's own
+    result, not off the variant's env layer.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(192, 192, 2, _STALE_HANDLE))
+
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "succeeded"
+    assert r.error_class == ""
+    assert r.output_throughput == pytest.approx(1200.0)
+    assert r.completed_requests == 192
+    assert r.returncode == 2
+    assert "nonzero_rc_after_complete_protocol:2" in r.nonfatal_warnings
+    # The cause of the non-zero exit stays on the record, not only in the log.
+    assert "Stale file handle" in (r.error or "")
+    assert list((tmp_path / "out").rglob("abort_reason.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypatch):
+    """A server that died mid-protocol still fails, however parseable its report.
+
+    This is the case the nonzero-rc branch exists for: fewer requests were
+    served than were asked for, so the throughput is not the protocol's.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(120, 192, 1, "server exited 1"))
+
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "magpie_nonzero_after_valid_measurement"
+    markers = list((tmp_path / "out").rglob("abort_reason.json"))
+    assert len(markers) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, monkeypatch):
+    """A report with no ``num_prompts`` cannot be judged complete, so rc wins.
+
+    An unpatched InferenceX checkout serves ``max_concurrency`` prompts and may
+    record no requested count at all. That is not evidence of a whole protocol.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _no_request_count(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "sglang",
+                    "throughput": {
+                        "output_throughput": 1200.0,
+                        "completed_requests": 192,
+                        "duration_seconds": 120.0,
+                    },
+                }
+            )
+        )
+        return 2, "", _STALE_HANDLE
+
+    monkeypatch.setattr(gr, "_run_magpie", _no_request_count)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    assert results[0].status == "failed"
+    assert results[0].error_class == "magpie_nonzero_after_valid_measurement"
 
 
 @pytest.mark.asyncio
@@ -653,7 +712,6 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("fp8_kv")],
         output_root=out_root,
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"

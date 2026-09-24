@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_trace_reader as reader  # noqa: E402
-import _trace_shape_manifest as tsm  # noqa: E402
-import bypass_trace_analysis as bta  # noqa: E402
+import _bypass_trace_reader as reader
+import _trace_shape_manifest as tsm
+import bypass_trace_analysis as bta
 
 
 def _launch(name, *, op_name="", ts=0.0, dur=100.0, shapes=None, dtypes=None, backend="", kfile=""):

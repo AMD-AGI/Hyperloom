@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the FRAMEWORK_AGENT local-exploration arm."""
+"""Unit tests for the FRAMEWORK_AGENT local-exploration arm (direct-dispatch path)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import pytest
 
 from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.phases import machine_state as _phase_state
-from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import FakeCoordinator, optimize_state
 
@@ -79,6 +79,12 @@ class _Tasks:
         self._by_idem[key] = task
         return task, False
 
+    async def get(self, task_id: str) -> Any:
+        for task in self._by_idem.values():
+            if task.task_id == task_id:
+                return task
+        raise TaskNotFound(task_id)
+
 
 class _Bus:
     def __init__(self) -> None:
@@ -115,100 +121,96 @@ class _Stub(FakeCoordinator):
 
 
 # --------------------------------------------------------------------------- # 3.
-def test_pseudo_candidate_none_when_arm_disabled(tmp_path: Path):
+def test_arm_disabled_dispatch_is_noop(tmp_path: Path):
+    """When either arm flag is off the local-explore dispatch returns empty."""
     disabled_auth = _Stub(tmp_path, authoring=False, local_explore=True)
-    assert disabled_auth._make_local_explore_pseudo_candidate() is None
+    assert disabled_auth._framework_local_explore_arm_enabled() is False
+
     disabled_arm = _Stub(tmp_path, authoring=True, local_explore=False)
-    assert disabled_arm._make_local_explore_pseudo_candidate() is None
+    assert disabled_arm._framework_local_explore_arm_enabled() is False
 
 
-def test_pseudo_candidate_shape_when_enabled(tmp_path: Path):
+def test_arm_enabled_when_both_flags_on(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    pseudo = stub._make_local_explore_pseudo_candidate()
-    assert pseudo is not None
-    assert pseudo["kind"] == FrameworkPhase._LOCAL_EXPLORE_KIND
-    assert pseudo["candidate_id"] == "local_explore:0"
-    assert pseudo["framework"] == "sglang"
-    # Gap composed from workload taxonomy (framework / gpu / arch / precision).
-    assert isinstance(pseudo["gap_keywords"], list)
-    assert "sglang" in pseudo["gap_keywords"]
+    assert stub._framework_local_explore_arm_enabled() is True
 
 
-def test_next_local_explore_id_increments_with_progress(tmp_path: Path):
+def test_gap_compose_includes_framework_and_gpu(tmp_path: Path):
+    """_compose_framework_local_explore_gap returns a gap string and keywords."""
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    assert stub._next_local_explore_candidate_id() == "local_explore:0"
-    stub.shared_state.framework_agent_phase_progress.append(
-        {"candidate_id": "local_explore:0", "status": "author_empty", "kept": False}
-    )
-    assert stub._next_local_explore_candidate_id() == "local_explore:1"
-    # Non-local rows do not advance the sequence.
-    stub.shared_state.framework_agent_phase_progress.append(
-        {"candidate_id": "https://example.com/pr/9", "status": "reverted", "kept": False}
-    )
-    assert stub._next_local_explore_candidate_id() == "local_explore:1"
+    gap, keywords = stub._compose_framework_local_explore_gap()
+    assert isinstance(gap, str)
+    assert isinstance(keywords, list)
+    assert "sglang" in keywords
 
 
 # --------------------------------------------------------------------------- # 4.
-def test_maybe_dispatch_local_explore_disabled_is_noop(tmp_path: Path):
+def test_local_explore_direct_dispatch_disabled_arm_creates_nothing(tmp_path: Path):
+    """When authoring is off the pump falls through to phase_done without dispatching."""
     stub = _Stub(tmp_path, authoring=False, local_explore=True)
-    dispatched = asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
-    assert dispatched is False
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    asyncio.run(stub._pump_framework_agent_phase())
     assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True
 
 
-def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path):
+def test_local_explore_direct_dispatch_creates_specialist(tmp_path: Path):
+    """The pump dispatches a local-explore specialist directly, without a pseudo-candidate."""
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    dispatched = asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
-    assert dispatched is True
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    asyncio.run(stub._pump_framework_agent_phase())
     assert len(stub.tasks.created) == 1
     created = stub.tasks.created[0]
     assert created["kind"] == "specialist"
     params = created["params"]
     assert params["framework_agent_authoring"] is True
     assert params["framework_local_explore"] is True
-    assert params["framework_agent_candidate_id"] == "local_explore:0"
     assert params["domain"] == "serving_specialist"
-    # Boilerplate is in _TASK_KIND_BRIEFS; notes is empty on a fresh dispatch.
     assert params.get("task_kind") == "framework_local_explore"
-    assert params.get("notes", "") == ""
-    # The per-task tool whitelist is gone; the specialist tool policy is a denylist.
     assert "allowed_tools" not in created
-    # Idempotency keyed on the candidate id.
-    assert created["idempotency_key"] == "framework_agent_local_explore:local_explore:0"
     # The specialist->candidate provenance map is recorded.
-    assert stub.shared_state.framework_agent_specialist_candidate_map == {"t-1": "local_explore:0"}
+    cand_id = params.get("framework_agent_candidate_id", "")
+    assert cand_id.startswith("local_explore:")
+    assert stub.shared_state.framework_agent_specialist_candidate_map.get("t-1") == cand_id
 
 
-def test_a_candidate_whose_specialist_failed_is_dispatched_again(tmp_path: Path):
-    """One interrupted run must not retire a candidate."""
+def test_a_failed_local_explore_specialist_is_retried(tmp_path: Path):
+    """One interrupted run must not retire the candidate; the loop picks :r1."""
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    assert asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted")) is True
-    first = stub.tasks._queued[-1]
-    first.state = "failed"
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    asyncio.run(stub._pump_framework_agent_phase())
+    first_task = stub.tasks._queued[-1]
+    first_key = stub.tasks.created[-1]["idempotency_key"]
+    # Mark as failed and remove from queued so _framework_agent_authoring_inflight
+    # won't see it as still running and block the pump.
+    first_task.state = "failed"
+    stub.tasks._queued.remove(first_task)
 
     stub.shared_state.framework_agent_specialist_candidate_map = {}
-    assert asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted")) is True
+    asyncio.run(stub._pump_framework_agent_phase())
+    retry_key = stub.tasks.created[-1]["idempotency_key"]
+    assert retry_key != first_key, f"expected new key, got same {retry_key!r}"
+    # The retry key shares the base prefix.
+    base = first_key.split(":r")[0]
+    assert retry_key.startswith(base), f"{retry_key!r} should start with {base!r}"
 
-    retry = stub.tasks.created[-1]
-    assert retry["idempotency_key"] != "framework_agent_local_explore:local_explore:0"
-    assert retry["idempotency_key"].startswith("framework_agent_local_explore:local_explore:0")
-    assert stub.tasks._queued[-1] is not first
 
-
-def test_a_candidate_that_keeps_failing_is_left_for_the_phase_to_replace(tmp_path: Path):
-    """Retrying is bounded: a candidate that cannot author is not worth the wall clock the framework budget is there to spend."""
+def test_a_repeatedly_failing_local_explore_specialist_stops(tmp_path: Path):
+    """Retrying is bounded: exhausting all attempts stops dispatching."""
     from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
 
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     for _ in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
         stub.shared_state.framework_agent_specialist_candidate_map = {}
-        asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
-        stub.tasks._queued[-1].state = "failed"
+        asyncio.run(stub._pump_framework_agent_phase())
+        task = stub.tasks._queued[-1]
+        task.state = "failed"
+        stub.tasks._queued.remove(task)
 
     before = len(stub.tasks._queued)
     stub.shared_state.framework_agent_specialist_candidate_map = {}
-    asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
-
+    asyncio.run(stub._pump_framework_agent_phase())
     assert len(stub.tasks._queued) == before
 
 
@@ -283,7 +285,7 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
 
 
 def test_forward_enablement_carriers_eval_origin():
-    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     src = {
         "enablement_origin": "eval",
@@ -303,7 +305,7 @@ def test_forward_enablement_carriers_eval_origin():
 
 
 def test_forward_enablement_carriers_boot_origin_noop():
-    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     dst: dict[str, Any] = {}
     _forward_enablement_carriers({}, dst)
@@ -316,39 +318,45 @@ def test_forward_enablement_carriers_boot_origin_noop():
 
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
 # registered and has a real canonical id --------------------------------------------------------------------------- #
-def test_pseudo_candidate_gap_canonical_id_is_not_literal_local_explore():
-    """The pseudo-candidate must carry a per-candidate gap id, not the old literal 'local_explore' string that prevented find_gap from matching."""
+def test_local_explore_gap_canonical_id_is_not_literal_local_explore():
+    """The dispatched specialist must carry a per-candidate gap id."""
     stub = _Stub(Path("/tmp/t"), authoring=True, local_explore=True)
-    pseudo = stub._make_local_explore_pseudo_candidate()
-    assert pseudo is not None
-    cid = pseudo["gap_canonical_id"]
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    asyncio.run(stub._pump_framework_agent_phase())
+    assert len(stub.tasks.created) == 1
+    params = stub.tasks.created[0]["params"]
+    cid = params.get("gap_canonical_id", "")
     assert cid != "local_explore", "gap_canonical_id must not be the bare literal 'local_explore'"
     assert cid.startswith("gap.framework.local_explore."), f"expected gap.framework.local_explore.<id>, got {cid!r}"
 
 
 def test_local_explore_dispatch_registers_gap_on_real_state():
     """upsert_gap is called during dispatch so find_gap resolves the new id."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
     tmp = Path("/tmp")
-    shared = SharedState(session_id="test-le-gap")
     stub = _Stub(tmp, authoring=True, local_explore=True)
-    # Patch in a real SharedState that supports upsert_gap.
-    stub.shared_state = shared
-    stub.state = shared
-    shared.framework_agent_authoring_enabled = True
-    shared.framework_local_explore_enabled = True
-    shared.framework_agent_batches = []
-    shared.framework_agent_phase_progress = []
-    shared.framework_agent_specialist_candidate_map = {}
-    shared.gaps = []
+    # Use the stub's already-wired SharedState with gap support.
+    stub.shared_state.framework_agent_specialist_candidate_map = {}
+    stub.shared_state.gaps = []
 
-    asyncio.run(stub._maybe_dispatch_local_explore(reason="discover_exhausted"))
+    # Call _enqueue_framework_agent_local_explore_specialist directly with a
+    # synthetic candidate dict, bypassing the pump to keep this test focused.
+    asyncio.run(
+        stub._enqueue_framework_agent_local_explore_specialist(
+            {
+                "title": "local source exploration (gemm)",
+                "repo": "(local source)",
+                "framework": "sglang",
+                "gap_description": "improve sglang gemm throughput on MI300X",
+                "gap_keywords": ["sglang", "gemm"],
+            },
+            reason="test",
+        )
+    )
 
     assert len(stub.tasks.created) == 1
     params = stub.tasks.created[0]["params"]
     gap_cid = params["gap_canonical_id"]
-    resolved = shared.find_gap(gap_cid)
+    resolved = stub.shared_state.find_gap(gap_cid)
     assert resolved is not None, f"find_gap({gap_cid!r}) returned None; gap was not registered"
     assert resolved["layer"] == "framework"
 
@@ -486,3 +494,69 @@ async def test_the_retry_drain_carries_the_batch_the_failure_belonged_to(tmp_pat
 
     keys = [c["idempotency_key"] for c in stub.tasks.created]
     assert any("batch-7" in k for k in keys), keys
+
+
+def test_the_arms_deliverable_decides_its_lever():
+    """This arm dispatches without a lever_kind, so the row's lever is derived.
+
+    A config proposal and a diff are both valid returns from the same dispatch,
+    and a row left with an empty lever is invisible to the dryness judgment.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_CONFIG,
+        LEVER_SOURCE_PATCH,
+    )
+    from hyperloom.orchestrator.state.attempt_ledger import record_patch_attempt
+
+    def _lever(**deliverable: Any) -> str:
+        state = SharedState()
+        record_patch_attempt(
+            state,
+            task_id="t-1",
+            specialist_task_id="spec-1",
+            outcome="reverted",
+            gain_pct=None,
+            before_tput=5000.0,
+            after_tput=4900.0,
+            error_class="",
+            evidence={"framework_agent_candidate_id": "local_explore:0", **deliverable},
+        )
+        return str(state.attempts[0]["lever_kind"])
+
+    assert _lever(patches_applied=["001_fix.patch"]) == LEVER_SOURCE_PATCH
+    assert _lever() == LEVER_CONFIG
+
+
+def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
+    """The ledger row sits behind the same gate as the progress row, so retries are not evidence the lever is dry."""
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    from .test_framework_agent_authoring import _Stub
+
+    def _attempts(**result: Any) -> list[dict[str, Any]]:
+        stub = _Stub(tmp_path, authoring=True)
+        task = SimpleNamespace(
+            task_id="integrate-1",
+            params={
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "https://pr/1",
+                "framework_batch_id": "",
+                "lever_kind": LEVER_UPSTREAM_PR,
+            },
+        )
+        Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
+            stub,
+            task=task,
+            result=result,
+        )
+        return [r for r in stub.shared_state.attempts if r.get("task_id") == "integrate-1"]
+
+    # The lane re-dispatches this one and stamps its own terminal row at the cap.
+    assert _attempts(status="apply_failed", lane="perf_framework") == []
+    # An apply failure nobody will retry has settled the candidate, and so has a verdict.
+    assert len(_attempts(status="apply_failed")) == 1
+    kept = _attempts(status="kept", delta_pct=4.0, output_throughput=5200.0, base_tput=5000.0)
+    assert len(kept) == 1
+    assert kept[0]["adopted"] is True
+    assert kept[0]["lever_kind"] == LEVER_UPSTREAM_PR

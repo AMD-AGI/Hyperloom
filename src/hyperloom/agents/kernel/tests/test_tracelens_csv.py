@@ -18,11 +18,11 @@ _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import tracelens_analysis as tla  # noqa: E402
-import _bypass_report as bypass_report  # noqa: E402
-import _idle_gate as idle_gate  # noqa: E402
-import _task_group_contract as task_group_contract  # noqa: E402
-import tracelens_skill_runner as tlr  # noqa: E402
+import tracelens_analysis as tla
+import _bypass_report as bypass_report
+import _idle_gate as idle_gate
+import _task_group_contract as task_group_contract
+import tracelens_skill_runner as tlr
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
@@ -1330,6 +1330,50 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert str(tmp_path / "skill.md") in call["prompt"]
 
 
+def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
+    """Graph-capture analysis writes into the capture folder, so it must be writable.
+
+    ``TraceLens_generate_perf_report_pytorch_inference`` classifies the capture
+    folder before it can merge it, and that classification writes
+    ``execution_details.json`` into the folder itself. With only ``output_dir``
+    writable the step dies with ``OSError: [Errno 30] Read-only file system``
+    and the turn ends without ``analysis.md``.
+    """
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+    capture_folder = tmp_path / "capture_traces"
+    capture_folder.mkdir()
+    calls: list[dict] = []
+
+    async def _fake_codex_turn(**kwargs):
+        calls.append(kwargs)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(text="ok")
+
+    _use_openai_only_env(monkeypatch)
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=capture_folder,
+            budget_minutes=30,
+            codex_turn_runner=_fake_codex_turn,
+        )
+    )
+
+    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+
+
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
     """A sub-minute budget must not translate into an instant Codex timeout."""
     import asyncio
@@ -1825,8 +1869,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     def fake_run(cmd, *args, **kwargs):
         captured.append(list(cmd))
-        # Make pip install and splitter invocations succeed.
-        return _Result(returncode=0, stdout="ok")
+        return _Result(returncode=0, stdout="ok" if kwargs.get("text") else b"ok")
 
     argv = [
         "tracelens_analysis.py",
@@ -1863,7 +1906,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
@@ -1889,7 +1932,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
 # Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window selection uses the analytic PD
 # ratio instead of an empirical heuristic.
-def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None):
+def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None, subprocess_run=None):
     """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
@@ -1927,6 +1970,8 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
 
     def fake_run(cmd, *_a, **_kw):
         captured.append(list(cmd))
+        if subprocess_run is not None:
+            return subprocess_run(cmd, *_a, **_kw)
         return _Result(returncode=0, stdout="ok")
 
     argv = [
@@ -1967,9 +2012,48 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
     return captured, trace
 
 
+@pytest.mark.parametrize(
+    ("dependency_rc", "split_rc", "error_code"),
+    [
+        (1, 0, "tracelens_dependency_error"),
+        (0, 1, "trace_split_failed"),
+        (0, 0, "trace_split_no_steady_state"),
+    ],
+)
+def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc, split_rc, error_code):
+    """Dependency failures and splitter crashes must not masquerade as empty traces."""
+    import subprocess
+
+    def run(cmd, **kwargs):
+        if "pip" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="ResolutionImpossible: protobuf constraint")
+        rc = dependency_rc if "-c" in cmd else split_rc
+        return subprocess.CompletedProcess(cmd, rc, stdout="ModuleNotFoundError: strenum" if rc else "ok")
+
+    captured, _ = _drive_main_capturing_subprocess(tmp_path, [], subprocess_run=run)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert error_code in result["error"]
+    assert not any("pip" in cmd for cmd in captured)
+    probes = [cmd for cmd in captured if "-c" in cmd]
+    assert len(probes) == 1
+    assert probes[0][0] == sys.executable
+    assert "import TraceLens" in probes[0][-1]
+    assert "split_inference_trace_annotation" in probes[0][-1]
+    splitter = _find_splitter_cmd(captured)
+    if dependency_rc:
+        assert splitter is None
+    else:
+        assert splitter[0] == sys.executable
+    if dependency_rc or split_rc:
+        assert "trace_split_no_steady_state" not in result["error"]
+        log_path = next((tmp_path / "ws").rglob("*.log"))
+        assert "ModuleNotFoundError: strenum" in log_path.read_text(encoding="utf-8")
+
+
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
         None,
     )
 

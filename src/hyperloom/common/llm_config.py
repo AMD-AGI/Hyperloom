@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
@@ -19,6 +17,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
+from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
 
 log = logging.getLogger(__name__)
@@ -65,6 +64,14 @@ ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
+# What may authenticate an OpenAI-protocol client, highest precedence first. The Anthropic-side keys come last
+# because an Anthropic-only deployment fronts both protocols behind one gateway token.
+_OPENAI_CLIENT_KEY_ENV_ORDER: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+
 
 def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
     """First non-blank value among ``names``, in the order given."""
@@ -102,7 +109,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
 )
 
 # Retired provider-specific variables.
@@ -133,6 +139,13 @@ _ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "
 # The two agent CLIs that can drive this repository's agentic roles.
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
+
+# The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
+# every model ladder in both packages, so it lives beside the backend names it is keyed by.
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+# The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
+# behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
@@ -165,9 +178,11 @@ def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
 def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side can authenticate an agent CLI run.
 
-    A bare ``OPENAI_BASE_URL`` without ``OPENAI_API_KEY`` is an endpoint hint,
-    not a credential, and treating the URL alone as configured is what sends an
-    unauthenticated Codex run.
+    ``OPENAI_API_KEY`` is the only name that authenticates one, which is the
+    same name :mod:`hyperloom.common.codex_session` resolves and the same one
+    ``_validate_credentials`` admits a run on. A bare ``OPENAI_BASE_URL`` with
+    it unset is an endpoint hint, not a credential, and treating the URL alone
+    as configured is what sends an unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
     return bool((source.get("OPENAI_API_KEY") or "").strip())
@@ -183,28 +198,46 @@ def is_openai_only(env: Mapping[str, str] | None = None) -> bool:
     return has_openai_side(env) and not has_anthropic_side(env)
 
 
-def _claude_agent_sdk_installed() -> bool:
+def claude_agent_sdk_installed() -> bool:
     """Return whether the optional Claude Agent SDK is installed."""
     from importlib.util import find_spec
 
     return find_spec("claude_agent_sdk") is not None
 
 
-def _codex_agent_sdk_installed() -> bool:
+def codex_agent_sdk_installed() -> bool:
     """Return whether the optional Codex Agent SDK is installed."""
     from importlib.util import find_spec
 
     return find_spec("openai_codex") is not None
 
 
+def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int, int]:
+    """Sort key for one agent backend candidate: credential first, then SDK.
+
+    The one ordering the whole repository shares, read by
+    :func:`preferred_agent_backend` and by
+    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`.
+    Lower sorts first and candidates that tie keep the order they were offered
+    in, which is what puts Claude ahead of Codex on both sides.
+
+    Credentials lead because ranking on the installed SDK alone is what let an
+    OpenAI-only box resolve to Claude whenever both extras happened to be
+    installed, and then fail to authenticate.
+    """
+    return (0 if credentialed else 1, 0 if sdk_installed else 1)
+
+
+# The rank of a candidate that can neither authenticate nor import: no reason to prefer it over any other.
+UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
+
+
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
     """Return the agent backend this environment should run.
 
-    Two ranked keys, shared with
-    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`:
-    a configured credential, then an installed SDK. Claude wins whenever both
-    providers tie, so an OpenAI-only credential is the only shape that selects
-    Codex outright; a dual-configured deployment keeps Claude.
+    Ranked by :func:`agent_backend_rank`. Claude wins whenever both backends
+    tie, so an OpenAI-only credential is the only shape that selects Codex
+    outright; a dual-configured deployment keeps Claude.
 
     With no credential on either side -- a runtime logged in by other means
     carries none this can see -- the installed SDK decides, and when neither
@@ -212,24 +245,23 @@ def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
     missing rather than silently picking the other CLI.
     """
     source = env if env is not None else os.environ
-    claude_rank = (
-        0 if anthropic_agent_credentialed(source) else 1,
-        0 if _claude_agent_sdk_installed() else 1,
-    )
-    codex_rank = (
-        0 if openai_agent_credentialed(source) else 1,
-        0 if _codex_agent_sdk_installed() else 1,
-    )
-    if codex_rank < claude_rank:
-        return AGENT_BACKEND_CODEX
-    return AGENT_BACKEND_CLAUDE
+    ranks = {
+        AGENT_BACKEND_CLAUDE: agent_backend_rank(
+            credentialed=anthropic_agent_credentialed(source),
+            sdk_installed=claude_agent_sdk_installed(),
+        ),
+        AGENT_BACKEND_CODEX: agent_backend_rank(
+            credentialed=openai_agent_credentialed(source),
+            sdk_installed=codex_agent_sdk_installed(),
+        ),
+    }
+    return min(ranks, key=lambda backend: ranks[backend])
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -319,52 +351,21 @@ def resolve_forge_llm_model(
     *,
     env: Mapping[str, str] | None = None,
     explicit: str | None = None,
-    default: str = "",
 ) -> str:
-    """Resolve the Forge LLM model id for a chosen agent backend."""
+    """Resolve the Forge LLM model id for a chosen agent backend.
+
+    The backend decides the last rung, so callers never have to: ``CLAUDE_MODEL``
+    is unset on every run that authenticates by OAuth token, and a caller that
+    forgot a default would post an empty model id.
+    """
     source = env if env is not None else os.environ
     explicit_model = (explicit or "").strip()
     if explicit_model:
         return explicit_model
     backend = (agent_backend or "").strip().lower()
-    if backend == "codex":
-        return str(source.get("CODEX_MODEL") or "").strip() or default
-    return str(source.get("CLAUDE_MODEL") or "").strip() or default
-
-
-def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
-    source = env if env is not None else os.environ
-
-    def repl(match: re.Match[str]) -> str:
-        return str(source.get(match.group(1), ""))
-
-    return _ENV_REF_RE.sub(repl, raw)
-
-
-def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Parse custom LLM headers from env."""
-    if not raw:
-        return {}
-    expanded = _expand_env_refs(raw, env)
-    text = expanded.strip()
-    if not text:
-        return {}
-    if text.startswith(("{", "[")):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if parsed is not None:
-            if isinstance(parsed, dict):
-                return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
-            return {}
-
-    headers: dict[str, str] = {}
-    for line in expanded.splitlines():
-        name, sep, value = line.partition(":")
-        if sep and name.strip():
-            headers[name.strip()] = value.strip()
-    return headers
+    if backend == AGENT_BACKEND_CODEX:
+        return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
 def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
@@ -395,27 +396,10 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("OPENAI_API_KEY") or "").strip()
-        or (source.get("LLM_GATEWAY_KEY") or "").strip()
-        # Anthropic-only deployments: one gateway token authenticates both protocols.
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-    )
+    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
+    api_key = _first_set_value(candidates, source)
     if not api_key:
-        key_names = " / ".join(
-            dict.fromkeys(
-                [
-                    api_key_env,
-                    "OPENAI_API_KEY",
-                    "LLM_GATEWAY_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                ]
-            )
-        )
-        raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
 
     explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
@@ -629,7 +613,7 @@ def claude_sdk_env_options(
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
     # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
     if source.get("ANTHROPIC_CUSTOM_HEADERS"):
-        source["ANTHROPIC_CUSTOM_HEADERS"] = _expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
+        source["ANTHROPIC_CUSTOM_HEADERS"] = expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
     # Disable the advisor-tool beta header by default since strict gateways reject it.
     source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
@@ -1082,13 +1066,17 @@ __all__ = [
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
+    "DEFAULT_CLAUDE_MODEL",
+    "DEFAULT_CODEX_MODEL",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
     "ResponsesResult",
+    "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
     "achat_completion",
+    "agent_backend_rank",
     "anthropic_completion",
     "anthropic_messages",
     "anthropic_agent_credentialed",
@@ -1100,7 +1088,9 @@ __all__ = [
     "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
+    "claude_agent_sdk_installed",
     "claude_sdk_env_options",
+    "codex_agent_sdk_installed",
     "deepseek_compat_env",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
@@ -1116,7 +1106,6 @@ __all__ = [
     "is_openai_only",
     "openai_agent_credentialed",
     "openai_client_kwargs",
-    "parse_custom_headers",
     "preferred_agent_backend",
     "provider_model_defaults",
     "resolve_forge_llm_model",

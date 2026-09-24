@@ -29,6 +29,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     bool_or_none as _bool_or_none,
+    failure_row as _failure_row,
     float_or_none as _float_or_none,
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
@@ -37,7 +38,6 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
-from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def warm_start_event_id(macro_cycle: Any = 0) -> str:
 
 
 def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
-    """Record one KB read served while a T0 lookup is in flight. Never raises.
+    """Record one KB read served while a T0 lookup is in flight.
 
     Called from the recipe audit hook, which sees writes as well as reads, and
     reads from every seam that consults the KB. Both are filtered here: a write
@@ -114,15 +114,12 @@ def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
         return
     if not isinstance(audit_event, Mapping) or str(audit_event.get("op") or "") != "read":
         return
-    try:
-        from .recorder import recorder_for
+    from .recorder import recorder_for
 
-        recorder_for(session_dir, producer=PRODUCER).record_item(
-            SECTION_READ,
-            _read_row(active.event_id, active.next_read_ordinal(), audit_event),
-        )
-    except Exception as exc:  # noqa: BLE001 — a read's record must not cost the read
-        note_failure(section="warm_start_event", error=exc, detail="record warm_start read failed")
+    recorder_for(session_dir, producer=PRODUCER).record_item(
+        SECTION_READ,
+        _read_row(active.event_id, active.next_read_ordinal(), audit_event),
+    )
 
 
 def _read_row(event: str, ordinal: int, audit_event: Mapping[str, Any]) -> dict[str, Any]:
@@ -213,7 +210,7 @@ class WarmStartEventRecorder:
             return True
         try:
             return Path(session_dir).resolve() == Path(self._session).resolve()
-        except (OSError, TypeError, ValueError):  # noqa: BLE001 — unusable path
+        except (OSError, TypeError, ValueError):
             return False
 
     def begin(self) -> None:
@@ -243,11 +240,14 @@ class WarmStartEventRecorder:
         match_status: str,
         matched: Mapping[str, Any] | None = None,
         error: str = "",
+        exc: BaseException | None = None,
     ) -> None:
         """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        ``error`` carries the exception class name when the lookup itself
-        failed, which is not the same as having looked and found nothing.
+        ``exc`` (or ``error`` as a bare class name) carries the exception when
+        the lookup itself failed, which is not the same as having looked and
+        found nothing. The failure block is the canonical
+        ``{stage, error_class, message}`` shape every other event uses.
         """
         if self._closed:
             return
@@ -255,7 +255,8 @@ class WarmStartEventRecorder:
         self._release()
         end_time = _now()
         found = str(match_status or "").strip().lower()
-        status = _status_for(found, error=error)
+        failed = exc is not None or bool(error)
+        status = _status_for(found, error="failed" if failed else "")
         payload: dict[str, Any] = {
             "status": status,
             "match_status": found,
@@ -264,23 +265,29 @@ class WarmStartEventRecorder:
         }
         if matched:
             payload["matched"] = dict(matched)
-        if error:
-            payload["failure"] = {"error_class": str(error)}
+        if exc is not None:
+            payload["failure"] = _failure_row(stage="lookup", exc=exc)
+        elif error:
+            payload["failure"] = _failure_row(stage="lookup", error_class=str(error))
         self._sink.record(SECTION_EVENT, payload)
 
         from .assembler import warm_start_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing warm_start event {self.event_id}")
 
     def _release(self) -> None:
         """Stop claiming reads. Tolerant of a token set on another context."""
@@ -289,7 +296,7 @@ class WarmStartEventRecorder:
             return
         try:
             _ACTIVE.reset(token)
-        except ValueError:  # noqa: BLE001 — settled from a different context
+        except ValueError:
             _ACTIVE.set(None)
 
 
@@ -308,26 +315,24 @@ def make_warm_start_recorder(
     scope: Mapping[str, Any] | None = None,
     start_time: str = "",
 ) -> WarmStartEventRecorder | None:
-    """Open the T0 lookup's event, or ``None`` when it cannot be recorded.
+    """Open the T0 lookup's event, or ``None`` when no session is bound.
 
-    ``None`` means no session is bound or the open write failed; ``start_time``
-    defaults to now. Recording is best-effort: the anchor outranks its record.
+    ``start_time`` defaults to now.
     """
-    try:
-        from ...session.session_binding import bound_session
+    from ...session.session_binding import bound_session
+    from .construct import decline_unbound
 
-        recorder = WarmStartEventRecorder(
-            make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
-            requested_canonical_id=requested_canonical_id,
-            scope=scope,
-            start_time=start_time or _now(),
-            session=bound_session(),
-        )
-        recorder.begin()
-        return recorder
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="warm_start_event", error=exc, detail="open warm_start event failed")
+    if decline_unbound("warm_start"):
         return None
+    recorder = WarmStartEventRecorder(
+        make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
+        requested_canonical_id=requested_canonical_id,
+        scope=scope,
+        start_time=start_time or _now(),
+        session=bound_session(),
+    )
+    recorder.begin()
+    return recorder
 
 
 def assemble_warm_start_ext(
@@ -352,10 +357,8 @@ def assemble_warm_start_ext(
         "match_status": str(header.get("match_status") or ""),
         "matched": _as_dict(header.get("matched")) or None,
         "reads": _reads_block(reads),
+        "failure": _as_dict(header.get("failure")) or None,
     }
-    failure = _as_dict(header.get("failure"))
-    if failure:
-        ext["failure"] = failure
     return ext, str(header.get("status") or "")
 
 

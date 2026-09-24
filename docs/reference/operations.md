@@ -45,7 +45,6 @@ GEAK workers. The Coordinator pod itself is small.
 |------------------------------------|-----------|-----------|-------------------------------------------|--------------------------------------------------------------------------------------------|
 | Coordinator + Orchestration        | 4 cores   | 16 GiB    | none                                      | minimal                                                                                    |
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
-| Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
 | GEAK + Ray head (kernel optimization) | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
 | Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X, MI325X, or MI355X             | ~10 GB per attempt for build artifacts                                                     |
 | Inference server (sglang or vllm)  | 16 cores  | 128 GiB   | 1–8 × MI300X, MI325X, or MI355X (matches TP)| weights + KV cache; depends on model                                                      |
@@ -85,6 +84,12 @@ If you only need long-term observability, the only file you must
 preserve is `session_breakdown.json` (1–10 MB; see
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md)).
 
+When `USER_DATA_PATH` must stay on a cluster-wide shared mount, keep session
+directories there but, for Codex SDK turns, set `HYPERLOOM_RUNTIME_DIR` to a
+private node-local directory outside source checkouts (installers often default
+it to `$USER_DATA_PATH/runtime`, which follows the shared mount). See
+[Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out).
+
 ---
 
 ## Kubernetes layout
@@ -102,7 +107,6 @@ namespace: hyperloom
 ├── Job: hyperloom-session-<session_id>   # short-lived, one per optimization run
 │   ├── Pod: coordinator                  # Python CLI
 │   ├── (subprocess) critic-agent
-│   ├── (subprocess) robustness-agent
 │   └── Ray head (launched by kernel request handlers; GEAK runs as Ray workers)
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
@@ -121,6 +125,9 @@ Notes:
   GPU labels; Ray currently expects all GPUs visible to the head.
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick state.json reads.
+  If session outputs must use shared storage and Codex SDK turns are enabled,
+  also provide node-local disk for `HYPERLOOM_RUNTIME_DIR` (see
+  [Storage for `USER_DATA_PATH`](#storage-for-user_data_path)).
   (`RWO` = ReadWriteOnce, a persistent volume (PV) access mode.)
 * LLM calls go directly to the configured upstream gateway; no in-pod
   auth-proxy Service or NetworkPolicy is required.
@@ -151,7 +158,6 @@ Back up the following artifacts from each session.
 | Session manifest + state                | `$SESSION_DIR/manifest.json`,<br>`$SESSION_DIR/state.json`        | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/`<br>`session_breakdown.json`                | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.                 |
 | Local knowledge root                    | `${KNOWLEDGE_LOCAL_ROOT:-$USER_DATA_PATH/knowledge}` (otherwise `~/.cache/hyperloom/knowledge`) | Permanent. Backup before cleanup of `USER_DATA_PATH`. |
-| Robustness findings                     | `$SESSION_DIR/agents/`<br>`robustness/findings/`<br>`<session_id>.jsonl` | 30 days minimum; longer if your incident process needs it.                                        |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.          |
 | Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                    |
 
@@ -200,7 +206,6 @@ is JSONL-on-disk + (optional) downstream collectors.
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
 | Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
 | Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
-| Robustness findings            | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`                     | JSONL, append   |
 | Critic verdicts                | `$SESSION_DIR/critic-workdir/<turn>/emit.json` (memory in `$SESSION_DIR/critic-session-memory/`) | JSON per call   |
 | Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
 | Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
@@ -225,8 +230,10 @@ ingest it whole on session end.
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
    (if any) is re-played from scratch.
-4. Robustness writes a fresh `findings/<session>.jsonl` segment; old
-   segments remain.
+There is no automatic supervision or resume. Confirm the old Coordinator is gone
+and inspect the failure before relaunching. SIGHUP follows normal terminal drain;
+`--max-hours` is cooperative and cannot guarantee termination of a frozen
+Coordinator. Historical stop reasons remain readable but do not trigger a restart.
 
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the

@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.1 --target .
+pip install hyperloom-inference-optimizer==1.1.2 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -164,15 +164,17 @@ value.
    recommendation:
    1. `none`: use an already-installed vLLM/SGLang framework stack on the host.
    2. `sglang`: install SGLang ROCm framework components (shared with the host torch).
-   3. `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
-      pins its own torch, so it runs in an isolated env and never touches the
-      host torch/SGLang stack.
+   3. `vllm (isolated)`: install vLLM into a dedicated venv, leaving the host
+      torch/SGLang stack untouched. On ROCm 7.2.x the ROCm wheel brings its own
+      torch; on ROCm 10 vLLM is built from source in a venv that reuses the host
+      ROCm torch.
    - Do not mark any option as recommended. Present the three options in the exact
      order above without a default selection.
 
 8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
-   briefly note that the installer enforces the vLLM 0.28.0+ glibc floor
-   (glibc >= 2.39). If setup later fails with that error, explain it in plain
+   briefly note that on ROCm 7.2.x the installer enforces the vLLM 0.28.0+
+   wheel's glibc floor (glibc >= 2.39); the ROCm 10 source build has no such
+   gate. If setup later fails with that error, explain it in plain
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
 

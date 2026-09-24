@@ -53,7 +53,7 @@ def _import_sdk() -> tuple[Any, Any]:
 
 def _iter_message_text(message: Any) -> Iterable[str]:
     """Yield the non-empty text fragments of a Claude Agent SDK message."""
-    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
+    from hyperloom.common.claude_oneshot import message_text
 
     yield from (fragment for fragment in message_text(message) if fragment)
 

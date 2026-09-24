@@ -313,19 +313,6 @@ def test_provider_overrides_select_the_responses_wire_api():
     assert _override_value(overrides, "model_providers.hyperloom.name") == '"hyperloom"'
 
 
-def test_provider_overrides_name_the_gateway_key_variable_that_is_set():
-    """``LLM_GATEWAY_KEY`` deployments must be pointed at their own variable."""
-    env = {
-        "LLM_GATEWAY_KEY": _SECRET,
-        "OPENAI_BASE_URL": "https://gateway.example/Unified/v1",
-    }
-
-    overrides = cs.codex_provider_overrides(env=env)
-
-    assert _override_value(overrides, "model_providers.hyperloom.env_key") == '"LLM_GATEWAY_KEY"'
-    assert not any(_SECRET in override for override in overrides)
-
-
 def test_resolved_provider_config_keeps_literal_header_values_out_of_overrides():
     """Literal gateway headers travel through private child env variables."""
     env = _gateway_env(OPENAI_CUSTOM_HEADERS="user: ntid42")
@@ -392,28 +379,36 @@ def test_provider_overrides_require_an_explicit_base_url():
 
 
 def test_provider_overrides_require_a_credential():
-    """A missing credential fails before the SDK spends a turn."""
+    """A missing credential fails before the SDK spends a turn.
+
+    ``LLM_GATEWAY_KEY`` is retired, so a host carrying only that name counts as
+    uncredentialed rather than as a gateway deployment.
+    """
     with pytest.raises(cs.CodexSessionUnavailableError, match="credential is missing"):
-        cs.codex_provider_overrides(env={"OPENAI_BASE_URL": "https://gateway.example/Unified/v1"})
+        cs.codex_provider_overrides(
+            env={
+                "OPENAI_BASE_URL": "https://gateway.example/Unified/v1",
+                "LLM_GATEWAY_KEY": _SECRET,
+            }
+        )
 
 
 def test_api_key_env_name_follows_llm_config_precedence():
-    """The preferred variable wins, then OPENAI_API_KEY, then LLM_GATEWAY_KEY."""
+    """The caller's preferred variable wins, then OPENAI_API_KEY."""
     both = {"OPENAI_API_KEY": "a", "LLM_GATEWAY_KEY": "b"}
 
     assert cs.api_key_env_name(env=both) == "OPENAI_API_KEY"
-    assert cs.api_key_env_name(env={"LLM_GATEWAY_KEY": "b"}) == "LLM_GATEWAY_KEY"
     assert cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}) == "SAFE_API_KEY"
 
 
 def test_api_key_env_name_lists_every_candidate_when_none_is_set():
     """The error must tell the operator which variables were checked."""
     with pytest.raises(cs.CodexSessionUnavailableError) as excinfo:
-        cs.api_key_env_name(env={})
+        cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={})
 
     message = str(excinfo.value)
+    assert "SAFE_API_KEY" in message
     assert "OPENAI_API_KEY" in message
-    assert "LLM_GATEWAY_KEY" in message
 
 
 # --------------------------------------------------------------------------- # Sandbox and approval selection

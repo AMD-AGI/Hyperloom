@@ -156,7 +156,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-TRACELENS_REF="c74d4d2ca48d6fcd7e7e829b409446000fe4300f"
+TRACELENS_REF="9fc0dc6487bde554c6ed314a15b61022e5ec62ea"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -171,6 +171,11 @@ _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+_is_git_checkout_root() {
+  local root="$1" top
+  top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] && [ "$(_canonicalize_path "$top")" = "$(_canonicalize_path "$root")" ]
 }
 # Mirror Path.home() (posixpath.expanduser) so paths written here land where the
 # Python readers look: a *present* HOME wins even when empty, else the uid's passwd entry.
@@ -314,6 +319,16 @@ fi
 # internal naming changed — no upstream GEAK branch was renamed.
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_REF="${GEAK_REF:-main}"
+_geak_root_is_operator_override=""
+if [ -n "${GEAK_ROOT:-}" ]; then
+  # Re-exported GEAK@* cache paths remain installer-managed across reruns.
+  _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
+  _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
+  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
+     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
+    _geak_root_is_operator_override=1
+  fi
+fi
 # GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
 # network (git ls-remote). Only do that when GEAK_ROOT was not overridden -- an
 # operator-pinned root must not pay for (or fail on) a network round-trip.
@@ -1126,17 +1141,10 @@ ensure_tracelens() {
     export TRACELENS_ROOT
     return 0
   fi
-  # Read-only source guard. When
-  # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
-  # install -e fails because it must write *.egg-info into the source
-  # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every trace_analyze request,
-  # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to $TRACELENS_MIRROR_DIR lets both
-  # the install-time and the runtime pip install land on a writable
-  # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
-  # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
-  # the mirror.
+  # Editable installation needs writable source for package metadata. Mirror
+  # read-only checkouts before the install-time pip call; runtime analysis only
+  # checks dependencies. write_env_file() preserves the mirror path for later
+  # CLI subprocesses.
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if ! ( : > "$TRACELENS_INTERNAL_ROOT/.hl_write_test" ) 2>/dev/null; then
       log "TraceLens-internal root not writable ($TRACELENS_INTERNAL_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
@@ -1354,10 +1362,20 @@ write_env_file() {
 # interface/run_e2e.py runner, then pip-install the GEAK package + claude_agent_sdk.
 ensure_geak() {
   log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${GEAK_ROOT}"
-  fi
-  if [ ! -d "${GEAK_ROOT}/.git" ]; then
+  if [ -n "${_geak_root_is_operator_override:-}" ]; then
+    if ! _is_git_checkout_root "${GEAK_ROOT}"; then
+      if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "operator-supplied GEAK_ROOT is not a git checkout: ${GEAK_ROOT}"
+      else
+        die "operator-supplied GEAK_ROOT is not a git checkout: ${GEAK_ROOT}"
+      fi
+    else
+      log "using operator-supplied GEAK checkout unchanged: ${GEAK_ROOT}"
+    fi
+  elif [ ! -d "${GEAK_ROOT}/.git" ]; then
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      mkdir -p "${GEAK_ROOT}"
+    fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"
       run git -C "${GEAK_ROOT}" remote add origin "$GEAK_REPO"
@@ -1513,7 +1531,7 @@ PY
       warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
     fi
   done
-  if [ -d "${GEAK_ROOT}/.git" ]; then
+  if _is_git_checkout_root "${GEAK_ROOT}"; then
     log "e2e optimizer geak ref: $(git -C "${GEAK_ROOT}" describe --tags --always 2>/dev/null || echo unknown)"
   else
     warn "e2e optimizer geak checkout missing at ${GEAK_ROOT}"

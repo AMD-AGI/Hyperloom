@@ -9,11 +9,12 @@ import json
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 
 SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
@@ -25,22 +26,12 @@ TASK_STATES = (
     "cancelled",
 )
 
-_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"succeeded", "failed", "cancelled"}),
-    "failed": frozenset(),
-    "succeeded": frozenset(),
-    "cancelled": frozenset(),
-}
-
-TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if not outgoing)
+# Re-exported: the state machine moved to ``task_states`` so ``bus`` can read it
+# without importing this module back. Existing callers keep their import site.
+_TRANSITIONS = TRANSITIONS
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
-
-
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
 
 
 @dataclass
@@ -56,8 +47,8 @@ class Task:
     side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
     history: list[dict] = field(default_factory=list)
-    created_at: str = field(default_factory=_now_iso)
-    updated_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
 
     @classmethod
     def from_row(cls, row) -> "Task":
@@ -110,7 +101,7 @@ def _insert_queued_task(
     an in-memory task never describes a row that was written differently.
     ``cur`` belongs to the caller's write transaction.
     """
-    now = _now_iso()
+    now = now_iso()
     task = Task(
         task_id=task_id or uuid.uuid4().hex,
         kind=kind,
@@ -305,7 +296,7 @@ class TaskRegistry:
             allowed = _TRANSITIONS.get(current_state, frozenset())
             if new_state not in allowed:
                 raise IllegalTransition(f"cannot transition {task_id!r} from {current_state!r} to {new_state!r}")
-            now = _now_iso()
+            now = now_iso()
             history = json.loads(row["history"])
             history.append(
                 {
@@ -333,7 +324,7 @@ class TaskRegistry:
             if row is None:
                 return
             history = json.loads(row["history"])
-            history.append({"progress": note or {}, "ts": _now_iso()})
+            history.append({"progress": note or {}, "ts": now_iso()})
             history = _drop_oldest_progress_notes(history, _MAX_PROGRESS_NOTES)
             cur.execute(
                 "UPDATE tasks SET history=? WHERE task_id=?",
@@ -381,106 +372,40 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state=? ORDER BY updated_at ASC", (state,))
         return [Task.from_row(r) for r in rows]
 
-    async def reclaim_expired_running(
-        self,
-        *,
-        now_unix: float | None = None,
-        reason: str = "lease_expired",
-    ) -> list[str]:
-        """Fail running tasks whose execution lease (``lease_ttl_sec`` since ``updated_at``) has expired (R6 watchdog / cycle soft-restart cleanup)."""
-        import time as _time
-
-        now = float(now_unix if now_unix is not None else _time.time())
-        reclaimed: list[str] = []
-        async with self.db.transaction() as cur:
-            cur.execute("SELECT task_id, lease_ttl_sec, updated_at, history FROM tasks WHERE state='running'")
-            rows = [(r["task_id"], r["lease_ttl_sec"], r["updated_at"], r["history"]) for r in cur.fetchall()]
-            now_iso = _now_iso()
-            for task_id, ttl, updated_at, history_json in rows:
-                try:
-                    ttl_sec = float(ttl or 0)
-                except (TypeError, ValueError):
-                    ttl_sec = 0.0
-                if ttl_sec <= 0:
-                    continue
-                try:
-                    updated = datetime.fromisoformat(str(updated_at))
-                    if updated.tzinfo is None:
-                        updated = updated.replace(tzinfo=timezone.utc)
-                    age = now - updated.timestamp()
-                except (TypeError, ValueError):
-                    continue
-                if age < ttl_sec:
-                    continue
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "running",
-                        "to": "failed",
-                        "ts": now_iso,
-                        "evidence": {
-                            "reason": reason,
-                            "age_sec": round(age, 1),
-                            "lease_ttl_sec": ttl_sec,
-                        },
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now_iso, task_id),
-                )
-                reclaimed.append(task_id)
-        return reclaimed
-
     async def reclaim_dead_running(
         self,
         *,
         reason: str = "dead_holder",
     ) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead."""
-        import os as _os
-
-        def _alive(pid: int) -> bool:
-            if pid <= 0:
-                return True
-            try:
-                _os.kill(pid, 0)
-            except ProcessLookupError:
-                return False
-            except OSError:
-                return True
-            return True
-
-        self_pid = _os.getpid()
         reclaimed: list[str] = []
         async with self.db.transaction() as cur:
             cur.execute(
-                "SELECT t.task_id AS task_id, t.history AS history, "
-                "MAX(l.pid) AS pid "
+                "SELECT t.task_id, t.history, l.pid, l.owner_scope "
                 "FROM tasks t JOIN leases l ON l.task_id = t.task_id "
-                "WHERE t.state='running' GROUP BY t.task_id"
+                "WHERE t.state='running' AND l.pid > 0"
             )
-            rows = [(r["task_id"], r["history"], r["pid"]) for r in cur.fetchall()]
-            now_iso = _now_iso()
-            for task_id, history_json, pid_raw in rows:
-                try:
-                    pid = int(pid_raw) if pid_raw is not None else 0
-                except (TypeError, ValueError):
-                    pid = 0
-                if pid <= 0 or pid == self_pid or _alive(pid):
+            holders: dict[str, list] = {}
+            for row in cur.fetchall():
+                holders.setdefault(row["task_id"], []).append(row)
+            ts_now = now_iso()
+            for task_id, rows in holders.items():
+                if not all(SqliteLeaseBackend.holder_is_dead(row) for row in rows):
                     continue
+                pid = int(rows[0]["pid"])
+                history_json = rows[0]["history"]
                 history = json.loads(history_json)
                 history.append(
                     {
                         "from": "running",
                         "to": "failed",
-                        "ts": now_iso,
+                        "ts": ts_now,
                         "evidence": {"reason": reason, "dead_pid": pid},
                     }
                 )
                 cur.execute(
                     "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now_iso, task_id),
+                    (json.dumps(history), ts_now, task_id),
                 )
                 reclaimed.append(task_id)
         return reclaimed
@@ -504,7 +429,7 @@ class TaskRegistry:
                 family_kinds,
             )
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
+            now = now_iso()
             for task_id, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
@@ -537,7 +462,7 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             cur.execute("SELECT task_id, kind, params, history FROM tasks WHERE state='queued'")
             rows = [(r["task_id"], r["kind"], r["params"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
+            now = now_iso()
             for task_id, kind, params_json, history_json in rows:
                 if str(kind or "").strip() in allowed:
                     continue

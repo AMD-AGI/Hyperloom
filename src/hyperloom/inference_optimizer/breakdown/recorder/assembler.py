@@ -20,7 +20,7 @@ from hyperloom.common.jsonio import read_json
 
 # Re-exported: callers have always named the section tuples through the
 # assembler, and they now live in a leaf module the event writers can share.
-from .sections import (  # noqa: F401
+from .sections import (
     BASELINE_EVENT_SECTIONS,
     CONC_SWEEP_EVENT_SECTIONS,
     ENABLEMENT_EVENT_SECTIONS,
@@ -320,6 +320,36 @@ def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list
         rows = assembled.get(section)
         parts[section] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     return parts
+
+
+def recorded_section(section: str, *, detail: str = "") -> list[dict[str, Any]]:
+    """Every row the bound session has written into ``section``, read back.
+
+    The guarded counterpart of :meth:`~.event_sink.EventSink.record`, and the
+    one place the read side is allowed to fail quietly. A writer consults its
+    own rows all the time -- to settle the open segment, to keep the first
+    trigger, to find the start time a later close needs -- and every one of
+    those call sites used to carry its own catch, which is how the subpackage
+    came to swallow everything it touched.
+
+    An unreadable spool is not a reason to skip the write that was about to
+    happen, so the answer is an empty list and the loss is noted. Fragments
+    that are individually bad are already skipped by :func:`assemble_parts`.
+    """
+    from .recorder_warnings import RECORDING_ERRORS, note_failure  # local: avoid an import cycle at module load
+
+    try:
+        return event_parts((section,)).get(section) or []
+    except RECORDING_ERRORS as exc:
+        note_failure(section=section, error=exc, detail=detail or f"reading back section {section}")
+        return []
+
+
+def recorded_rows(section: str, *, event: str) -> list[dict[str, Any]]:
+    """The rows ``event`` has already written into ``section``, read back."""
+    from .event_rows import rows_for_event  # local: avoid an import cycle at module load
+
+    return rows_for_event(recorded_section(section, detail=f"reading back the rows of event {event}"), event)
 
 
 def kernel_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:

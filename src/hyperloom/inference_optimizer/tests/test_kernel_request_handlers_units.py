@@ -23,7 +23,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
@@ -189,6 +189,28 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(precision="bf16", model_path="/models/does-not-exist")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+
+    def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
+        root = tmp_path / "sgl-workspace" / "aiter"
+        package = root / "aiter"
+        package.mkdir(parents=True)
+        (root / "csrc").mkdir()
+        origin = package / "__init__.py"
+        origin.write_text("", encoding="utf-8")
+
+        def _find_spec(name):
+            if name == "aiter_meta":
+                return None
+            assert name == "aiter"
+            return types.SimpleNamespace(
+                origin=str(origin),
+                submodule_search_locations=[str(package)],
+            )
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", _find_spec)
+
+        assert krh._resolve_aiter_root_for_forge() == str(root)
 
     def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
         # The probe must be the same invocation the tool makes, in the same interpreter.
@@ -498,27 +520,42 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_fusion_sentinel("no marker") is None
         assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
 
-    def test_resolve_fusion_decode_trace_prefers_payload_and_newest(self, tmp_path):
+    def test_resolve_fusion_decode_trace_reads_the_file_a_profile_records(self, tmp_path):
+        """A merged or AgentX profile records a single file; it is used verbatim."""
         state = SharedState()
-        state_dir = tmp_path / "state_trace"
-        payload_dir = tmp_path / "payload_trace"
-        state_dir.mkdir()
-        payload_dir.mkdir()
-        state_trace = state_dir / "old.trace.json.gz"
-        payload_old = payload_dir / "old.trace.json.gz"
-        payload_new = payload_dir / "new.trace.json"
+        state_trace = tmp_path / "prelude.trace.json.gz"
         state_trace.write_text("state", encoding="utf-8")
-        payload_old.write_text("old", encoding="utf-8")
-        payload_new.write_text("new", encoding="utf-8")
+        state.last_profile_trace = str(state_trace)
+
+        assert krh._resolve_fusion_decode_trace(state) == str(state_trace)
+
+    def test_resolve_fusion_decode_trace_reads_the_capture_dir_a_profile_records(self, tmp_path):
+        """Non-AgentX profiles record the capture directory (``trace_dir_preferred``)."""
+        state = SharedState()
+        trace_dir = tmp_path / "benchmark_vllm_20260501_001122"
+        trace_dir.mkdir()
+        older = trace_dir / "rank1.177.pt.trace.json.gz"
+        newest = trace_dir / "rank0.177.pt.trace.json.gz"
+        older.write_text("old", encoding="utf-8")
+        newest.write_text("new", encoding="utf-8")
         import os
 
-        os.utime(payload_old, (1, 1))
-        os.utime(payload_new, (10, 10))
-        state.last_profile_trace = str(state_dir)
+        os.utime(older, (1, 1))
+        os.utime(newest, (10, 10))
+        state.last_profile_trace = str(trace_dir)
 
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": str(payload_dir)}) == str(payload_new)
-        assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
+        assert krh._resolve_fusion_decode_trace(state) == str(newest)
+
+    def test_resolve_fusion_decode_trace_reports_no_trace_when_the_run_has_none(self, tmp_path):
+        """Nothing is substituted for a missing trace: discovery is attributed to what it read."""
+        state = SharedState()
+        assert krh._resolve_fusion_decode_trace(state) == ""
+        state.last_profile_trace = str(tmp_path / "deleted.trace.json")
+        assert krh._resolve_fusion_decode_trace(state) == ""
+        empty_dir = tmp_path / "no_captures"
+        empty_dir.mkdir()
+        state.last_profile_trace = str(empty_dir)
+        assert krh._resolve_fusion_decode_trace(state) == ""
 
     def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
         probed: list[str] = []
@@ -912,8 +949,8 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_forge_agent_defaults_an_unconfigured_provider_to_claude(self, monkeypatch):
         """A runtime logged in by other means carries no credential this can read."""
         _pin_fusion_provider_env(monkeypatch, {})
-        monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: True)
-        monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: True)
+        monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
+        monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
         assert krh._resolve_forge_agent({}) == ("claude", DEFAULT_CLAUDE_MODEL)
 
@@ -990,6 +1027,7 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(
             framework="sglang",
             model_path="/models/zaya",
+            # The shape a non-AgentX profile records: the capture directory, not a file.
             last_profile_trace=str(trace_dir),
         )
         state.save(tmp_path)
@@ -3658,6 +3696,10 @@ class TestRunGemmTuningHandler:
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        # The backend is chosen by KERNEL_OPT_BACKEND_ORDER, not by GEMM_TUNING_BACKEND, so
+        # leaving it to the ambient environment sends this down the forge branch instead --
+        # which reports model_path_missing, a prerequisite this test is not about.
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
@@ -4561,7 +4603,7 @@ class TestBuildTraceAnalyzeCmd:
             analysis_mode="inference",
         )
         assert cmd == [
-            "python3",
+            krh.sys.executable,
             "/tools/tracelens_analysis.py",
             "--trace-input",
             "/t/trace",
@@ -4697,49 +4739,6 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
         # session-id falls back to the session dir name when payload omits it.
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
-
-
-def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
-    """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    monkeypatch.setattr(
-        aiter_jit,
-        "probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
-    )
-
-    assert rh._cold_start_rebaseline_timeout(600) == aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC
-
-
-def test_a_warm_cache_keeps_the_resolved_timeout(monkeypatch):
-    """Only an empty cache justifies the cold cap; a warm boot keeps its budget."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    for probe in (
-        {"probe_status": "found", "is_cold": False, "kernel_count": 90},
-        {"probe_status": "not_found", "is_cold": None, "kernel_count": 0},
-        {"probe_status": "error", "is_cold": None, "kernel_count": 0},
-    ):
-        monkeypatch.setattr(aiter_jit, "probe_aiter_jit_cache", lambda p=probe: p)
-        assert rh._cold_start_rebaseline_timeout(600) == 600
-
-
-def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
-    """The cap is a floor for a cold boot, not a ceiling on the operator's budget."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    monkeypatch.setattr(
-        aiter_jit,
-        "probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
-    )
-    generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
-
-    assert rh._cold_start_rebaseline_timeout(generous) == generous
 
 
 class TestTheGemmLaneBudgetReachesTheInputJson:

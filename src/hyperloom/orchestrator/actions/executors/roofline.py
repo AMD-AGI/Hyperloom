@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
+from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
     ANALYSIS_ATTEMPT_INITIAL,
@@ -37,13 +39,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     make_roofline_recorder,
     roofline_event_id,
 )
-
-#: Task param naming the event an inline roofline's rows belong to. A phase
-#: that owns a timeline event puts its event id here when it dispatches the
-#: action, and that one string is the whole of the difference between the
-#: inline and standalone modes: with it the rows join the enclosing event, and
-#: without it the action leaves an event of its own.
-INLINE_EVENT_PARAM = "sbd_event_id"
 
 log = logging.getLogger(__name__)
 
@@ -101,14 +96,14 @@ async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
         return []
     try:
         return await asyncio.to_thread(reap_orphaned_servers, resolved)
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:
         log.debug("roofline: orphan reap failed", exc_info=True)
         return []
 
 
 async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> None:
     """Free GPUs held by an orphaned server before the next profile attempt."""
-    from .recover import probe_gpu_free_mb
+    from hyperloom.common.rocm_smi import gpu_vram_usage
 
     reaped = await _reap_session_orphans(session_dir)
 
@@ -129,10 +124,30 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
     )
     await asyncio.sleep(_GPU_RECLAIM_SETTLE_S)
     try:
-        free_mb = await asyncio.to_thread(probe_gpu_free_mb)
-        log.info("roofline: post-reclaim free VRAM: %s", free_mb)
-    except Exception:  # noqa: BLE001 — best-effort
+        usage = await asyncio.to_thread(gpu_vram_usage)
+        free_mb = [max(0.0, gpu.total_mib - gpu.used_mib) for gpu in usage] if usage is not None else None
+        log.info("roofline: post-reclaim free VRAM (MiB): %s", free_mb)
+    except Exception:
         log.debug("roofline: post-reclaim probe failed", exc_info=True)
+
+
+def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
+    """Why this stack can never record GPU kernels, or empty when the capture merely failed this time. Demands a
+    parsed trace carrying host ops beside zero kernels, so one transient empty capture cannot condemn the session.
+    """
+    if not isinstance(profile_result, dict):
+        return ""
+    measures = ((profile_result.get("trace_validate") or {}).get("verdict") or {}).get("measures") or {}
+    kernel_count = measures.get("kernel_count") if isinstance(measures, dict) else None
+    if not isinstance(kernel_count, int) or kernel_count != 0:
+        return ""
+    health = profile_result.get("trace_health")
+    if not isinstance(health, dict) or health.get("zero_ops") is not False:
+        return ""
+    return (
+        f"the profiler recorded {kernel_count} GPU kernels beside a populated host timeline, "
+        "so this stack cannot capture GPU traces at all"
+    )
 
 
 def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
@@ -458,7 +473,7 @@ class RooflineExecutor:
         # Only a context that names its session binds one.
         named = (ctx.extra or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -489,27 +504,19 @@ class RooflineExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "roofline timeline: no session bound; this action's whole event will be "
-                    "missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            event = inline or roofline_event_id(
-                str(getattr(self.shared_state, "phase", "") or "unphased"),
-                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
+        if not session_is_bound():
             log.warning(
-                "roofline timeline: could not resolve an event to record into; this action's "
-                "whole event will be missing from the breakdown",
-                exc_info=True,
+                "roofline timeline: no session bound; this action's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        event = inline or roofline_event_id(
+            str(getattr(self.shared_state, "phase", "") or "unphased"),
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
@@ -548,7 +555,7 @@ class RooflineExecutor:
             _sd0 = Path(session_dir)
             if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
                 self.shared_state.save(_sd0)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
         # ---- Profile (with retry) -------------------------------------------- sglang's torch profiler on
@@ -722,7 +729,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=None,
-                    failure={"phase": last_phase, "error_class": type(exc).__name__, "message": last_error},
+                    failure={"stage": last_phase, "error_class": type(exc).__name__, "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_EXCEPTION
                 # Only meaningful when capture was actually on. With the operator override set, a capture marker
@@ -756,7 +763,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=None,
-                    failure={"phase": last_phase, "error_class": "bad_return", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "bad_return", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_BAD_RETURN
                 continue
@@ -801,7 +808,7 @@ class RooflineExecutor:
                         status="failed",
                         result=profile_result,
                         failure={
-                            "phase": last_phase,
+                            "stage": last_phase,
                             "error_class": str(profile_result.get("error_class") or ""),
                             "message": last_error,
                         },
@@ -817,7 +824,7 @@ class RooflineExecutor:
                     status="failed",
                     result=profile_result,
                     failure={
-                        "phase": last_phase,
+                        "stage": last_phase,
                         "error_class": str(profile_result.get("error_class") or ""),
                         "message": last_error,
                     },
@@ -861,7 +868,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "no_trace", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "no_trace", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_NO_TRACE
                 continue
@@ -883,7 +890,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "capture_only", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "capture_only", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY
                 continue
@@ -904,7 +911,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "zero_ops", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "zero_ops", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_ZERO_OPS
                 continue
@@ -943,6 +950,23 @@ class RooflineExecutor:
             successful_profile_params or ctx.task.params or {},
             arm=roofline_arm,
         )
+        _backend = detect_kineto_backend(trace_path)
+        if _backend:
+            _fingerprint = dict(self.shared_state.stack_fingerprint_meta or {})
+            if _fingerprint.get("kineto_backend") != _backend:
+                _fingerprint["kineto_backend"] = _backend
+                self.shared_state.stack_fingerprint_meta = _fingerprint
+        if not self.shared_state.gpu_trace_unsupported_reason:
+            _unsupported = _gpu_trace_unsupported_reason(profile_result)
+            if _unsupported:
+                if _backend:
+                    _unsupported = f"{_unsupported} (Kineto backend: {_backend})"
+                self.shared_state.gpu_trace_unsupported_reason = _unsupported
+                log.error(
+                    "roofline: %s; automatic profile/roofline enqueues will be suppressed (stack=%s)",
+                    _unsupported,
+                    self.shared_state.stack_fingerprint_meta or "(unknown)",
+                )
         # The host-side rewrite evidence is produced by the profile sub-step and is what the framework specialist is
         # given instead of guessing landing points from source.
         from ._framework_rewrite_evidence import promote_evidence_path
@@ -1027,7 +1051,7 @@ class RooflineExecutor:
                 started_monotonic=_ta_t0,
                 trace_input=str(trace_path),
                 failure={
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": type(exc).__name__,
                     "message": f"trace_analyze_handler raised: {exc!r}",
                 },
@@ -1042,7 +1066,7 @@ class RooflineExecutor:
                 started_monotonic=_ta_t0,
                 trace_input=str(trace_path),
                 failure={
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": "bad_return",
                     "message": f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
                 },
@@ -1062,7 +1086,7 @@ class RooflineExecutor:
                 None
                 if ta_result.get("status") == "ok"
                 else {
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": str(ta_result.get("error_class") or ""),
                     "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
                 }
@@ -1130,7 +1154,7 @@ class RooflineExecutor:
                     trace_input=str(trace_path),
                     requested_mode=retry_mode,
                     failure={
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": type(exc).__name__,
                         "message": f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}",
                     },
@@ -1155,7 +1179,7 @@ class RooflineExecutor:
                     trace_input=str(trace_path),
                     requested_mode=retry_mode,
                     failure={
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": "bad_return",
                         "message": (
                             f"trace_analyze_handler returned non-dict on N26 "
@@ -1186,7 +1210,7 @@ class RooflineExecutor:
                     None
                     if retry_ok
                     else {
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": str(ta_result.get("error_class") or ""),
                         "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
                     }
@@ -1287,7 +1311,7 @@ class RooflineExecutor:
                         status="failed",
                         result=None,
                         failure={
-                            "phase": "profile",
+                            "stage": "profile",
                             "error_class": type(exc).__name__,
                             "message": f"compute-bound re-profile raised: {exc!r}",
                         },
@@ -1301,7 +1325,7 @@ class RooflineExecutor:
                         None
                         if cb_trace
                         else {
-                            "phase": "profile_no_trace",
+                            "stage": "profile_no_trace",
                             "error_class": "no_trace",
                             "message": "compute-bound re-profile produced no trace path",
                         }
@@ -1331,7 +1355,7 @@ class RooflineExecutor:
                             started_monotonic=_cb_t0,
                             trace_input=str(cb_trace),
                             failure={
-                                "phase": "trace_analyze",
+                                "stage": "trace_analyze",
                                 "error_class": type(exc).__name__,
                                 "message": f"compute-bound re-analysis raised: {exc!r}",
                             },
@@ -1349,7 +1373,7 @@ class RooflineExecutor:
                             None
                             if _cb_ok
                             else {
-                                "phase": "trace_analyze",
+                                "stage": "trace_analyze",
                                 "error_class": "compute_bound_reanalyze",
                                 "message": str((cb_ta or {}).get("error") or "compute-bound re-analysis failed")
                                 if isinstance(cb_ta, dict)
@@ -1439,7 +1463,7 @@ class RooflineExecutor:
             sd = Path(session_dir)
             if sd.name and sd.is_dir() and (sd / "state.json").exists():
                 self.shared_state.save(sd)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.debug("roofline: lifecycle emit failed", exc_info=True)
 
         result = {

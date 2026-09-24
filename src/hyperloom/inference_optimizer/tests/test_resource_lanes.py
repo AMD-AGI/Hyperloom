@@ -6,10 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
@@ -47,9 +53,8 @@ def locks(conn):
     return ResourceLockManager(SqliteLeaseBackend(conn))
 
 
-def test_schema_version_is_v5():
-    """v4 dropped ``tasks.allowed_tools``; v5 adds the bring-up round store."""
-    assert SCHEMA_VERSION == 5
+def test_schema_version_records_owner_provenance():
+    assert SCHEMA_VERSION == 6
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -112,6 +117,7 @@ async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
         action="bench",
         ttl_sec=60,
     )
+    assert isinstance(a.acquired_at, str)
     with pytest.raises(LaneBusy) as exc:
         await locks.acquire_many(
             ["benchmark_lane"],
@@ -430,8 +436,8 @@ async def test_release_only_drops_own_holder_row(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_reap_expired_keys_on_holder_id(conn, locks):
-    """``reap_expired`` deletes only the expired ``(lane, holder_id)`` row, not the whole lane."""
+async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
+    """Old timestamps cannot release an owner whose completion is unknown."""
     set_lane_capacity(conn.raw, "research_lane", 2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
@@ -465,25 +471,285 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
         ),
     )
     conn.raw.commit()
-    reaped = await locks.reap_expired()
-    assert any(r["holder_id"] == "dead" for r in reaped)
     holders = await locks.lane_holders()
-    assert holders.get("research_lane") == 1
-    cur = conn.raw.execute(
-        "SELECT holder_id FROM leases WHERE lane=?",
-        ("research_lane",),
+    assert holders.get("research_lane") == 2
+    assert (
+        await locks.try_acquire_many(
+            ["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60
+        )
+        is None
     )
-    surviving = [r["holder_id"] for r in cur.fetchall()]
-    assert surviving == ["live"]
+    assert not hasattr(locks, "reap_expired")
+
+
+_T0 = "2026-09-21T07:00:00+00:00"
+
+#: What the runner records when the release ran and teardown was acknowledged.
+_CLEANED = {"cleanup_confirmed": True}
+
+
+def _unconfirmed(tree_pgid: int | None = None) -> dict:
+    """Build the cleanup evidence of a holder that retained its lane.
+
+    What the runner records on the path that deliberately SKIPS the release,
+    with the process group the raise site named when it could name one. Omitting
+    it is not only a raise site with nothing to name: it is also the exact shape
+    every row written before this code shipped carries, 2026-09-21's included.
+    """
+    evidence: dict = {"cleanup_confirmed": False, "cleanup_error": "physical cleanup unconfirmed"}
+    if tree_pgid is not None:
+        evidence["cleanup_tree_pgid"] = tree_pgid
+    return evidence
+
+
+@pytest.fixture(autouse=True)
+def _forget_logged_remedies():
+    """The remedy log de-duplicates for the life of the process, not of one test."""
+    resource_lock._DIAGNOSED.clear()
+    yield
+    resource_lock._DIAGNOSED.clear()
+
+
+def _seed_task(conn, task_id: str, state: str, *, evidence: dict | None = None) -> None:
+    """Give a lane holder the registry row and cleanup account reclamation judges it by."""
+    history = json.dumps([{"from": "running", "to": state, "ts": _T0, "evidence": evidence or _CLEANED}])
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, history, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?,?)",
+        (task_id, "specialist", state, f"idem-{task_id}", history, _T0, _T0),
+    )
+    conn.raw.commit()
+
+
+def _dead_tree_pgid() -> int:
+    """A process-group id whose group has certainly emptied.
+
+    Spawned with ``start_new_session``, as both real launch sites do, so the
+    child's pid is its group id -- and once it is reaped neither the process nor
+    the group it led has a member left.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", ""], start_new_session=True)  # nosec B603
+    proc.wait()
+    return proc.pid
+
+
+@contextlib.contextmanager
+def _live_tree(*, own_session: bool = True):
+    """A real process, alive for the body of the test.
+
+    Args:
+        own_session: Whether it leads a session of its own, as a specialist
+            launched with ``start_new_session`` does. False reproduces a root
+            that shares its launcher's process group, where its own pid names
+            no group at all and only walking the tree can see it.
+    """
+    proc = subprocess.Popen(  # nosec B603
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=own_session
+    )
+    try:
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 @pytest.mark.asyncio
-async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
-    """A not-yet-expired lease whose holder PID is dead is reaped immediately."""
+async def test_the_confirmation_rate_counts_what_decides_the_next_design(conn, locks):
+    """How often teardown is unconfirmed, which is the number worth measuring.
+
+    ``leases_unverifiable`` says how many lanes are held now; it cannot say
+    whether that is an accident or the ordinary outcome. Every portable way to
+    release such a lane automatically was refuted, and the one candidate left is
+    safety-critical, so this ratio is what decides whether anyone should build
+    it. A task with no cleanup evidence at all counts as unconfirmed: that is
+    exactly the shape that strands a lane.
+    """
+    _seed_task(conn, "confirmed", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+    _seed_task(conn, "unconfirmed", "failed", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    # _seed_task treats an empty dict as "not supplied", so a history carrying no
+    # cleanup account at all is written directly -- that is the real shape here.
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, history, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?,?)",
+        (
+            "silent",
+            "specialist",
+            "succeeded",
+            "idem-silent",
+            json.dumps([{"from": "running", "to": "succeeded", "ts": _T0}]),
+            _T0,
+            _T0,
+        ),
+    )
+    conn.raw.commit()
+    _seed_task(conn, "still-running", "running", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+
+    unconfirmed, ended = await locks.cleanup_confirmation_rate()
+
+    # 'still-running' has not ended, so it is not part of the question.
+    assert (unconfirmed, ended) == (2, 3)
+
+
+def _remedies(caplog) -> list[str]:
+    """Every operator-facing warning the lane diagnostic logged."""
+    return [r.getMessage() for r in caplog.records if r.name == "hyperloom.orchestrator.bus.resource_lock"]
+
+
+@pytest.mark.asyncio
+async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_remedy(conn, locks, caplog):
+    """2026-09-21's own rows are not auto-healed, and are not meant to be.
+
+    The code that wrote them recorded ``cleanup_confirmed=False`` and no group
+    id, so they take the unverifiable path and keep their lanes -- for the life
+    of the session if need be, because no age or TTL may break the tie and a
+    row like this reads exactly like a holder still on the machine.
+
+    What the operator gets instead is this warning: the lane, the holder, why it
+    could not be settled, and the statement that releases that one row, with the
+    check that makes running it safe. On the day it took an hour of ``py-spy``
+    and sqlite spelunking to arrive at the same command.
+    """
+    _seed_task(conn, "tincident", "failed", evidence={"cleanup_confirmed": False})
+    await locks.acquire_many(
+        ["build_lane"], holder_id="incident", task_id="tincident", action="specialist", ttl_sec=3600
+    )
+
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+        # A sweep runs every maintenance tick, for the life of the session.
+        assert len(await locks.diagnose_unverifiable_holders()) == 1
+
+    assert [(r["lane"], r["task_id"], r["reason"]) for r in stuck] == [
+        ("build_lane", "tincident", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)
+    ]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    remedies = _remedies(caplog)
+    assert len(remedies) == 1
+    assert resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED in remedies[0]
+    assert "FIRST confirm no process of task tincident is still running" in remedies[0]
+    # The remedy names this session's real database, not a $SESSION_DIR the
+    # operator would have to resolve before they could paste it.
+    assert f'sqlite3 "{conn.db_path}" ' in remedies[0]
+    assert "\"DELETE FROM leases WHERE lane='build_lane' AND holder_id='incident';\"" in remedies[0]
+    assert "$SESSION_DIR" not in remedies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_lease_that_outlived_its_pruned_task_is_still_reported(conn, locks, caplog):
+    """A holder pruned out from under its lease must not vanish from the report.
+
+    ``prune_tasks`` deletes finished task rows without sparing one that still
+    holds a lease, and reclamation joins through ``tasks`` — so such a row can
+    be held with nothing able to judge it. Retaining unverifiable rows makes
+    that MORE likely, not less, because they now outlive their task on purpose.
+    Silence here would be the 2026-09-21 outcome with no log line at all.
+    """
+    await locks.acquire_many(["build_lane"], holder_id="orphan", task_id="torphan", action="specialist", ttl_sec=3600)
+    _seed_task(conn, "torphan", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    conn.raw.execute("DELETE FROM tasks WHERE task_id=?", ("torphan",))
+    conn.raw.commit()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDER_PRUNED)]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    assert len(_remedies(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_gpu_exempt_holder_is_retained_but_still_reported(conn, locks, caplog):
+    """The exemption is a reason not to reclaim, never a reason not to report.
+
+    A lane records its coordinator, not the specialist's GPU worker, so a holder
+    with live ``gpu_leases`` rows is exempt from reclamation. But that exemption
+    covers the GPU path — the one ``release_resources()`` fails on — which is
+    precisely the shape that wedged 2026-09-21. Reclamation must respect it; the
+    operator report must not.
+    """
+    await locks.acquire_many(["build_lane"], holder_id="gpuheld", task_id="tgpuheld", action="specialist", ttl_sec=3600)
+    _seed_task(conn, "tgpuheld", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    conn.raw.execute(
+        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (0, "gpuheld", "tgpuheld", _T0, _T0, _T0),
+    )
+    conn.raw.commit()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    # Nothing reclaims it either way now; the point is that it is REPORTED.
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDS_GPU)]
+    assert len(_remedies(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_holder_whose_work_may_still_run_is_reported_too(conn, locks, caplog):
+    """The accepted cost of refusing to guess: a winding-down holder is reported as well.
+
+    Earlier revisions tried to stay quiet while "something still answers under
+    the recorded process group", so an orderly teardown would not put a remedy
+    in the log. Every version of that test turned out to be a proxy a served
+    process escapes -- it is setsid'd by design -- so this pass no longer claims
+    to tell a busy holder from an abandoned one. It reports both, once per
+    ``(lane, holder)``, and lets the operator look.
+
+    The noise is the price of the asymmetry: a lane reported while its work
+    winds down costs a glance at a log, whereas a lane released while its work
+    runs puts two rounds on the same cards.
+    """
+    with _live_tree() as tree:
+        _seed_task(conn, "tbusy", "failed", evidence=_unconfirmed(tree.pid))
+        await locks.acquire_many(["build_lane"], holder_id="busy", task_id="tbusy", action="specialist", ttl_sec=3600)
+        with caplog.at_level(logging.WARNING):
+            stuck = await locks.diagnose_unverifiable_holders()
+            # A second pass must not repeat itself, however long the holder lingers.
+            assert await locks.diagnose_unverifiable_holders() == stuck
+
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    remedies = _remedies(caplog)
+    assert len(remedies) == 1
+    # The recorded spawn group is offered as a lead, explicitly not as proof.
+    assert f"its spawn process group was {tree.pid}" in remedies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_row_this_process_may_not_judge_is_still_reported(conn, locks, caplog):
+    """No reaper here will ever take it back, so the operator is the only way out.
+
+    The scope guard keeps the sweep from probing an id minted in another boot or
+    PID namespace, where any answer would be about the wrong machine. That is
+    the right call and also a dead end, so the diagnostic deliberately ignores
+    scope where the sweep must not.
+    """
+    _seed_task(conn, "tfarstuck", "failed", evidence=_unconfirmed())
+    await locks.acquire_many(
+        ["build_lane"], holder_id="farstuck", task_id="tfarstuck", action="specialist", ttl_sec=3600
+    )
+    conn.raw.execute("UPDATE leases SET owner_scope='other-boot:4026531836'")
+    conn.raw.commit()
+
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    assert [r["reason"] for r in stuck] == [resource_lock.UNVERIFIABLE_FOREIGN_SCOPE]
+    assert resource_lock.UNVERIFIABLE_FOREIGN_SCOPE in _remedies(caplog)[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires", ["2020-01-01T00:00:00+00:00", "2099-12-31T23:59:59+00:00"])
+async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, expires):
+    """Confirmed-dead owners are scanned independently of their recorded TTL."""
     import os
 
     dead_pid = 2_147_483_646
     assert dead_pid != os.getpid()
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != dead_pid))
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
     set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
@@ -497,7 +763,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
             "explore",
             dead_pid,
             "2026-01-01T00:00:00+00:00",
-            "2099-12-31T23:59:59+00:00",
+            expires,
             "2026-01-01T00:00:00+00:00",
         ),
     )
@@ -517,6 +783,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
             "2026-01-01T00:00:00+00:00",
         ),
     )
+    conn.raw.execute("UPDATE leases SET owner_scope='test-node'")
     conn.raw.commit()
     reaped = await locks.reap_dead_holders()
     assert any(r["holder_id"] == "zombie" for r in reaped)
@@ -733,6 +1000,103 @@ async def test_gpu_research_lane_is_strictly_serial(locks):
             ttl_sec=60,
         )
     await locks.release(first)
+
+
+@pytest.mark.asyncio
+async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks):
+    lease = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1
+    )
+    assert await locks.reap_dead_holders() == []
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
+        )
+        is None
+    )
+    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+    await locks.release(lease)
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ray", [False, True])
+async def test_old_gpu_owner_keeps_capacity_until_release(conn, ray):
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+
+    async def acquire(holder):
+        if ray:
+            return await pool.try_acquire_ray_observation(holder_id=holder, task_id=holder, pending_limit=1)
+        return await pool.try_acquire(count=1, holder_id=holder, task_id=holder)
+
+    lease = await acquire("old")
+    await conn.execute("UPDATE gpu_leases SET expires_at='2020-01-01T00:00:00+00:00'")
+    assert await acquire("next") is None
+    assert not hasattr(pool, "reap_expired")
+    await pool.release(lease)
+    assert await acquire("next") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["", "another-node"])
+async def test_unknown_owner_scope_is_not_probed(conn, locks, monkeypatch, scope):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    lease = await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
+    await conn.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
+    monkeypatch.setattr(locks.backend, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
+    assert await locks.reap_dead_holders() == []
+    assert await locks.lane_holders() == {"research_lane": 1}
+    await locks.release(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe_error", [PermissionError, OSError])
+async def test_uncertain_pid_probe_retains_lane(conn, locks, monkeypatch, probe_error):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
+
+    def probe(pid, signal):
+        raise probe_error()
+
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.os.kill", probe)
+    assert await locks.reap_dead_holders() == []
+
+
+@pytest.mark.asyncio
+async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, locks, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: False))
+    await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="specialist", task_id="specialist", action="specialist", ttl_sec=-1
+    )
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    await pool.try_acquire(count=1, holder_id="specialist", task_id="specialist")
+    assert await locks.reap_dead_holders() == []
+    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+
+
+def test_legacy_db_gains_unknown_owner_scope(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as raw:
+        raw.execute(
+            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, action TEXT, pid INTEGER, "
+            "acquired_at TEXT, expires_at TEXT, heartbeat_at TEXT, PRIMARY KEY (lane, holder_id))"
+        )
+        raw.execute("INSERT INTO leases VALUES ('research_lane','old','old','specialist',123,'old','old','old')")
+    db = SqliteConnection(path)
+    try:
+        ensure_schema(db.raw)
+        row = db.raw.execute("SELECT owner_scope FROM leases").fetchone()
+        assert row["owner_scope"] == ""
+    finally:
+        db.close()
 
 
 def test_gpu_research_lane_seeded_capacity_one():

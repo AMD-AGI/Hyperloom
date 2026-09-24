@@ -73,7 +73,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -446,6 +446,39 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
+    # ``profiler=torch`` belongs in the launched fragment; do not add
+    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
+    # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
+    assert "--profiler-config.profiler torch" in extra, extra
+    assert "--profiler-config.torch_profiler_dir" not in extra, extra
+
+
+def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
+    tmp_path,
+    monkeypatch,
+):
+    """An operator-set ``profiler``/``torch_profiler_dir`` must not be doubled."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": (
+                "--profiler-config.profiler torch --profiler-config.torch_profiler_dir /tmp/operator-dir"
+            ),
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.profiler") == 1, extra
+    assert extra.count("--profiler-config.torch_profiler_dir") == 1, extra
+    assert "/tmp/operator-dir" in extra, extra
 
 
 def test_materialize_profile_window_vllm_skill_formula_explicit_R(
@@ -734,6 +767,8 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
         tmp_path,
         extra_envs={
             "EXTRA_VLLM_ARGS": (
+                "--profiler-config.profiler torch "
+                "--profiler-config.torch_profiler_dir /tmp/already-set "
                 "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
@@ -1744,6 +1779,8 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     assert "--profiler-config" not in extra, f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
     # --trust-remote-code from the baseline YAML must survive untouched.
     assert "--trust-remote-code" in extra, f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
+    # baseline YAML is not a profile materialize; do not inject ATOM TraceLens knobs.
+    assert "--mark-trace" not in extra
 
 
 def test_default_profile_config_tracks_framework(monkeypatch):
@@ -1762,6 +1799,54 @@ def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypat
     # default_config_path=None so the resolver is consulted at call time.
     assert pe.default_config_path is None
     assert pe._resolve_default_config().name == "baseline_vllm.yaml"
+
+
+def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path, monkeypatch):
+    import yaml
+
+    from hyperloom.orchestrator.bringup.argv_preflight import OK
+
+    config_path = tmp_path / "profile.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {
+                        "PROFILE": "1",
+                        "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler True",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def _capture(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), dropped=())
+
+    monkeypatch.setattr("hyperloom.orchestrator.bringup.check_server_argv", _capture)
+    state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
+    executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
+
+    result = executor._preflight_server_argv(
+        config_path=config_path,
+        framework="vllm",
+        launch_env={},
+        output_dir=tmp_path / "round",
+        attempt=1,
+        capture_meta={},
+    )
+
+    assert result is None
+    assert seen["argv"][:4] == (
+        "--profiler-config.profiler",
+        "torch",
+        "--profiler-config.torch_profiler_dir",
+        str(tmp_path / "round" / "torch_trace"),
+    )
 
 
 def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
@@ -2332,8 +2417,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 
 @pytest.mark.asyncio
-async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
+async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2362,10 +2446,12 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
                 }
             )
         )
-        capture_dir = output_dir / "capture_traces"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(exist_ok=True)
+        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
+        capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
-        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
-        (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
@@ -2378,12 +2464,16 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
 
-    capture_dir = output_dir / "capture_traces"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    torch_trace = workspace / "torch_trace"
+    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(capture_dir)
-    assert len(res.result["trace_files"]) == 2
-    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    assert res.result["trace_dir"] == str(torch_trace)
+    assert res.result["trace_files"] == [str(complete_trace)]
+    assert res.result["main_trace_path"] == str(torch_trace)
+    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
+    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 
@@ -2519,6 +2609,8 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    monkeypatch.setattr(krh.sys, "executable", "/task/deps/venv/bin/python")
+    monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2543,6 +2635,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
+    assert cmd[0] == "/task/deps/venv/bin/python"
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--tracelens-root" in cmd

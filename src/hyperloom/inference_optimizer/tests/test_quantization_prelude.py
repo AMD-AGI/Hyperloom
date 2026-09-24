@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import env_bool
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import quantization as cli_quantization
@@ -453,12 +454,12 @@ def test_prelude_env_gate_skips_when_unset(monkeypatch):
     assert str(args.model) == "/models/src"
 
 
-def test_quantization_enabled_via_env_helper(monkeypatch):
+def test_quantize_switch_token_vocabulary(monkeypatch):
     for v in ("1", "true", "TRUE", "yes", "on", "On", " 1 "):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli_quantization._quantization_enabled_via_env() is True
+        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is True
     for v in ("0", "false", "no", "off", "", "bogus"):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli_quantization._quantization_enabled_via_env() is False
+        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
     monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
-    assert cli_quantization._quantization_enabled_via_env() is False
+    assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
