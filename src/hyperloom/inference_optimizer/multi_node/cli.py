@@ -14,7 +14,7 @@ import shlex
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +28,7 @@ from ._internal.server_args_safety import (
     validate_server_args,
 )
 from .state_paths import resolve_state_file
-from ._internal.env_safety import is_forward_env_key_allowed, parse_forward_env
-from ._internal.launch_env import LaunchEnv, expand_env_vars
+from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
 from ._internal.serving_probe import cluster_is_serving
 
@@ -111,9 +110,9 @@ def _infera_ssh_dir() -> Path:
     return _state_file().parent / "mn_ssh"
 
 
-def _multinode_server_log_dir(source: Mapping[str, str]) -> str:
+def _multinode_server_log_dir() -> str:
     """Resolve a cross-node-visible directory for the per-rank server logs."""
-    explicit = expand_env_vars(source.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip(), source)
+    explicit = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
     if explicit.startswith("/") and "$" not in explicit:
         return explicit
     try:
@@ -650,8 +649,6 @@ def _build_multinode_launch_entrypoint(
     nnodes: int,
     pid_dir: str,
     log_dir: str,
-    *,
-    launch_env: LaunchEnv | None = None,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
     py = _read_bundled_pod_python_script("launch_multinode.py", _LAUNCHER_DEPS)
@@ -663,8 +660,21 @@ def _build_multinode_launch_entrypoint(
         )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
-    launch_env = _collect_ray_launch_env(_load_state(), log_dir=log_dir) if launch_env is None else launch_env
-    profiler_dir = launch_env.profiler_dir
+    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive from state.json's rayjob_id; empty =>
+    # skip the flag.
+    profiler_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    if not profiler_dir:
+        _st = _load_state()
+        _rid = str(_st.get("rayjob_id") or "").strip()
+        if _rid:
+            _profiler_path = mn_profile_trace_root() / _rid / "torch_trace"
+            # Best-effort mkdir.
+            try:
+                _profiler_path.mkdir(parents=True, exist_ok=True)
+            except OSError as _exc:
+                warn(f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; pod-side launch will retry the mkdir")
+            profiler_dir = str(_profiler_path)
+            info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     # Expert-parallel size; ep <= 1 emits no flag.
     try:
@@ -896,71 +906,25 @@ def _extract_pod_json(logs: str) -> dict | None:
     return None
 
 
-_LAUNCH_ENV_CONTROL = "HYPERLOOM_MN_LAUNCH_ENV_CONTROL"
-_PLATFORM_ENV_PREFIXES = ("LWS_", "POD_", "KUBERNETES_")
-
-
-def _is_launch_env_key_allowed(key: str) -> bool:
-    return (
-        is_forward_env_key_allowed(key)
-        and key not in {_LAUNCH_ENV_CONTROL, "VIRTUAL_ENV"}
-        and not key.startswith(_PLATFORM_ENV_PREFIXES)
-    )
-
-
-def _launch_env_snapshot(
-    forward_env: Mapping[str, str],
-    unset: tuple[str, ...],
-    *,
-    profiler_dir: str = "",
-    log_dir: str = "",
-) -> LaunchEnv:
-    """Keep platform assignments and transport metadata out of variant identity."""
-    return LaunchEnv(
-        {key: value for key, value in forward_env.items() if _is_launch_env_key_allowed(key)},
-        unset=tuple(key for key in unset if _is_launch_env_key_allowed(key)),
-        profiler_dir=profiler_dir,
-        log_dir=log_dir,
-    )
-
-
-def _launch_env_transport(launch_env: LaunchEnv) -> dict[str, str]:
-    """Carry values in env and only key names in the consumed control envelope."""
-    forwarded = dict(launch_env.forward_env)
-    forwarded[_LAUNCH_ENV_CONTROL] = json.dumps(
-        {"set": sorted(forwarded.keys() - set(launch_env.unset)), "unset": list(launch_env.unset)},
-        separators=(",", ":"),
-    )
-    return forwarded
-
-
-def _collect_ray_launch_env(
-    state: dict[str, Any], *, log_dir: str = "", source: Mapping[str, str] | None = None
-) -> LaunchEnv:
-    """Capture the Ray launch inputs before reuse checks or remote operations."""
-    source = dict(os.environ) if source is None else source
-    extra, unset = parse_forward_env(source)
-    profiler_dir = source.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    rayjob_id = str(state.get("rayjob_id") or "").strip()
-    if not profiler_dir and rayjob_id:
-        profiler_path = mn_profile_trace_root() / rayjob_id / "torch_trace"
-        try:
-            profiler_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            warn(f"cannot mkdir profile-traces dir {profiler_path}: {exc}; pod-side launch will retry the mkdir")
-        profiler_dir = str(profiler_path)
-        info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
-    log_dir = log_dir or state.get("last_server_log_dir") or _multinode_server_log_dir(source)
-    return _launch_env_snapshot(extra, unset, profiler_dir=profiler_dir, log_dir=log_dir)
-
-
-def _forward_runtime_env(launch_env: LaunchEnv | None = None) -> dict[str, Any] | None:
+def _forward_runtime_env() -> dict[str, Any] | None:
     """Build the Ray runtime_env carrying per-round env overrides to every rank."""
-    if launch_env is None:
-        launch_env = _launch_env_snapshot(*parse_forward_env(dict(os.environ)))
-    if launch_env.forward_env:
-        info(f"forwarding per-round env to all ranks: {sorted(launch_env.forward_env)}")
-    return {"env_vars": _launch_env_transport(launch_env)}
+    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+        return None
+    if not isinstance(parsed, dict):
+        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
+        return None
+
+    env_vars = filter_forward_env({str(k): str(v) for k, v in parsed.items()}, warn_on_drop=True)
+    if not env_vars:
+        return None
+    info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")
+    return {"env_vars": env_vars}
 
 
 def _submit_and_collect_pod_json(
@@ -1271,12 +1235,10 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
     return fingerprint
 
 
-def cmd_restart_server(
-    args: argparse.Namespace, *, launch_env: LaunchEnv | None = None, force_full_restart: bool = False
-) -> int:
+def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one."""
     if _load_state().get("backend") == "infera":
-        return _infera_restart_server(args, launch_env=launch_env, force_full_restart=force_full_restart)
+        return _infera_restart_server(args)
     try:
         validate_server_args(
             getattr(args, "extra_args", "") or "",
@@ -1293,13 +1255,11 @@ def cmd_restart_server(
         pid_dir = (
             args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         )
-        if launch_env is None:
-            launch_env = _collect_ray_launch_env(state, log_dir=args.log_file or "")
-        log_dir = launch_env.log_dir
+        log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
-        launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir, launch_env=launch_env)
+        launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
 
         # Resume fast path: if the prior launch had identical framework/model/tp/ep/pd_mode and is still RUNNING, skip
         # KILL+LAUNCH and resume polling.
@@ -1307,9 +1267,7 @@ def cmd_restart_server(
         # Set only when a resume was granted because the cluster is serving, which in PD means its router is already
         # up and must not be rebuilt.
         resumed_serving = False
-        resume_enabled = not force_full_restart and os.environ.get(
-            "MULTI_NODE_RESTART_RESUME_RUNNING", "1"
-        ).lower() not in (
+        resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
             "0",
             "false",
             "no",
@@ -1319,11 +1277,7 @@ def cmd_restart_server(
         # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
         # miss the fast path, and it is part of the record because it carries every variant flag.
         topology = _rayjob_topology_fingerprint(args, nnodes)
-        prev_match = (
-            bool(prev_sub)
-            and state.get("last_restart_topology") == topology
-            and state.get("last_restart_env_digest") == launch_env.digest
-        )
+        prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
         if resume_enabled and prev_match:
             _prev_status = ""
             try:
@@ -1372,7 +1326,7 @@ def cmd_restart_server(
         with _ray_dashboard_client(state) as ray:
             # Launch new servers (skipped when resuming a RUNNING launch).
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env(launch_env))
+                launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
@@ -1391,7 +1345,6 @@ def cmd_restart_server(
             # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
             # per-field pd_* keys below are written only once the poll returns.
             state["last_restart_topology"] = topology
-            state["last_restart_env_digest"] = launch_env.digest
             _save_state(state)
 
             def _fetch_launch():
