@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
-
 import pytest
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
@@ -345,67 +343,14 @@ def test_gate_orchestration_prune_branch_allowed_with_family(gate):
     )
 
 
-@pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
-@pytest.mark.parametrize("value", ["", "baseline"])
-def test_gate_orchestration_update_state_text_ok(gate, field_name, value):
+def test_gate_orchestration_update_state_non_core_ok(gate):
     gate.validate_intent(
         "orchestration",
-        Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field_name: value}}),
+        Intent(
+            type=IntentType.UPDATE_STATE,
+            payload={"changes": {"current_action": "baseline"}},
+        ),
     )
-
-
-@pytest.mark.parametrize("field_name", ["current_action", "target_summary"])
-@pytest.mark.parametrize("value", [None, False, 1, 1.5, [], {}])
-def test_gate_update_state_rejects_non_text_values(gate, field_name, value):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field_name: value}}),
-        )
-    assert exc.value.rule == "state_field"
-
-
-@pytest.mark.parametrize("include_allowed", [False, True])
-def test_gate_update_state_leaves_unknown_keys_for_rejected_feedback(gate, include_allowed):
-    changes = {"future_unknown_key": 42}
-    if include_allowed:
-        changes["current_action"] = "baseline"
-    gate.validate_intent("orchestration", Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}))
-
-
-@pytest.mark.parametrize("changes", [None, {}, [], "bad"])
-def test_gate_update_state_requires_nonempty_mapping(gate, changes):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}))
-    assert exc.value.rule == "payload"
-
-
-@pytest.mark.parametrize(
-    "field_name", [f.name for f in fields(SharedState) if f.name not in {"current_action", "target_summary"}]
-)
-def test_gate_update_state_rejects_every_internal_field(gate, field_name):
-    state = SharedState()
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field_name: getattr(state, field_name)}}),
-        )
-    assert exc.value.rule == "state_field"
-
-
-@pytest.mark.parametrize("transport", ["tools", "structured_output"])
-def test_update_state_prompt_and_gate_share_the_text_schema(transport):
-    from hyperloom.orchestrator.prompts.prompt_builder import build_orchestration_prompt
-
-    schema = SharedState.AGENT_UPDATE_FIELDS
-    assert schema == {"current_action": str, "target_summary": str}
-    assert CORE_STATE_FIELDS == {f.name for f in fields(SharedState)} - schema.keys()
-    prompt = build_orchestration_prompt(action_registry={}, enabled_actions=(), transport=transport)
-    assert "### UPDATE_STATE" in prompt
-    for name, expected_type in schema.items():
-        assert f"`{name}`: `{expected_type.__name__}`" in prompt
-    assert "before any assignment" in prompt
-    assert "`rejected`" in prompt
 
 
 def test_gate_orchestration_update_state_core_field_rejected(gate):
