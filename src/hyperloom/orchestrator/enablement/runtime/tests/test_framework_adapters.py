@@ -61,9 +61,9 @@ def test_sglang_supports_missing_arch_not_resource_constraint():
     assert a.supports(_gap(RESOURCE_CONSTRAINT)) is False
 
 
-def test_atom_and_xdit_never_support():
-    assert AtomAdapter().supports(_gap(MISSING_MODEL_ARCH)) is False
-    assert XditAdapter().supports(_gap(MISSING_MODEL_ARCH)) is False
+def test_atom_and_xdit_never_acquire_a_runtime():
+    for adapter in (AtomAdapter(), XditAdapter()):
+        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH), framework=adapter.framework, model="m") is None
 
 
 def test_get_adapter_unknown_returns_null_no_raise():

@@ -16,7 +16,6 @@ from typing import Callable
 from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     NOT_IMPLEMENTED,
-    RESOURCE_CONSTRAINT,
     SERVE_FLAG,
     TOKENIZER_ERROR,
     UNSUPPORTED_DTYPE,
@@ -41,11 +40,6 @@ _PROVISION_TIMEOUT_SEC = 1800
 _RUNTIME_ACQUIRABLE_KINDS: frozenset[str] = frozenset(
     {MISSING_MODEL_ARCH, UNSUPPORTED_DTYPE, NOT_IMPLEMENTED, TOKENIZER_ERROR, SERVE_FLAG}
 )
-
-
-def _needs_code_change(gap: CapabilityGap) -> bool:
-    """Whether code can repair ``gap`` at all (never a resource constraint)."""
-    return gap.requires_code_acquisition and gap.kind != RESOURCE_CONSTRAINT
 
 
 # Injectable subprocess shim: (argv, env, cwd) -> CompletedProcess.
@@ -207,11 +201,7 @@ class BaseAdapter:
         self._run = run
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap`` via a runtime."""
-        return False
-
-    def localizes(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap`` by backporting a merged PR."""
+        """Whether this adapter can attempt to repair ``gap``."""
         return False
 
     def build_stack_action(
@@ -241,16 +231,14 @@ class BaseAdapter:
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
         """Build a pr_backport localization from a merged-PR ref (origin-allowlisted), or None."""
-        if not self.localizes(gap):
+        if not self.supports(gap):
             return None
         pr_number = _pr_number_from_ref(candidate_ref)
-        if not repo_url or pr_number <= 0:
+        if pr_number <= 0:
             return None
         origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
         if origin_allow and not _is_allowlisted(repo_url, origin_allow):
@@ -302,12 +290,8 @@ class _VenvProvisionMixin(BaseAdapter):
     """Shared attempt-venv creation + pip-install plumbing for real adapters."""
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """True for code-acquirable gaps a runtime candidate might repair."""
-        return _needs_code_change(gap) and gap.kind in _RUNTIME_ACQUIRABLE_KINDS
-
-    def localizes(self, gap: CapabilityGap) -> bool:
-        """Localize only the gaps a runtime candidate might also repair."""
-        return self.supports(gap)
+        """True for the gaps a runtime candidate might repair."""
+        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
 
     def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
         """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python)."""
@@ -567,9 +551,9 @@ class AtomAdapter(BaseAdapter):
 
     framework = "atom"
 
-    def localizes(self, gap: CapabilityGap) -> bool:
+    def supports(self, gap: CapabilityGap) -> bool:
         """Localize any code gap; the backport is applied via no-git, with no editable refresh."""
-        return _needs_code_change(gap)
+        return True
 
 
 class XditAdapter(BaseAdapter):
