@@ -25,7 +25,7 @@ from kernelforge.llm.workspace_policy import (
     protected_path_inventory,
 )
 from kernelforge.llm.git import git
-from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
+from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -436,7 +436,9 @@ class InSessionGate:
         # best; a real win. "block_budget_exhausted" — max_blocks blocked stops spent; hand off to the outer loop to
         # re-validate + keep/revert. "harness_tampered" — harness block cap hit on unrestored protected changes; the
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
-        # performs the one authoritative retry. "gate_error" — the gate itself raised; fail OPEN.
+        # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
+        # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
+        # measures it itself. "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -1086,11 +1088,23 @@ class InSessionGate:
 
             # ── 2) SELF-CORRECTION: canonical correctness + benchmark ───────── Ensure the canonical check compiles
             # the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a subprocess that did not inherit
-            # the loop's AITER_REBUILD, so (re)assert it here (aiter HIP; no-op otherwise).
-            force_jit_rebuild_for_changes(
-                self.workspace_root or Path.cwd(),
-                [self.kernel_abs, *self.target_abs],
-            )
+            # the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one the outer loop reuses, so
+            # a shard chosen from a stale source list would decide keep/revert on the previous iteration's binary.
+            try:
+                force_jit_rebuild_for_changes(
+                    self.workspace_root or Path.cwd(),
+                    [self.kernel_abs, *self.target_abs],
+                )
+            except JitRebuildUnavailable as error:
+                # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
+                # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
+                # edit can clear.
+                self.end_reason = "jit_rebuild_unavailable"
+                self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
+                self._log(
+                    f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
+                )
+                return self._allow()
 
             # 2a) Correctness — canonical driver, same call the pipeline uses.
             corr = await test_correctness(
