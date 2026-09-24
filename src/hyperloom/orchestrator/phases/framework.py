@@ -181,7 +181,6 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
-
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
     """Copy eval-origin trigger context from specialist params to the integrate task."""
     origin = str(src.get("enablement_origin") or "")
@@ -488,6 +487,7 @@ class FrameworkPhase(PhaseHandler):
 
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
+    # Tail of outcomes from the priors ledger to evaluate.
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
@@ -503,7 +503,7 @@ class FrameworkPhase(PhaseHandler):
 
     async def on_integrate_patch_settled(self, task: "Task", result: Any) -> None:
         """Record an authored patch's KEEP/REVERT, then re-arm or drain the authored lane."""
-        if bool((task.params or {}).get("framework_agent_authoring")):
+        if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
@@ -528,12 +528,8 @@ class FrameworkPhase(PhaseHandler):
         )
 
     def timeline(self):
-        """Return the recorder for this FRAMEWORK entry, or ``None``.
-
-        Read through ``getattr`` because the handler delegates unknown
-        attributes to its Coordinator, so an unset recorder must not raise.
-        """
-        return getattr(self, "_framework_timeline_recorder", None)
+        """Return the recorder for this FRAMEWORK entry, or ``None``."""
+        return _recorder(self)
 
     def _open_framework_timeline(self) -> None:
         """Open the timeline event for this FRAMEWORK entry and record its policy.
