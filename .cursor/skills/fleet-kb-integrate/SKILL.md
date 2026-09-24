@@ -35,7 +35,7 @@ export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH:?}/fleet-kb-spool/$SLACK_JOB_I
 ```
 
 Every Run needs a fresh scope. For Run B, the scope must be the same one the
-Slack Bot populated through human selection before launch.
+Slack Bot populated through human `verified_for_scope` decisions before launch.
 
 After the normal Hyperloom runtime install, verify the exact worker process
 environment:
@@ -103,7 +103,7 @@ rendered prompt block into that same LLM request. Keep the read fail-open: a
 network, Planner, or Executor failure must not stop optimization.
 
 Require one Slack-created `HYPERLOOM_FLEET_KB_SCOPE_ID`. Runtime read searches
-only Experiences a human selected for that scope. Do not fall back to the full
+only Experiences a human verified for that scope. Do not fall back to the full
 Fleet Catalog when the scope is absent or empty.
 
 Never let the workflow reinterpret raw hits or rebuild ranking. The Executor's
@@ -135,8 +135,8 @@ Test:
 - context is captured from realistic runtime state;
 - no `candidate_change`, `question`, weights, or search strategy is supplied;
 - retries inside one decision reuse its read;
-- a changed context or later decision reads the current run-scoped selected view;
-- an empty or different Run scope cannot see unselected Catalog records;
+- a changed context or later decision reads the current scope-verified view;
+- an empty or different Run scope cannot see records not verified for that scope;
 - completed evidence appears before proposal generation;
 - failures continue without evidence;
 - only consumed refs reach the measured Experience;
