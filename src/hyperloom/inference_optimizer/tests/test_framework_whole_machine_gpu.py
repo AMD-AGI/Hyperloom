@@ -117,7 +117,7 @@ def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
     params = coord._build_enablement_specialist_params(log)
     assert params is not None
-    assert params.get("framework_agent_authoring") is True
+    assert params.get("enablement") is True
     assert params.get("needs_gpu") is True
     assert params.get("gpu_count") == 4
 

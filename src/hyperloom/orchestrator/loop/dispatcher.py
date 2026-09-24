@@ -688,10 +688,10 @@ class DispatcherCollaborator:
                     )
 
                     whole_machine_lane = uses_whole_machine_gpu_lane(params)
-                    is_framework_authoring = bool(params.get("framework_agent_authoring"))
+                    authored_lane = bool(params.get("framework_agent_authoring")) or bool(params.get("enablement"))
                     if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
-                        if is_framework_authoring:
+                        if authored_lane:
                             # Default to the whole machine; explicit gpu_count wins.
                             default_gpu_count = gpu_pool.capacity or 1
                         else:

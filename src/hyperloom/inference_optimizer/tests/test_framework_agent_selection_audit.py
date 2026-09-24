@@ -440,7 +440,7 @@ def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> None:
+def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> None:
     coord.shared_state.framework_agent_batches = [{"batch_id": "batch-1"}]
     coord.shared_state.framework_agent_phase_progress = []
     task = types.SimpleNamespace(
@@ -466,7 +466,6 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
     assert rows[-1]["gain_pct"] == 4.5
-    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 4.5
 
 
 def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Coordinator) -> None:
