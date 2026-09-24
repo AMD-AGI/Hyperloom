@@ -43,10 +43,10 @@ def test_required_experience_kb_fails_when_collection_is_disabled(monkeypatch) -
     result = check._check_experience_kb(require_experience_kb=True)
 
     assert result.status == "failed"
-    assert result.detail == "HYPERLOOM_KB_ENABLE is false"
+    assert result.detail == "HYPERLOOM_KB_URL is not configured"
 
 
-def test_fleet_experience_kb_cold_start_checks_remote_health(monkeypatch) -> None:
+def test_experience_kb_cold_start_checks_remote_health(monkeypatch) -> None:
     seen = {"health": 0}
 
     class Client:

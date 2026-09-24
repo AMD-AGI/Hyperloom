@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, writing .env, requiring and validating Fleet KB connectivity, running the setup backend when appropriate, and installing the Fleet KB SDK when needed.
+description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, writing .env, installing the Experience KB SDK when needed, validating authenticated KB connectivity, and running the setup backend when appropriate.
 ---
 
 # Hyperloom Setup
@@ -49,8 +49,8 @@ writing `.env`, write `.env`, read it back for validation, and continue to the
 setup command. If setup already completed for this workspace and the user is not
 changing provider, model, `USER_DATA_PATH`, run mode, Docker target host, or
 bare-metal framework setup choice, reuse the existing setup. Still run the
-required Fleet KB SDK and connection gate before handing off to a demo; an old
-workspace without valid Fleet KB configuration is not fully set up.
+required Experience KB SDK and connection gate before handing off to a demo; an
+old workspace without valid KB configuration is not fully set up.
 
 ## Step 1: Confirm Workspace
 
@@ -177,14 +177,13 @@ value.
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
 
-9. Fleet KB configuration is required and belongs in `.env`.
-   - Do not ask the user to paste the KB token, URL, or Fleet ID into chat.
+9. Experience KB configuration is required and belongs in `.env`.
+   - Do not ask the user to paste the KB token into chat.
    - In Step 3, preserve existing non-placeholder values. Otherwise write
      placeholders and ask the user to edit `.env` directly.
-   - `HYPERLOOM_FLEET_KB_URL`, `HYPERLOOM_FLEET_KB_WORKER_TOKEN`, and
-     `HYPERLOOM_FLEET_KB_ID` must all be set before setup can complete.
-   - Read Fleet configuration from the workspace `.env` by default. Do not
-     invent a URL, token, or Fleet ID.
+   - `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` must both be set before setup
+     can complete.
+   - Read both values from the workspace `.env`. Do not invent either value.
 
 ## Step 3: Write `.env`
 
@@ -211,10 +210,8 @@ Before writing, explicitly tell the user:
 Write the Anthropic keys plus the common keys:
 
 - `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
-- `Fleet KB`: `HYPERLOOM_FLEET_KB_URL`,
-  `HYPERLOOM_FLEET_KB_WORKER_TOKEN`, `HYPERLOOM_FLEET_KB_ID`.
-  Preserve each existing non-placeholder value; otherwise write
-  `<PLEASE_FILL_IN>`.
+- `Experience KB`: `HYPERLOOM_KB_URL`, `HYPERLOOM_KB_TOKEN`. Preserve each
+  existing non-placeholder value; otherwise write `<PLEASE_FILL_IN>`.
 
 Common keys:
 
@@ -257,10 +254,10 @@ Then read `.env` back and confirm:
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
-- the required Fleet KB URL, worker token, and Fleet ID are all set and none
-  equals `<PLEASE_FILL_IN>`.
+- the required KB URL and token are both set and neither equals
+  `<PLEASE_FILL_IN>`.
 
-If any required secret or Fleet KB value is missing or still a placeholder,
+If any required secret or Experience KB value is missing or still a placeholder,
 stop and ask the user to edit `.env` again.
 
 ## Step 4: Run Setup Backend
@@ -345,52 +342,49 @@ mode, skip this until the demo skill runs setup inside the container. Read
   with `--install-framework vllm` or `sglang`. Do not invent a `FRAMEWORK`
   value.
 
-## Fleet KB capability (required setup gate)
+## Experience KB capability (required setup gate)
 
-Read Fleet KB configuration from the workspace `.env`. The URL, worker token,
-and Fleet ID are required setup values. Scope, job, correlation, worker, and
-spool values remain per-Run values supplied later by the controller.
+Read `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` from the workspace `.env`.
+They are the complete client connection contract.
 
-Load `.env` without printing any values, then install the matching SDK if
-`hyperloom_kb` is absent:
+Load `.env` without printing any values. If the compatible `hyperloom_kb` SDK
+is not importable (absent, or an older build without `RemoteClient`), install
+it:
 
 ```bash
 set -a
 . "$PWD/.env"
 set +a
+: "${HYPERLOOM_KB_URL:?missing from workspace .env}"
+: "${HYPERLOOM_KB_TOKEN:?missing from workspace .env}"
+
 if ! PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -c \
-  'import hyperloom_kb' 2>/dev/null; then
+  'from hyperloom_kb import RemoteClient' 2>/dev/null; then
   python3 -m pip install --upgrade --target . \
     "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
 fi
 ```
 
-After the SDK is importable, perform an authenticated connection check with the
-SDK. The setup-only scope and worker values below are transient and must not be
-written to `.env`:
+After the SDK is importable, perform an authenticated connection check:
 
 ```bash
-export HYPERLOOM_FLEET_KB_SCOPE_ID="${HYPERLOOM_FLEET_KB_SCOPE_ID:-hyperloom-setup}"
-export HYPERLOOM_FLEET_KB_WORKER_ID="${HYPERLOOM_FLEET_KB_WORKER_ID:-hyperloom-setup}"
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 - <<'PY'
-from hyperloom_kb import FleetClientConfig, FleetKBClient
+from hyperloom_kb import RemoteClient, RemoteConfig
 
-config = FleetClientConfig.from_env()
-if config is None or not config.token:
-    raise SystemExit("Fleet KB URL or worker token is missing")
-health = FleetKBClient(config).health()
+config = RemoteConfig.from_env()
+if config is None:
+    raise SystemExit("HYPERLOOM_KB_URL is missing")
+health = RemoteClient(config).health()
 if health.get("status") != "ok":
-    raise SystemExit("Fleet KB health check did not return ok")
-if health.get("fleet_id") != config.fleet_id:
-    raise SystemExit("Fleet KB health check returned a different Fleet ID")
-print("Fleet KB connection verified")
+    raise SystemExit("Experience KB health check did not return ok")
+print("Experience KB connection verified")
 PY
 ```
 
-This check must use the URL, token, and Fleet ID loaded from `.env`; never echo
-them. If SDK installation, authentication, or the health request fails, setup
-fails. Report the non-secret error, ask the user to correct `.env`, and retry
-the gate. Do not continue to a demo with an unverified KB connection.
+This check must use the URL and token loaded from `.env`; never echo the token.
+If SDK installation, authentication, or the health request fails, setup fails.
+Report the non-secret error, ask the user to correct `.env`, and retry the gate.
+Do not continue to a demo with an unverified KB connection.
 
 ## Step 6: Report Result
 
@@ -402,7 +396,7 @@ Report:
 - The setup command that was run (or that host setup was skipped in `docker` mode).
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
-- Fleet SDK and connection status: `ready` only after the authenticated health
+- Experience SDK and connection status: `ready` only after the authenticated health
   check succeeds; otherwise `failed`.
 - The last relevant error lines on failure.
 
@@ -411,7 +405,7 @@ Do not print secret values back to the user.
 ## Step 7: Hand Off to a Demo Skill
 
 When setup completed in `baremetal` mode, or when `.env` is written in `docker`
-mode, and the Fleet KB connection gate succeeded, ask the user whether they
+mode, and the Experience KB connection gate succeeded, ask the user whether they
 want to run a demo optimization now, and if so which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.

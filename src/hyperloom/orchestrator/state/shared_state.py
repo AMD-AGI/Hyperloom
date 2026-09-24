@@ -322,6 +322,9 @@ _PHASE_HISTORY_CAP = 100
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
 
+# Experience KB injection log cap; a row is only added when the injected Experience set changes.
+_KB_INJECTIONS_CAP = 20
+
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
 
@@ -875,6 +878,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
+    # Experience KB blocks injected into FRAMEWORK_AGENT orchestration prompts, one row per change of the injected
+    # Experience set: {tick, phase, ts, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
+    experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
@@ -1656,6 +1662,32 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             duration_s=duration_s,
             ts=ts,
         )
+
+    def record_experience_kb_injection(
+        self,
+        *,
+        read_id: str,
+        experience_ids: list[str],
+        experiences: list[dict[str, Any]],
+        prompt_block: str,
+    ) -> bool:
+        """Record an injected Experience KB block unless it injects the same Experiences as the last record."""
+        last = self.experience_kb_injections[-1] if self.experience_kb_injections else {}
+        if sorted(last.get("experience_ids") or []) == sorted(experience_ids):
+            return False
+        self.experience_kb_injections.append(
+            {
+                "tick": int(self.tick),
+                "phase": self.phase,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "read_id": read_id,
+                "experience_ids": list(experience_ids),
+                "experiences": [dict(item) for item in experiences],
+                "prompt_block": prompt_block,
+            }
+        )
+        del self.experience_kb_injections[:-_KB_INJECTIONS_CAP]
+        return True
 
     def merge_lifecycle_events(self, incoming: Any) -> None:
         """Union ``incoming`` lifecycle rows into this state, ordered by timestamp."""

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Best-effort Fleet KB read integration for the Framework decision boundary."""
+"""Best-effort Experience service read integration for the Framework decision boundary."""
 
 from __future__ import annotations
 
@@ -46,41 +46,42 @@ def _current_best_throughput(value: Any) -> float:
 
 
 @dataclass(frozen=True)
-class FleetKBEvidence:
+class ExperienceKBEvidence:
     tick: int
     read_id: str
     status: str
     prompt_block: str
     rendered_refs: tuple[dict[str, str], ...]
     warnings: tuple[str, ...]
+    experiences: tuple[dict[str, Any], ...] = ()
 
 
-class FleetKBIntegration:
-    """One fail-open Fleet KB client and decision-context read cache."""
+class ExperienceKBIntegration:
+    """One fail-open Experience service client and decision-context read cache."""
 
     def __init__(self, client: Any, session_dir: Path) -> None:
         self.client = client
         self.session_dir = Path(session_dir)
         self._cache_tick: int | None = None
-        self._by_context: dict[str, FleetKBEvidence] = {}
+        self._by_context: dict[str, ExperienceKBEvidence] = {}
 
     @classmethod
     def from_env(
         cls,
         session_dir: str | Path,
         env: dict[str, str] | None = None,
-    ) -> FleetKBIntegration | None:
+    ) -> ExperienceKBIntegration | None:
         values = os.environ if env is None else env
-        if not str(values.get("HYPERLOOM_FLEET_KB_URL") or "").strip():
+        if not str(values.get("HYPERLOOM_KB_URL") or "").strip():
             return None
         try:
             module = import_module("hyperloom_kb")
-            config = module.FleetClientConfig.from_env(values)
+            config = module.RemoteConfig.from_env(values)
             if config is None:
                 return None
-            return cls(module.FleetKBClient(config), Path(session_dir))
+            return cls(module.RemoteClient(config), Path(session_dir))
         except (ImportError, RuntimeError, ValueError):
-            log.exception("Fleet KB client bootstrap failed; reads are disabled")
+            log.exception("Experience service client bootstrap failed; reads are disabled")
             return None
 
     def _manifest_context(self) -> dict[str, Any]:
@@ -201,7 +202,7 @@ class FleetKBIntegration:
         state: Any,
         *,
         untested_proposals: str = "",
-    ) -> FleetKBEvidence:
+    ) -> ExperienceKBEvidence:
         tick = int(getattr(state, "tick", 0) or 0)
         context = self.build_context(state, untested_proposals)
         context_hash = hashlib.sha256(
@@ -218,23 +219,25 @@ class FleetKBIntegration:
         if cached is not None:
             return cached
         session_id = str(getattr(state, "session_id", "") or self.session_dir.name)
-        operation_id = f"fleet-read-{session_id}-{tick}-{context_hash[:16]}"
+        operation_id = f"kb-read-{session_id}-{tick}-{context_hash[:16]}"
         result = self.client.read(
             _DECISION,
             context,
             operation_id=operation_id,
             run_id=session_id,
         )
-        evidence = FleetKBEvidence(
+        evidence = ExperienceKBEvidence(
             tick=tick,
             read_id=result.read_id,
             status=result.status,
             prompt_block=result.prompt_block,
             rendered_refs=tuple(item.to_dict() for item in result.rendered_refs),
             warnings=tuple(result.warnings),
+            # SDK builds before per-Experience read summaries lack this field; the prompt block still carries them.
+            experiences=tuple(dict(item) for item in getattr(result, "experiences", ())),
         )
         self._by_context[context_hash] = evidence
         return evidence
 
 
-__all__ = ["FleetKBEvidence", "FleetKBIntegration"]
+__all__ = ["ExperienceKBEvidence", "ExperienceKBIntegration"]

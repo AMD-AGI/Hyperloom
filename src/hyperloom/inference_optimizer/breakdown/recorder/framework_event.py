@@ -401,7 +401,7 @@ class FrameworkEventRecorder:
             "repo",
             "title",
             "reasoning",
-            "fleet_kb_read_id",
+            "kb_read_id",
             "verdict",
             "route",
         ):

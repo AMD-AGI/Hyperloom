@@ -27,9 +27,7 @@ from hyperloom.common.env_safety import (
 
 log = logging.getLogger(__name__)
 
-_ENABLE_ENV = "HYPERLOOM_KB_ENABLE"
-_TRUE = {"1", "true", "yes", "on"}
-_FALSE = {"", "0", "false", "no", "off"}
+_URL_ENV = "HYPERLOOM_KB_URL"
 _RECEIPT_REL = Path("reports") / "experience_v1_publish.json"
 _MAX_PATCH_BYTES = 128 * 1024
 _MAX_PATCH_TOTAL_BYTES = 256 * 1024
@@ -86,7 +84,7 @@ class ProjectedAttempt:
     baseline_value: float
     reasoning: str
     reasoning_origin: str
-    fleet_kb_read_id: str
+    kb_read_id: str
     rendered_refs: tuple[dict[str, str], ...]
     change_family: str
     change_fingerprint: str
@@ -110,7 +108,7 @@ class ProjectedAttempt:
             "baseline_configuration": dict(self.baseline_configuration),
             "baseline_value": self.baseline_value,
             "reasoning_origin": self.reasoning_origin,
-            "fleet_kb_read_id": self.fleet_kb_read_id,
+            "kb_read_id": self.kb_read_id,
             "rendered_refs": [dict(item) for item in self.rendered_refs],
             "change_identity": {
                 "change_family": self.change_family,
@@ -127,13 +125,7 @@ class ProjectedAttempt:
 
 def enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
-    value = (values.get(_ENABLE_ENV) or "").strip().lower()
-    if value in _TRUE:
-        return True
-    if value in _FALSE:
-        return False
-    allowed = ", ".join(sorted(_TRUE | (_FALSE - {""})))
-    raise ValueError(f"{_ENABLE_ENV} must be one of {allowed}; got {value!r}")
+    return bool((values.get(_URL_ENV) or "").strip())
 
 
 def validate_experience_config(env: dict[str, str] | None = None) -> None:
@@ -144,7 +136,7 @@ def validate_experience_config(env: dict[str, str] | None = None) -> None:
     module = import_module("hyperloom_kb")
     kb = module.experience_kb_from_env(env)
     if not kb.enabled:
-        raise ValueError(f"{_ENABLE_ENV}=true requires a configured Hyperloom-KB backend")
+        raise ValueError(f"{_URL_ENV} requires a configured Hyperloom-KB backend")
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -269,10 +261,10 @@ def _reasoning(attempt: Mapping[str, Any], proposal: Mapping[str, Any]) -> tuple
     return normalized, origin
 
 
-def _fleet_exposure(
+def _kb_exposure(
     proposal: Mapping[str, Any],
 ) -> tuple[str, tuple[dict[str, str], ...]]:
-    read_id = _text(proposal.get("fleet_kb_read_id"))
+    read_id = _text(proposal.get("kb_read_id"))
     refs: list[dict[str, str]] = []
     raw_refs = proposal.get("rendered_refs")
     if isinstance(raw_refs, list):
@@ -554,7 +546,7 @@ def _project(
         raise ProjectionError("attempt has no valid measured baseline")
     baseline_configuration = _baseline_configuration(attempt)
     reasoning, reasoning_origin = _reasoning(attempt, proposal)
-    fleet_kb_read_id, rendered_refs = _fleet_exposure(proposal)
+    kb_read_id, rendered_refs = _kb_exposure(proposal)
     family, fingerprint, summary, content, resource_refs = _change(
         attempt,
         proposal,
@@ -585,7 +577,7 @@ def _project(
         baseline_value=baseline,
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
-        fleet_kb_read_id=fleet_kb_read_id,
+        kb_read_id=kb_read_id,
         rendered_refs=rendered_refs,
         change_family=family,
         change_fingerprint=fingerprint,
@@ -605,7 +597,7 @@ def _project(
             "proposal_ref": _text(attempt.get("proposal_ref")),
             "action_ref": _text(attempt.get("proposal_ref") or attempt.get("task_id")),
             "reasoning_origin": reasoning_origin,
-            "fleet_kb_read_id": fleet_kb_read_id,
+            "kb_read_id": kb_read_id,
             "round_id": _text(attempt.get("round_id")),
             "variant_name": _text(attempt.get("variant_name")),
             "validation_basis": _text(attempt.get("validation_basis")),

@@ -520,6 +520,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # operator-facing lifecycle event log; Coordinator-only writer so the
         # LLM cannot forge lifecycle events.
         "lifecycle",
+        # record of Experience KB evidence the Coordinator injected; forging it
+        # would misreport which Experiences shaped a decision.
+        "experience_kb_injections",
         # specialist sub-agent ledger; Coordinator-only writer.
         "specialist_rounds",
         # per-kb_anchor coverage counters; Coordinator-only writers.

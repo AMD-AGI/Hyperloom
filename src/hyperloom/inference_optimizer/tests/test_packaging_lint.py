@@ -86,24 +86,24 @@ def test_data_files_sources_exist():
     assert not missing, f"data-files entries point at missing sources: {missing}"
 
 
-def test_existing_skills_own_fleet_setup_and_runtime_contracts() -> None:
+def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None:
     assert _REPO_ROOT is not None
     setup = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
     optimizer = (_REPO_ROOT / "src/hyperloom/inference_optimizer/SKILL.md").read_text(encoding="utf-8")
 
-    assert "import hyperloom_kb" in setup
-    assert "never ask the user for them or write token placeholders" in setup
-    assert "Fleet is a runtime overlay" in optimizer
-    assert "import hyperloom_kb" in optimizer
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+        assert name in setup
+        assert name in optimizer
+    assert "from hyperloom_kb import RemoteClient" in setup
+    assert "RemoteClient(config).health()" in setup
     assert "--require-experience-kb" in optimizer
-    assert "HYPERLOOM_FLEET_KB_BOT_TOKEN=<PLEASE_FILL_IN>" not in setup
-    assert "HYPERLOOM_FLEET_KB_WORKER_TOKEN=<PLEASE_FILL_IN>" not in setup
-    assert "Slack" not in setup
-    assert "Slack" not in optimizer
-    destinations = _pyproject()["tool"]["setuptools"]["data-files"]
-    assert not any(
-        "fleet-kb-" in destination or "hyperloom-fleet-worker" in destination for destination in destinations
-    )
+    assert "experience_kb_injections" in optimizer
+    for text in (setup, optimizer):
+        assert "HYPERLOOM_FLEET_KB" not in text
+        assert "HYPERLOOM_KB_ENABLE" not in text
+        assert "HYPERLOOM_KB_DECL" not in text
+        assert "verified_for_scope" not in text
+        assert "slack" not in text.lower()
 
 
 def _module_path(dotted: str) -> Path | None:

@@ -557,92 +557,59 @@ failure exits 2. A PID plus `manifest.json` and `state.json` is not a substitute
 the environment is ready only after this check succeeds and a short canary
 produces a measured baseline.
 
-### Fleet Experience KB demo
+### Experience KB service
 
-`hyperloom-setup` requires `HYPERLOOM_FLEET_KB_URL`,
-`HYPERLOOM_FLEET_KB_WORKER_TOKEN`, and `HYPERLOOM_FLEET_KB_ID` in the
-workspace `.env` and verifies an authenticated health request before handing
-off to a workload Skill. Load those values from `.env` by default; do not ask
-the user to enter them again at launch.
-
-When `HYPERLOOM_FLEET_KB_URL` is configured, FRAMEWORK_AGENT orchestration
-performs one run-scoped Experience read before proposing work. Only
-Experiences explicitly marked `verified_for_scope` by a human for
-`HYPERLOOM_FLEET_KB_SCOPE_ID` are eligible. The result is advisory historical
-evidence, not instructions. A read failure soft degrades to the original
-prompt; it must not block optimization.
-
-The controller launcher injects the per-Run scope/worker/job/correlation
-identities and a durable `HYPERLOOM_FLEET_KB_SPOOL`; it does not replace the
-base URL, worker token, or Fleet ID already loaded from `.env`. Rendered
-Experience refs are stamped on proposals, carried into SBD V6, and written into
-the measured Experience. Complete writes are idempotent, cataloged as
-unverified, and unavailable to other runs until scope verification; a network
-failure spools the Experience for retry.
-
-Fleet is a runtime overlay, not a second workload schema. The selected
-workload Skill and Hyperloom CLI remain the only owners of model, framework,
-GPU, TP/EP, concurrency, ISL/OSL, precision, target, budget, Docker, launch,
-resume, and monitoring behavior. Never ask for or maintain a duplicate Fleet
-copy of those parameters.
-
-In the actual Worker process/container, load the workspace `.env`, then install
-the matching SDK only when the Fleet URL is set and the package is absent:
+`hyperloom-setup` writes `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` to the
+workspace `.env`, installs the SDK when absent, and validates authenticated
+health. Load `.env` before launching; do not ask the user for these values
+again.
 
 ```bash
-if [ -n "${HYPERLOOM_FLEET_KB_URL:-}" ] &&
-   ! python3 -c 'import hyperloom_kb' 2>/dev/null; then
-  python3 -m pip install --upgrade \
-    "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
-fi
+: "${HYPERLOOM_KB_URL:?missing from workspace .env}"
+: "${HYPERLOOM_KB_TOKEN:?missing from workspace .env}"
 ```
 
-Before launch, require the URL, worker token, and Fleet ID loaded from `.env`,
-plus these platform-injected per-Run values in the actual Worker
-process/container:
+No enable flag, declaration path, service identity, Run scope, worker identity,
+job identity, or spool path is required. The URL enables the integration; the
+SDK owns its packaged declaration and local retry spool.
+
+FRAMEWORK_AGENT reads the service before proposing work. Runtime reads use only
+Experiences whose service-wide trust state is `verified`; `unverified`
+Experiences remain discoverable for human review but are never injected into an
+optimization. Retrieved evidence is advisory and never replaces the measured
+benchmark baseline. A read failure soft-degrades to the original prompt.
+
+Every complete measured attempt is written idempotently with trust state
+`unverified`. Rendered Experience references are carried through the proposal
+and measured Experience. A network write failure is spooled for retry.
+
+Whenever the set of injected Experiences changes, the Coordinator appends one
+entry to `state.json` `experience_kb_injections` (latest last, capped at 20):
+`{tick, phase, ts, read_id, experience_ids, experiences, prompt_block}`.
+`prompt_block` is the exact text injected into the orchestration prompt; each
+Experience appears in it under an `Experience <id>` heading. `experiences`
+holds one summary per injected Experience, in `experience_ids` order:
+`experience_id`, `trust_state`, `source_run_id`, `change_summary`, `decision`,
+`baseline_value`, `outcome_value`, `score`, and `why_matched`.
+`read_optimizer_state.py` prints the latest entry with one line per injected
+Experience. When a poll shows a new entry, report each Experience's summary
+together with the matching section of `prompt_block` to the user.
+
+After the workload Skill resolves `MODEL_PATH` and `FRAMEWORK`, validate the
+same production path:
 
 ```bash
-: "${HYPERLOOM_FLEET_KB_URL:?missing from workspace .env}"
-: "${HYPERLOOM_FLEET_KB_WORKER_TOKEN:?missing from workspace .env}"
-: "${HYPERLOOM_FLEET_KB_ID:?missing from workspace .env}"
-export HYPERLOOM_KB_ENABLE=true
-export HYPERLOOM_KB_DECL="$REPO_ROOT/examples/hyperloom-kb-inference.yaml"
-export HYPERLOOM_FLEET_KB_SCOPE_ID=...
-export HYPERLOOM_FLEET_KB_JOB_ID=...
-export HYPERLOOM_FLEET_KB_THREAD_ID=...
-export HYPERLOOM_FLEET_KB_WORKER_ID="$(hostname)"
-export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH}/fleet-kb-spool/<scope-id>"
-```
-
-Only the Worker token belongs in the Worker environment. Controller credentials
-stay inside the controller tool process. Preserve a platform-provided
-`TARGET_GPU_TYPE`; do not turn a Magpie `GPU_TYPE` runner label into the
-Experience's real board identity.
-
-After the workload Skill's normal runtime install resolves `MODEL_PATH` and
-`FRAMEWORK`, run:
-
-```bash
+mkdir -p "$USER_DATA_PATH/optimizer_runs"
 python3 -m hyperloom.inference_optimizer.tools.cold_start_check \
   --model "$MODEL_PATH" \
   --framework "$FRAMEWORK" \
   --require-experience-kb \
-  --output "$HYPERLOOM_FLEET_KB_SPOOL/cold-start.json"
+  --output "$USER_DATA_PATH/optimizer_runs/experience-kb-cold-start.json"
 ```
 
-Require `cold_start_ready=true`. For this Fleet demo, append `--degraded-kb`
-to the existing `optimize` command so Recipe KB cannot independently
-warm-start the Run; this flag does not disable Fleet Experience read/write.
-Do not force `--degraded-pr` for Fleet.
-
-At CLOSE, use Fleet events for the exact scope/correlation to confirm:
-
-- every measured attempt that published created an unverified
-  `kb.experience.cataloged` record;
-- a scope with verified Experiences produced `kb.read.completed` with
-  non-empty `rendered_refs`, and those refs reached the measured Experience;
-- an explicitly empty scope produced an empty read;
-- failed writes remain in the durable Worker spool.
+Require `cold_start_ready=true`. At CLOSE, service events should show
+`kb.read.completed` for injected verified evidence and
+`kb.experience.cataloged` with `trust_state=unverified` for new writes.
 
 ### Tool source fields (prompt → env, sandbox-only)
 
@@ -1516,7 +1483,8 @@ python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
 `last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
-`phase`, plus the recent lifecycle events.
+`phase`, the latest Experience KB injection when one exists, plus the recent
+lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1687,4 +1655,5 @@ Report concise status:
 - `cumulative_gain_validated` and `current_best`
 - explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
+- any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why

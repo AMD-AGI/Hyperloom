@@ -7,22 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Fleet-scoped shared Experience KB integration for customer demos.**
-  FRAMEWORK_AGENT orchestration can retrieve prompt-ready historical evidence
-  from a Slack-central Fleet KB before proposing work. The selected Experience
-  references follow proposals into SBD V6 and the measured Experience write,
-  while remote reads fail open and completed writes use the SDK's durable
-  worker spool. Reads now capture the actual pre-proposal identity, workload,
-  baseline, current-best, observations, and recent outcomes; retries within one
-  decision are reused while later decisions see the current scope-verified view,
-  without weakening the original Recipe baseline. New Fleet Experiences are
-  unverified and unavailable by default; runtime reads see only Experiences a
-  Slack user explicitly marked `verified_for_scope` for that Run.
-  `hyperloom-setup` now installs and verifies the Fleet product tools without
-  asking for or persisting Fleet credentials, while the existing optimizer
-  Skill owns the runtime overlay. Worker GPU identity prefers the real product
-  probe or `TARGET_GPU_TYPE`; MI325X remains the persisted Experience identity
-  even though its Magpie runner label is `mi300x`.
+- **Shared Experience KB service integration.** Setting `HYPERLOOM_KB_URL` and
+  `HYPERLOOM_KB_TOKEN` is the whole client configuration; `hyperloom-setup`
+  collects both in `.env`, installs the `hyperloom_kb` SDK when absent, and
+  fails setup unless an authenticated health check succeeds. FRAMEWORK_AGENT
+  orchestration then reads prompt-ready historical evidence before proposing
+  work, drawn only from Experiences whose service-wide trust state is
+  `verified`. The injected references follow proposals into SBD V6 and the
+  measured Experience write. Every new Experience is written as `unverified`;
+  reads fail open and failed writes are spooled for retry. Retrieved evidence
+  never replaces the original measured baseline. Each time the injected
+  Experience set changes, the exact injected block is recorded in `state.json`
+  `experience_kb_injections` and surfaced by `read_optimizer_state.py`, so an
+  operator can see which Experiences shaped a Run without reading prompts.
+  Worker GPU identity prefers
+  the real product probe or `TARGET_GPU_TYPE`; MI325X remains the persisted
+  Experience identity even though its Magpie runner label is `mi300x`.
 
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,

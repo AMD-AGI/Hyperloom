@@ -136,6 +136,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cycle_strategy_log",
         # operator-facing lifecycle event log.
         "lifecycle",
+        # Experience KB injection record.
+        "experience_kb_injections",
         # specialist sub-agent ledger.
         "specialist_rounds",
         # per-kb_anchor coverage counters.

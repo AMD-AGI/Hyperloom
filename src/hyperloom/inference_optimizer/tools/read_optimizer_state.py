@@ -68,6 +68,21 @@ def main() -> int:
         print(f"{key}: {state.get(key)}")
     print("explore_last_round:", state.get("explore_search", {}).get("last_round"))
     print("phase:", state.get("phase"))
+    injections = state.get("experience_kb_injections") or []
+    if injections:
+        latest = injections[-1]
+        print(
+            f"experience_kb_injection: {len(injections)} recorded; latest tick={latest.get('tick')} "
+            f"read_id={latest.get('read_id')}"
+        )
+        summaries = {item.get("experience_id"): item for item in latest.get("experiences") or []}
+        for experience_id in latest.get("experience_ids") or []:
+            item = summaries.get(experience_id, {})
+            print(
+                f"  {experience_id}: decision={item.get('decision')} change={item.get('change_summary')!r} "
+                f"baseline={item.get('baseline_value')} outcome={item.get('outcome_value')} "
+                f"source_run={item.get('source_run_id')}"
+            )
 
     events = state.get("lifecycle") or []
     limit = max(0, int(args.lifecycle_limit))

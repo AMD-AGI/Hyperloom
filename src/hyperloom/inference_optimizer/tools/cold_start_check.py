@@ -160,7 +160,7 @@ def _check_experience_kb(require_experience_kb: bool) -> CheckResult:
 
     if not enabled():
         status = "failed" if require_experience_kb else "skipped"
-        return _result("experience_kb", started, status=status, detail="HYPERLOOM_KB_ENABLE is false")
+        return _result("experience_kb", started, status=status, detail="HYPERLOOM_KB_URL is not configured")
     try:
         validate_experience_config()
         from hyperloom_kb import experience_kb_from_env
@@ -168,15 +168,15 @@ def _check_experience_kb(require_experience_kb: bool) -> CheckResult:
         configured = experience_kb_from_env()
         if not configured.enabled:
             raise RuntimeError("configured Experience KB is disabled")
-        fleet_client = getattr(configured, "client", None)
-        if fleet_client is not None:
-            health = fleet_client.health()
+        remote_client = getattr(configured, "client", None)
+        if remote_client is not None:
+            health = remote_client.health()
             if str(health.get("status") or "") != "ok":
-                raise RuntimeError("Fleet KB health check did not return ok")
+                raise RuntimeError("Experience KB health check did not return ok")
     except Exception as exc:
         return _result("experience_kb", started, status="failed", detail=f"{type(exc).__name__}: {exc}")
     detail = (
-        "Fleet KB bootstrap and health check succeeded"
+        "Experience KB bootstrap and health check succeeded"
         if getattr(configured, "client", None) is not None
         else "collector bootstrap succeeded"
     )

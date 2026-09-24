@@ -38,16 +38,16 @@ class ConversationCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    async def _fleet_kb_prompt_block(self, untested_proposals: str) -> str:
-        """Read shared fleet evidence once per FRAMEWORK_AGENT orchestration tick."""
-        marker = "_fleet_kb_integration"
+    async def _kb_prompt_block(self, untested_proposals: str) -> str:
+        """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
+        marker = "_kb_integration"
         if not hasattr(self._coord, marker):
             try:
-                from hyperloom.inference_optimizer.fleet_kb import FleetKBIntegration
+                from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
 
-                integration = FleetKBIntegration.from_env(self.session_dir)
+                integration = ExperienceKBIntegration.from_env(self.session_dir)
             except Exception:  # noqa: BLE001 — shared KB is advisory
-                log.exception("Coordinator: Fleet KB bootstrap failed")
+                log.exception("Coordinator: Experience KB bootstrap failed")
                 integration = None
             setattr(self._coord, marker, integration)
         integration = getattr(self._coord, marker, None)
@@ -60,14 +60,14 @@ class ConversationCollaborator:
                 untested_proposals=untested_proposals,
             )
         except Exception:  # noqa: BLE001 — fail open without KB evidence
-            log.exception("Coordinator: Fleet KB read failed")
+            log.exception("Coordinator: Experience KB read failed")
             return ""
-        self._coord._fleet_kb_last_read = evidence
+        self._coord._kb_last_read = evidence
         if evidence.status != "completed" or not evidence.prompt_block:
             return ""
-        return "\n".join(
+        block = "\n".join(
             (
-                "=== Fleet KB warm-start evidence ===",
+                "=== Experience KB warm-start evidence ===",
                 ("INVARIANT: the original Recipe benchmark measurement remains the gain-accounting baseline."),
                 (
                     "Historical configurations may seed proposals/current-best "
@@ -76,6 +76,13 @@ class ConversationCollaborator:
                 evidence.prompt_block,
             )
         )
+        self.shared_state.record_experience_kb_injection(
+            read_id=evidence.read_id,
+            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+            experiences=[dict(item) for item in evidence.experiences],
+            prompt_block=block,
+        )
+        return block
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
@@ -372,9 +379,9 @@ class ConversationCollaborator:
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)
-                fleet_kb_block = await self._fleet_kb_prompt_block(untested_block)
-                if fleet_kb_block:
-                    sections.append(fleet_kb_block)
+                kb_block = await self._kb_prompt_block(untested_block)
+                if kb_block:
+                    sections.append(kb_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration":
