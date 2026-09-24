@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom.common import llm_config
 from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
@@ -264,7 +265,15 @@ class Config:
                 mode=overrides.get("knowledge_store_mode"),
                 local_root=overrides.get("knowledge_local_root"),
             )
-        agent_backend = overrides.get("agent_backend", os.getenv("FORGE_AGENT_BACKEND", "auto"))
+        # The platform's harness selection is the next rung below Forge's own, so a
+        # run that names a harness once gets it in every Forge session too.
+        platform_backend = llm_config.explicit_agent_backend()
+        agent_backend = overrides.get(
+            "agent_backend",
+            os.getenv("FORGE_AGENT_BACKEND", "").strip() or platform_backend or "auto",
+        )
+        # A harness the operator named must fail loudly rather than be replaced by Claude.
+        default_fallback = "" if platform_backend else "claude"
         return cls(
             gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
             gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
@@ -294,7 +303,7 @@ class Config:
             agent_precheck=overrides.get("agent_precheck", env_flag("FORGE_AGENT_PRECHECK", default=True)),
             agent_fallback_provider=overrides.get(
                 "agent_fallback_provider",
-                os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", "claude"),
+                os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", default_fallback),
             ),
             agent_options=overrides.get("agent_options")
             if "agent_options" in overrides
