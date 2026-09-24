@@ -35,6 +35,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
@@ -85,9 +86,10 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
-# gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
-# gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
-_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
+# has no such kernel. The gate is the arch, so the board list is read off the
+# identity table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
 
 # Value is optional so a bare, value-less flag (an operator typo, or a flag

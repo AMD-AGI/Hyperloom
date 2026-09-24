@@ -20,4 +20,14 @@ def gfx_arch_for_gpu_type(gpu_type: str | None) -> str | None:
     return identity[0] if identity else None
 
 
-__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type"]
+def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
+    """Return whether ``gpu_type`` means ``arch``.
+
+    Callers receive a GPU type that may already have been resolved to an arch, so the
+    arch names itself as well as every board that dispatches to it.
+    """
+    key = str(gpu_type or "").strip().lower()
+    return bool(key) and (key == arch or gfx_arch_for_gpu_type(key) == arch)
+
+
+__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type", "is_gfx_arch"]

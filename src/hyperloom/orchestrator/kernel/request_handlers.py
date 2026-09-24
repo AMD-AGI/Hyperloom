@@ -36,6 +36,7 @@ from hyperloom.common import codex_session, llm_config
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
@@ -2669,13 +2670,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     return "per_token"
 
 
-_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
-
-
 def _is_gfx950(gpu_type: str) -> bool:
     """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
     key = (gpu_type or "").strip().lower()
-    if key in _GFX950_GPU_TYPES:
+    if is_gfx_arch(key, "gfx950"):
         return True
     if not key or key == "auto":
         return _is_gfx950_rocminfo()
