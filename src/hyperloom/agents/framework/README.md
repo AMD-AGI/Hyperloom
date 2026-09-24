@@ -5,8 +5,10 @@ vllm/sglang source-layer optimisation companion for
 
 - **Standalone PR exploration** (`fa candidates` / `fa explore`) —
   ad-hoc tooling outside the `inference_optimizer` runtime path.
-- **Shared tables** — repo map, PR-KB adapters and the KB partitions the
-  Coordinator reads through `hyperloom.orchestrator.framework`.
+- **Shared library** — `isolation`, `models`, `sources`, `keywords`,
+  `repo_map` and `kb` are imported directly by the orchestrator's enablement
+  and `integrate_patch` executor. The Coordinator does not read the KB through
+  `hyperloom.orchestrator.framework`; it imports `agents.framework.kb` directly.
 
 - **Enablement** (opt-in) — make a `(model, backend)` combo that is
   **non-runnable**, or that boots but **fails its accuracy eval**, *run
