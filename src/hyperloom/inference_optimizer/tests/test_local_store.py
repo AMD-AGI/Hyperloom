@@ -95,15 +95,12 @@ def test_coerce_dict_variants():
 # ---- normalisation helpers ----
 
 
-def test_normalise_findings_and_failures():
-    assert ls._normalise_str_dicts(
-        [{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")
-    ) == [
-        {"description": "d", "measured_impact": "i"},
-    ]
-    assert ls._normalise_str_dicts([{"description": "d", "reason": "r"}], ("description", "reason")) == [
-        {"description": "d", "reason": "r"},
-    ]
+def test_coerce_dicts_keeps_row_shaped_entries_only():
+    # Experience rows reach ``Recipe.from_dict`` unprojected, so this step only has to make them dicts: a mapping and
+    # an object that can render itself as one both survive, and an entry that is not row-shaped at all is dropped.
+    assert ls._coerce_dicts([{"name": "d", "gain_pct": 1.0}, "skip"]) == [{"name": "d", "gain_pct": 1.0}]
+    assert ls._coerce_dicts([_ToDictItem({"name": "d", "gain_pct": 1.0})]) == [{"name": "d", "gain_pct": 1.0}]
+    assert ls._coerce_dicts(None) == []
 
 
 def test_normalise_gaps_pitfalls_lessons():
