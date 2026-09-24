@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -206,7 +206,7 @@ class PrFilter:
         )
 
 
-_VALID_SEARCH_MODES = frozenset({"gbrain_pr_kb", "pr_monitor", "github"})
+_VALID_SEARCH_MODES = frozenset({"pr_monitor", "github"})
 _VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
 
 
@@ -357,61 +357,3 @@ class ExploreRequest:
             disk_min_free_gb=(None if raw.get("disk_min_free_gb") is None else float(raw.get("disk_min_free_gb"))),
         )
 
-
-@dataclass
-class CommandResult:
-    """Result of a single shell command (build/bench/accuracy)."""
-
-    name: str
-    command: str
-    returncode: int
-    stdout_tail: str = ""
-    stderr_tail: str = ""
-    timed_out: bool = False
-
-    @property
-    def ok(self) -> bool:
-        """True iff returncode == 0 and command did not time out."""
-        return self.returncode == 0 and not self.timed_out
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output."""
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class Finding:
-    """A single distilled observation suitable for KB contribution."""
-
-    title: str
-    body: str = ""
-    source: str = ""
-    session_id: str = ""
-    candidate_ref: str = ""
-    metrics: dict[str, float] = field(default_factory=dict)
-
-
-@dataclass
-class CandidateResult:
-    """Per-candidate run summary used in explore_summary.json."""
-
-    candidate: Candidate
-    candidate_dir: str
-    worktree_dir: str
-    venv_dir: str
-    status: str
-    throughput: float | None = None
-    accuracy: float | None = None
-    completed: str = ""
-    winner: bool = False
-    reason: str = ""
-    commands: list[CommandResult] = field(default_factory=list)
-    patches_path: str = ""
-    files_json_path: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output, expanding nested fields."""
-        data = asdict(self)
-        data["candidate"] = asdict(self.candidate)
-        data["commands"] = [c.to_dict() for c in self.commands]
-        return data

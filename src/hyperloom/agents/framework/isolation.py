@@ -212,43 +212,10 @@ def prepare_candidate_workspace(
     return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
 
-def cleanup_workspace(
-    workspace: WorkspacePaths,
-    *,
-    is_winner: bool,
-    keep_winner_only: bool,
-    repo_dir: Path | None = None,
-) -> None:
-    """Drop worktree + venv from disk when policy says so."""
-    if not keep_winner_only or is_winner:
-        return
-    if repo_dir is not None:
-        # Detach the worktree from the mirror before removing it.
-        try:
-            _run_git(
-                ["git", "worktree", "remove", "--force", str(workspace.worktree_dir)],
-                cwd=repo_dir,
-                timeout_sec=60,
-            )
-        except Exception:
-            log.debug(
-                "cleanup_workspace: git worktree remove failed; falling back to rmtree",
-                exc_info=True,
-            )
-    for path in (workspace.worktree_dir, workspace.venv_dir):
-        try:
-            if path.exists():
-                shutil.rmtree(path)
-                log.info("cleanup_workspace: removed %s", path)
-        except OSError as exc:
-            log.warning("cleanup_workspace: failed to remove %s: %s", path, exc)
-
-
 __all__ = [
     "DiskPreflightError",
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
-    "cleanup_workspace",
     "disk_preflight",
     "fetch_candidate_ref",
     "prepare_candidate_workspace",

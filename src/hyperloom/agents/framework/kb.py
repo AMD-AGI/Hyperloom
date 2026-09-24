@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import os
@@ -13,9 +12,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
-from .models import Finding
 
 _log = logging.getLogger(__name__)
 
@@ -116,6 +113,25 @@ def check_kb_configuration() -> None:
     )
 
 
+def mutable_kb_root() -> Path:
+    """Root of the KB partition this session reads and writes."""
+    override = os.environ.get(KB_ROOT_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _default_workspace_root()
+    return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
+
+
+def framework_optimization_root() -> Path:
+    """The partition holding the lessons ledger, for reader and writer alike."""
+    return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
+
+
+def _resolve_kb_root() -> Path:
+    """Resolve the active KB root each call (so tests can monkeypatch env)."""
+    return mutable_kb_root()
+
+
 def migrate_legacy_partition_once() -> Path | None:
     """Carry the framework partition over from the legacy ``<workspace>/kb`` root."""
     if os.environ.get(KB_ROOT_ENV, "").strip():
@@ -165,232 +181,6 @@ def _copy_partition_atomically(source: Path, destination: Path) -> None:
         raise
 
 
-_PRIORITY_FILES = ["empirical_kb.md", "shared_pitfalls.md"]
-
-_DEFAULT_MODEL = "claude-opus-5"
-
-
-@dataclass
-class KBFile:
-    """A single resolved KB markdown file with its content already loaded."""
-
-    path: Path
-    domain: str
-    content: str
-
-
-def mutable_kb_root() -> Path:
-    """Root of the KB partition this session reads and writes."""
-    override = os.environ.get(KB_ROOT_ENV, "").strip()
-    if override:
-        return Path(override).expanduser()
-    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _default_workspace_root()
-    return Path(workspace).expanduser() / _MUTABLE_KB_DIRNAME
-
-
-def framework_optimization_root() -> Path:
-    """The partition holding the lessons ledger, for reader and writer alike."""
-    return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
-
-
-def _resolve_kb_root() -> Path:
-    """Resolve the active KB root each call (so tests can monkeypatch env)."""
-    return mutable_kb_root()
-
-
-def list_domains() -> list[str]:
-    """List domain directories under the active KB root (sorted)."""
-    root = _resolve_kb_root()
-    if not root.is_dir():
-        return []
-    return sorted(d.name for d in root.iterdir() if d.is_dir())
-
-
-def get_domain_files(domain: str) -> list[Path]:
-    """List all files in a given domain directory (sorted)."""
-    root = _resolve_kb_root()
-    domain_dir = root / domain
-    if not domain_dir.is_dir():
-        return []
-    return sorted(domain_dir.iterdir())
-
-
-def _prioritized_files(domain: str) -> list[Path]:
-    """Return domain files with priority entries (empirical / pitfalls) first."""
-    root = _resolve_kb_root()
-    domain_dir = root / domain
-    if not domain_dir.is_dir():
-        return []
-    priority: list[Path] = []
-    rest: list[Path] = []
-    for p in sorted(domain_dir.iterdir()):
-        if not p.is_file():
-            continue
-        (priority if p.name in _PRIORITY_FILES else rest).append(p)
-    priority.sort(key=lambda p: _PRIORITY_FILES.index(p.name))
-    return priority + rest
-
-
-def _load_file(path: Path, domain: str) -> KBFile | None:
-    """Best-effort read of a single KB file; OSErrors swallowed."""
-    try:
-        content = path.read_text()
-    except OSError:
-        return None
-    return KBFile(path=path, domain=domain, content=content)
-
-
-def contribute_to_kb(
-    domain: str,
-    finding: str,
-    source: str,
-    session_id: str,
-) -> Path:
-    """Append a single finding to ``${KB}/<domain>/empirical_kb.md``."""
-    root = _resolve_kb_root()
-    domain_dir = root / domain
-    domain_dir.mkdir(parents=True, exist_ok=True)
-    target = domain_dir / "empirical_kb.md"
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    entry = f"\n\n---\n**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n{finding}\n"
-    with target.open("a") as f:
-        f.write(entry)
-    return target
-
-
-def _render_finding_markdown(finding: Finding) -> str:
-    """Render a single Finding into a markdown subsection."""
-    lines = [f"### {finding.title or 'untitled finding'}"]
-    if finding.source:
-        lines.append(f"- source: `{finding.source}`")
-    if finding.session_id:
-        lines.append(f"- session: `{finding.session_id}`")
-    if finding.candidate_ref:
-        lines.append(f"- candidate: `{finding.candidate_ref}`")
-    if finding.metrics:
-        lines.append("- metrics:")
-        for key in sorted(finding.metrics):
-            lines.append(f"  - `{key}` = {finding.metrics[key]}")
-    if finding.body:
-        lines.append("")
-        lines.append(finding.body.rstrip())
-    return "\n".join(lines)
-
-
-def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
-    """Pure-Python distillation: deterministic markdown digest of findings."""
-    if not findings:
-        return f"## Synthesised findings - {domain}\n\n_no findings_\n"
-    lines: list[str] = [f"## Synthesised findings - {domain}", ""]
-    for f in findings:
-        lines.append(_render_finding_markdown(f))
-        lines.append("")
-    # Per-metric counts surface repeat signals across candidates.
-    counts: dict[str, int] = {}
-    for f in findings:
-        for k in f.metrics:
-            counts[k] = counts.get(k, 0) + 1
-    repeated = {k: v for k, v in counts.items() if v > 1}
-    if repeated:
-        lines.append("## Aggregate metrics")
-        for key in sorted(repeated):
-            lines.append(f"- `{key}` reported by {repeated[key]} candidates")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _build_llm_prompt(domain: str, findings: list[Finding]) -> str:
-    """Build the prompt fed to claude_agent_sdk when ``with_llm=True``."""
-    raw = _synthesize_pure_python(domain, findings)
-    return (
-        "You are a curator for the framework-agent knowledge base. "
-        f"The findings below are raw observations under domain '{domain}'. "
-        "Summarise them into a single markdown section suitable for appending "
-        "to empirical_kb.md. Keep concrete numbers verbatim. Do not invent "
-        "data. Output markdown only, no preamble.\n\n"
-        "Raw findings:\n\n"
-        f"{raw}\n"
-    )
-
-
-def _synthesize_via_llm(
-    domain: str,
-    findings: list[Finding],
-    *,
-    model: str,
-) -> str:
-    """Distil findings via claude_agent_sdk."""
-    try:
-        import claude_agent_sdk as sdk  # type: ignore
-    except ImportError as exc:  # pragma: no cover - exercised via test stub
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run framework-agent install "
-            "with the [claude] extra or reuse kernel-agent's install.sh"
-        ) from exc
-    if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise RuntimeError("claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)")
-
-    from hyperloom.common.llm_attribution import sdk_env_overlay
-
-    prompt = _build_llm_prompt(domain, findings)
-    option_kwargs: dict[str, object] = {"model": model, "system_prompt": ""}
-    overlay = sdk_env_overlay(component="framework", operation="synthesize_kb")
-    if overlay:
-        option_kwargs["env"] = overlay
-    options = sdk.ClaudeAgentOptions(**option_kwargs)
-    chunks: list[str] = []
-    # sdk.query is an async generator; block via asyncio.run().
-    import asyncio
-
-    async def _drive() -> None:
-        """Stream the SDK query and accumulate text into ``chunks``."""
-        async for message in sdk.query(prompt=prompt, options=options):
-            for text in _iter_message_text(message):
-                if text:
-                    chunks.append(text)
-
-    asyncio.run(_drive())
-    return "".join(chunks).strip() or _synthesize_pure_python(domain, findings)
-
-
-def _iter_message_text(message) -> Iterable[str]:
-    """Yield the non-empty text fragments of a claude_agent_sdk message."""
-    from hyperloom.common.claude_oneshot import message_text
-
-    yield from (fragment for fragment in message_text(message) if fragment)
-
-
-def synthesize_findings(
-    domain: str,
-    findings: list[Finding],
-    *,
-    with_llm: bool = False,
-    model: str = _DEFAULT_MODEL,
-) -> str:
-    """Distil ``findings`` into a markdown blob for ``contribute_to_kb``."""
-    if not with_llm:
-        return _synthesize_pure_python(domain, findings)
-    return _synthesize_via_llm(domain, findings, model=model)
-
-
-def search_kb(query: str, *, domains: list[str] | None = None) -> list[KBFile]:
-    """Case-insensitive substring search across all (or selected) domains."""
-    needle = query.lower()
-    domains = domains or list_domains()
-    hits: list[KBFile] = []
-    seen: set[Path] = set()
-    for domain in domains:
-        for path in _prioritized_files(domain):
-            if path in seen:
-                continue
-            seen.add(path)
-            kb_file = _load_file(path, domain)
-            if kb_file is None:
-                continue
-            if needle in kb_file.content.lower():
-                hits.append(kb_file)
-    return hits
-
 
 def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
     """Read the framework PR outcome ledger from ``lessons.jsonl``."""
@@ -413,7 +203,6 @@ def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
 
 
 __all__ = [
-    "KBFile",
     "LESSONS_FILE",
     "ALLOWED_OUTCOMES",
     "OUTCOME_INTEGRATED",
@@ -422,10 +211,7 @@ __all__ = [
     "OUTCOME_REJECTED_APPLY_FAIL",
     "OUTCOME_REVERTED_SWITCH_OFF_PARITY",
     "OUTCOME_REVERTED_PARITY_INCONCLUSIVE",
-    "list_domains",
-    "get_domain_files",
-    "contribute_to_kb",
-    "synthesize_findings",
-    "search_kb",
+    "framework_optimization_root",
+    "prepare_kb_environment",
     "read_pr_ledger",
 ]
