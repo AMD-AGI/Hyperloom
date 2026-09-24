@@ -3,7 +3,7 @@
 The customer demo uses one Fleet KB service on the Slack central server.
 Workers catalog immutable Experiences there as `unverified`. Humans can
 discover those records across runs, but Hyperloom can read only the
-Experiences explicitly selected for its own Run scope.
+Experiences explicitly marked `verified_for_scope` for its own Run scope.
 
 ## Central server
 
@@ -60,11 +60,10 @@ recorded on the proposal and preserved in the measured Experience. Historical
 evidence may seed a proposal or current-best candidate, but the original Recipe
 measurement remains the immutable gain-accounting baseline.
 
-Before launching Run B, the Slack Bot uses its Bot credential to discover
-Run A's unverified Experiences. It adds candidates to Run B only after an
-explicit user request such as “use these Experiences for Run B.” That action
-creates a Run B selection; it does not mark the records verified or expose
-them to Run C.
+Before launching Run B, the Slack Bot uses its Bot credential to list the full
+unverified Catalog, with optional relevance discovery. It marks chosen records
+`verified_for_scope` only after an explicit user decision. The Catalog records
+remain unverified, and Run C cannot inherit Run B's verification.
 
 Hyperloom captures runtime `identity`, `workload`, `objective`,
 `benchmark_baseline`, `current_best`, `observations`, `recent_results`, and
@@ -88,8 +87,8 @@ Authorization: Bearer <token>
 X-Hyperloom-Fleet-ID: customer-demo
 ```
 
-Render `kb.experience.cataloged`, `kb.discovery.completed`,
-`kb.experiences.selected`, and `kb.read.completed` in the Hyperloom job
+Render `kb.experience.cataloged`, optional `kb.discovery.completed`,
+`kb.experiences.verified_for_scope`, and `kb.read.completed` in the Hyperloom job
 thread. Read events include signals, top Repeat Groups, actual rendered
 Experience IDs, latency, and warnings. The accepted decision context is
 retained as a future Test Case seed, but the Slack message renders only bounded
@@ -101,7 +100,7 @@ Re-reading a cursor is safe because each event has a stable `event_id`.
 
 ## Demo failure behavior
 
-- No human selection produces a successful empty read.
+- No scope verification produces a successful empty read.
 - Read failure is advisory: Hyperloom continues without a KB prompt block.
 - Write failure does not discard the Experience: the worker spool retains it.
 - Slack failure does not roll back KB operations: the central SQLite outbox

@@ -561,7 +561,7 @@ produces a measured baseline.
 
 When `HYPERLOOM_FLEET_KB_URL` is configured, FRAMEWORK_AGENT orchestration
 performs one run-scoped Experience read before proposing work. Only
-Experiences explicitly selected by a human for
+Experiences explicitly marked `verified_for_scope` by a human for
 `HYPERLOOM_FLEET_KB_SCOPE_ID` are eligible. The result is advisory historical
 evidence, not instructions. A read failure soft degrades to the original
 prompt; it must not block optimization.
@@ -571,7 +571,7 @@ The Slack launcher also injects `HYPERLOOM_FLEET_KB_WORKER_TOKEN`,
 `HYPERLOOM_FLEET_KB_SPOOL`. Rendered Experience refs are stamped on proposals,
 carried into SBD V6, and written into the measured Experience. Complete writes
 are idempotent, cataloged as unverified, and unavailable to other runs until
-human selection; a network failure spools the Experience for retry.
+scope verification; a network failure spools the Experience for retry.
 
 ### Tool source fields (prompt → env, sandbox-only)
 
