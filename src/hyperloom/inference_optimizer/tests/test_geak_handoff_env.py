@@ -34,7 +34,7 @@ async def test_handoff_preserves_environment_values(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         stop_after_handoff,
     )
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
@@ -80,7 +80,7 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             raise RuntimeError("stop after handoff write")
 
         monkeypatch.setattr(
-            "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+            "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
             stop_after_handoff,
         )
         await coord._run_geak_kernel_phase(from_phase="KERNEL")

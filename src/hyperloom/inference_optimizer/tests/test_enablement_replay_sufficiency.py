@@ -1403,7 +1403,7 @@ def test_a_recorded_decision_reads_back_as_the_producer_wrote_it():
 
 
 def test_new_keys_do_not_change_the_r1a_projections():
-    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement as collect
+    from hyperloom.orchestrator.enablement.recipe.section import collect_enablement as collect
 
     out = collect(
         Path("/tmp/sess"),
@@ -1510,7 +1510,7 @@ def test_resolved_packages_reports_version_and_record_digest():
 
 
 def _collect(state):
-    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+    from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
     return collect_enablement(Path("/tmp/sess"), {"enablement": {"attempts": 1, **state}}, [])
 

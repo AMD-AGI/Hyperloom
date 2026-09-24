@@ -14,7 +14,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     enablement_round_dir,
     runs_dir,
 )
-from hyperloom.orchestrator.delivery.archive import (
+from hyperloom.inference_optimizer.breakdown.round_archive import (
     ROLE_ARTIFACT_PREIMAGE,
     ROLE_ARTIFACT_SOURCE,
     ROLE_LAUNCH_CONFIG,

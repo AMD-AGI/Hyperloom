@@ -55,11 +55,11 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_OSL,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from ._benchmark_interpreter import _resolve_probe_python
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -67,9 +67,9 @@ from ._grid_server_args import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import remove_server_args
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
@@ -1772,7 +1772,7 @@ def materialize_config_with_envs(
         envs.pop(name, None)
     if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        from ._grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[_ref_fw_env] = compose_server_args(
             base_extra_args=ref_args,
