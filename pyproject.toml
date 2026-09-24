@@ -227,7 +227,6 @@ exclude = [
 ]
 ".agents/skills/fleet-kb-observability/scripts" = [
     "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
-    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
     "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
 ]
 ".claude/skills/fleet-kb-observability" = [
@@ -235,7 +234,6 @@ exclude = [
 ]
 ".claude/skills/fleet-kb-observability/scripts" = [
     "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
-    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
     "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
 ]
 ".cursor/skills/fleet-kb-observability" = [
@@ -243,7 +241,6 @@ exclude = [
 ]
 ".cursor/skills/fleet-kb-observability/scripts" = [
     "src/hyperloom/skills/fleet-kb-observability/scripts/fetch_events.py",
-    "src/hyperloom/skills/fleet-kb-observability/scripts/fleet_conversation.py",
     "src/hyperloom/skills/fleet-kb-observability/scripts/slack_bridge.py",
 ]
 ".agents/skills/hyperloom-fleet-worker-run" = [
