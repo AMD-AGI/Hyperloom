@@ -746,10 +746,10 @@ class FuseRequest:
         FuseAgentOptions,
         click.option(
             "--agent-backend",
-            type=click.Choice(["auto", "claude", "codex"]),
             default="auto",
             show_default=True,
-            help="Registered Agent provider for discovery and authoring.",
+            callback=_validate_agent_backend,
+            help="Registered Agent provider for discovery and authoring, or 'auto'.",
         ),
         click.option(
             "--agent-sandbox-mode",

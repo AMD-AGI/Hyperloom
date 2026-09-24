@@ -64,6 +64,9 @@ class AgentProvider:
     availability: Callable[[], bool] = _always_available
     credentialed: Callable[[Mapping[str, str]], bool] = _credential_unproven
     owns_model: Callable[[str], bool] = _owns_no_model
+    #: Whether :func:`select_default_agent_provider` may pick this provider on
+    #: its own. A provider that only an explicit name should reach sets False.
+    auto_selectable: bool = True
 
     def __post_init__(self) -> None:
         """Validate stable provider metadata at registration time."""
@@ -184,7 +187,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
             return False
 
-    providers = list(_providers.values())
+    providers = [provider for provider in _providers.values() if provider.auto_selectable]
     if model:
         runnable_owners = [
             provider
@@ -458,6 +461,9 @@ register_agent_provider(
         availability=_deepseek_available,
         credentialed=_deepseek_credentialed,
         owns_model=_deepseek_owns_model,
+        # It authenticates on the same OpenAI-compatible line as Codex, so ranking it would let an installed SDK
+        # select it on a box that never asked for the harness.
+        auto_selectable=False,
     )
 )
 
