@@ -156,6 +156,10 @@ class _Seam:
         self.shared_state = _StubState(phase)
         self._framework_timeline_recorder = framework_recorder
 
+    def _framework_timeline(self):
+        """Mirror the delegated FrameworkPhase accessor used by _record_specialist_round_product."""
+        return self._framework_timeline_recorder
+
 
 def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> None:
     seam = _Seam(phase="KERNEL_AGENT")
