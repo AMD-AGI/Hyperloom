@@ -23,8 +23,8 @@ def test_default_mode_is_local_and_root_uses_user_data_path(tmp_path):
     assert config.mode is KnowledgeStoreMode.LOCAL
     assert config.local_root == tmp_path / "knowledge"
     assert config.experience_root == (tmp_path / "knowledge" / "kernelforge" / "experiences")
-    assert config.gbrain_base_url == ""
-    assert config.gbrain_token == ""
+    assert config.kb_store_url == ""
+    assert config.kb_store_token == ""
 
 
 def test_default_root_without_user_data_path_uses_hyperloom_cache(monkeypatch, tmp_path):
@@ -40,16 +40,14 @@ def test_explicit_local_ignores_ambient_remote_credentials(tmp_path):
         {
             "KNOWLEDGE_STORE_MODE": "local",
             "KNOWLEDGE_LOCAL_ROOT": str(tmp_path),
-            "GBRAIN_BASE_URL": "https://ambient.invalid",
-            "GBRAIN_TOKEN": "ambient-secret",
+            "KB_STORE_URL": "https://ambient.invalid",
+            "KB_STORE_TOKEN": "ambient-secret",
         }
     )
 
     # Blanked, not merely unused: a later reader of this config cannot reach the network with credentials that are not
     # there.
     assert config.mode is KnowledgeStoreMode.LOCAL
-    assert config.gbrain_base_url == ""
-    assert config.gbrain_token == ""
     assert config.kb_store_url == ""
     assert config.kb_store_token == ""
 
@@ -64,19 +62,22 @@ def test_unknown_mode_fails_strict_validation(mode):
     "env",
     [
         {"KNOWLEDGE_STORE_MODE": "remote"},
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "GBRAIN_BASE_URL": "https://gbrain",
-        },
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "GBRAIN_TOKEN": "token",
-        },
+        {"KNOWLEDGE_STORE_MODE": "remote", "KB_STORE_URL": "https://kb"},
+        {"KNOWLEDGE_STORE_MODE": "remote", "KB_STORE_TOKEN": "token"},
     ],
 )
-def test_remote_requires_both_gbrain_values(env):
+def test_remote_requires_both_kb_store_values(env):
     with pytest.raises(ValueError, match="requires"):
         KnowledgeConfig.from_env(env)
+
+
+def test_gbrain_credentials_do_not_satisfy_remote_mode():
+    """GBrain stays configured for the Framework PR client; it must not pass for a store that was never built."""
+    with pytest.raises(ValueError, match="KB_STORE_URL and KB_STORE_TOKEN") as excinfo:
+        KnowledgeConfig.from_env(
+            {"KNOWLEDGE_STORE_MODE": "remote", "GBRAIN_BASE_URL": "https://gbrain", "GBRAIN_TOKEN": "token"}
+        )
+    assert "GBRAIN_BASE_URL/GBRAIN_TOKEN do not configure it" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -88,11 +89,6 @@ def test_blank_local_root_is_rejected_rather_than_defaulted(blank):
 def test_blank_local_root_override_is_rejected_too():
     with pytest.raises(ValueError, match="KNOWLEDGE_LOCAL_ROOT"):
         KnowledgeConfig.from_env({}, local_root="   ")
-
-
-def test_an_unknown_remote_backend_is_a_programming_error():
-    with pytest.raises(ValueError, match="remote_backend must be"):
-        KnowledgeConfig.from_env({}, remote_backend="gbrian")
 
 
 def test_a_runtime_config_without_knowledge_falls_back_to_the_environment(monkeypatch, tmp_path):
@@ -171,8 +167,8 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
 def test_forge_loop_rejects_invalid_remote_config_before_workspace(monkeypatch, tmp_path):
     workspace = tmp_path / "must-not-be-created"
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
-    monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
 
     result = CliRunner().invoke(
         main,

@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.unified_diff import touched_paths
+
 from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
     hash_implementation_identity,
@@ -420,16 +422,6 @@ def summarize_run(config, workspace: str, op: str, digest: str, kernel_source: s
 
 # --------------------------------------------------------------------------- # page rendering
 # --------------------------------------------------------------------------- #
-def _changed_files_from_diff(diff: str) -> list[str]:
-    """Extract the list of changed file paths from a unified/git diff."""
-    files: list[str] = []
-    for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)", diff or "", re.MULTILINE):
-        path = m.group(2)
-        if path not in files:
-            files.append(path)
-    return files
-
-
 def _measurement_line(metric: dict[str, Any]) -> str:
     """State the speedup with the two timings it was computed from."""
     speedup = metric.get("speedup")
@@ -671,7 +663,7 @@ def _write_run_experience_impl(
         "snr_db": snr_db,
         "gpu_arch": gpu_target,
     }
-    changed_files = _changed_files_from_diff(cumulative_diff)
+    changed_files = touched_paths(cumulative_diff)
 
     # Everything a later run needs to judge and reuse this solution, minus the diff: that travels as an artifact so a
     # reader can rank candidates without pulling a patch it may not want.

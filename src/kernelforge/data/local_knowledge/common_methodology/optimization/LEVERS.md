@@ -56,7 +56,7 @@ row in a permitted data file are all edits *inside* the permitted set.
 | `lever_xcd_locality.md` | bandwidth-bound (re-fetch) | 8 XCDs × 32 CU, per-XCD L2, ≥1024 workgroups, 8-multiple tiles, swizzled CTA order, the 512 B stride cliff |
 | `lever_grid_sizing.md` | latency / occupancy-bound | wave64, `num_warps`, `__launch_bounds__`, **256 CUs**, split-K for decode, persistent kernels |
 | `lever_fusion.md` | bandwidth-bound; launch-bound | traffic fusion vs launch fusion, donors, when NOT to fuse, `launch_bound_share` and the 0.13 graph discount |
-| `lever_cheap_sweeps.md` | stage 5 | `FORGE_SWEEP_<NAME>` + `sweep_const:` echo, one bench command per data point, joint sweeps, keep the knobs through the search |
+| `lever_cheap_sweeps.md` | stage 5 | `FORGE_SWEEP_<NAME>` + `sweep_const:` echo, one bench command per data point, joint sweeps, collapse to the literal before the turn ends |
 | `lever_autotune.md` | stage 5 | only aiter's per-shape DB reaches the live path; capture → race → deploy → **prove engagement**; the 10-tuple key |
 | `lever_edit_surface.md` | cross-cutting | what an editable file reaches: package rebind, injected device source, module constants (incl. `os.environ` defaults), data/config rows |
 | `lever_numerics.md` | **gate on everything** | FP32 accumulate, online softmax, Welford, the **OCP** fp8 trap, MXFP block scaling, the `err_ratio` gate |

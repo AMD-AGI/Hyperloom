@@ -96,7 +96,7 @@ async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
         return []
     try:
         return await asyncio.to_thread(reap_orphaned_servers, resolved)
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:
         log.debug("roofline: orphan reap failed", exc_info=True)
         return []
 
@@ -127,7 +127,7 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
         usage = await asyncio.to_thread(gpu_vram_usage)
         free_mb = [max(0.0, gpu.total_mib - gpu.used_mib) for gpu in usage] if usage is not None else None
         log.info("roofline: post-reclaim free VRAM (MiB): %s", free_mb)
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:
         log.debug("roofline: post-reclaim probe failed", exc_info=True)
 
 
@@ -473,7 +473,7 @@ class RooflineExecutor:
         # Only a context that names its session binds one.
         named = (ctx.extra or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -504,27 +504,19 @@ class RooflineExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "roofline timeline: no session bound; this action's whole event will be "
-                    "missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            event = inline or roofline_event_id(
-                str(getattr(self.shared_state, "phase", "") or "unphased"),
-                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
+        if not session_is_bound():
             log.warning(
-                "roofline timeline: could not resolve an event to record into; this action's "
-                "whole event will be missing from the breakdown",
-                exc_info=True,
+                "roofline timeline: no session bound; this action's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        event = inline or roofline_event_id(
+            str(getattr(self.shared_state, "phase", "") or "unphased"),
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
@@ -563,7 +555,7 @@ class RooflineExecutor:
             _sd0 = Path(session_dir)
             if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
                 self.shared_state.save(_sd0)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
         # ---- Profile (with retry) -------------------------------------------- sglang's torch profiler on
@@ -1471,7 +1463,7 @@ class RooflineExecutor:
             sd = Path(session_dir)
             if sd.name and sd.is_dir() and (sd / "state.json").exists():
                 self.shared_state.save(sd)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.debug("roofline: lifecycle emit failed", exc_info=True)
 
         result = {

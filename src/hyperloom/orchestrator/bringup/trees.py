@@ -119,7 +119,7 @@ def head_commit(root: str | Path) -> str:
             ``""`` as a diff base.
     """
     args = safe_directory_args(["-C", str(root), "rev-parse", "HEAD"])
-    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    proc = subprocess.run(
         ["git", *args],
         capture_output=True,
         text=True,

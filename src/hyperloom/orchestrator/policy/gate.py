@@ -24,6 +24,7 @@ from ..framework.paths import (
     resolve_session_framework_root,
     resolved_within,
 )
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -52,6 +53,7 @@ from ..specialists.profile import (
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 from ..specialists.patch_safety import parse_patch_targets
+from ..state._shared_state.phase_state import gap_actionability_key
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -527,15 +529,9 @@ class PolicyGate:
     # attempt goes straight to its acquire.
     resources: ResourceFacts = field(default_factory=ResourceFacts)
 
-    def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+    def __post_init__(self) -> None:
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
-        import os as _os
-
-        if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if not self.strict_paths and env_bool("INFERENCE_OPTIMIZER_STRICT_PATHS"):
             self.strict_paths = True
 
     # Public API
@@ -1268,11 +1264,7 @@ class PolicyGate:
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu_raw = params.get("needs_gpu", False)
-        if isinstance(needs_gpu_raw, str):
-            needs_gpu = needs_gpu_raw.strip().lower() in ("1", "true", "yes", "y", "on")
-        else:
-            needs_gpu = bool(needs_gpu_raw)
+        needs_gpu = is_truthy(params.get("needs_gpu"))
         reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         if not needs_gpu and reserves_bench_lane:
             needs_gpu = True
@@ -1383,24 +1375,6 @@ class PolicyGate:
         if not candidates:
             return ""
 
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
-
-        def _selection_key(g: dict[str, Any]) -> tuple[int, int, str]:
-            """Sort key ranking gaps by actionability for autofill.
-
-            Args:
-                g (dict[str, Any]): a gaps[] ledger entry.
-
-            Returns:
-                tuple[int, int, str]: ``(-severity_rank, attempt_count,
-                first_seen_ts)`` so the highest-severity, least-attempted,
-                oldest gap sorts first.
-            """
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            return (-sev, attempts, first_seen)
-
         matches = [
             g
             for g in gaps
@@ -1410,7 +1384,7 @@ class PolicyGate:
         ]
         if not matches:
             return ""
-        matches.sort(key=_selection_key)
+        matches.sort(key=gap_actionability_key)
         chosen = str(matches[0].get("canonical_id") or "").strip()
         if chosen:
             params["gap_canonical_id"] = chosen
@@ -1839,7 +1813,7 @@ def record_policy_denial(
         int: The new consecutive-denial streak value for this
             (action, rule) pair.
     """
-    from ..state.shared_state import _now_iso
+    from hyperloom.common.timeutil import now_iso
 
     key = f"{action_name or '*'}:{rule}"
     streak = int(state.policy_denial_streak.get(key, 0)) + 1
@@ -1851,7 +1825,7 @@ def record_policy_denial(
         "hint": hint or "",
         "intent_type": intent_type,
         "streak": streak,
-        "ts": _now_iso(),
+        "ts": now_iso(),
     }
     if intent_payload:
         entry["intent_payload_keys"] = sorted(intent_payload.keys())

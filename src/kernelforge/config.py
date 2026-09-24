@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -30,14 +31,6 @@ def _warn_removed_max_turns_env() -> None:
         "KERNEL_AGENTS_MAX_TURNS is no longer supported and will be "
         "ignored; forge-loop derives its turn cap from --max-hours"
     )
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    """Parse one conventional boolean environment variable."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -172,10 +165,6 @@ class Config:
     # the canonical workspace, which is the one place the probe refuses to run.
     specialist_probe_scratch_root: str = ""
 
-    # Experience storage. gbrain_url/gbrain_token remain compatibility fields for
-    # the broader remote knowledge index and are populated only in remote mode.
-    gbrain_url: str = field(default="")
-    gbrain_token: str = field(default="")
     knowledge_config: KnowledgeConfig | None = field(default=None)
 
     # Experimental / off by default: inject framework/mori/ into the forge-loop
@@ -249,26 +238,17 @@ class Config:
         if self.local_knowledge_dir is None:
             self.local_knowledge_dir = resource_path("local_knowledge", self.project_root)
         if self.knowledge_config is None:
-            self.knowledge_config = KnowledgeConfig.from_env(
-                gbrain_base_url=self.gbrain_url or None,
-                gbrain_token=self.gbrain_token or None,
-            )
-        self.gbrain_url = self.knowledge_config.gbrain_base_url
-        self.gbrain_token = self.knowledge_config.gbrain_token
+            self.knowledge_config = KnowledgeConfig.from_env()
         # Only fall back to the env var when the caller didn't pass an
         # explicit value at all -- an explicit True/False (from either
         # direct construction or `from_env(include_mori_kb=...)`) always
         # wins over the environment.
         if self.include_mori_kb is None:
-            self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
+            self.include_mori_kb = env_bool("KERNELFORGE_INCLUDE_MORI_KB")
         if self.defer_knowledge_maps is None:
             # Defaults on, so the env var reads as an opt-*out*: anything that
             # is not an explicit "off" leaves the pointers in place.
-            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() not in (
-                "0",
-                "false",
-                "no",
-            )
+            self.defer_knowledge_maps = env_flag("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", default=True)
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
@@ -306,8 +286,6 @@ class Config:
             knowledge_config = KnowledgeConfig.from_env(
                 mode=overrides.get("knowledge_store_mode"),
                 local_root=overrides.get("knowledge_local_root"),
-                gbrain_base_url=overrides.get("gbrain_url"),
-                gbrain_token=overrides.get("gbrain_token"),
             )
         agent_backend = overrides.get("agent_backend", os.getenv("FORGE_AGENT_BACKEND", "auto"))
         return cls(
@@ -336,7 +314,7 @@ class Config:
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),
             ),
-            agent_precheck=overrides.get("agent_precheck", _env_bool("FORGE_AGENT_PRECHECK", True)),
+            agent_precheck=overrides.get("agent_precheck", env_flag("FORGE_AGENT_PRECHECK", default=True)),
             agent_fallback_provider=overrides.get(
                 "agent_fallback_provider",
                 os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", "claude"),
@@ -345,7 +323,7 @@ class Config:
             if "agent_options" in overrides
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
-            specialist_probe=overrides.get("specialist_probe", _env_bool("FORGE_SPECIALIST_PROBE", True)),
+            specialist_probe=overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
             specialist_probe_max=int(
                 overrides.get(
                     "specialist_probe_max",
@@ -364,8 +342,6 @@ class Config:
                     os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
                 )
             ),
-            gbrain_url=knowledge_config.gbrain_base_url,
-            gbrain_token=knowledge_config.gbrain_token,
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),

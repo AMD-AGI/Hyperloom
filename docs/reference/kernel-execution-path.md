@@ -271,13 +271,9 @@ Cross-task GEAK artifacts keyed by `kernel_id` live at
 
 ### Per-attempt stdout file naming
 
-`run_attempt` in `kernel_optimization.py` writes one file per attempt under
-`runs/<session_id>/optimized/`:
-
-| Mode | Filename | Contents |
-|---|---|---|
-| Real backend run | `<attempt_id>_stdout.log` | Raw subprocess stdout (GEAK conversation log) |
-| `--dry-run` | `<attempt_id>_optimized<source_suffix>` (e.g. `.cu`) | Synthetic placeholder for smoke tests |
+GEAK and Forge attempt logs land under `runs/<session_id>/optimized/` as
+`<attempt_id>_stdout.log` (conversation / subprocess stdout). A dry-run may
+instead write `<attempt_id>_optimized<source_suffix>` as a placeholder.
 
 **Backward compatibility**: Prior to 2026-05 the real-backend file shared the
 `<attempt_id>_optimized<suffix>` name and contained subprocess stdout. That caused

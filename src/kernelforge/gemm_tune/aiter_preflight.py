@@ -15,7 +15,7 @@ from typing import Mapping
 def serve_aiter_path() -> str | None:
     """Realpath of the aiter package ``import aiter`` would resolve to, or None."""
     try:
-        import importlib.util  # noqa: PLC0415
+        import importlib.util
 
         spec = importlib.util.find_spec("aiter")
     except Exception:  # noqa: BLE001 - unresolvable / broken package means "no serving aiter"
@@ -59,7 +59,7 @@ def classify(serve: str | None, root: str | None, commit: str | None) -> tuple[l
 def _installed_aiter_version() -> str | None:
     """``<dist>==<version>`` for the installed aiter, or None."""
     try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        from importlib.metadata import PackageNotFoundError, version
     except Exception:  # noqa: BLE001 - stdlib shape differs on exotic runtimes
         return None
     for dist in ("amd-aiter", "aiter"):

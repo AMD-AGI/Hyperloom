@@ -35,7 +35,7 @@ def _validated_warm_start_result(
     path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
     try:
         payload = json.loads(path.read_text())
-    except Exception:
+    except (OSError, ValueError):
         return None
     if (
         not isinstance(payload, dict)
@@ -223,7 +223,7 @@ def publish_warm_start_recovery(
     if caller_experiment_id:
         try:
             tracker.set_checkpoint(caller_experiment_id, checkpoint)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
@@ -231,7 +231,7 @@ def publish_warm_start_recovery(
     if result_json:
         try:
             atomic_write_json(result_json, result)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

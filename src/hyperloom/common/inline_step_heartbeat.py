@@ -47,5 +47,5 @@ async def inline_step_heartbeat(
                     await task
         finally:
             if clear is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # broad-suppress: caller-supplied clear callback
                     clear()

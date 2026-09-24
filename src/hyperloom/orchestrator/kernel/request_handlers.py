@@ -51,29 +51,7 @@ from ..trace.task_progress import heartbeat_while_output_flows
 
 from ._recorder_trace import trace_recording_skipped
 
-# Re-exported: callers patch these at ``request_handlers.<name>``.
-from ._kernel_decisions import (
-    _honest_flag as _honest_flag,
-    _entry_by_kernel_id as _entry_by_kernel_id,
-    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
-    enqueue_nominated_patch as enqueue_nominated_patch,
-)
-from .nomination_result import parse_outcome as parse_outcome
+from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 
 
 log = logging.getLogger(__name__)
@@ -150,7 +128,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     if not logs:
         try:
             logs = sorted(ws.rglob("server.log"))[:1]
-        except Exception:
+        except OSError:
             logs = []
     if not logs:
         return None
@@ -159,7 +137,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
         return None
     try:
         text = logs[0].read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    except OSError:
         return None
     if stem not in text:
         return False
@@ -762,7 +740,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:  # noqa: BLE001 — fall back so apply surfaces the real failure.
+    except Exception:
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -1650,8 +1628,8 @@ def _gemm_router_targets(
             which leaves the lane ceiling on its own per-target default.
     """
     try:
-        from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
-        from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
+        from kernelforge.gemm_tune.model_analyzer import analyze_model
+        from kernelforge.gemm_tune.router import select_tuners
 
         specs = select_tuners(
             analyze_model(model_path),
@@ -1664,7 +1642,7 @@ def _gemm_router_targets(
             has_shapes_json=has_shapes_json,
             has_tunableop_input=has_tunableop_input,
         )
-    except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
+    except Exception:
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
         return ()
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
@@ -1722,7 +1700,7 @@ def _fusion_session_serve_args(
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
     if block_size <= 0 and "vllm" in (framework or "").strip().lower():
-        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+        from hyperloom.inference_optimizer.model_config_utils import (
             _sparse_kv_block_size,
         )
 
@@ -3328,10 +3306,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
             'an incomplete install; reinstall with pip install -e ".[forge]"'
         )
         return
-    try:
-        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
-        return
+    moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
     if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
         log.warning(
             "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
@@ -4475,7 +4450,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             shutil.copy2(src_path, dst)
             updated[env_key] = str(dst)
             rel_paths.append(rel)
-    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
+    except Exception:
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
@@ -4497,7 +4472,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
-    except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
+    except Exception:
         log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
     return updated, snap_dir
 
@@ -4974,7 +4949,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (  # noqa: PLC0415
+        from hyperloom.agents.kernel.tools.forge_fusion import (
             salvage_forge_fusion_from_workspace,
         )
 
@@ -5987,7 +5962,7 @@ def _grade_integrate_accuracy(
         from ..state.shared_state import SharedState
 
         baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:  # noqa: BLE001 - an unresolvable baseline degrades, never raises
+    except Exception:
         log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
 
     measured = bench_result.get("accuracy")
@@ -5996,16 +5971,13 @@ def _grade_integrate_accuracy(
     metric = str(bench_result.get("accuracy_metric") or "")
     source_file = str(bench_result.get("accuracy_source") or "")
     if new_accuracy is None:
-        try:
-            eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-            parsed = eval_out.get("accuracy")
-            if isinstance(parsed, (int, float)):
-                new_accuracy = float(parsed)
-                task = str(eval_out.get("task") or "")
-                metric = str(eval_out.get("metric") or "")
-                source_file = str(eval_out.get("source_file") or "")
-        except Exception:  # noqa: BLE001 - a failed parse degrades to "no verdict"
-            log.debug("integrate_handler: accuracy re-parse failed", exc_info=True)
+        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            new_accuracy = float(parsed)
+            task = str(eval_out.get("task") or "")
+            metric = str(eval_out.get("metric") or "")
+            source_file = str(eval_out.get("source_file") or "")
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:

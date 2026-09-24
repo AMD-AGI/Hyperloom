@@ -18,7 +18,7 @@ import unittest.mock as mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from tracelens_analysis import (  # noqa: E402
+from tracelens_analysis import (
     _defines_traced_triton_kernel,
     _flydsl_kernel_params,
     _flydsl_reusable_roots,
@@ -29,7 +29,7 @@ from tracelens_analysis import (  # noqa: E402
     enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
-from tracelens_skill_runner import (  # noqa: E402
+from tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
     normalize_upstream_category,
 )

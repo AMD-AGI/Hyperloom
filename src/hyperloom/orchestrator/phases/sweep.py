@@ -78,7 +78,7 @@ class SweepPhase(PhaseHandler):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
+        except Exception as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,

@@ -130,7 +130,7 @@ class TargetAnalysisExecutor:
                 osl=osl,
                 benchmark_mode=benchmark_mode,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
             clear_competitor_target(session_dir)
             return {

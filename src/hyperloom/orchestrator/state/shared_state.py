@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.timeutil import now_iso
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
@@ -39,7 +41,6 @@ _CRASH_TIMESTAMP_CAP: int = 200
 _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
-_now_iso = _kernel_decision_settings._now_iso
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
@@ -650,7 +651,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
-    start_ts: str = field(default_factory=_now_iso)
+    start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
     # Absolute unix deadline for a bounded session. Stamped once from
     # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
@@ -1318,12 +1319,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-            instrument.snapshot_state_sections(session_dir, self)
-        except Exception:  # noqa: BLE001 — author-time capture must never block save
-            log.debug("snapshot_state_sections failed", exc_info=True)
+        instrument.snapshot_state_sections(session_dir, self)
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:
@@ -1348,7 +1346,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     text,
                     encoding="utf-8",
                 )
-        except Exception:  # noqa: BLE001 — derived artifact, never fatal
+        except Exception:
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
             try:
@@ -1361,7 +1359,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from ..trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:  # noqa: BLE001 — status mirror must never block save
+        except Exception:
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
@@ -1417,7 +1415,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 summary["explore_ratio"] = (
                     round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
                 )
-        except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
+        except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
@@ -1492,15 +1490,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if is_valid_stop_reason(text):
             return self._commit_stop_reason(text)
         if strict is None:
-            strict_env = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_STRICT_STOP_REASON",
-                    "",
-                )
-                .strip()
-                .lower()
-            )
-            strict = strict_env in ("1", "true", "yes")
+            strict = env_bool("INFERENCE_OPTIMIZER_STRICT_STOP_REASON")
         if strict:
             raise ValueError(f"stop_reason={text!r} not in STOP_REASON_VOCAB ({sorted(STOP_REASON_VOCAB)!r})")
         # Lenient: map to "unknown" and warn.
@@ -1518,7 +1508,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Write a validated stop reason, stamping the end time on the first one."""
         self.stop_reason = reason
         if not self.stop_ts:
-            self.stop_ts = _now_iso()
+            self.stop_ts = now_iso()
         return reason
 
     # escalate hint plumbing
@@ -1539,7 +1529,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = _now_iso()
+        self.last_consumed_escalate_hint_ts = now_iso()
         return hint
 
     def discard_pending_escalate_hint(self) -> str:
@@ -1549,7 +1539,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_discarded_escalate_hint = hint
-        self.last_discarded_escalate_hint_ts = _now_iso()
+        self.last_discarded_escalate_hint_ts = now_iso()
         return hint
 
     # phase machine writer (Coordinator-only, single writer)
@@ -1714,7 +1704,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Persist a compact Coordinator exception summary for postmortems."""
         entry = {
             "tick": int(tick or 0),
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "stage": str(stage or ""),
             "agent": str(agent or ""),
             "type": str(exc_type or ""),
@@ -1812,38 +1802,35 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """
         if not isinstance(entry, dict):
             return
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
-            last = (entry.get("attempts") or [{}])[-1]
-            last = last if isinstance(last, dict) else {}
-            rejected = entry.get("rejected")
-            record_integrate_verdict(
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                integration_id=str(entry.get("integration_id") or ""),
-                kernel_id=str(entry.get("kernel_id") or ""),
-                decision=str(entry.get("last_decision") or ""),
-                status=str(entry.get("last_status") or ""),
-                attempt_count=entry.get("attempt_count"),
-                fault_count=entry.get("fault_count"),
-                gain_pct=entry.get("best_gain_pct"),
-                accuracy_pass=last.get("accuracy_pass"),
-                validation_tier=str(last.get("validation_tier") or ""),
-                patch_path=str(entry.get("patch_path") or ""),
-                target_file=str(entry.get("target_file") or ""),
-                error_class=str(entry.get("last_error_class") or ""),
-                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
-                retryable=bool(entry.get("retryable")),
-                settled_at=str(entry.get("updated_at") or ""),
-                extra_server_args=str(entry.get("extra_server_args") or ""),
-                basis=str(entry.get("basis") or ""),
-                alignment_status=str(entry.get("alignment_status") or ""),
-                # Absent means attributable: every writer that cannot pin the
-                # gain on this one kernel says so explicitly.
-                gain_attributed=bool(entry.get("validated", True)),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("integrate verdict capture failed", exc_info=True)
+        last = (entry.get("attempts") or [{}])[-1]
+        last = last if isinstance(last, dict) else {}
+        rejected = entry.get("rejected")
+        record_integrate_verdict(
+            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+            integration_id=str(entry.get("integration_id") or ""),
+            kernel_id=str(entry.get("kernel_id") or ""),
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            fault_count=entry.get("fault_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            accuracy_pass=last.get("accuracy_pass"),
+            validation_tier=str(last.get("validation_tier") or ""),
+            patch_path=str(entry.get("patch_path") or ""),
+            target_file=str(entry.get("target_file") or ""),
+            error_class=str(entry.get("last_error_class") or ""),
+            rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+            retryable=bool(entry.get("retryable")),
+            settled_at=str(entry.get("updated_at") or ""),
+            extra_server_args=str(entry.get("extra_server_args") or ""),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            # Absent means attributable: every writer that cannot pin the
+            # gain on this one kernel says so explicitly.
+            gain_attributed=bool(entry.get("validated", True)),
+        )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2017,7 +2004,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         except (TypeError, ValueError):
             key_metric = None
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "task_id": str(task_id or ""),
             "status": str(status or ""),
             "decision": str(decision or ""),
@@ -2033,17 +2020,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
         if action == "baseline":
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
+            from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-                record_action_decision(
-                    phase=str(getattr(self, "phase", "") or "unphased"),
-                    macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                    task_id=str(entry.get("task_id") or ""),
-                    decision=str(entry.get("decision") or ""),
-                )
-            except Exception:  # noqa: BLE001 — author-time capture must never block record
-                log.debug("baseline decision capture failed", exc_info=True)
+            record_action_decision(
+                phase=str(getattr(self, "phase", "") or "unphased"),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                task_id=str(entry.get("task_id") or ""),
+                decision=str(entry.get("decision") or ""),
+            )
         return entry
 
     def record_action_failure(
@@ -2057,7 +2041,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
         result = result or {}
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             **self._common_result_fields(result),
@@ -2186,18 +2170,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         achieved = self._resolve_baseline_achieved_tput()
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-        try:
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm="baseline",
-            )
-        except Exception:  # noqa: BLE001 — ceiling is best-effort
-            pass
+        breakdown = compute_roofline_breakdown_from_state(
+            self,
+            arm="baseline",
+        )
         peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
         if peak_tput <= 0:
             return {}
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         ceiling = build_roofline_snapshot(
             snapshot_id=None,
             ts=ts_iso,
@@ -2307,7 +2288,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(task_groups, list):
             task_groups = []
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "steady_state_trace": str(steady_state_trace),
@@ -2498,13 +2479,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 achieved_tput = self._resolve_baseline_achieved_tput()
             # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(
-                    self,
-                    arm=snapshot_arm,
-                )
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
+            breakdown = compute_roofline_breakdown_from_state(
+                self,
+                arm=snapshot_arm,
+            )
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).
@@ -2613,7 +2591,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "status": str(result.get("status") or "succeeded"),
             "skip_reason": str(result.get("skip_reason") or ""),
             "was_skipped": bool(result.get("was_skipped", False)),

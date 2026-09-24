@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from .event_ids import fragment_key, parse_event_id
 from .event_rows import EVENT_ID_FIELD
-from .recorder_warnings import RECORDING_ERRORS
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 __all__ = ["EventSink", "RecordSink", "make_sink"]
 
@@ -91,7 +91,7 @@ class EventSink:
             key = fragment_key(self._event_id, row_type, *ids)
             row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
             return get_recorder(producer=self._producer).record_upsert_item(section, row, key=key)
-        except RECORDING_ERRORS:
+        except RECORDING_ERRORS as exc:
             log.warning(
                 "recorder: dropped a %s row of event %s (key %s, producer %s); "
                 "the assembled event will be missing this fact",
@@ -99,7 +99,14 @@ class EventSink:
                 self._event_id,
                 key or "<unbuilt>",
                 self._producer,
+                extra={"error": exc},
                 exc_info=True,
+            )
+            note_failure(
+                section=section,
+                error=exc,
+                producer=self._producer,
+                detail=f"dropped a {section} row of event {self._event_id}",
             )
             return None
 
@@ -157,14 +164,21 @@ class EventSink:
                 )
             row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
             return get_recorder(producer=self._producer).record_item(section, row)
-        except RECORDING_ERRORS:
+        except RECORDING_ERRORS as exc:
             log.warning(
                 "recorder: dropped an appended %s row of event %s (producer %s); "
                 "the assembled event will be missing this fact",
                 section,
                 self._event_id,
                 self._producer,
+                extra={"error": exc},
                 exc_info=True,
+            )
+            note_failure(
+                section=section,
+                error=exc,
+                producer=self._producer,
+                detail=f"dropped an appended {section} row of event {self._event_id}",
             )
             return None
 

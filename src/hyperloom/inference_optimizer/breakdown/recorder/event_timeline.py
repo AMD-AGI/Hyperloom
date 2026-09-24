@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 from .event_ids import parse_event_id
 from .event_rows import EVENT_ID_FIELD
 from .event_sink import EventSink
+from .recorder_warnings import RECORDING_ERRORS
 
 __all__ = [
     "EVENT_STATUS_INTERRUPTED",
@@ -119,7 +120,7 @@ def open_event(
     )
     try:
         write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to open %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.open", exc=exc)
         return None
@@ -160,7 +161,7 @@ def finish_event(
         set_timeline_sequence(envelope, sequence)
     try:
         return write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to close %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.finish", exc=exc)
         return None
@@ -237,7 +238,7 @@ def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
         return
     try:
         record_warning(session, component=component, exc=exc)
-    except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
+    except RECORDING_ERRORS:
         # The sidecar is what makes the parked failures above visible in the export, so losing it is the point at
         # which the original failure would otherwise go unreported entirely.
         log.warning(

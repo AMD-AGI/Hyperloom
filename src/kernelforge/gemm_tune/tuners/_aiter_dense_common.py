@@ -58,7 +58,7 @@ def _aiter_dtype_str(attr: str) -> str:
     """Return the repr string aiter's tuner scripts accept for ``dtypes.<attr>``."""
     try:
         from aiter import dtype2str_dict, dtypes  # type: ignore[import-untyped]
-    except Exception as exc:  # noqa: BLE001 - any import failure is fatal here
+    except Exception as exc:
         raise AiterDtypeUnavailable(
             f"cannot resolve the aiter dtype for {attr!r}: aiter is not importable ({exc})"
         ) from exc

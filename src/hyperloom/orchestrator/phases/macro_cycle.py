@@ -189,17 +189,14 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        try:
-            prev_delta = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0) - float(
-                getattr(state, "gain_at_cycle_start", 0.0) or 0.0
-            )
-            rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
-            for row in rows:
-                if int(row.get("cycle", -1) or -1) == prior_cycle and row.get("gain_delta") is None:
-                    row["gain_delta"] = round(prev_delta, 6)
-            state.cycle_strategy_log = rows[-50:]
-        except Exception:  # noqa: BLE001 — advisory bookkeeping only
-            log.exception("Coordinator: cycle_strategy gain_delta backfill failed")
+        prev_delta = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0) - float(
+            getattr(state, "gain_at_cycle_start", 0.0) or 0.0
+        )
+        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        for row in rows:
+            if int(row.get("cycle", -1) or -1) == prior_cycle and row.get("gain_delta") is None:
+                row["gain_delta"] = round(prev_delta, 6)
+        state.cycle_strategy_log = rows[-50:]
         state.macro_cycle = prior_cycle + 1
         if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
@@ -209,14 +206,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         except (TypeError, ValueError):
             state.gain_at_cycle_start = 0.0
         # Reset per-cycle counters.
-        try:
-            state.reset_per_cycle_plateau_state()
-        except Exception:  # noqa: BLE001 — resets are best-effort
-            log.exception("Coordinator: per-cycle reset failed on reloop")
-        try:
-            self._record_cycle_strategy_for_current_cycle()
-        except Exception:  # noqa: BLE001 — focus is advisory only
-            log.exception("Coordinator: cycle strategy planning failed on reloop")
+        state.reset_per_cycle_plateau_state()
+        self._record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, gain_anchor=%.4f)",
             prior_cycle,
@@ -236,8 +227,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
         caches, re-scoped system prompt) without losing accumulated optimization state;
         ``current_best`` / ``optimization_stack`` / ``explore_search`` are
-        preserved. Idempotent and best-effort: every step is independently
-        guarded so one failure never aborts the run loop.
+        preserved. Idempotent.
 
         Args:
             prior_cycle: The macro-cycle number that just finished.
@@ -255,14 +245,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         }
         # 1) Capture the cycle's working memory, then rebuild the system prompt
         # for the new cycle around the directive that capture produced.
-        try:
-            summary["memory_captured"] = await self._capture_cycle_memory()
-        except Exception:  # noqa: BLE001 — capture never aborts the run loop
-            log.exception("cycle soft-restart: orchestration memory capture failed")
-        try:
-            summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
-        except Exception:  # noqa: BLE001 — reseed is best-effort
-            log.exception("cycle soft-restart: orchestration prompt reseed failed")
+        summary["memory_captured"] = await self._capture_cycle_memory()
+        summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         # 4) Deep-clean any lingering inference-server processes.
@@ -270,7 +254,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             try:
                 self._restart_inference_servers()
                 summary["servers_restarted"] = True
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("cycle soft-restart: server restart failed")
         log.info(
             "cycle soft-restart %d → %d: %s",
@@ -284,7 +268,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                 "observation",
                 {"kind": "cycle_soft_restart", **summary},
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("cycle soft-restart: observation write failed")
         return summary
 
@@ -326,7 +310,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     task.task_id,
                 )
-            except Exception:  # noqa: BLE001 — reprofile is best-effort
+            except Exception:
                 log.exception(
                     "cycle start: forced reprofile enqueue failed",
                 )

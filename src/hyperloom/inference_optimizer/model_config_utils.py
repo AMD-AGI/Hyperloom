@@ -15,7 +15,7 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
-from hyperloom.common.model_paths import resolve_local_model_dir  # noqa: F401
+from hyperloom.common.model_paths import resolve_local_model_dir
 
 
 _MAXPOS_CONFIG_KEYS = (
