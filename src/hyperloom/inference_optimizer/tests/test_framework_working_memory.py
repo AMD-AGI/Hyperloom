@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
@@ -29,11 +28,11 @@ class _StateStub:
 
 class _MemCoord:
     _FRAMEWORK_TRIED_MEMORY_CAP = FrameworkPhase._FRAMEWORK_TRIED_MEMORY_CAP
-    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
-    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
-    _framework_known_candidate_ids = Coordinator._framework_known_candidate_ids
-    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
-    _build_framework_working_memory = Coordinator._build_framework_working_memory
+    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
+    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
+    _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
+    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
+    _build_framework_working_memory = FrameworkPhase._build_framework_working_memory
 
     def __init__(self) -> None:
         self.shared_state = _StateStub()

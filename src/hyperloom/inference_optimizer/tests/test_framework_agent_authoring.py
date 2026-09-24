@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom.agents.framework import repo_map as _repo_map
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -118,9 +117,6 @@ class _Stub(FakeCoordinator):
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         return None
 
-    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        return [_repo_map.repo_url_for_framework(framework or "sglang")]
-
 
 _CANDIDATE = {
     "pr_url": "https://github.com/sgl-project/sglang/pull/42",
@@ -150,7 +146,7 @@ def _pump_then_materialize(stub: _Stub) -> None:
         if getattr(p, "action_name", "") == "integrate_patch" and not getattr(p, "decided", False)
     ]
     for p in pendings:
-        asyncio.run(stub._materialize_framework_agent_candidate(p))
+        asyncio.run(stub.phase_framework.materialize_candidate(p))
         p.decided = True
 
 
@@ -170,7 +166,7 @@ def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
             "audit_step": audit_step,
         },
     )
-    asyncio.run(stub._materialize_framework_agent_candidate(pending))
+    asyncio.run(stub.phase_framework.materialize_candidate(pending))
 
 
 def test_pump_submits_candidate_proposal(
@@ -603,16 +599,12 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-
-    async def _on_task_settled(task, result):
-        params = getattr(task, "params", None) or {}
-        if task.kind == "integrate_patch" and bool(params.get("framework_agent_authoring")):
-            recorded.append(str(result.result.get("status") or ""))
-
-    from types import SimpleNamespace as _NS
-    stub.phase_framework = _NS(on_task_settled=_on_task_settled, on_specialist_settled=_noop_async, record_settled_candidate=lambda task, result: None)
-    stub._maybe_rearm_authored_lane = _noop_async
-    stub._drain_apply_fail_retry_pending = _noop_async
+    phase = stub.phase_framework
+    phase._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
+        str(result.result.get("status") or "")
+    )
+    phase._maybe_rearm_authored_lane = _noop_async
+    phase._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async
     stub._fact_write_hook = _noop_async
