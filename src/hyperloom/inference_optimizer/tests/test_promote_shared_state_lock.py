@@ -458,7 +458,7 @@ async def test_promote_integrate_patch_carries_nested_launch_evidence(session_di
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lane", ["fusion", "integrate_patch"])
-@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win_output_drop", "intvty_regression"])
+@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win", "intvty_regression"])
 async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monkeypatch, lane, vetoed):
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
@@ -492,7 +492,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     s.last_fusion_integrate = dict(prior_fusion)
     bench = {
         "status": "succeeded",
-        "output_throughput": 90.0,
+        "output_throughput": 105.0,
         "total_token_throughput": 1200.0,
         "input_throughput": 1110.0,
         "e2e_norm_intvty_p90": 50.0 if vetoed else 120.0,
@@ -575,7 +575,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         assert s.last_fusion_integrate == prior_fusion
         return
 
-    assert s.current_best["tput"] == 90.0
+    assert s.current_best["tput"] == 105.0
     assert s.current_best["total_throughput"] == 1200.0
     assert s.current_best["input_throughput"] == 1110.0
     assert s.current_best["e2e_norm_intvty_p90"] == 120.0
@@ -584,7 +584,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     assert len(s.optimization_stack) == 1
     entry = s.optimization_stack[0]
     assert entry["action"] == lane
-    assert entry["tput"] == 90.0
+    assert entry["tput"] == 105.0
     assert entry["workspace"] == bench["workspace"]
     assert s.current_best["extra_server_args"] == "--page-size 32"
     assert s.current_best["extra_envs"] == {"ACCEPTED_ENV": "1"}
@@ -2310,8 +2310,8 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "last_tput,last_total,last_intvty,rejected",
-    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, False), (140.0, 1150.0, 115.0, True)],
-    ids=["last_winner_intvty", "last_winner_output_drop", "last_duplicate_recorded"],
+    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_output_drop_rejected", "last_duplicate_recorded"],
 )
 async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected

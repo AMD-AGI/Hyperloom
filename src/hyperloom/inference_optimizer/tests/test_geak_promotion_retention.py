@@ -129,15 +129,30 @@ async def test_geak_acceptance_requires_native_retention(
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     result["e2e_norm_intvty_p90"] = claimed_intvty
+    result["e2e_norm_intvty_p50"] = claimed_intvty
+    result["duration_seconds"] = 900.0
+    result["request_error_rate"] = 0.0
     state.geak_result = deepcopy(result)
     coord._record_geak_candidate(result)
     state.resume_pending_revalidation = True
     before_best = deepcopy(state.current_best)
     before_stack = deepcopy(state.optimization_stack)
     before_gain = state.cumulative_gain_validated
-    measurement = {"conc": 64, "output_throughput": 120.0, "accuracy": 0.9, "fingerprint": "candidate"}
+    measurement = {
+        "conc": 64,
+        "output_throughput": 120.0,
+        "accuracy": 0.9,
+        "fingerprint": "candidate",
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     if fresh_intvty is not None:
-        measurement.update(total_throughput=1200.0, input_throughput=1080.0, e2e_norm_intvty_p90=fresh_intvty)
+        measurement.update(
+            total_throughput=1200.0,
+            input_throughput=1080.0,
+            e2e_norm_intvty_p90=fresh_intvty,
+            e2e_norm_intvty_p50=fresh_intvty,
+        )
     sweep_calls = []
 
     async def replay(**kwargs):
