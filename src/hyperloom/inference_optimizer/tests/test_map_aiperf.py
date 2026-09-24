@@ -184,6 +184,20 @@ def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
     assert r["e2e_norm_intvty_p90"] == 0.0, f"expected 0.0 (no p10 present), got {r['e2e_norm_intvty_p90']!r}"
 
 
+def test_e2e_norm_intvty_p50_reads_the_median_rate():
+    """The median needs no slow-tail inversion, so it is the rate's own P50 -- not 1/ITL's."""
+    r = map_aiperf(_sample())
+    assert r["e2e_norm_intvty_p50"] == pytest.approx(55.0)  # not 84.1, the per-user 1/ITL p50
+
+
+def test_e2e_norm_intvty_p50_is_zero_when_export_has_no_p50():
+    """An export where e2e_output_token_throughput carries no p50 must emit 0.0, not the mean."""
+    s = _sample()
+    s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
+    r = map_aiperf(s)
+    assert r["e2e_norm_intvty_p50"] == 0.0, f"expected 0.0 (no p50 present), got {r['e2e_norm_intvty_p50']!r}"
+
+
 def test_map_accepts_metrics_wrapped():
     r = map_aiperf({"metrics": _sample()})
     assert r["output_throughput"] == 500.0

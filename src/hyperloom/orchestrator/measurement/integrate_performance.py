@@ -65,12 +65,7 @@ def assess_integrate_performance(
         # verdict, and promoting or discarding a native integration on it is a call for a human.
         decision = "NEEDS_REVIEW"
     elif graded.graded_on_intvty:
-        # RECORDED is a different point on the frontier, not a dominated one: it neither promotes nor reverts.
-        decision = (
-            "KEEP"
-            if graded.verdict == VERDICT_KEEP
-            else ("REVERT" if graded.verdict == VERDICT_REVERT else "NEEDS_REVIEW")
-        )
+        decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
     else:
         decision = (
             "KEEP"

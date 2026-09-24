@@ -12,12 +12,15 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_KEEP,
-    VERDICT_RECORDED,
     VERDICT_REVERT,
     graded_axes_of,
+    perf_snapshot_from_mapping,
 )
 from hyperloom.orchestrator.state.shared_state import (
     resolve_graded_comparison,
@@ -33,6 +36,9 @@ _ANCHOR = {
     "output_throughput": 183.44,
     "total_throughput": 25984.80,
     "e2e_norm_intvty_p90": 22.56,
+    "e2e_norm_intvty_p50": 56.55,
+    "duration_seconds": 924.98,
+    "request_error_rate": 0.0,
 }
 
 
@@ -65,12 +71,25 @@ def _synthetic(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
 
 
-def _full_measurement(*, total: float, output: float, intvty: float) -> dict[str, float]:
+def _full_measurement(
+    *,
+    total: float,
+    output: float,
+    intvty: float,
+    intvty_p50: float | None = None,
+    duration: float | None = None,
+    error_rate: float = 0.0,
+) -> dict:
+    # The median tracks the slow tail unless a case overrides it, so a round that moved interactivity moves both.
+    scaled = _ANCHOR["e2e_norm_intvty_p50"] * intvty / _ANCHOR["e2e_norm_intvty_p90"]
     return {
         "output_throughput": output,
         "input_throughput": total - output,
         "total_token_throughput": total,
         "e2e_norm_intvty_p90": intvty,
+        "e2e_norm_intvty_p50": scaled if intvty_p50 is None else intvty_p50,
+        "duration_seconds": _ANCHOR["duration_seconds"] if duration is None else duration,
+        "request_error_rate": error_rate,
     }
 
 
@@ -84,14 +103,14 @@ def test_agentx_reads_both_sides_on_the_intvty_axis(monkeypatch):
         state, _full_measurement(total=26500.0, output=190.0, intvty=24.0), keep_threshold_pct=2.0
     )
 
-    assert graded.objective == GRADED_INTVTY
-    assert graded.candidate == pytest.approx(24.0)  # intvty
-    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p90"])
+    assert graded.objective == GRADED_INTVTY_P50
+    assert graded.candidate == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"] * 24.0 / 22.56)
+    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"])
     assert graded.degrade_reason == ""
 
 
 def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
-    """A candidate that improves interactivity >= 2% and tput within band is KEEP."""
+    """A candidate that improves the median >= 3% with both guards in band is KEEP."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +10% interactivity, same tput
@@ -111,15 +130,39 @@ def test_agentx_revert_when_both_axes_worse(monkeypatch):
     assert graded.verdict == VERDICT_REVERT
 
 
-def test_agentx_recorded_when_neither_dominates(monkeypatch):
-    """Intvty gain < 2% and tput within band -> RECORDED (not promoted)."""
+def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
+    """A median gain the guards tolerate is still short of the bar, and short of the bar is REVERT."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
-    # +1% intvty (below 2% floor), tput roughly same
+    # +1% median, well inside both guard bands.
     graded = resolve_graded_comparison(
         state, _full_measurement(total=25984.0, output=183.0, intvty=22.79), keep_threshold_pct=2.0
     )
-    assert graded.verdict == VERDICT_RECORDED
+    assert graded.verdict == VERDICT_REVERT
+
+
+def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
+    """The median can rise while the slow tail collapses; the guard is what catches it."""
+    _agentx(monkeypatch)
+    state = _State(current_best=_ANCHOR, baseline_tput=180.0)
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=20.0, intvty_p50=62.0),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_REVERT
+
+
+def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
+    """A median win bought by dropping output throughput past the band is not a win."""
+    _agentx(monkeypatch)
+    state = _State(current_best=_ANCHOR, baseline_tput=180.0)
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=150.0, intvty=24.0),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_REVERT
 
 
 def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
@@ -237,23 +280,16 @@ def test_a_scriptable_framework_keeps_output_grading_under_agentx(monkeypatch):
 # --- the interactivity constraint travels with the objective ---
 
 
-def test_an_interactivity_regression_with_tput_win_is_recorded(monkeypatch):
-    """Intvty regresses BUT tput wins -> RECORDED (neither dominates the other).
-
-    Under the 2-D rule REVERT requires BOTH axes to be worse.  A candidate
-    that trades interactivity for throughput is 'RECORDED' — stored and visible,
-    but not promoted to the optimization stack.  This mirrors the Pareto
-    semantics: it is a different point on the frontier, not a dominated one.
-    """
+def test_an_interactivity_regression_bought_with_throughput_is_revert(monkeypatch):
+    """Buying total throughput with interactivity no longer earns a middle verdict."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
-    # Large tput win but interactivity crashes
     graded = resolve_graded_comparison(
         state, _full_measurement(total=40000.0, output=190.0, intvty=10.0), keep_threshold_pct=2.0
     )
 
     assert graded.graded_on_intvty
-    assert graded.verdict == VERDICT_RECORDED  # not REVERT — tput won
+    assert graded.verdict == VERDICT_REVERT
 
 
 def test_both_axes_worse_is_revert(monkeypatch):
@@ -290,8 +326,8 @@ def test_cumulative_gain_reads_the_baseline_on_the_graded_axis(monkeypatch):
         against_baseline=True,
     )
 
-    assert graded.objective == GRADED_INTVTY
-    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p90"])
+    assert graded.objective == GRADED_INTVTY_P50
+    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"])
 
 
 def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
@@ -380,9 +416,9 @@ def test_native_performance_does_not_promote_a_recorded_point(monkeypatch):
         stack_incremental_keep_threshold_pct=0.5,
     )
 
-    assert performance.graded.verdict == VERDICT_RECORDED
+    assert performance.graded.verdict == VERDICT_REVERT
     assert performance.stack_positive_keep is False
-    assert performance.decision == "NEEDS_REVIEW"
+    assert performance.decision == "REVERT"
 
 
 # --- the anchor chokepoint stays on the output axis ---
@@ -416,8 +452,8 @@ def test_graded_axes_survive_a_winner_record(monkeypatch):
     winner = {"name": "v", "tput": 190.0, **graded_axes_of(measurement)}
 
     graded = resolve_graded_comparison(_State(current_best=winner, baseline_tput=180.0), measurement)
-    assert graded.objective == GRADED_INTVTY
-    assert graded.reference == pytest.approx(24.0)
+    assert graded.objective == GRADED_INTVTY_P50
+    assert graded.reference == pytest.approx(measurement["e2e_norm_intvty_p50"])
 
 
 def test_graded_axes_of_omits_what_was_not_measured():
@@ -436,9 +472,9 @@ def test_a_round_without_the_env_var_still_grades_on_intvty(monkeypatch):
     graded = resolve_graded_comparison(
         state, _full_measurement(total=27000.0, output=190.0, intvty=23.0), keep_threshold_pct=2.0
     )
-    assert graded.objective == GRADED_INTVTY
-    assert graded.candidate == pytest.approx(23.0)
-    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p90"])
+    assert graded.objective == GRADED_INTVTY_P50
+    assert graded.candidate == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"] * 23.0 / 22.56)
+    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"])
 
 
 def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
@@ -507,16 +543,19 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
     assert state.baseline_config_path == result["materialized_config"]
     assert state.baseline_perf == {
         "e2e_norm_intvty_p90": 24.0,
+        "e2e_norm_intvty_p50": pytest.approx(_ANCHOR["e2e_norm_intvty_p50"] * 24.0 / 22.56),
         "total_throughput": 26500.0,
         "input_throughput": 26310.0,
         "output_throughput": 190.0,
+        "duration_seconds": _ANCHOR["duration_seconds"],
+        "request_error_rate": 0.0,
     }
     assert state.optimization_stack == stack
     assert state.current_best == current_best
     assert state.current_best_measurement == current_best["measurement"]
     graded = resolve_graded_comparison(state, result, against_baseline=True)
-    assert graded.objective == GRADED_INTVTY
-    assert graded.reference == 24.0
+    assert graded.objective == GRADED_INTVTY_P50
+    assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"] * 24.0 / 22.56)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -605,3 +644,91 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
     assert graded.objective == GRADED_OUTPUT
     assert graded.reference == 190.0
     assert graded.degrade_reason == "baseline_axes_missing"
+
+
+# Comparability inputs ride the same snapshot as the graded axes, so an anchor carries what the gates read.
+_COMPARABILITY = {
+    GRADED_INTVTY_P50: 56.55,
+    GRADED_DURATION: 924.98,
+    GRADED_ERROR_RATE: 0.0,
+}
+
+
+def test_snapshot_carries_the_comparability_inputs():
+    """P50, duration and error rate travel with the graded axes so an anchor can be read for them."""
+    snap = perf_snapshot_from_mapping({**_ANCHOR, **_COMPARABILITY})
+    assert snap is not None
+    assert snap[GRADED_INTVTY_P50] == 56.55
+    assert snap[GRADED_DURATION] == 924.98
+    assert snap[GRADED_ERROR_RATE] == 0.0
+
+
+def test_snapshot_keeps_a_zero_error_rate():
+    """Zero is a measured flawless run, not a missing reading; dropping it would fail the gate on a perfect round."""
+    snap = perf_snapshot_from_mapping({**_ANCHOR, GRADED_ERROR_RATE: 0.0})
+    assert snap is not None
+    assert GRADED_ERROR_RATE in snap
+    assert snap[GRADED_ERROR_RATE] == 0.0
+
+
+def test_snapshot_omits_an_unreported_error_rate():
+    """Absent stays absent: a round that reported no rate must not read as a flawless one."""
+    snap = perf_snapshot_from_mapping({**_ANCHOR, GRADED_ERROR_RATE: None})
+    assert snap is not None
+    assert GRADED_ERROR_RATE not in snap
+
+
+def test_graded_axes_stamp_the_comparability_inputs_onto_a_winner():
+    """A KEEP's current_best becomes the next anchor, so it must carry what the next round compares against."""
+    axes = graded_axes_of({**_ANCHOR, **_COMPARABILITY})
+    assert axes[GRADED_INTVTY_P50] == 56.55
+    assert axes[GRADED_DURATION] == 924.98
+    assert axes[GRADED_ERROR_RATE] == 0.0
+
+
+
+
+def test_agentx_revert_when_the_windows_differ(monkeypatch):
+    """A round that replayed a shorter slice of the corpus measured different work, so it cannot win."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, duration=293.0),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_REVERT
+
+
+def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(monkeypatch):
+    """Full rounds drift by a few percent; that is not a truncation."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, duration=893.2),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_KEEP
+
+
+def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
+    """A rate that rose because requests dropped out is not an improvement."""
+    _agentx(monkeypatch)
+    state = _State(current_best={**_ANCHOR, "request_error_rate": 1.0})
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=2.0),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_REVERT
+
+
+def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
+    """No evidence is not evidence of comparability: the gate fails closed."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    measurement = _full_measurement(total=25984.0, output=183.0, intvty=24.8)
+    measurement.pop("duration_seconds")
+    graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
+    assert graded.verdict == VERDICT_REVERT

@@ -7,14 +7,15 @@ import pytest
 
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
     INTVTY_V1,
+    holds_within_band,
     intvty_grading_enabled,
     intvty_of,
     intvty_serving_grading_enabled,
     output_tput_of,
     parse_intvty_noise_pct,
-    passes_intvty_gate,
-    passes_tput_guard,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
     total_tput_of,
@@ -23,12 +24,14 @@ from hyperloom.common.perf_metric import (
 _KEEP_THRESHOLD_PCT = 1.0
 
 # Shaped like a measured AgentX round: prefill dominates the token budget (~114k prompt / ~806 output tokens), so
-# total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s.
+# total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s; the p50 is the
+# median of the same rate and runs well above it on this heavy-tailed corpus.
 _BASELINE = {
     "input_throughput": 25801.36,
     "output_throughput": 183.44,
     "total_throughput": 25984.80,
     "e2e_norm_intvty_p90": 22.56,  # realistic Kimi-K3 p10 value
+    "e2e_norm_intvty_p50": 56.55,
 }
 
 
@@ -45,7 +48,7 @@ def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float
     cand = perf_snapshot_from_mapping(candidate)
     base = perf_snapshot_from_mapping(anchor)
     assert cand and base
-    if not passes_intvty_gate(cand, base):
+    if not holds_within_band(cand, base, GRADED_INTVTY):
         return None
     return gain_pct(intvty_of(cand), intvty_of(base))
 
@@ -133,28 +136,28 @@ def test_intvty_gate_vetoes_regression_past_band():
     candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-6.0))
     anchor = perf_snapshot_from_mapping(_BASELINE)
     assert candidate and anchor
-    assert passes_intvty_gate(candidate, anchor) is False
+    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is False
 
 
 def test_intvty_gate_allows_movement_within_band():
     candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-4.0))
     anchor = perf_snapshot_from_mapping(_BASELINE)
     assert candidate and anchor
-    assert passes_intvty_gate(candidate, anchor) is True
+    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is True
 
 
 def test_tput_guard_allows_within_band():
     cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.97})
     anch = perf_snapshot_from_mapping(_BASELINE)
     assert cand and anch
-    assert passes_tput_guard(cand, anch) is True
+    assert holds_within_band(cand, anch, GRADED_TOTAL) is True
 
 
 def test_tput_guard_rejects_regression_past_band():
     cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.90})
     anch = perf_snapshot_from_mapping(_BASELINE)
     assert cand and anch
-    assert passes_tput_guard(cand, anch) is False
+    assert holds_within_band(cand, anch, GRADED_TOTAL) is False
 
 
 def test_vetoed_candidate_is_never_graded():

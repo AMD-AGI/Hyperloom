@@ -23,8 +23,18 @@ _AGENTX_MODE = "agentx"
 # with interactivity on x and per-chip throughput on y, and no fixed interactivity target, so trading one for the
 # other moves a point along the frontier rather than violating a constraint.
 GRADED_INTVTY = "e2e_norm_intvty_p90"
+GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
+
+# Comparability inputs: a pair is comparable only when both replayed a window of the same length, and a rate that
+# rose because more requests failed is not a win.
+GRADED_DURATION = "duration_seconds"
+GRADED_ERROR_RATE = "request_error_rate"
+
+# A trace replay slices a different part of the corpus when the window moves, so the two rounds stop measuring the
+# same work. Sized to catch a truncated round, not the few percent a full round drifts by.
+DURATION_DRIFT_PCT = 5.0
 
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all four including the ones a measurement
 # did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader unable to tell
@@ -35,15 +45,11 @@ GRADED_AXIS_KEYS = (GRADED_INTVTY, GRADED_TOTAL, "input_throughput", "tpot_p90_m
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
-# Floor under ``keep_threshold_pct`` for AgentX: the slow-tail percentile's own variance is unmeasured, so the
-# default 1% threshold sits inside the noise band.
-AGENTX_KEEP_THRESHOLD_FLOOR_PCT = 2.0
+# The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
+AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
 
-# RECORDED exists because a point that loses at the measured concurrency can still be the frontier winner at another
-# rung, so discarding it costs more than storing it.
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
-VERDICT_RECORDED = "RECORDED"
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -105,25 +111,45 @@ def _positive(value: Any) -> float | None:
     return coerced if coerced > 0 else None
 
 
+def _non_negative(value: Any) -> float | None:
+    """Coerce to a float of zero or more, else None.
+
+    Zero is a measured error rate, not a missing one, so ``_positive`` would read a flawless run as unreported.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    coerced = float(value)
+    return coerced if coerced >= 0 else None
+
+
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
-    """Both graded axes from a measurement or a ``current_best``; None unless both are positive."""
-    # Returning None unless both are present is what stops a lane half-applying the objective. A total that is
-    # absent, null or non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+    """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
+    # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
+    # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
     if not isinstance(source, Mapping):
         return None
     intvty = _positive(source.get(GRADED_INTVTY))
+    intvty_p50 = _positive(source.get(GRADED_INTVTY_P50))
+    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     inp = _positive(source.get("input_throughput"))
     out = _positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput"))
     total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
     if total is None and inp is not None and out is not None:
         total = inp + out
-    if intvty is None or total is None:
+    if intvty is None or intvty_p50 is None or total is None:
         return None
-    snap: dict[str, float] = {GRADED_INTVTY: intvty, GRADED_TOTAL: total}
+    snap: dict[str, float] = {
+        GRADED_INTVTY: intvty,
+        GRADED_INTVTY_P50: intvty_p50,
+        GRADED_TOTAL: total,
+    }
     for key, value in (
         ("input_throughput", inp),
         (GRADED_OUTPUT, out),
         ("tpot_p90_ms", _positive(source.get("tpot_p90_ms"))),
+        (GRADED_DURATION, duration),
+        (GRADED_ERROR_RATE, error_rate),
     ):
         if value is not None:
             snap[key] = value
@@ -137,18 +163,21 @@ def output_tput_of(source: Mapping[str, Any] | None) -> float:
     return float(_positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput")) or 0.0)
 
 
-def intvty_of(snapshot: Mapping[str, float] | None) -> float:
-    """Interactivity from a perf snapshot; 0.0 when unavailable."""
+def axis_of(snapshot: Mapping[str, float] | None, key: str) -> float:
+    """One axis from a perf snapshot; 0.0 when unavailable."""
     if not isinstance(snapshot, Mapping):
         return 0.0
-    return float(snapshot.get(GRADED_INTVTY) or 0.0)
+    return float(snapshot.get(key) or 0.0)
+
+
+def intvty_of(snapshot: Mapping[str, float] | None) -> float:
+    """Slow-tail interactivity from a perf snapshot; 0.0 when unavailable."""
+    return axis_of(snapshot, GRADED_INTVTY)
 
 
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     """Total token throughput from a perf snapshot; 0.0 when unavailable."""
-    if not isinstance(snapshot, Mapping):
-        return 0.0
-    return float(snapshot.get(GRADED_TOTAL) or 0.0)
+    return axis_of(snapshot, GRADED_TOTAL)
 
 
 def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
@@ -164,10 +193,16 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
     if total is not None:
         axes[GRADED_TOTAL] = total
-    for key in ("input_throughput", "tpot_p90_ms"):
+    for key in ("input_throughput", "tpot_p90_ms", GRADED_INTVTY_P50):
         value = _positive(source.get(key))
         if value is not None:
             axes[key] = value
+    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    if duration is not None:
+        axes[GRADED_DURATION] = duration
+    error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
+    if error_rate is not None:
+        axes[GRADED_ERROR_RATE] = error_rate
     return axes
 
 
@@ -194,28 +229,33 @@ def _within_band(candidate: float, anchor: float, band_pct: float) -> bool:
     return candidate >= anchor * (1.0 - band_pct / 100.0)
 
 
-def passes_intvty_gate(
+def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
+    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+
+    Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
+    evidence" as "comparable" is what lets one KEEP on a window it never ran.
+    """
+    for side in (candidate, anchor):
+        if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
+            return False
+    ref_duration = axis_of(anchor, GRADED_DURATION)
+    if ref_duration <= 0:
+        return False
+    if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
+        return False
+    return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
+
+
+def holds_within_band(
     candidate: Mapping[str, float],
     anchor: Mapping[str, float],
+    key: str,
     *,
     noise_pct: float | None = None,
 ) -> bool:
-    """Whether candidate interactivity holds within the band below *anchor*."""
+    """Whether candidate *key* holds within the noise band below *anchor*."""
     band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
-    return _within_band(intvty_of(candidate), intvty_of(anchor), band)
-
-
-def passes_tput_guard(
-    candidate: Mapping[str, float],
-    anchor: Mapping[str, float],
-    *,
-    noise_pct: float | None = None,
-) -> bool:
-    """Whether candidate throughput holds within the band below *anchor*."""
-    # ``total_throughput`` is the raw aggregate; a caller comparing configurations of differing tensor-parallel
-    # degree must normalise by the chip count first.
-    band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
-    return _within_band(total_tput_of(candidate), total_tput_of(anchor), band)
+    return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
 @dataclass(frozen=True)
@@ -247,32 +287,36 @@ class GradedComparison:
     @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
-        return self.objective == GRADED_INTVTY
+        return self.objective == GRADED_INTVTY_P50
 
 
 __all__ = [
-    "AGENTX_KEEP_THRESHOLD_FLOOR_PCT",
+    "AGENTX_KEEP_P50_THRESHOLD_PCT",
+    "DURATION_DRIFT_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
+    "GRADED_DURATION",
+    "GRADED_ERROR_RATE",
     "GRADED_INTVTY",
+    "GRADED_INTVTY_P50",
     "GRADED_OUTPUT",
     "GRADED_TOTAL",
     "INTVTY_V1",
     "VERDICT_KEEP",
-    "VERDICT_RECORDED",
     "VERDICT_REVERT",
     "agentx_active",
+    "axis_of",
     "graded_axes_of",
     "graded_metric_key",
+    "holds_within_band",
     "intvty_grading_enabled",
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
     "output_tput_of",
     "parse_intvty_noise_pct",
-    "passes_intvty_gate",
-    "passes_tput_guard",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
+    "rounds_are_comparable",
     "total_tput_of",
 ]
