@@ -201,7 +201,7 @@ def sanitize_publish_server_args(value: str) -> str:
             "extra_server_args contains a whitespace-bearing value unsupported "
             "by Magpie's unquoted environment expansion"
         )
-    from ...actions.executors._grid_server_args import _reserialize_json_blobs
+    from hyperloom.inference_optimizer.grid_server_args import _reserialize_json_blobs
 
     return _reserialize_json_blobs(" ".join(safe))
 

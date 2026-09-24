@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from .exporter import (
-    BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
     FINAL_PRODUCER_COORDINATOR,
     FINAL_PRODUCER_SUPERVISOR,
@@ -21,7 +20,6 @@ from .schema import SCHEMA_VERSION
 from .session_package import package_session_artifacts
 
 __all__ = [
-    "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "SCHEMA_VERSION",
     "FINAL_PRODUCER_COORDINATOR",

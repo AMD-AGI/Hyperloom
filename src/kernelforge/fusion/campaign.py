@@ -20,6 +20,7 @@ from kernelforge.fusion.driver_shim import write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH
 from kernelforge.fusion.validate import DEFAULT_TARGET_SPEEDUP
+from kernelforge.llm.git import git
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger("forge_fusion")
@@ -72,6 +73,7 @@ def _failed_campaign(note: str) -> CampaignOutcome:
             fused_us=None,
             kept=False,
             note=f"CAMPAIGN FAILED: {note}",
+            correctness_measured=False,
         )
     )
 
@@ -105,16 +107,30 @@ def _read_harness_reports(report_log: str) -> list[dict]:
     return reports
 
 
-def _best_harness_report(reports: list[dict], best_ms) -> dict:
-    """The recorded report describing the candidate the loop settled on."""
-    usable = [
-        r for r in reports if r.get("compiled") and isinstance(r.get("fused_us"), (int, float)) and not r.get("skipped")
-    ]
-    if not usable:
+def committed_tree_id(workspace: str, commit: str, env: dict[str, str] | None = None) -> str:
+    """Git's name for the tree the loop committed, or ``""`` when it cannot be read."""
+    if not (workspace and commit):
+        return ""
+    shown = git("rev-parse", f"{commit}^{{tree}}", cwd=workspace, check=False, env=env)
+    if shown.returncode != 0:
+        log.warning("cannot read the tree of %s: %s", commit, (shown.stderr or "").strip())
+        return ""
+    return shown.stdout.strip()
+
+
+def _harness_report_for(reports: list[dict], tracked_tree: str) -> dict:
+    """The recorded report that benchmarked exactly this tree."""
+    if not tracked_tree:
         return {}
-    if isinstance(best_ms, (int, float)):
-        return min(usable, key=lambda r: abs(float(r["fused_us"]) / 1000.0 - float(best_ms)))
-    return min(usable, key=lambda r: float(r["fused_us"]))
+    measured = [
+        r
+        for r in reports
+        if r.get("tracked_tree") == tracked_tree
+        and r.get("compiled")
+        and not r.get("skipped")
+        and isinstance(r.get("fused_us"), (int, float))
+    ]
+    return measured[-1] if measured else {}
 
 
 def _worst_parity(report: dict) -> tuple[float | None, float | None]:
@@ -125,20 +141,40 @@ def _worst_parity(report: dict) -> tuple[float | None, float | None]:
     return (max(errs) if errs else None, min(snrs) if snrs else None)
 
 
-def _to_validation_result(payload: dict, target_speedup: float, reports: list[dict] | None = None) -> ValidationResult:
+def _to_validation_result(
+    payload: dict,
+    target_speedup: float,
+    reports: list[dict] | None = None,
+    *,
+    committed_tree: str = "",
+) -> ValidationResult:
     """Translate the loop's campaign result into the fusion verdict shape."""
     speedup = payload.get("mean_case_speedup")
     speedup = float(speedup) if isinstance(speedup, (int, float)) else None
     committed = bool(str(payload.get("best_commit") or "").strip())
-    kept = committed and speedup is not None and speedup >= target_speedup
-    report = _best_harness_report(reports or [], payload.get("best_ms"))
+    report = _harness_report_for(reports or [], committed_tree)
+    measured = bool(report)
     max_abs_err, snr_db = _worst_parity(report)
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
-    if committed and not report:
-        log.warning("no harness report recorded; manifest parity and timings stay null")
+    verified = committed and measured
+    kept = verified and speedup is not None and speedup >= target_speedup
+    if not committed:
+        note = "forge-loop produced no validated candidate"
+    elif not measured:
+        log.warning("no harness report benchmarked the committed tree; the recipe stays unverified")
+        note = (
+            f"forge-loop committed {payload.get('best_commit')} but no harness report benchmarked that tree: "
+            "parity and per-arm timings are unavailable"
+        )
+    else:
+        note = (
+            f"forge-loop best iteration {payload.get('best_iteration')}: "
+            f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
+            + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
+        )
     return ValidationResult(
-        correctness_passed=committed,
+        correctness_passed=verified,
         max_abs_err=max_abs_err,
         # The harness reports SNR and absolute error, never a relative tolerance.
         rtol=None,
@@ -146,13 +182,8 @@ def _to_validation_result(payload: dict, target_speedup: float, reports: list[di
         eager_us=float(eager_us) if isinstance(eager_us, (int, float)) else None,
         fused_us=float(fused_us) if isinstance(fused_us, (int, float)) else None,
         kept=kept,
-        note=(
-            f"forge-loop best iteration {payload.get('best_iteration')}: "
-            f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
-            + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
-            if committed
-            else "forge-loop produced no validated candidate"
-        ),
+        note=note,
+        correctness_measured=measured,
     )
 
 
@@ -275,6 +306,8 @@ def run_recipe_campaign(
         report_log=report_log,
         case_id=stem,
         fused_module=fused_module,
+        workspace=workspace,
+        git_env=shadow_env,
     )
 
     program_md_file = str(out / f"program_{stem}.md")
@@ -343,7 +376,16 @@ def run_recipe_campaign(
         return _failed_campaign(f"forge-loop exited {returncode}")
     payload = _read_result_json(result_json)
     return CampaignOutcome(
-        result=_to_validation_result(payload, target_speedup, _read_harness_reports(report_log)),
+        result=_to_validation_result(
+            payload,
+            target_speedup,
+            _read_harness_reports(report_log),
+            committed_tree=committed_tree_id(
+                workspace,
+                str(payload.get("best_commit") or "").strip(),
+                env=shadow_env,
+            ),
+        ),
         experiment_id=str(payload.get("experiment_id") or ""),
     )
 

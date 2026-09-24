@@ -165,12 +165,12 @@ class TestThePackageListHasOneOwner:
     """Two lists of kernel-source packages is one list that goes stale."""
 
     def test_the_tool_defers_to_the_orchestrator_list(self):
-        from hyperloom.orchestrator.framework.paths import FRAMEWORK_SOURCE_PACKAGES
+        from hyperloom.inference_optimizer.framework_paths import FRAMEWORK_SOURCE_PACKAGES
 
         assert tl._KERNEL_SOURCE_PACKAGES == FRAMEWORK_SOURCE_PACKAGES
 
     def test_the_standalone_default_does_not_drift_from_it(self):
         """The literal is the standalone fallback, not a competing answer."""
-        from hyperloom.orchestrator.framework.paths import FRAMEWORK_SOURCE_PACKAGES
+        from hyperloom.inference_optimizer.framework_paths import FRAMEWORK_SOURCE_PACKAGES
 
         assert set(tl._STANDALONE_KERNEL_SOURCE_PACKAGES) == set(FRAMEWORK_SOURCE_PACKAGES)

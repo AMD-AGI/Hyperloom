@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator action dispatch: admission, launch, reaping and cancellation of lane tasks."""
 
 from __future__ import annotations
 import asyncio
@@ -58,9 +58,7 @@ from .coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 
-from .coordinator import (
-    _format_inbox_event,
-)
+from .conversation import _format_inbox_event
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -123,9 +121,10 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
 #: Kinds the pump dispatches but does not join: it drains what it joins before
-#: returning, and an off-loop compile there would hold every reactor turn for
-#: its duration. Admission is unchanged — same budget, lane and lease gates.
-_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
+#: returning, and an off-loop compile or the KERNEL phase's whole pipeline there
+#: would hold every reactor turn for its duration. Admission is unchanged — same
+#: budget, lane and lease gates.
+_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
 class _InflightAction(NamedTuple):

@@ -14,10 +14,8 @@ import pytest
 
 from hyperloom.inference_optimizer.cli.model_gate import _load_model_arch
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.shared_state import (
-    SharedState,
-    render_model_arch_compact,
-)
+from hyperloom.orchestrator.state._shared_state.render import render_model_arch_compact
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _VALID_ARCH = {

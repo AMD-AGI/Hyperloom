@@ -186,23 +186,25 @@ def _read_pristine_sources(
     *,
     base_commit: str,
 ) -> dict[str, str]:
+    if base_commit:
+        reachable = git("rev-parse", "--verify", "--quiet", f"{base_commit}^{{commit}}", cwd=workspace, check=False)
+        if reachable.returncode != 0:
+            # Every per-path read below falls back to the working tree when the commit cannot be reached, so an
+            # unresolvable base would hand the whole implementation signature the working tree under a pristine label.
+            raise ValueError(f"pristine base commit is not in the workspace: {base_commit}")
+
     source_contents: dict[str, str] = {}
     for absolute in raw_paths:
         path = Path(absolute)
-        try:
-            relative = path.relative_to(workspace).as_posix()
-        except ValueError:
-            continue
+        relative = path.relative_to(workspace).as_posix()
         source = None
         if base_commit:
             result = git("show", f"{base_commit}:{relative}", cwd=workspace, check=False)
             if result.returncode == 0:
                 source = result.stdout
+        # A source the pristine commit does not carry is one added since: the working tree holds its only content.
         if source is None:
-            try:
-                source = path.read_text(errors="replace")
-            except OSError:
-                continue
+            source = path.read_text(errors="replace")
         source_contents[absolute] = source
     return source_contents
 
@@ -394,17 +396,11 @@ def _derive_target_functions(
     workspace: Path,
     source_files: list[str],
     *,
-    source_contents: dict[str, str] | None = None,
+    source_contents: dict[str, str],
 ) -> list[str]:
     functions: list[str] = []
     for relative in source_files:
-        absolute = str((workspace / relative).resolve())
-        source = source_contents.get(absolute) if source_contents is not None else None
-        if source is None:
-            try:
-                source = Path(absolute).read_text(errors="replace")
-            except OSError:
-                continue
+        source = source_contents[str((workspace / relative).resolve())]
         for name in derive_kernel_names(source):
             if name not in functions:
                 functions.append(name)

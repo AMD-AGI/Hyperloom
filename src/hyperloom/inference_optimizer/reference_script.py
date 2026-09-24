@@ -398,7 +398,7 @@ def _shell_ready_server_args(server_args: Any) -> str:
     text = str(server_args or "").strip()
     if not text:
         return ""
-    from hyperloom.orchestrator.actions.executors._grid_server_args import _split_args_preserving_json
+    from hyperloom.inference_optimizer.grid_server_args import _split_args_preserving_json
 
     tokens = _split_args_preserving_json(text)
     if tokens is None:

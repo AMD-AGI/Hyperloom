@@ -1097,7 +1097,8 @@ def record_session_breakdown(
     """Attach the final ``session_breakdown.json`` to the session's trace."""
     if breakdown is None:
         from hyperloom.common.jsonio import read_json
-        from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
+
+        from ..session.session_paths import BREAKDOWN_FILENAME
 
         breakdown = read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
     get_emitter(session_dir).record_session_breakdown(breakdown)

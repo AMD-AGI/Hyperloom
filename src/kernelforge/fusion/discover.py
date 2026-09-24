@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
+from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
@@ -1135,12 +1136,12 @@ def registered_agent_llm_fn(
                     protected_files=protected,
                 )
                 text = str(getattr(result, "text", "") or "").strip()
-                end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
+                end_reason = result.end_reason
                 cut_short = end_reason in {"turn_cap", "timeout"}
                 # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
                 # design -- it is handed read and search tools precisely so it explores.
                 usable = text and (not cut_short or _extract_json_array(text))
-                if usable and end_reason != "sdk_error":
+                if usable and not is_api_failure(result):
                     if cut_short:
                         log.warning(
                             "discovery Agent ended with %s but its proposals parsed; using them",

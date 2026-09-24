@@ -11,11 +11,15 @@ from hashlib import sha1
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
-from ._shared_state.phase_state import _shared_state_module
+from hyperloom.common.timeutil import now_iso
 
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
+
+# gap ledger caps; both enforced in upsert_gap.
+_GAPS_MAX_ENTRIES = 50
+_GAPS_ATTEMPTS_HISTORY = 20
 
 
 class GapsStateMixin:
@@ -38,8 +42,7 @@ class GapsStateMixin:
         cid = str(entry.get("canonical_id") or "").strip()
         if not cid:
             return {}
-        ss = _shared_state_module()
-        now = ss.now_iso()
+        now = now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -55,8 +58,8 @@ class GapsStateMixin:
                 "last_updated_ts": now,
                 "attempts": list(entry.get("attempts") or []),
             }
-            if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY :]
+            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
+                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
@@ -70,12 +73,12 @@ class GapsStateMixin:
             if incoming_attempts:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
                 # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
+                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
+                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
                 existing["attempts"] = merged_attempts
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
-        if len(self.gaps) > ss._GAPS_MAX_ENTRIES:
+        if len(self.gaps) > _GAPS_MAX_ENTRIES:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
@@ -83,7 +86,7 @@ class GapsStateMixin:
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
-            keep_count = ss._GAPS_MAX_ENTRIES - 1
+            keep_count = _GAPS_MAX_ENTRIES - 1
             others = others[-keep_count:] if keep_count > 0 else []
             self.gaps = others + [merged]
         return merged
@@ -98,12 +101,11 @@ class GapsStateMixin:
         if gap is None:
             return None
         attempts = list(gap.get("attempts") or [])
-        ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss.now_iso())})
-        if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or now_iso())})
+        if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+            attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss.now_iso()
+        gap["last_updated_ts"] = now_iso()
         return gap
 
 
@@ -256,7 +258,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
 
     def _seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
         for hint in hints:
@@ -307,10 +309,10 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
 
         a = str(action or "").strip().lower()
         if a in {
-            # ``kernel_opt`` names the lane, not a request kind: it is still in
-            # KERNEL_LANE_TASK_KINDS and still what a gap row calls kernel work,
-            # so it keeps classifying to the kernel layer.
+            # ``kernel_opt`` names the lane, not a request kind: it is still what
+            # a gap row calls kernel work, so it keeps classifying to the kernel layer.
             "kernel_opt",
+            "kernel_agent",
             "integrate",
             "trace_analyze",
             "run_gemm_tuning",
