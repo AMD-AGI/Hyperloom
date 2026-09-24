@@ -160,6 +160,22 @@ def test_an_undecodable_payload_string_is_rejected() -> None:
         decode_intent_envelope(envelope)
 
 
+async def test_the_specialist_runner_call_shape_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live run's specialists all crashed on TypeError: the runner passes disallowed_tools."""
+    _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
+    result = await _backend(tmp_path).run(
+        prompt="scout",
+        system_prompt="You are a specialist.",
+        disallowed_tools=["KillShell", "SlashCommand"],
+        max_turns=1,
+    )
+
+    assert [intent.type for intent in result.intents] == [IntentType.SEND_MESSAGE]
+
+
 # What the harness is told, given it has no field for a system prompt.
 
 

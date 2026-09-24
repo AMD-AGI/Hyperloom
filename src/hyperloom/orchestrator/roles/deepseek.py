@@ -203,11 +203,13 @@ class DeepSeekBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Run one DeepSeek Harness turn and parse the intent envelope it replied with."""
-        del tools, max_turns  # The harness owns its tool set and its own turn loop.
+        # The harness owns its tool set and its own turn loop, and the names a caller denies are Claude's.
+        del tools, disallowed_tools, max_turns
         if allow_no_intent:
             turn_prompt = f"{_PER_TURN_CONTRACT_OVERRIDE}\n\n{prompt}"
         else:
