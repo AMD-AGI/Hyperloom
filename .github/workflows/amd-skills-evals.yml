@@ -49,10 +49,12 @@ jobs:
     name: AMD Skills Checks
     # Pinned to the version amd/skills grades this skill with.
     uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
-    # No ``secrets`` mapping: routing and behavioral are the only legs that
-    # spend a model call, they are off below, and this repo holds no
-    # ANTHROPIC_API_KEY. Dispatching either one needs that secret added first,
-    # and the harness says so rather than running without it.
+    # No ``secrets`` mapping, because there is nothing here this workflow can
+    # use. The repo's Anthropic key is an AMD APIM gateway one, which needs a
+    # base URL and a subscription-key header alongside it; ``reusable.yml``
+    # takes neither, so passing the key alone returns 401. Reaching that
+    # gateway means the wider ``skill-evals.yml``, which is a decision for
+    # whenever a paid leg earns its place here.
     with:
       skills: examples/skills/hyperloom-workload-optimizer
       # Each step can be set to `required`, `optional`, or `off`.
