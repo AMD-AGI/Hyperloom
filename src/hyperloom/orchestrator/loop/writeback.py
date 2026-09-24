@@ -3525,6 +3525,9 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
+        from hyperloom.common.perf_metric import stamp_output_per_gpu
+
+        stamp_output_per_gpu(result, getattr(self.shared_state, "tp", None))
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -3720,6 +3723,7 @@ class WritebackCollaborator:
                 "e2e_norm_intvty_p50": result.get("e2e_norm_intvty_p50"),
                 "duration_seconds": result.get("duration_seconds"),
                 "request_error_rate": result.get("request_error_rate"),
+                "output_tput_per_gpu": result.get("output_tput_per_gpu"),
                 "workspace": result.get("workspace"),
             }
             snap = self.shared_state.baseline_perf

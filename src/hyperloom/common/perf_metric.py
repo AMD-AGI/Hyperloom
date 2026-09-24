@@ -27,6 +27,10 @@ GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
 
+# The y axis InferenceX plots the frontier on. Reported, not graded: tensor parallelism is fixed for a session, so
+# dividing both sides of a ratio by it leaves the guard's verdict unchanged.
+GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
+
 # Comparability inputs: a pair is comparable only when both replayed a window of the same length, and a rate that
 # rose because more requests failed is not a win.
 GRADED_DURATION = "duration_seconds"
@@ -36,10 +40,21 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
-# The axes ``graded_axes_of`` can carry, for a consumer that must publish all four including the ones a measurement
-# did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader unable to tell
-# an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it was zero".
-GRADED_AXIS_KEYS = (GRADED_INTVTY, GRADED_TOTAL, "input_throughput", "tpot_p90_ms")
+# The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
+# measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
+# unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
+# was zero".
+GRADED_AXIS_KEYS = (
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_TOTAL,
+    GRADED_OUTPUT_PER_GPU,
+    "input_throughput",
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "tpot_p50_ms",
+    "tpot_p90_ms",
+)
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
 # to the top of that range instead of rejecting movement upstream would call noise.
@@ -148,6 +163,10 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         ("input_throughput", inp),
         (GRADED_OUTPUT, out),
         ("tpot_p90_ms", _positive(source.get("tpot_p90_ms"))),
+        ("ttft_p50_ms", _positive(source.get("ttft_p50_ms"))),
+        ("ttft_p90_ms", _positive(source.get("ttft_p90_ms"))),
+        ("tpot_p50_ms", _positive(source.get("tpot_p50_ms"))),
+        (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
     ):
@@ -193,7 +212,15 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
     if total is not None:
         axes[GRADED_TOTAL] = total
-    for key in ("input_throughput", "tpot_p90_ms", GRADED_INTVTY_P50):
+    for key in (
+        "input_throughput",
+        "ttft_p50_ms",
+        "ttft_p90_ms",
+        "tpot_p50_ms",
+        "tpot_p90_ms",
+        GRADED_INTVTY_P50,
+        GRADED_OUTPUT_PER_GPU,
+    ):
         value = _positive(source.get(key))
         if value is not None:
             axes[key] = value
@@ -227,6 +254,17 @@ def _within_band(candidate: float, anchor: float, band_pct: float) -> bool:
     if anchor <= 0:
         return True
     return candidate >= anchor * (1.0 - band_pct / 100.0)
+
+
+def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
+    """Derive the frontier's y axis onto *measurement* in place; a non-positive chip count leaves it unstamped."""
+    if not isinstance(measurement, dict):
+        return
+    chips = _positive(tp)
+    out = _positive(measurement.get(GRADED_OUTPUT)) or _positive(measurement.get("tput"))
+    if chips is None or out is None:
+        return
+    measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
 def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
@@ -300,6 +338,7 @@ __all__ = [
     "GRADED_INTVTY",
     "GRADED_INTVTY_P50",
     "GRADED_OUTPUT",
+    "GRADED_OUTPUT_PER_GPU",
     "GRADED_TOTAL",
     "INTVTY_V1",
     "VERDICT_KEEP",
@@ -318,5 +357,6 @@ __all__ = [
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
     "rounds_are_comparable",
+    "stamp_output_per_gpu",
     "total_tput_of",
 ]

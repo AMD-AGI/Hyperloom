@@ -124,6 +124,7 @@ def map_aiperf(
         "duration": stat(m, "benchmark_duration"),
         "mean_ttft_ms": stat(m, "time_to_first_token", "avg"),
         "median_ttft_ms": stat(m, "time_to_first_token", "p50"),
+        "p90_ttft_ms": stat(m, "time_to_first_token", "p90"),
         "p99_ttft_ms": stat(m, "time_to_first_token", "p99"),
         "std_ttft_ms": stat(m, "time_to_first_token", "std"),
         "mean_tpot_ms": stat(m, "inter_token_latency", "avg"),

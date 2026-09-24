@@ -293,3 +293,42 @@ def test_output_tput_of_falls_back_to_tput():
 def test_output_tput_of_reports_zero_when_absent():
     assert output_tput_of({}) == 0.0
     assert output_tput_of(None) == 0.0
+
+
+def test_output_per_gpu_is_stamped_from_the_session_chip_count():
+    """The frontier's y axis is derived here so consumers read one figure, not a division they each repeat."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT_PER_GPU, stamp_output_per_gpu
+
+    measurement = dict(_BASELINE)
+    stamp_output_per_gpu(measurement, 8)
+    assert measurement[GRADED_OUTPUT_PER_GPU] == pytest.approx(_BASELINE["output_throughput"] / 8)
+
+
+def test_output_per_gpu_is_left_unstamped_without_a_chip_count():
+    """A missing or zero chip count must not publish the aggregate as if it were per GPU."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT_PER_GPU, stamp_output_per_gpu
+
+    for chips in (None, 0, "", -1):
+        measurement = dict(_BASELINE)
+        stamp_output_per_gpu(measurement, chips)
+        assert GRADED_OUTPUT_PER_GPU not in measurement, f"chips={chips!r} should leave the axis unstamped"
+
+
+def test_graded_axes_publish_the_display_figures():
+    """SBD reads these through graded_axes_of, so they have to survive the projection."""
+    from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_OUTPUT_PER_GPU, graded_axes_of
+
+    source = {
+        **_BASELINE,
+        GRADED_OUTPUT_PER_GPU: 22.93,
+        "ttft_p50_ms": 110.0,
+        "ttft_p90_ms": 240.0,
+        "tpot_p50_ms": 18.0,
+        "tpot_p90_ms": 34.0,
+    }
+    axes = graded_axes_of(source)
+    assert axes[GRADED_OUTPUT_PER_GPU] == 22.93
+    assert (axes["ttft_p50_ms"], axes["ttft_p90_ms"]) == (110.0, 240.0)
+    assert (axes["tpot_p50_ms"], axes["tpot_p90_ms"]) == (18.0, 34.0)
+    for key in (GRADED_OUTPUT_PER_GPU, "ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
+        assert key in GRADED_AXIS_KEYS

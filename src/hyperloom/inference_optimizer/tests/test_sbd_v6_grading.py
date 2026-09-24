@@ -40,8 +40,13 @@ from hyperloom.orchestrator.state.shared_state import SharedState, resolved_grad
 #: The AgentX axes a measured round carries, on the keys grading itself reads them from.
 AGENTX_AXES: dict[str, Any] = {
     GRADED_INTVTY: 41.2,
+    "e2e_norm_intvty_p50": 78.9,
     "total_throughput": 25978.0,
+    "output_tput_per_gpu": 22.9,
     "input_throughput": 25795.0,
+    "ttft_p50_ms": 110.0,
+    "ttft_p90_ms": 240.0,
+    "tpot_p50_ms": 18.0,
     "tpot_p90_ms": 24.3,
 }
 

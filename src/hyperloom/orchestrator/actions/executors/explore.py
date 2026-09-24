@@ -28,6 +28,7 @@ from hyperloom.common.perf_metric import (
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
+    stamp_output_per_gpu,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -1066,6 +1067,7 @@ class ExploreExecutor:
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
                     }
+                    stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
                         ss,
                         variant_meas,

@@ -36,7 +36,7 @@ def _sample():
         "total_isl": {"unit": "tok", "avg": 4200.0},
         "total_output_tokens": {"unit": "tok", "avg": 2100.0},
         "benchmark_duration": {"unit": "s", "avg": 14.0},
-        "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
+        "time_to_first_token": _metric(120.0, p50=110.0, p90=170.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
         # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
         "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
@@ -349,3 +349,10 @@ def test_deployed_mapper_honours_noncanonical_reasons(deployed_mapper, tmp_path)
     result = _run_deployed(deployed_mapper, tmp_path, export, AGENTX_NONCANONICAL_REASONS="entries=50, ,duration=120s")
     assert result["submission_valid"] is False
     assert result == map_aiperf(export, noncanonical_reasons=["entries=50", "duration=120s"])
+
+
+def test_ttft_p90_is_mapped():
+    """The detail view reports TTFT at p50 and p90; only p50 and p99 used to be carried."""
+    r = map_aiperf(_sample())
+    assert r["p90_ttft_ms"] == pytest.approx(170.0)
+    assert r["median_ttft_ms"] == pytest.approx(110.0)
