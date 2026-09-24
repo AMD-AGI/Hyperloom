@@ -91,7 +91,7 @@ Test:
 - context is captured from realistic runtime state;
 - no `candidate_change`, `question`, weights, or search strategy is supplied;
 - retries inside one decision reuse its read;
-- a changed context or later decision reads the current shared corpus;
+- a changed context or later decision reads the current run-scoped selected view;
 - an empty or different Run scope cannot see unselected Catalog records;
 - completed evidence appears before proposal generation;
 - failures continue without evidence;
