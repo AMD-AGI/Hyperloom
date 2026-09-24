@@ -230,7 +230,7 @@ class KernelStackPhase(PhaseHandler):
 
     async def _recover_interrupted_stack_validation(self) -> bool:
         """Resume or abort a stack validation interrupted by crash."""
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+        from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
         if isinstance(pending, dict) and pending:
@@ -355,6 +355,8 @@ class KernelStackPhase(PhaseHandler):
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _grade_integrate_accuracy,
+        )
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             _maybe_finalize_kernel_patch,
             _maybe_revert_kernel_patch,

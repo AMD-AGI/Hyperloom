@@ -40,7 +40,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (
     chatty_child,

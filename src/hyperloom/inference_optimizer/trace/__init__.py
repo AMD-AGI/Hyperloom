@@ -29,8 +29,8 @@ Modules:
   its internal units through (:func:`progress_scope`, :func:`report_progress`).
 
 The join of this ledger with the decision streams lives in
-``src/hyperloom/inference_optimizer/breakdown/collectors/decision.py``
-(``write_decision_trace``), which produces ``reports/trace/decision_trace.jsonl``.
+:mod:`decision_trace` (:func:`write_session_decision_trace`), which produces
+``reports/trace/decision_trace.jsonl``.
 """
 
 from .conversation_trace import (

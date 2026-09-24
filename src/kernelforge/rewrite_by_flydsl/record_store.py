@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.remote_exp.kb_store_client import KBStoreClient, KBStoreError
-from kernelforge.durable_io import atomic_write_bytes, fsync_directory
+from kernelforge.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -327,13 +327,6 @@ def _copy_file_synced(source: Path, target: Path) -> None:
         shutil.copyfileobj(reader, writer)
         writer.flush()
         os.fsync(writer.fileno())
-
-
-def _fsync_tree_directories(root: Path) -> None:
-    directories = [path for path in root.rglob("*") if path.is_dir()]
-    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
-        fsync_directory(directory)
-    fsync_directory(root)
 
 
 def _replace_directory(staging: Path, destination: Path) -> None:
@@ -826,7 +819,7 @@ class LocalRewriteRecords:
                 loaded = json.loads((staging / KNOWLEDGE_FILENAME).read_text(encoding="utf-8"))
                 if loaded != payload:
                     raise RewriteRecordError("staged rewrite knowledge failed validation")
-                _fsync_tree_directories(staging)
+                fsync_tree_directories(staging)
                 _replace_directory(staging, session_dir)
             finally:
                 if staging.exists():

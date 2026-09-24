@@ -161,7 +161,7 @@ def _settle_apply_manifest(validation: dict[str, Any], *, kept: bool) -> str:
     here makes it durable: finalizing earlier would delete the pod-side backups
     a failed commit still needs.
     """
-    from .request_handlers import _maybe_finalize_kernel_patch, _maybe_revert_kernel_patch
+    from ..actions.executors._kernel_agent_tool import _maybe_finalize_kernel_patch, _maybe_revert_kernel_patch
 
     apply_result = validation.get("apply_result")
     if not isinstance(apply_result, dict) or not apply_result.get("manifest_path"):

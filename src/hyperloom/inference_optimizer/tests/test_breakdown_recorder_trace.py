@@ -13,7 +13,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import snapshot_state_sections
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
-from hyperloom.orchestrator.kernel._recorder_trace import trace_recording_skipped
+from hyperloom.orchestrator.actions._recorder_trace import trace_recording_skipped
 
 
 def _record(session_dir, payload=None):

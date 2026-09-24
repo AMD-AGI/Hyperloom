@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.delivery.archive import (
+from hyperloom.inference_optimizer.breakdown.round_archive import (
     ROLE_LAUNCH_CONFIG,
     ROLE_PATCH,
     ROLE_PATCH_EVIDENCE,

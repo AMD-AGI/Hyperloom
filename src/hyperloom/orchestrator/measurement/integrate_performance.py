@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT, GradedComparison, graded_axes_of
 from ..state.shared_state import resolve_graded_comparison
 
 
@@ -84,3 +84,26 @@ def assess_integrate_performance(
         stack_positive_keep=stack_positive_keep,
         decision=decision,
     )
+
+
+def integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep performance axes and launch evidence on the same E2E measurement."""
+    return {
+        **graded_axes_of(measurement),
+        **{
+            key: measurement[key]
+            for key in (
+                "ttft_mean_ms",
+                "e2el_mean_ms",
+                "tpot_mean_ms",
+                "workspace",
+                "raw_result_path",
+                "report_path",
+                "materialized_config",
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+            )
+            if key in measurement
+        },
+    }

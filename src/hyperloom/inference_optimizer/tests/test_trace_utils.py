@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom.orchestrator.trace import _row_utils as ru
-from hyperloom.orchestrator.trace import conversation_trace as ct
-from hyperloom.orchestrator.trace import langfuse_mapping as lm
-from hyperloom.orchestrator.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import _row_utils as ru
+from hyperloom.inference_optimizer.trace import conversation_trace as ct
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lm
+from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 
 def test_stream_json_usage_skips_blank_and_nondict_lines(tmp_path):
@@ -305,7 +305,7 @@ def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeyp
     monkeypatch.setattr(ct, "append_jsonl", _ok)
 
     # Force the Langfuse mirror import/get_emitter to blow up; must be swallowed.
-    import hyperloom.orchestrator.trace.langfuse_emitter as le
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
         raise RuntimeError("langfuse down")

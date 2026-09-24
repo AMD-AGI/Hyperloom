@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_str_list
 
-from ._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 __all__ = [
