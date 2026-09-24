@@ -1317,7 +1317,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("geak runner unavailable")),
     )
     try:
@@ -1358,7 +1358,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
