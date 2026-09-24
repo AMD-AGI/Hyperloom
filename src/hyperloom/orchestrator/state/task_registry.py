@@ -14,6 +14,7 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 
 SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
@@ -25,15 +26,9 @@ TASK_STATES = (
     "cancelled",
 )
 
-_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"succeeded", "failed", "cancelled"}),
-    "failed": frozenset(),
-    "succeeded": frozenset(),
-    "cancelled": frozenset(),
-}
-
-TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if not outgoing)
+# Re-exported: the state machine moved to ``task_states`` so ``bus`` can read it
+# without importing this module back. Existing callers keep their import site.
+_TRANSITIONS = TRANSITIONS
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120

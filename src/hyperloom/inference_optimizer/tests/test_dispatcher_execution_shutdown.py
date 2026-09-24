@@ -420,6 +420,51 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
         dispatcher.db.close()
 
 
+@pytest.mark.parametrize("named_tree", [True, False])
+def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, named_tree):
+    """The lead an operator gets for a retained lane: the group, as a number, not prose.
+
+    The lane stays held here on purpose, so the one thing that can ever release
+    it is an observation that nothing of the execution is left -- and this row
+    is the only durable place its process group survives the process that saw
+    it. A raise site with no local group to name records none, and that lane is
+    then held for good.
+    """
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, SubAgentResult
+
+    dispatcher = _dispatcher(tmp_path)
+
+    async def run():
+        task = await dispatcher.tasks.create(
+            kind="shutdown_test", params={}, idempotency_key="tree-root", requires_lanes=["research_lane"]
+        )
+        result = SubAgentResult(task.task_id, "failed", {}, "tree cleanup unconfirmed", "cleanup")
+        dispatcher.sub.register_executor(
+            "shutdown_test",
+            AsyncMock(
+                side_effect=ExecutionCleanupUnconfirmed(
+                    "specialist pid=4242: tree cleanup unconfirmed",
+                    result=result,
+                    tree_pgid=4242 if named_tree else None,
+                )
+            ),
+        )
+        lease = await dispatcher.locks.try_acquire_many(
+            ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action=task.kind, ttl_sec=60
+        )
+        with pytest.raises(ExecutionCleanupUnconfirmed):
+            await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=AsyncMock(return_value=True))
+        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        evidence = (await dispatcher.tasks.get(task.task_id)).history[-1]["evidence"]
+        assert evidence["cleanup_confirmed"] is False
+        assert evidence.get("cleanup_tree_pgid") == (4242 if named_tree else None)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
 @pytest.mark.parametrize("outcome", ["succeeded", "failed", "cancelled"])
 @pytest.mark.parametrize("callback_error", [RuntimeError("completion failed"), asyncio.CancelledError()])
 def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, outcome, callback_error):
