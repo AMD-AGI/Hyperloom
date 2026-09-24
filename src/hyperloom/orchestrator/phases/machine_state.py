@@ -1133,16 +1133,6 @@ def kernel_work_pending(state: Any) -> bool:
     if _controller_phase_terminal(state):
         return False
     if _geak_phase_terminal(state):
-        result = getattr(state, "geak_result", None) or {}
-        pending = getattr(state, "geak_pending", None) or {}
-        if (
-            isinstance(result, dict)
-            and str(result.get("status") or "").strip().lower() == "ok"
-            and isinstance(pending, dict)
-            and str(pending.get("status") or "").strip().lower() == "awaiting_rebench"
-            and bool(str(pending.get("revalidation_task_id") or "").strip())
-        ):
-            return True
         return False
 
     untried_hot = getattr(state, "untried_hot_reusable_kernels", None)

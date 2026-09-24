@@ -86,6 +86,34 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
         _runner_should_not_be_needed,
     )
 
+    # In the new synchronous flow, _revalidate_geak_candidate runs the 2b via execute_covered.
+    # Patch it to record that it was called and fail gracefully (no real executor available).
+    revalidation_calls: list[str] = []
+
+    async def _fake_revalidate(*, reason: str) -> bool:
+        revalidation_calls.append(reason)
+        # Simulate the task creation that _revalidate_geak_candidate normally does.
+        params = coord._geak_rebench_params(reason=reason)
+        if isinstance(params, dict) and params.get("geak_fallback"):
+            task = Task(
+                task_id="geak-revalidate-c0",
+                kind="explore",
+                state="queued",
+                params=params,
+                idempotency_key="geak-revalidate-c0",
+            )
+            coord.tasks.created.append(task)
+            # Set geak_pending as the old async path did (awaiting the rebench).
+            state = coord.shared_state
+            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            pending["status"] = "awaiting_rebench"
+            pending["revalidation_task_id"] = task.task_id
+            state.geak_pending = pending
+            state.save(coord.session_dir)
+        return False
+
+    coord.phase_kernel._revalidate_geak_candidate = _fake_revalidate  # type: ignore[method-assign]
+
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
     # The result.json is recovered into state, but as an unvalidated candidate.

@@ -1375,174 +1375,6 @@ class KernelPhase(PhaseHandler):
             state.save(self.session_dir)
             return True
 
-        async def _replay_succeeded_rebench(task_id: str) -> bool:
-            """Replay a persisted delegated result lost before state writeback."""
-            try:
-                settled_task = await self.tasks.get(task_id)
-                for msg in await self.bus.tail(topic="delegated_result", n=10_000):
-                    payload = msg.payload if isinstance(msg.payload, dict) else {}
-                    if str(payload.get("task_id") or "") != task_id:
-                        continue
-                    if str(payload.get("kind") or "") != "explore":
-                        continue
-                    if str(payload.get("state") or "").lower() != "succeeded":
-                        continue
-                    result = payload.get("result")
-                    if not isinstance(result, dict) or not self._is_promotable_result("explore", result):
-                        return False
-
-                    replay_pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                    replay_pending["status"] = "awaiting_rebench"
-                    replay_pending["revalidation_task_id"] = task_id
-                    replay_pending.pop("revalidation_error", None)
-                    state.geak_pending = replay_pending
-                    state.save(self.session_dir)
-                    await self._promote_to_shared_state(
-                        "explore",
-                        result,
-                        task=settled_task,
-                    )
-                    return True
-            except Exception:
-                log.exception(
-                    "geak: failed to replay delegated result for succeeded rebench %s",
-                    task_id,
-                )
-            return False
-
-        async def _enqueue_geak_revalidation(*, reason: str) -> bool:
-            """Enqueue and persist the rebench that keeps a GEAK win pending."""
-            # Reserve the pending slot BEFORE the task exists.
-            cycle = int(getattr(state, "macro_cycle", 0) or 0)
-            placeholder_keys = _geak_rebench.geak_revalidation_placeholder_keys(cycle)
-            inflight = await _geak_rebench.find_inflight_geak_rebench_task(self.tasks)
-            if inflight is not None and inflight.state in {"queued", "running"}:
-                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                pending["status"] = "awaiting_rebench"
-                pending["revalidation_task_id"] = inflight.task_id
-                pending.pop("revalidation_error", None)
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                log.info(
-                    "geak: revalidation already in flight (%s); skipping duplicate enqueue",
-                    inflight.task_id,
-                )
-                return True
-
-            reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            reserved["status"] = "awaiting_rebench"
-            if not str(reserved.get("revalidation_task_id") or "").strip():
-                reserved["revalidation_task_id"] = _geak_rebench.geak_revalidate_idempotency_key(cycle)
-            reserved.pop("revalidation_error", None)
-            state.geak_pending = reserved
-            state.save(self.session_dir)
-
-            try:
-                summary = await self._enqueue_internal_stack_rebench(reason=reason)
-            except Exception as exc:
-                log.exception("geak: enqueue same-harness revalidation failed")
-                summary = {"skipped": True, "reason": repr(exc)}
-
-            if isinstance(summary, dict) and summary.get("reason") == "geak_invalid_config":
-                return False
-            if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
-                state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
-                state.geak_pending = {}
-                state.resume_pending_revalidation = False
-                state.save(self.session_dir)
-                return False
-
-            # The grid cannot carry a dead overlay or a source-patch-only
-            # deployment. GEAK's final launcher may materialize that artifact;
-            # its fresh measurements still have to pass the fallback gates.
-            if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
-                log.warning(
-                    "geak: 2b declined (%s); validating through the GEAK harness instead",
-                    summary.get("reason"),
-                )
-                try:
-                    fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
-                except Exception as exc:
-                    log.exception("geak: GEAK-harness validation failed")
-                    fb = {"validated": False, "reason": repr(exc)}
-                if bool(fb.get("validated")):
-                    # 2a promotes and clears geak_pending itself.
-                    return True
-                if fb.get("status") == "no_promote":
-                    return False
-                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                pending["status"] = _geak_decline_status((summary or {}).get("reason"))
-                pending.pop("revalidation_task_id", None)
-                pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
-                state.geak_pending = pending
-                if agentx and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION:
-                    verdict = dict(state.geak_result)
-                    verdict["revalidation_status"] = "fallback_failed"
-                    verdict["revalidation_error_class"] = _geak_rebench.INCOMPARABLE_REVALIDATION
-                    verdict["revalidation_error"] = pending["revalidation_error"]
-                    # This refusal is reusable only while its overlay remains unloadable.
-                    verdict["revalidation_blocked_overlay"] = str(verdict.get("final_overlay") or "")
-                    state.geak_result = verdict
-                state.save(self.session_dir)
-                return False
-
-            task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
-            task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
-            existing = bool(isinstance(summary, dict) and summary.get("existing"))
-            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            if task_id and task_state in {"queued", "running"}:
-                pending["status"] = "awaiting_rebench"
-                pending["revalidation_task_id"] = task_id
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                return True
-
-            if task_id and existing and task_state == "succeeded":
-                # create_or_return_existing returned a task that already ran under this cycle's idempotency key
-                # (#1240).
-                prior_geak_result = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-                settled_status = str(prior_geak_result.get("revalidation_status") or "")
-                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
-                    state.geak_pending = {}
-                    state.save(self.session_dir)
-                    return True
-                if await _replay_succeeded_rebench(task_id):
-                    log.info(
-                        "geak: replayed persisted result for already-succeeded rebench %s",
-                        task_id,
-                    )
-                    return True
-                pending["status"] = "rebench_unavailable"
-                if pending.get("revalidation_task_id") in placeholder_keys:
-                    pending.pop("revalidation_task_id", None)
-                pending["revalidation_error"] = (
-                    f"rebench task {task_id} already succeeded but its verdict could not be reconciled"
-                )[:500]
-                state.geak_pending = pending
-                state.save(self.session_dir)
-                log.warning(
-                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
-                    pending["revalidation_error"],
-                )
-                return False
-
-            pending["status"] = "rebench_unavailable"
-            # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
-            if pending.get("revalidation_task_id") in placeholder_keys:
-                pending.pop("revalidation_task_id", None)
-            if task_state == "cancelled":
-                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
-            else:
-                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
-            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
-            state.geak_pending = pending
-            state.save(self.session_dir)
-            log.warning(
-                "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
-                pending["revalidation_error"],
-            )
-            return False
-
         # Crash-recovery: a validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
@@ -1556,7 +1388,7 @@ class KernelPhase(PhaseHandler):
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
             if recovered.get("status") == "ok":
-                await _enqueue_geak_revalidation(reason="geak_e2e_win_recovered")
+                await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
             return
 
         try:
@@ -1692,9 +1524,8 @@ class KernelPhase(PhaseHandler):
                     kill_timeout_s=kill_timeout,
                 ):
                     return
-                # Rebench-first: enqueue the main-flow rebench (candidate stays pending if a budget cap prevents it
-                # from running).
-                await _enqueue_geak_revalidation(reason="geak_e2e_win_sigterm_recovered")
+                # Rebench-first: run the 2b revalidation synchronously under the current task's lanes.
+                await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
                 return
             _finish_skip(
                 {
@@ -1796,11 +1627,11 @@ class KernelPhase(PhaseHandler):
         # Enqueue the same-harness config-identity rebench — the ONLY path that
         # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
-            await _enqueue_geak_revalidation(reason="geak_e2e_win")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win")
         elif _geak_has_accepted_kernel(result):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
-            await _enqueue_geak_revalidation(reason="geak_e2e_accepted_kernel")
+            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
         self._record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1829,6 +1660,99 @@ class KernelPhase(PhaseHandler):
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
         state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
+
+    async def _revalidate_geak_candidate(self, *, reason: str) -> bool:
+        """Run the GEAK 2b same-harness revalidation synchronously under the current task's lanes.
+
+        Builds explore params from the current ``geak_result``, runs the executor
+        via :meth:`~hyperloom.orchestrator.loop.sub_agent_runner.SubAgentRunner.execute_covered`
+        (no second lane claim), and promotes the result in-place. Returns ``True``
+        when the slot is settled (win recorded or terminal rejection), ``False``
+        when the candidate stays pending or is ineligible.
+        """
+        state = self.shared_state
+        summary = self._geak_rebench_params(reason=reason)
+
+        if isinstance(summary, dict) and summary.get("reason") == "geak_invalid_config":
+            return False
+        if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
+            state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
+            state.geak_pending = {}
+            state.resume_pending_revalidation = False
+            state.save(self.session_dir)
+            return False
+
+        if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
+            log.warning(
+                "geak: 2b declined (%s); validating through the GEAK harness instead",
+                summary.get("reason"),
+            )
+            try:
+                fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
+            except Exception as exc:
+                log.exception("geak: GEAK-harness validation failed")
+                fb = {"validated": False, "reason": repr(exc)}
+            if bool(fb.get("validated")):
+                return True
+            if fb.get("status") == "no_promote":
+                return False
+            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            pending["status"] = _geak_decline_status((summary or {}).get("reason"))
+            pending.pop("revalidation_task_id", None)
+            pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
+            state.geak_pending = pending
+            agentx = not _geak_rebench.geak_harness_replays_workload(state)
+            if agentx and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION:
+                verdict = dict(state.geak_result)
+                verdict["revalidation_status"] = "fallback_failed"
+                verdict["revalidation_error_class"] = _geak_rebench.INCOMPARABLE_REVALIDATION
+                verdict["revalidation_error"] = pending["revalidation_error"]
+                verdict["revalidation_blocked_overlay"] = str(verdict.get("final_overlay") or "")
+                state.geak_result = verdict
+            state.save(self.session_dir)
+            return False
+
+        if isinstance(summary, dict) and summary.get("skipped"):
+            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            pending["status"] = "rebench_unavailable"
+            pending["revalidation_error"] = str(summary.get("reason") or "params_unavailable")[:500]
+            pending.pop("revalidation_task_id", None)
+            state.geak_pending = pending
+            state.save(self.session_dir)
+            log.warning("geak: 2b revalidation unavailable (%s)", pending["revalidation_error"])
+            return False
+
+        # summary is the params dict — create a row and run it under the current task's lanes.
+        params_ps = summary
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        idempotency_key = f"geak-revalidate-c{cycle}"
+        lanes, ttl = self._registry_lanes_ttl("explore")
+        task, existing = await self.tasks.create_or_return_existing(
+            kind="explore",
+            params=params_ps,
+            idempotency_key=idempotency_key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        if existing and str(getattr(task, "state", "")) in {"succeeded"}:
+            # A prior run in this cycle already settled the slot.
+            if self._geak_win_already_recorded():
+                state.geak_pending = {}
+                state.save(self.session_dir)
+                return True
+        try:
+            result = await self.sub.execute_covered(task)
+        except Exception as exc:
+            log.exception("geak: 2b execute_covered failed")
+            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            pending["status"] = "rebench_unavailable"
+            pending["revalidation_error"] = repr(exc)[:500]
+            pending.pop("revalidation_task_id", None)
+            state.geak_pending = pending
+            state.save(self.session_dir)
+            return False
+        await self._promote_to_shared_state("explore", result, task=task)
+        return True
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state."""
