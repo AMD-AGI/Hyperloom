@@ -340,10 +340,9 @@ def build_candidates(
         display = op_name or _short_name(kname)
 
         # Source resolution: one call to TraceLens' resolver, keyed on the device
-        # symbol (native kernels under HIP graphs arrive with op_name=""); read the
-        # verdict off the ResolveResult (§3.4). A non-patchable kernel now carries a
-        # dispatcher source, so ``op_to_source_patchable`` -- not source presence --
-        # gates routing below.
+        # symbol (native kernels under HIP graphs arrive with op_name=""). A
+        # non-patchable kernel can still carry a dispatcher source, so
+        # ``op_to_source_patchable`` -- not source presence -- gates routing below.
         resolution = resolve_source_verdict(
             kname,
             kernel_file=k.get("op_kernel_file", "") or "",

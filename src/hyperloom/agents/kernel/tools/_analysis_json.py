@@ -8,8 +8,7 @@
 """Read TraceLens ``analysis.json`` into hot-kernel candidate rows.
 
 TraceLens owns the parse/group/prose/impact/order/cap and writes a typed
-``compute_optimizations[]`` (``candidate_schema.ComputeTask``). This reader is
-Stage A + the source-finding half of Stage B of the compute augmentation: it
+``compute_optimizations[]`` (``candidate_schema.ComputeTask``). This reader
 expands each task's ``members[]`` into one candidate per member, lifts the task
 scalars and TraceLens metrics verbatim (``gpu_pct := pct_e2e``), then resolves
 each device symbol through TraceLens' single ``resolve_kernel_source`` and stamps
@@ -36,7 +35,7 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
     Expands every ``compute_optimizations[]`` task's ``members[]`` into one
     candidate per member, carrying the task's operation/prose/impact and the
     member's TraceLens metrics, then resolves each device symbol to its source
-    via TraceLens' ``resolve_kernel_source`` (§3.4). The returned rows are ready
+    via TraceLens' ``resolve_kernel_source``. The returned rows are ready
     for the host-only finalize pass; order matches TraceLens' emitted order.
 
     Args:
@@ -75,7 +74,7 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
 def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
     """Build one candidate row from a task's scalars and a member's fields.
 
-    ``gpu_pct := pct_e2e`` (§3.2): the per-kernel %E2E is TraceLens' number, read
+    ``gpu_pct := pct_e2e``: the per-kernel %E2E is TraceLens' number, read
     everywhere but never recomputed here. ``args_shapes`` and ``args_datatypes``
     are folded back into the pipeline's ``shapes`` strings as ``"(dims) dtype"``,
     the shape the downstream consumers and the cross-package GEMM extraction read
@@ -122,7 +121,7 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
 
 
 def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") -> None:
-    """Resolve the candidate's primary device symbol through TraceLens (§3.4).
+    """Resolve the candidate's primary device symbol through TraceLens.
 
     One ``resolve_kernel_source`` call per symbol; the returned ``ResolveResult``
     fields are read straight onto the candidate. No fallback: an unresolvable

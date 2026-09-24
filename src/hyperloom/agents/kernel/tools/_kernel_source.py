@@ -9,7 +9,7 @@
 
 TraceLens owns path-finding: :func:`resolve_source_verdict` is the one call both
 routes make, wrapping TraceLens' ``resolve_kernel_source`` and returning its
-``ResolveResult`` straight through (no legacy-tuple translation). Only the
+``ResolveResult`` straight through. Only the
 Triton-vs-native routing decision is HL's, and it lives here so both callers
 route identically. :func:`triton_def_line` is the AST reading of what a Triton
 kernel definition looks like; ``source_type_for`` needs it to tell a Triton
@@ -41,7 +41,7 @@ def resolve_source_verdict(
     op_name: str = "",
     library: str = "",
 ) -> ResolveResult:
-    """Resolve one device symbol to its source via TraceLens (§3.4).
+    """Resolve one device symbol to its source via TraceLens.
 
     A genuine Triton kernel takes the Triton route with its launcher; a native
     kernel passes just the symbol so TraceLens' native gate can classify
