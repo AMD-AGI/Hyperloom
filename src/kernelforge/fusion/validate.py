@@ -1130,6 +1130,7 @@ def validate_recipe(
         kind = "triton JIT" if comp.is_triton else "module import"
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,
@@ -1144,6 +1145,7 @@ def validate_recipe(
     if not samples:
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,
