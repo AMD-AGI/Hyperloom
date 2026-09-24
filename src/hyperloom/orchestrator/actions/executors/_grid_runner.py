@@ -2282,13 +2282,28 @@ def _write_variant_abort_marker(
     extra_args: str = "",
 ) -> None:
     """Write ``abort_reason.json`` into the variant slot directory."""
-    _write_variant_abort_marker_impl(
-        slot,
-        variant_name=variant_name,
-        error_class=error_class,
-        error_summary=error_summary,
-        extra_args=extra_args,
-    )
+    try:
+        slot.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "variant": variant_name,
+            "error_class": error_class,
+            "error": (error_summary or "")[:2000],
+            "extra_args": extra_args,
+            "aborted_at_utc": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
+            ),
+        }
+        (slot / "abort_reason.json").write_text(
+            json.dumps(marker, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning(
+            "_grid_runner: failed to write abort_reason.json at %s: %s",
+            slot,
+            exc,
+        )
 
 
 def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> str:
@@ -2318,39 +2333,6 @@ def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
             except OSError:
                 continue
     return ""
-
-
-def _write_variant_abort_marker_impl(
-    slot: Path,
-    *,
-    variant_name: str,
-    error_class: str,
-    error_summary: str,
-    extra_args: str,
-) -> None:
-    """Implementation body for :func:`_write_variant_abort_marker`."""
-    try:
-        slot.mkdir(parents=True, exist_ok=True)
-        marker = {
-            "variant": variant_name,
-            "error_class": error_class,
-            "error": (error_summary or "")[:2000],
-            "extra_args": extra_args,
-            "aborted_at_utc": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ",
-                time.gmtime(),
-            ),
-        }
-        (slot / "abort_reason.json").write_text(
-            json.dumps(marker, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning(
-            "_grid_runner: failed to write abort_reason.json at %s: %s",
-            slot,
-            exc,
-        )
 
 
 __all__ = [
