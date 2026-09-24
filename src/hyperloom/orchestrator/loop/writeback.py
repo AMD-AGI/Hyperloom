@@ -2827,8 +2827,8 @@ class WritebackCollaborator:
             "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
-        recorder = getattr(self, "_framework_timeline_recorder", None)
-        if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
+        recorder = self._framework_timeline() if source_phase == PHASE_FRAMEWORK_AGENT else None
+        if recorder is not None:
             recorder.record_run(str(task.task_id or ""), **product)
             return
         try:
