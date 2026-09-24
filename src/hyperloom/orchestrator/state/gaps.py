@@ -8,12 +8,15 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from hashlib import sha1
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.common.timeutil import now_iso
 
 from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
+
+if TYPE_CHECKING:
+    from .task_registry import Task
 
 log = _logging.getLogger(__name__)
 
@@ -111,6 +114,7 @@ class GapsStateMixin:
         return gap
 
 
+# Artifact references copied from a per-variant outcome onto its gap attempt.
 _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
     "failure_id",
     "fingerprint",
@@ -118,6 +122,7 @@ _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
     "workspace",
     "server_log_path",
 )
+
 
 class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
@@ -337,10 +342,17 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
     def _record_explore_round_gaps(
         self,
         *,
-        task: "Any | None",
-        result: dict[str, "Any"],
+        task: "Task | None",
+        result: dict[str, Any],
     ) -> None:
-        """Append per-variant KEEP/REVERT outcomes to the matching gap."""
+        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
+
+        Args:
+            task: The explore task whose params carry the gap canonical id;
+                ``None`` is a no-op.
+            result: The explore result; its ``per_variant_outcomes`` drive the
+                appended gap attempts.
+        """
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
@@ -364,7 +376,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         for outcome in per_variant:
             if not isinstance(outcome, dict):
                 continue
-            attempt: dict[str, "Any"] = {
+            attempt: dict[str, Any] = {
                 "action": "explore",
                 "variant_name": str(outcome.get("variant_name") or ""),
                 "outcome": str(outcome.get("outcome") or "").upper(),
@@ -381,10 +393,18 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
     def _record_explore_variant_failures(
         self,
         *,
-        task: "Any | None",
-        result: dict[str, "Any"],
+        task: "Task | None",
+        result: dict[str, Any],
     ) -> None:
-        """Record unmeasured per_variant_outcomes rows as failure evidence."""
+        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``.
+
+        A crashed variant does not fail the round, so the round-level recorder
+        never sees it.
+
+        Args:
+            task: The completed explore task; ``None`` is a no-op.
+            result: The explore result dict carrying ``per_variant_outcomes``.
+        """
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
