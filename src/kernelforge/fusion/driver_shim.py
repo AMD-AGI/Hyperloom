@@ -10,11 +10,11 @@ from pathlib import Path
 _SHIM_TEMPLATE = '''\
 """Generated driver: runs the fusion harness and reports the loop's contract."""
 
-import hashlib
 import json
 import os
 import subprocess
 import sys
+import tempfile
 
 HARNESS = {harness!r}
 ENV_FLAGS = {env_flags!r}
@@ -22,7 +22,7 @@ CASE_ID = {case_id!r}
 REPORT_LOG = {report_log!r}
 FUSED_MODULE = {fused_module!r}
 WORKSPACE = {workspace!r}
-SOURCE_FILES = {source_files!r}
+GIT_ENV = {git_env!r}
 
 
 def _fused_kernel_authored():
@@ -42,26 +42,34 @@ def _fused_kernel_authored():
         return False
 
 
-def _measured_sources_sha256():
-    """Digest the tracked sources exactly as this run measured them.
+def _git(env, *args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=WORKSPACE, capture_output=True, text=True, env=env, timeout=300,
+    )
 
-    These are the only files the loop keeps or reverts, so their contents are
-    the state this report describes. The campaign matches the digest against
-    the same files as the loop committed them, so a manifest never describes
-    one attempt with another attempt's parity or timings.
+
+def _measured_tree():
+    """Name the tracked tree this run measured, the way git names it.
+
+    The loop stages EVERY tracked modification into its keep commit, so the
+    whole tracked tree -- not the recipe's declared source files -- is the
+    candidate a report describes. Asking git for the tree id over a scratch
+    index also puts both sides of the match on blob bytes, so a .gitattributes
+    filter that rewrites a file on its way into the index cannot make the
+    worktree and the commit disagree.
     """
-    if not SOURCE_FILES:
+    if not WORKSPACE:
         return ""
-    digest = hashlib.sha256()
-    for relative in SOURCE_FILES:
-        try:
-            with open(os.path.join(WORKSPACE, relative), "rb") as handle:
-                blob = handle.read()
-        except OSError:
-            return ""
-        digest.update(relative.encode("utf-8"))
-        digest.update(hashlib.sha256(blob).digest())
-    return digest.hexdigest()
+    with tempfile.TemporaryDirectory() as scratch:
+        env = dict(os.environ)
+        env.update(GIT_ENV)
+        env["GIT_INDEX_FILE"] = os.path.join(scratch, "index")
+        for args in (("read-tree", "HEAD"), ("add", "-u")):
+            if _git(env, *args).returncode != 0:
+                return ""
+        written = _git(env, "write-tree")
+        return written.stdout.strip() if written.returncode == 0 else ""
 
 
 def _record(report):
@@ -72,7 +80,7 @@ def _record(report):
     One short line per append keeps concurrent lanes from interleaving.
     """
     identified = dict(report)
-    identified["sources_sha256"] = _measured_sources_sha256()
+    identified["tracked_tree"] = _measured_tree()
     with open(REPORT_LOG, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(identified, sort_keys=True) + "\\n")
 
@@ -149,7 +157,7 @@ def render_driver(
     timeout_sec: int = 1800,
     fused_module: str = "",
     workspace: str = "",
-    source_files: tuple[str, ...] | list[str] = (),
+    git_env: dict[str, str] | None = None,
 ) -> str:
     """Render the driver source for one recipe's harness."""
     return _SHIM_TEMPLATE.format(
@@ -160,7 +168,7 @@ def render_driver(
         report_log=str(report_log),
         fused_module=str(fused_module),
         workspace=str(workspace),
-        source_files=tuple(source_files),
+        git_env=dict(git_env or {}),
     )
 
 
@@ -174,7 +182,7 @@ def write_driver(
     timeout_sec: int = 1800,
     fused_module: str = "",
     workspace: str = "",
-    source_files: tuple[str, ...] | list[str] = (),
+    git_env: dict[str, str] | None = None,
 ) -> str:
     """Write the driver next to the campaign artifacts and return its path."""
     path = Path(destination)
@@ -188,7 +196,7 @@ def write_driver(
             timeout_sec=timeout_sec,
             fused_module=fused_module,
             workspace=workspace,
-            source_files=source_files,
+            git_env=git_env,
         ),
         encoding="utf-8",
     )

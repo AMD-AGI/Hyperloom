@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +73,7 @@ def _failed_campaign(note: str) -> CampaignOutcome:
             fused_us=None,
             kept=False,
             note=f"CAMPAIGN FAILED: {note}",
+            correctness_measured=False,
         )
     )
 
@@ -107,55 +107,29 @@ def _read_harness_reports(report_log: str) -> list[dict]:
     return reports
 
 
-def tracked_relative_paths(workspace: str, paths: Sequence[str]) -> tuple[str, ...]:
-    """``paths`` as the loop's index names them, or ``()`` when one lies outside the workspace."""
-    if not workspace:
-        return ()
-    root = Path(workspace).resolve()
-    relative: list[str] = []
-    for path in paths:
-        if not path:
-            return ()
-        try:
-            relative.append(Path(path).resolve().relative_to(root).as_posix())
-        except ValueError:
-            return ()
-    return tuple(relative)
-
-
-def _digest_sources(blobs: Sequence[tuple[str, bytes]]) -> str:
-    """Bind each tracked file's contents to its path, matching the driver's digest."""
-    digest = hashlib.sha256()
-    for relative, blob in blobs:
-        digest.update(relative.encode("utf-8"))
-        digest.update(hashlib.sha256(blob).digest())
-    return digest.hexdigest()
-
-
-def committed_sources_sha256(
-    workspace: str,
-    source_files: Sequence[str],
-    commit: str,
-    env: dict[str, str] | None = None,
-) -> str:
-    """Digest the tracked sources as the loop committed them, or ``""`` when they cannot be read."""
-    if not (workspace and source_files and commit):
+def committed_tree_id(workspace: str, commit: str, env: dict[str, str] | None = None) -> str:
+    """Git's name for the tree the loop committed, or ``""`` when it cannot be read."""
+    if not (workspace and commit):
         return ""
-    blobs: list[tuple[str, bytes]] = []
-    for relative in source_files:
-        shown = git("show", f"{commit}:{relative}", cwd=workspace, check=False, text=False, env=env)
-        if shown.returncode != 0:
-            log.warning("cannot read %s at %s: %s", relative, commit, (shown.stderr or b"").decode(errors="replace"))
-            return ""
-        blobs.append((relative, shown.stdout))
-    return _digest_sources(blobs)
+    shown = git("rev-parse", f"{commit}^{{tree}}", cwd=workspace, check=False, env=env)
+    if shown.returncode != 0:
+        log.warning("cannot read the tree of %s: %s", commit, (shown.stderr or "").strip())
+        return ""
+    return shown.stdout.strip()
 
 
-def _harness_report_for(reports: list[dict], sources_sha256: str) -> dict:
-    """The recorded report that measured exactly these sources."""
-    if not sources_sha256:
+def _harness_report_for(reports: list[dict], tracked_tree: str) -> dict:
+    """The recorded report that benchmarked exactly this tree."""
+    if not tracked_tree:
         return {}
-    measured = [r for r in reports if r.get("sources_sha256") == sources_sha256 and not r.get("skipped")]
+    measured = [
+        r
+        for r in reports
+        if r.get("tracked_tree") == tracked_tree
+        and r.get("compiled")
+        and not r.get("skipped")
+        and isinstance(r.get("fused_us"), (int, float))
+    ]
     return measured[-1] if measured else {}
 
 
@@ -172,24 +146,25 @@ def _to_validation_result(
     target_speedup: float,
     reports: list[dict] | None = None,
     *,
-    committed_sources_digest: str = "",
+    committed_tree: str = "",
 ) -> ValidationResult:
     """Translate the loop's campaign result into the fusion verdict shape."""
     speedup = payload.get("mean_case_speedup")
     speedup = float(speedup) if isinstance(speedup, (int, float)) else None
     committed = bool(str(payload.get("best_commit") or "").strip())
-    report = _harness_report_for(reports or [], committed_sources_digest)
+    report = _harness_report_for(reports or [], committed_tree)
+    measured = bool(report)
     max_abs_err, snr_db = _worst_parity(report)
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
-    verified = committed and bool(report)
+    verified = committed and measured
     kept = verified and speedup is not None and speedup >= target_speedup
     if not committed:
         note = "forge-loop produced no validated candidate"
-    elif not report:
-        log.warning("no harness report measured the committed sources; the recipe stays unverified")
+    elif not measured:
+        log.warning("no harness report benchmarked the committed tree; the recipe stays unverified")
         note = (
-            f"forge-loop committed {payload.get('best_commit')} but no harness report measured those sources: "
+            f"forge-loop committed {payload.get('best_commit')} but no harness report benchmarked that tree: "
             "parity and per-arm timings are unavailable"
         )
     else:
@@ -208,6 +183,7 @@ def _to_validation_result(
         fused_us=float(fused_us) if isinstance(fused_us, (int, float)) else None,
         kept=kept,
         note=note,
+        correctness_measured=measured,
     )
 
 
@@ -323,7 +299,6 @@ def run_recipe_campaign(
     env_flags = tuple(f for f in (recipe.env_flag or "").split() if f)
     report_log = str(out / f"harness_reports_{stem}.jsonl")
     Path(report_log).unlink(missing_ok=True)
-    tracked = tracked_relative_paths(workspace, [recipe.source_file] + ([fused_module] if fused_module else []))
     driver_path = write_driver(
         out / f"driver_{stem}.py",
         harness_path,
@@ -332,7 +307,7 @@ def run_recipe_campaign(
         case_id=stem,
         fused_module=fused_module,
         workspace=workspace,
-        source_files=tracked,
+        git_env=shadow_env,
     )
 
     program_md_file = str(out / f"program_{stem}.md")
@@ -405,9 +380,8 @@ def run_recipe_campaign(
             payload,
             target_speedup,
             _read_harness_reports(report_log),
-            committed_sources_digest=committed_sources_sha256(
+            committed_tree=committed_tree_id(
                 workspace,
-                tracked,
                 str(payload.get("best_commit") or "").strip(),
                 env=shadow_env,
             ),

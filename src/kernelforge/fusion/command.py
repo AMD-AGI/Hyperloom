@@ -1391,6 +1391,7 @@ def _run_fusion_autoloop(
                 fused_us=None,
                 kept=False,
                 note="CAMPAIGN FAILED: could not restore the unfused baseline",
+                correctness_measured=False,
             )
         # After the reset, so the loop's anchor bench measures the unfused tree.
         harness_path = _harness_path_for(recipe)
