@@ -597,7 +597,7 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
 
     assert refused == [kernel]
     assert kernel.read_text(encoding="utf-8") == original
-    assert result.ok is True
+    assert result.ok is True, result.message
     assert "could not restore" not in (result.message or "")
 
 
