@@ -44,8 +44,6 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(SOFT_RESTART_DISABLE_ENV, raising=False)
-    # Don't let the soft restart's /proc server sweep run against the real host.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
@@ -160,29 +158,6 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     assert summary["memory_captured"] is True
     again = await c._run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
     assert again["running_tasks_reclaimed"] == 0
-
-
-@pytest.mark.asyncio
-async def test_soft_restart_invokes_server_deep_clean(cyclic_coordinator):
-    c = cyclic_coordinator
-    # Enable the server-restart step but stub the real /proc kill.
-    c._cycle_restart_servers = True
-    calls: list[int] = []
-    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == [1]
-    assert summary["servers_restarted"] is True
-
-
-@pytest.mark.asyncio
-async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator):
-    c = cyclic_coordinator
-    assert c._cycle_restart_servers is False
-    calls: list[int] = []
-    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == []
-    assert "servers_restarted" not in summary
 
 
 async def _noop_phase_side_effects(c):

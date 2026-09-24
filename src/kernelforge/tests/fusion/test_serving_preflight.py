@@ -61,17 +61,3 @@ def test_a_probe_that_raises_reads_as_unknown() -> None:
     assert _free_vram_fraction("0", _run=boom) is None
 
 
-def test_the_cleanup_kills_only_this_users_engines(monkeypatch) -> None:
-    """``VLLM::EngineCore`` names an engine, not a run."""
-    if not hasattr(validate.os, "getuid"):
-        pytest.skip("no POSIX uid on this platform")
-    seen: list[str] = []
-    monkeypatch.setattr(
-        validate.subprocess,
-        "run",
-        lambda cmd, **kw: seen.append(cmd) or _Out(""),
-    )
-
-    validate._pkill("VLLM::EngineCore")
-
-    assert seen == ["pkill -9 -u %d -f 'VLLM::EngineCore'" % validate.os.getuid()]

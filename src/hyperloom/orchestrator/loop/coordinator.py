@@ -279,9 +279,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Medium-intensity soft restart at each macro-cycle boundary.
         self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -448,7 +445,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_cycle_strategy_block": "phase_macro_cycle",
         "_apply_macro_cycle_reloop": "phase_macro_cycle",
         "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_restart_inference_servers": "phase_macro_cycle",
         "_on_cycle_start_reprofile": "phase_macro_cycle",
         "_capture_cycle_memory": "cycle_memory",
         "_cycle_directive_fallback": "cycle_memory",
