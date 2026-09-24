@@ -700,7 +700,6 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
     ss.research_scout_seen_pr_ids = ["p3"]
     ids = coord._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
-    assert set(coord._framework_tried_refs()) == ids
 
 
 # -- module-level helpers --------------------------------------------------

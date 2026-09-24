@@ -75,7 +75,7 @@ def _infer_scope(p: dict[str, Any]) -> str:
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
     p = params or {}
-    if bool(p.get("framework_agent_authoring")):
+    if bool(p.get("framework_agent_authoring")) or bool(p.get("enablement")):
         return True
     return resolve_specialist_profile(p).reserves_benchmark_lane
 

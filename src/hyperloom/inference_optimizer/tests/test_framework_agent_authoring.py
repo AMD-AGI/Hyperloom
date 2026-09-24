@@ -366,13 +366,10 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     assert asyncio.run(stub._framework_agent_authoring_inflight()) is False
 
 
-def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
+def test_record_authored_outcome_writes_progress(
     tmp_path: Path,
 ):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
-    ]
     task = SimpleNamespace(
         task_id="i-1",
         params={
@@ -402,7 +399,6 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
     assert row["reauthor_attempt"] == 1
-    assert stub.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):

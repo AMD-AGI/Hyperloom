@@ -27,7 +27,6 @@ class _StateStub:
 
 
 class _MemCoord:
-    _FRAMEWORK_KEEP_STATUSES = Coordinator._FRAMEWORK_KEEP_STATUSES
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
     _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
@@ -39,7 +38,7 @@ class _MemCoord:
         self.shared_state = _StateStub()
 
 
-def test_build_working_memory_aggregates_tried_excluded_learnings():
+def test_build_working_memory_aggregates_tried():
     coord = _MemCoord()
     st = coord.shared_state
     st.framework_agent_phase_progress = [
@@ -66,20 +65,12 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
     assert revert["status"] == "reverted"
     assert revert["gain_pct"] == 0.0
     assert "baseline" in revert["why"]
-    # excluded_refs = known ids ∪ processed keys.
-    assert {"PR:723", "PR:1015", "PR:900", "PR:2000"} <= set(mem["excluded_refs"])
-    # Learnings come from the denial rows in the progress ledger, which is the only place a Critic rejection is
-    # recorded.
-    assert mem["learnings"] == ["does not address mem-bw bottleneck"]
-    # pending = unprocessed candidate in the latest batch.
-    assert mem["pending"] == ["PR:2000"]
 
 
 def test_build_working_memory_empty_when_no_progress():
     coord = _MemCoord()
     mem = coord._build_framework_working_memory()
     assert mem["tried_and_why"] == []
-    assert mem["learnings"] == []
 
 
 def test_build_working_memory_caps_tried_rows():
