@@ -182,6 +182,7 @@ class EventSink:
             )
             return None
 
+
 def make_sink(event: str, *, producer: str) -> EventSink:
     """Build the sink for one event.
 

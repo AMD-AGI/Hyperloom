@@ -299,8 +299,7 @@ def _stage_reached(
         if heuristic:
             if warnings is not None:
                 warnings.append(
-                    f"v6.outcome: stage_reached derived from state heuristic ({heuristic}); "
-                    "timeline had no typed event"
+                    f"v6.outcome: stage_reached derived from state heuristic ({heuristic}); timeline had no typed event"
                 )
             return heuristic
     return "install"

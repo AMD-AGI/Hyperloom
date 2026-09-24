@@ -88,6 +88,7 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
         return
     recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
 
+
 def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None:
     """Open the section as the sequencer is entered.
 
@@ -134,6 +135,7 @@ def record_close_step(
     if detail:
         row["detail"] = str(detail)
     recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
+
 
 def record_close_artifacts(
     session_dir: Path | str | None,
@@ -509,6 +511,7 @@ def _write_arc(session_dir: Path | str, payload: Mapping[str, Any]) -> None:
         dict(payload),
     )
 
+
 def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping[str, Any]) -> None:
     """Upsert one attempt row, keyed by its number."""
     if not session_dir:
@@ -519,6 +522,7 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
         dict(row),
         key=str(int(attempt)),
     )
+
 
 def _queue_depth(session_dir: Path | str) -> dict[str, int]:
     """Line counts of the local KB write queues, as of this settlement.

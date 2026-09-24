@@ -146,7 +146,9 @@ def _finalize_type(spec: _EventType) -> list[str]:
     try:
         parts = event_parts(spec.sections)
     except RECORDING_ERRORS as exc:
-        log.warning("timeline: cannot read %s fragments to recover events", spec.event_type, extra={"error": exc}, exc_info=True)
+        log.warning(
+            "timeline: cannot read %s fragments to recover events", spec.event_type, extra={"error": exc}, exc_info=True
+        )
         note_failure(
             section="timeline",
             error=exc,

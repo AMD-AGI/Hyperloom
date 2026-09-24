@@ -54,6 +54,7 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
         return
     recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
 
+
 def record_metadata_identity(
     session_dir: Path | str | None,
     manifest: Mapping[str, Any],
