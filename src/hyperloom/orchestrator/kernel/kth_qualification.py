@@ -103,7 +103,7 @@ class KthConfigurationError(ValueError):
 
 
 class _Rejected(Exception):
-    """The attestation cannot qualify the candidate that was sent."""
+    """KTH gave no answer that can qualify the candidate that was sent."""
 
 
 @dataclass(frozen=True)
@@ -221,34 +221,10 @@ class KthQualificationProvider:
             envelope = _envelope(publication, artifact, session_id=session_id)
             atomic_write_json(artifacts_dir / "envelope.json", envelope, trailing_newline=True)
             request = {"schema_version": ADAPTIVE_REQUEST_SCHEMA, "request_id": request_id, "envelope": envelope}
-        request_path = artifacts_dir / "request.json"
-        attestation_path = artifacts_dir / "attestation.json"
-        atomic_write_json(request_path, request, trailing_newline=True)
-
         try:
-            process = subprocess.run(
-                [self.executable, "--request", str(request_path), "--out", str(attestation_path)],
-                cwd=artifacts_dir,
-                env=scrub_benchmark_process_env(os.environ.copy()),
-                capture_output=True,
-                timeout=self.timeout_s,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            self._write_logs(artifacts_dir, error.stdout, error.stderr)
-            return self._persist(replace(base, reason=f"KTH timed out after {self.timeout_s:g}s"))
-        except OSError as error:
-            return self._persist(replace(base, reason=f"KTH executable {self.executable!r} could not run: {error}"))
-        self._write_logs(artifacts_dir, process.stdout, process.stderr)
-        if process.returncode not in VERDICT_EXIT_CODES.values():
-            return self._persist(replace(base, reason=f"KTH infrastructure failure (exit {process.returncode})"))
-
-        try:
-            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            return self._persist(replace(base, reason=f"KTH attestation is missing or malformed: {error}"))
-        if not isinstance(attestation, dict):
-            return self._persist(replace(base, reason="KTH attestation is not a JSON object"))
+            exit_code, attestation = self._run(request, artifacts_dir)
+        except _Rejected as failure:
+            return self._persist(replace(base, reason=str(failure)))
         reported = replace(
             base,
             verdict=str(attestation.get("verdict") or ""),
@@ -260,9 +236,9 @@ class KthQualificationProvider:
         )
         try:
             if plan_id:
-                self._check_reviewed(attestation, artifact, request, process.returncode)
+                self._check_reviewed(attestation, artifact, request, exit_code)
             else:
-                self._check_adaptive(attestation, request, process.returncode)
+                self._check_adaptive(attestation, request, exit_code)
         except _Rejected as rejection:
             return self._persist(replace(reported, reason=str(rejection)))
         verdict = str(attestation["verdict"])
@@ -270,6 +246,36 @@ class KthQualificationProvider:
 
     def mark_performance_admitted(self, result: KthQualificationResult) -> KthQualificationResult:
         return self._persist(replace(result, performance_admitted=True))
+
+    def _run(self, request: dict[str, Any], artifacts_dir: Path) -> tuple[int, dict[str, Any]]:
+        """Run ``kth-qualify`` on ``request``; return its verdict exit code and the attestation it wrote."""
+        request_path = artifacts_dir / "request.json"
+        attestation_path = artifacts_dir / "attestation.json"
+        atomic_write_json(request_path, request, trailing_newline=True)
+        try:
+            process = subprocess.run(
+                [self.executable, "--request", str(request_path), "--out", str(attestation_path)],
+                cwd=artifacts_dir,
+                env=scrub_benchmark_process_env(os.environ.copy()),
+                capture_output=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            self._write_logs(artifacts_dir, error.stdout, error.stderr)
+            raise _Rejected(f"KTH timed out after {self.timeout_s:g}s") from error
+        except OSError as error:
+            raise _Rejected(f"KTH executable {self.executable!r} could not run: {error}") from error
+        self._write_logs(artifacts_dir, process.stdout, process.stderr)
+        if process.returncode not in VERDICT_EXIT_CODES.values():
+            raise _Rejected(f"KTH infrastructure failure (exit {process.returncode})")
+        try:
+            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _Rejected(f"KTH attestation is missing or malformed: {error}") from error
+        if not isinstance(attestation, dict):
+            raise _Rejected("KTH attestation is not a JSON object")
+        return process.returncode, attestation
 
     def _check_common(self, attestation: dict[str, Any], request: dict[str, Any], exit_code: int) -> None:
         if attestation.get("schema_version") != request["schema_version"]:

@@ -205,6 +205,25 @@ def _qualify_applied(
         return KthQualificationResult(status="failed", reason=f"could not qualify the applied candidate: {error}")
 
 
+def _admit_to_performance(
+    provider: KthQualificationProvider,
+    publication: ControllerPatchPublication,
+    *,
+    repo: Path,
+    head: str,
+    touched: Sequence[str],
+    session_dir: Path,
+) -> KthQualificationResult:
+    """Qualify the applied candidate and, when Eligible, durably record that it may be benchmarked."""
+    qualified = _qualify_applied(provider, publication, repo=repo, head=head, touched=touched, session_dir=session_dir)
+    if not qualified.eligible:
+        return qualified
+    try:
+        return provider.mark_performance_admitted(qualified)
+    except OSError as error:
+        return replace(qualified, status="failed", reason=f"could not record KTH admission to performance: {error}")
+
+
 def _still_qualified(repo: Path, touched: Sequence[str], qualified: KthQualificationResult) -> bool:
     """Whether the worktree still carries the bytes KTH qualified."""
     try:
@@ -447,7 +466,7 @@ async def integrate_controller_patches(
 
         qualified: KthQualificationResult | None = None
         if kth_provider is not None:
-            qualified = _qualify_applied(
+            qualified = _admit_to_performance(
                 kth_provider,
                 publication,
                 repo=repo,
@@ -455,13 +474,6 @@ async def integrate_controller_patches(
                 touched=touched,
                 session_dir=Path(session_dir),
             )
-            if qualified.eligible:
-                try:
-                    qualified = kth_provider.mark_performance_admitted(qualified)
-                except OSError as error:
-                    qualified = replace(
-                        qualified, status="failed", reason=f"could not record KTH admission to performance: {error}"
-                    )
             if not qualified.eligible:
                 result = PatchIntegrationResult(
                     operator_id=publication.operator_id,
