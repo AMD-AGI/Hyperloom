@@ -2744,10 +2744,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                     merged_setup.append(sc)
             if merged_setup:
                 integrate_params["enablement_setup_commands"] = merged_setup
-        # A specialist patch lands through integrate_patch, which the breakdown attributes to the
-        # framework agent. Without an owner the Critic-approved patch is discarded at materialize.
-        if not patch_owner_phase(integrate_params):
-            integrate_params["source_phase"] = "FRAMEWORK_AGENT"
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",

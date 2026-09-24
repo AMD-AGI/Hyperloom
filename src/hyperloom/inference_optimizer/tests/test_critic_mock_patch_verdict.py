@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The mock Critic's approval of a specialist patch, and the ownership a patch
-needs before ``integrate_patch`` will run it."""
+"""Ownership of a patch a specialist wrote, frozen where the specialist is created."""
 
 from __future__ import annotations
 
@@ -13,11 +12,12 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.loop.intent_router import IntentRouter
 from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 from hyperloom.orchestrator.state.task_registry import Task
 
 SPECIALIST_ID = "spec-patch-1"
+_FREEFORM_PATCH = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}
 
 
 def _coordinator(session_dir: Path, *, phase: str) -> Coordinator:
@@ -56,39 +56,73 @@ async def _integrate_tasks(coord: Coordinator) -> list[Task]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["FRAMEWORK_AGENT", "KERNEL_AGENT"])
-async def test_mock_critic_approval_lands_as_the_specialist_patch_verdict(session_dir: Path, phase: str) -> None:
-    """``--critic-mock`` carries a specialist patch all the way through the gate."""
+@pytest.mark.parametrize("phase", ["KERNEL_AGENT", "ENABLEMENT"])
+async def test_a_patch_mode_specialist_is_owned_at_dispatch(session_dir: Path, phase: str) -> None:
+    """A freeform dispatch names no domain, gap layer or authoring phase.
+
+    In patch mode it will still author a diff that lands through
+    ``integrate_patch``, which the breakdown books to the framework agent, so
+    that is the owner the round is frozen with.
+    """
     coord = _coordinator(session_dir, phase=phase)
     try:
-        await _specialist_wrote_a_patch(coord, spec_params={"domain": "kernel", "source_phase": "EXPLORE"})
-        assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == ""
+        params = dict(_FREEFORM_PATCH)
+        assert IntentRouter(coord)._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+        assert params["source_phase"] == "FRAMEWORK_AGENT"
+    finally:
+        await coord.stop()
 
-        await coord._reactor_pass("critic")
 
-        assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == "approve"
-        tasks = await _integrate_tasks(coord)
-        assert [(t.params or {}).get("specialist_task_id") for t in tasks] == [SPECIALIST_ID]
-        coord.policy.validate_dispatched_task("integrate_patch", dict(tasks[0].params or {}))
+@pytest.mark.asyncio
+async def test_a_research_specialist_names_no_owner(session_dir: Path) -> None:
+    """A freeform dispatch defaults to research, which authors no patch.
+
+    Owning that round would book a read-only investigation to the framework
+    agent, so it keeps the gap the attribution model reports.
+    """
+    coord = _coordinator(session_dir, phase="KERNEL_AGENT")
+    try:
+        params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
+        assert IntentRouter(coord)._stamp_specialist_owner(params) == ""
+        assert "source_phase" not in params
+    finally:
+        await coord.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_integrate_route_accepts_the_specialist_it_owned(session_dir: Path) -> None:
+    """``delegate`` / ``propose_action`` read the owner off the specialist task.
+
+    Both refuse an `integrate_patch` they cannot attribute, so a patch the
+    autosubmit path would carry has to be accepted here too.
+    """
+    coord = _coordinator(session_dir, phase="KERNEL_AGENT")
+    router = IntentRouter(coord)
+    try:
+        params = dict(_FREEFORM_PATCH)
+        router._stamp_specialist_owner(params)
+        task = await coord.tasks.create(kind="specialist", params=params, idempotency_key="spec-1")
+
+        integrate_params = {"specialist_task_id": task.task_id}
+        assert await router._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
+        assert integrate_params["source_phase"] == "FRAMEWORK_AGENT"
     finally:
         await coord.stop()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["KERNEL_AGENT", "ENABLEMENT"])
-async def test_a_freeform_patch_is_integrated_and_owned_by_the_framework_agent(
-    session_dir: Path,
-    phase: str,
-) -> None:
-    """A freeform specialist names no domain, gap layer or authoring phase.
+async def test_the_autosubmitted_patch_is_integrated_and_owned(session_dir: Path, phase: str) -> None:
+    """The round the orchestration prompt asks for, end to end.
 
-    Its patch still lands through ``integrate_patch``, which the breakdown
-    attributes to the framework agent, so the round must be owned rather than
-    discarded for want of a label.
+    A patch-mode freeform specialist finishes, the Critic approves, and the
+    `integrate_patch` task carries the owner frozen at dispatch.
     """
     coord = _coordinator(session_dir, phase=phase)
     try:
-        await _specialist_wrote_a_patch(coord, spec_params={"scope": "freeform"})
+        params = dict(_FREEFORM_PATCH)
+        IntentRouter(coord)._stamp_specialist_owner(params)
+        await _specialist_wrote_a_patch(coord, spec_params=params)
 
         await coord._reactor_pass("critic")
 
@@ -102,55 +136,19 @@ async def test_a_freeform_patch_is_integrated_and_owned_by_the_framework_agent(
 
 
 @pytest.mark.asyncio
-async def test_integrate_patch_stays_denied_without_a_verdict(session_dir: Path) -> None:
-    """The gate is not weakened: an unreviewed subject is still refused."""
-    coord = _coordinator(session_dir, phase="FRAMEWORK_AGENT")
-    try:
-        with pytest.raises(PolicyDenied) as denial:
-            coord.policy.validate_dispatched_task("integrate_patch", {"specialist_task_id": SPECIALIST_ID})
-        assert denial.value.rule == "integrate_patch_requires_critic_verdict"
-    finally:
-        await coord.stop()
+async def test_the_mock_critic_approval_lands_as_the_patch_verdict(session_dir: Path) -> None:
+    """Evidence for #1553: `--critic-mock` is not what drops a specialist patch.
 
-
-@pytest.mark.asyncio
-async def test_integrate_patch_stays_denied_on_a_reject_verdict(session_dir: Path) -> None:
-    """A recorded reject is still a refusal, not a pass-through."""
-    coord = _coordinator(session_dir, phase="FRAMEWORK_AGENT")
-    try:
-        coord.shared_state.record_specialist_patch_verdict(SPECIALIST_ID, "reject")
-        with pytest.raises(PolicyDenied) as denial:
-            coord.policy.validate_dispatched_task("integrate_patch", {"specialist_task_id": SPECIALIST_ID})
-        assert denial.value.rule == "integrate_patch_requires_critic_verdict"
-    finally:
-        await coord.stop()
-
-
-@pytest.mark.asyncio
-async def test_an_unownable_patch_is_refused_before_it_reaches_the_critic(session_dir: Path) -> None:
-    """Ownership is settled where the proposal is published, not after review.
-
-    A patch naming a specialist that does not exist has no ownership evidence
-    at all, so it never becomes a proposal and never costs a Critic turn.
+    The mock's approval reaches `specialist_patch_verdicts` under the
+    specialist's own id, on the same handler the critic-agent backend uses.
     """
     coord = _coordinator(session_dir, phase="FRAMEWORK_AGENT")
     try:
-        await coord._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={
-                    "action_name": "integrate_patch",
-                    "params": {"specialist_task_id": "missing-specialist"},
-                },
-            ),
-        )
+        await _specialist_wrote_a_patch(coord, spec_params={"domain": "kernel", "source_phase": "EXPLORE"})
+        assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == ""
 
-        assert list(coord.state.pending_proposals) == []
-        assert await _integrate_tasks(coord) == []
-        observations = await coord.bus.tail(topic="observation", n=20)
-        assert [o.payload.get("reason") for o in observations if o.payload.get("kind") == "proposal_rejected"] == [
-            "integrate_patch_owner_missing"
-        ]
+        await coord._reactor_pass("critic")
+
+        assert coord.shared_state.get_specialist_patch_verdict(SPECIALIST_ID) == "approve"
     finally:
         await coord.stop()

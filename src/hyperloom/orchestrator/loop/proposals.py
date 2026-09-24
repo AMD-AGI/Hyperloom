@@ -6,9 +6,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    patch_owner_phase,
-)
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -479,9 +476,8 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            # Every publisher names an owner before the proposal reaches the bus: the model-facing
-            # paths refuse an unownable patch, and an autosubmitted one is owned by construction.
-            params["source_phase"] = patch_owner_phase(params)
+            # ``source_phase`` is stamped where the specialist is created and carried from there; a
+            # second derivation here would be a second decision, and could write an empty owner.
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
             # Seed the patched-eval server with the same base args/config every other eval server uses, else it
             # launches on bare framework defaults and crashes at startup regardless of the patch.
