@@ -3946,9 +3946,9 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
 
 
 def test_handlers_dispatch_table():
-    """Dispatch table includes trace_analyze / run_gemm_tuning, not run_optimization or unknown kinds."""
+    """Dispatch table includes trace_analyze, not the Coordinator-owned lanes or unknown kinds."""
     assert krh.has_handler("trace_analyze")
-    assert krh.has_handler("run_gemm_tuning")
+    assert not krh.has_handler("run_gemm_tuning")
     assert not krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 

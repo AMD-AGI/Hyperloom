@@ -86,8 +86,7 @@ the ``=== Phase ===`` block for the five middle phases.
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing might be enqueued internally even
-when the LLM is not allowed to propose them. The dispatcher cancels a queued
-task whose kind the current phase does not allow (`phase_incompatible`).
+when the LLM is not allowed to propose them.
 
 Every phase transition is a GPU barrier: the Coordinator stops every running
 action and drops queued work the next phase does not allow, and commits the

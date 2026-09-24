@@ -461,26 +461,6 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     assert await c.tasks.queued() == []
 
 
-@pytest.mark.asyncio
-async def test_phase_incompatible_task_is_cancelled_at_admission(coord):
-    """A task enqueued after the transition into a phase that does not allow its kind never runs."""
-    c = coord
-    _arm_kernel_phase(c.shared_state)
-    ran: list[str] = []
-
-    async def _specialist(ctx):
-        ran.append(ctx.task.task_id)
-        return {"status": "ok"}
-
-    c.sub.register_executor("specialist", _specialist)
-    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="late-specialist")
-
-    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
-
-    assert ran == []
-    assert (await c.tasks.get(task.task_id)).state == "cancelled"
-
-
-def test_specialist_is_admitted_in_enablement_but_not_in_kernel():
+def test_specialist_is_allowed_in_enablement_but_not_in_kernel():
     assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_ENABLEMENT]
     assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]

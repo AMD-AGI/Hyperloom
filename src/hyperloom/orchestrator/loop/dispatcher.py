@@ -602,8 +602,6 @@ class DispatcherCollaborator:
                 _serving_slot_busy_fn = _ssb
         except Exception:  # noqa: BLE001 — never block dispatch on the probe
             pass
-        current_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-        phase_allowed = _phase_state.PHASE_ALLOWED_ACTIONS.get(current_phase, frozenset())
         for task in queued:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
@@ -613,17 +611,6 @@ class DispatcherCollaborator:
                 # Still running from an earlier pump that returned without it.
                 continue
             retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
-            # Only the current phase's kinds run; a retired ``recover`` row still goes through to its clean exit.
-            if not retired and phase_allowed and task.kind not in phase_allowed:
-                log.info(
-                    "dispatcher: cancelled task=%s kind=%s not allowed in %s", task.task_id, task.kind, current_phase
-                )
-                await self.tasks.transition(
-                    task.task_id,
-                    "cancelled",
-                    evidence={"reason": "phase_incompatible", "phase": current_phase},
-                )
-                continue
             if not retired and await self._cancel_queued_task_over_budget(task):
                 continue
             lanes_needed = [] if retired else list(task.requires_lanes or [])
