@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -443,9 +444,7 @@ class ProposalsCollaborator:
         approved_variant_names: set[str] | None = None,
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
-        # An upstream-PR candidate pre-screen is an ``integrate_patch`` proposal carrying a candidate id at the top
-        # level (rather than params).
-        if pending.action_name == "integrate_patch" and (pending.payload or {}).get("framework_agent_candidate_id"):
+        if is_upstream_pr_prescreen(pending.action_name, pending.payload or {}):
             await self._materialize_framework_agent_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})

@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen as _is_upstream_pr_prescreen_canonical
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
@@ -110,11 +111,7 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 
 def _is_upstream_pr_prescreen(payload: dict[str, Any] | None) -> bool:
     """Whether this proposal only decides *whether to spend a bench* on a PR."""
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("patches") or (payload.get("params") or {}).get("patches"):
-        return False
-    return bool(payload.get("framework_agent_candidate_id"))
+    return _is_upstream_pr_prescreen_canonical("integrate_patch", payload)
 
 
 def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
