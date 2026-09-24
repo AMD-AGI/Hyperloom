@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -76,8 +75,8 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
         return None
     if not str(getattr(pending, "proposal_msg_id", "") or ""):
         return None
-    getter = getattr(coll, "_framework_timeline", None)
-    return getter() if callable(getter) else None
+    ph = getattr(coll, "phase_framework", None)
+    return ph.timeline() if ph is not None else None
 
 
 def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
@@ -444,8 +443,8 @@ class ProposalsCollaborator:
         approved_variant_names: set[str] | None = None,
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
-        if is_upstream_pr_prescreen(pending.action_name, pending.payload or {}):
-            await self._materialize_framework_agent_candidate(pending)
+        ph = getattr(self, 'phase_framework', None)
+        if ph is not None and await ph.on_proposal_approved(pending):
             return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.

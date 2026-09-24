@@ -603,9 +603,14 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
-        str(result.result.get("status") or "")
-    )
+
+    async def _on_task_settled(task, result):
+        params = getattr(task, "params", None) or {}
+        if task.kind == "integrate_patch" and bool(params.get("framework_agent_authoring")):
+            recorded.append(str(result.result.get("status") or ""))
+
+    from types import SimpleNamespace as _NS
+    stub.phase_framework = _NS(on_task_settled=_on_task_settled, on_specialist_settled=_noop_async, record_settled_candidate=lambda task, result: None)
     stub._maybe_rearm_authored_lane = _noop_async
     stub._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False

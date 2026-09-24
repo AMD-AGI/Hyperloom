@@ -134,8 +134,8 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    ph = getattr(router, "phase_framework", None)
+    recorder = ph.timeline() if ph is not None else None
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -337,8 +337,8 @@ def _record_critic_review(
     proposal_id = _review_subject(pending)
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    ph = getattr(router, "phase_framework", None)
+    recorder = ph.timeline() if ph is not None else None
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -406,8 +406,8 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     proposal_id = _review_subject(pending)
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    ph = getattr(router, "phase_framework", None)
+    recorder = ph.timeline() if ph is not None else None
     if recorder is None:
         return
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
@@ -811,11 +811,9 @@ class IntentRouter:
                 approved_variant_names=approved_variant_names,
             )
         elif verdict == "reject" and _is_upstream_pr_candidate(pending):
-            # Record the critic_denied row so the candidate pump advances.
-            await self._coord._record_framework_agent_critic_denied(
-                pending,
-                reasoning,
-            )
+            ph = getattr(self._coord, 'phase_framework', None)
+            if ph is not None:
+                await ph.on_verdict(pending, verdict="reject", reasoning=reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
@@ -829,10 +827,9 @@ class IntentRouter:
                     sid_candidate,
                 )
         elif verdict == "needs_review":
-            await self._coord._maybe_reauthor_from_critic_feedback(
-                pending,
-                advisory,
-            )
+            ph = getattr(self._coord, 'phase_framework', None)
+            if ph is not None:
+                await ph.on_verdict(pending, verdict="needs_review", advisory=advisory)
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
