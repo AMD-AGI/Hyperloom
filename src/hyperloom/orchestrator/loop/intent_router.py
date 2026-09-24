@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id as _arm_review_row_id
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,

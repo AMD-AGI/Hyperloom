@@ -18,7 +18,7 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
     ScriptedPlan,
 )
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult

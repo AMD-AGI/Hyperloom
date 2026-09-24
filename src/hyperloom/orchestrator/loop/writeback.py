@@ -23,7 +23,7 @@ from hyperloom.common.launch_log_evidence import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
 from ..enablement.recipe.section import recipe_for
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
     LEVER_KERNEL,

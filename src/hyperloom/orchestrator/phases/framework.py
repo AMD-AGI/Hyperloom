@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX as _LOCAL_EXPLORE_PREFIX
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
     patch_owner_phase,
