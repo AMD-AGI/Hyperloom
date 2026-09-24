@@ -221,11 +221,11 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
         return str(snapshot_dir)
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._maybe_apply_kernel_patch",
         _apply,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers.materialize_unified_patch_snapshot",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot",
         _materialize,
     )
     session_dir = tmp_path / "session"
@@ -277,7 +277,7 @@ def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(
 def test_multi_file_manifest_and_target_snapshot_both_roll_back(
     tmp_path: Path,
 ) -> None:
-    from hyperloom.orchestrator.kernel.request_handlers import (
+    from hyperloom.orchestrator.actions.executors._kernel_agent_tool import (
         _maybe_apply_kernel_patch,
     )
 

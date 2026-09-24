@@ -1588,7 +1588,7 @@ def revert_warm_kernel_patches(
     snapshots: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Rollback kernels exactly, reporting every failure."""
-    from ...kernel.request_handlers import _maybe_revert_kernel_patch
+    from ._kernel_agent_tool import _maybe_revert_kernel_patch
 
     errors: list[str] = []
     for apply_result in reversed(applied):

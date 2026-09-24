@@ -21,6 +21,8 @@ from hyperloom.common.codex_session import (
     DEFAULT_CODEX_SANDBOX_MODE,
 )
 from hyperloom.common.env import is_truthy
+from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
+from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.common.llm_config import (
@@ -614,7 +616,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         snapshot = Path(
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=patch,
                 repo_root=repo,
             )
@@ -642,7 +644,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         snapshot = Path(
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=patch,
                 repo_root=repo,
             )
@@ -671,7 +673,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         snapshot = Path(
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=patch,
                 repo_root=repo,
             )
@@ -704,7 +706,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         snapshot = Path(
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=patch,
                 repo_root=repo,
             )
@@ -731,7 +733,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         snapshot = Path(
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=patch,
                 repo_root=repo,
             )
@@ -757,7 +759,7 @@ class TestForgeGemmHelperCoverage:
         )
 
         with pytest.raises(FileNotFoundError, match="patch base missing"):
-            krh.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
+            tool.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
 
     def test_materialize_unified_patch_snapshot_rejects_bad_inputs(self, tmp_path):
         repo = tmp_path / "repo"
@@ -766,10 +768,10 @@ class TestForgeGemmHelperCoverage:
         patch.write_text("", encoding="utf-8")
 
         with pytest.raises(ValueError, match="empty patch|no file operations"):
-            krh.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
+            tool.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
 
         with pytest.raises(FileNotFoundError):
-            krh.materialize_unified_patch_snapshot(
+            tool.materialize_unified_patch_snapshot(
                 patch_path=tmp_path / "missing.patch",
                 repo_root=repo,
             )
@@ -2185,7 +2187,7 @@ class TestCoerceRuntimeValue:
         ],
     )
     def test_roundtrips(self, value, expected):
-        assert krh._coerce_runtime_value(value) == expected
+        assert ta._coerce_runtime_value(value) == expected
 
 
 class TestBackendOrder:
@@ -2204,42 +2206,42 @@ class TestBackendOrder:
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
-        assert krh._candidate_env_allowed(name) is False
+        assert ta._candidate_env_allowed(name) is False
 
     def test_known_prefix_allowed(self):
-        prefixes = krh._CANDIDATE_ENV_PREFIXES
+        prefixes = ta._CANDIDATE_ENV_PREFIXES
         assert prefixes  # registry not empty
         sample = next(iter(prefixes))
-        assert krh._candidate_env_allowed(sample + "FOO") is True
+        assert ta._candidate_env_allowed(sample + "FOO") is True
 
     def test_explicit_allowlisted_key(self):
-        keys = krh._CANDIDATE_ENV_KEYS
+        keys = ta._CANDIDATE_ENV_KEYS
         if not keys:
             pytest.skip("no explicit allowlist entries in build")
         sample = next(iter(keys))
-        assert krh._candidate_env_allowed(sample) is True
+        assert ta._candidate_env_allowed(sample) is True
 
 
 class TestSplitServerArgs:
     def test_empty_returns_empty(self):
-        assert krh._split_server_args("") == []
+        assert ta._split_server_args("") == []
 
     def test_split_uses_shlex(self):
-        argv = krh._split_server_args("--foo 1 --bar 'x y'")
+        argv = ta._split_server_args("--foo 1 --bar 'x y'")
         assert argv == ["--foo", "1", "--bar", "x y"]
 
     def test_unterminated_quote_returns_empty(self):
         # shlex.split raises ValueError on bad input; helper returns [].
-        argv = krh._split_server_args('--foo "unterminated')
+        argv = ta._split_server_args('--foo "unterminated')
         assert argv == []
 
 
 class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_no_path(self):
-        assert krh._load_materialized_workload_metadata("") == {}
+        assert ta._load_materialized_workload_metadata("") == {}
 
     def test_empty_when_path_missing(self, tmp_path):
-        assert krh._load_materialized_workload_metadata(str(tmp_path / "no.yaml")) == {}
+        assert ta._load_materialized_workload_metadata(str(tmp_path / "no.yaml")) == {}
 
     def test_parses_sglang_metadata(self, tmp_path):
         cfg = tmp_path / "magpie.yaml"
@@ -2255,7 +2257,7 @@ class TestLoadMaterializedWorkloadMetadata:
             "    OSL: 512\n"
             "    EXTRA_SGLANG_ARGS: '--foo 1'\n"
         )
-        out = krh._load_materialized_workload_metadata(str(cfg))
+        out = ta._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
         assert runtime["framework"] == "sglang"
         assert runtime["server_args"] == "--foo 1"
@@ -2294,7 +2296,7 @@ class TestLoadMaterializedWorkloadMetadata:
             "    OSL: 1024\n"
             f"    {env_name}: '{expected_args}'\n"
         )
-        out = krh._load_materialized_workload_metadata(str(cfg))
+        out = ta._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
         assert runtime["framework"] == framework
         assert runtime["server_args"] == expected_args, (
@@ -2317,7 +2319,7 @@ class TestLoadMaterializedWorkloadMetadata:
             "    EXTRA_SGLANG_ARGS: '--should-be-ignored'\n"
             "    EXTRA_ATOM_ARGS: '--trust-remote-code --level 2'\n"
         )
-        out = krh._load_materialized_workload_metadata(str(cfg))
+        out = ta._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
         assert runtime["framework"] == "atom"
         assert runtime["server_args"] == "--trust-remote-code --level 2"
@@ -2328,22 +2330,22 @@ class TestEnrichCandidate:
     def test_enrich_candidate_runtime_metadata_setdefault_semantics(self):
         candidates = [{"kernel_id": "k", "env_vars": {"TP": "8"}}]
         metadata = {"env_vars": {"TP": "1", "CONC": "16"}, "runtime_args": {"framework": "sglang"}}
-        krh._enrich_candidate_runtime_metadata(candidates, metadata)
+        ta._enrich_candidate_runtime_metadata(candidates, metadata)
         assert candidates[0]["env_vars"] == {"TP": "8", "CONC": "16"}
         assert candidates[0]["runtime_args"]["framework"] == "sglang"
 
     def test_enrich_candidate_runtime_metadata_ignores_non_dict_items(self):
         candidates = ["not a dict", {"kernel_id": "x"}]
-        krh._enrich_candidate_runtime_metadata(candidates, {"env_vars": {"A": "B"}})
+        ta._enrich_candidate_runtime_metadata(candidates, {"env_vars": {"A": "B"}})
         assert candidates[1].get("env_vars") == {"A": "B"}
 
     def test_enrich_candidate_trace_report_skips_blank_path(self):
         candidates = [{"kernel_id": "k"}]
-        krh._enrich_candidate_trace_report(candidates, "")
+        ta._enrich_candidate_trace_report(candidates, "")
         assert "trace_report_path" not in candidates[0]
 
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
-        krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
+        ta._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
 
 
 class TestReusableSourceRootsAtom:
@@ -4397,21 +4399,21 @@ class TestTracelensRootResolution:
 
     def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
-        assert krh._resolve_tracelens_root() == tmp_path / "tl"
+        assert ta._resolve_tracelens_root() == tmp_path / "tl"
 
     def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         expected = tmp_path / "podlocal" / "TraceLens"
-        assert krh._resolve_tracelens_root() == expected
+        assert ta._resolve_tracelens_root() == expected
 
     def test_root_error_none_when_present(self, tmp_path):
         tl = tmp_path / "tl"
         (tl / ".git").mkdir(parents=True)  # usable git checkout
-        assert krh._tracelens_root_error(tl) is None
+        assert ta._tracelens_root_error(tl) is None
 
     def test_root_error_message_when_missing(self, tmp_path):
-        err = krh._tracelens_root_error(tmp_path / "ghost")
+        err = ta._tracelens_root_error(tmp_path / "ghost")
         assert err is not None
         assert "TraceLens root not found" in err
 
@@ -4419,7 +4421,7 @@ class TestTracelensRootResolution:
         # Dir exists but is not a git checkout (no .git) -> unusable.
         tl = tmp_path / "tl"
         tl.mkdir()
-        err = krh._tracelens_root_error(tl)
+        err = ta._tracelens_root_error(tl)
         assert err is not None
         assert "incomplete" in err
 
@@ -4433,9 +4435,9 @@ class TestTracelensRootResolution:
         def _fake_heal(root, *, log=None):
             called["n"] += 1
 
-        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
+        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler(
+            ta.trace_analyze_handler(
                 {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
@@ -4459,9 +4461,9 @@ class TestTracelensRootResolution:
             # Simulate an unrecoverable heal so the handler fail-fasts here.
             shutil.rmtree(root, ignore_errors=True)
 
-        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
+        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler(
+            ta.trace_analyze_handler(
                 {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
@@ -4480,12 +4482,12 @@ class TestTracelensRootResolution:
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
         heal_called = {"n": 0}
         monkeypatch.setattr(
-            krh,
+            ta,
             "_maybe_selfheal_tracelens_root",
             lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
         )
         out = asyncio.run(
-            krh.trace_analyze_handler(
+            ta.trace_analyze_handler(
                 {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
@@ -4512,7 +4514,7 @@ class TestTracelensRootResolution:
             krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
         )
         try:
-            krh._maybe_selfheal_tracelens_root(override)
+            ta._maybe_selfheal_tracelens_root(override)
         finally:
             _sys.modules.pop("tracelens_analysis", None)
         assert called["n"] == 0
@@ -4540,7 +4542,7 @@ class TestTracelensRootResolution:
             krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
         )
         try:
-            krh._maybe_selfheal_tracelens_root(default_root)
+            ta._maybe_selfheal_tracelens_root(default_root)
         finally:
             _sys.modules.pop("tracelens_analysis", None)
         assert called["n"] == 1
@@ -4568,7 +4570,7 @@ class TestTracelensRootResolution:
             krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
         )
         try:
-            krh._maybe_selfheal_tracelens_root(default_root)
+            ta._maybe_selfheal_tracelens_root(default_root)
         finally:
             _sys.modules.pop("tracelens_analysis", None)
         assert called["n"] == 1
@@ -4581,13 +4583,13 @@ class TestBuildTraceAnalyzeCmd:
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
         monkeypatch.delenv("MODEL_PATH", raising=False)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path("/tools") / name)
+        monkeypatch.setattr(ta, "_kernel_agent_tool_path", lambda name: Path("/tools") / name)
         state = SharedState()
         return state, tmp_path / "sess"
 
     def test_tracelens_splitter_cmd(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
-        cmd, steady = krh._build_trace_analyze_cmd(
+        cmd, steady = ta._build_trace_analyze_cmd(
             {"session_id": "sid", "trace_input": "/t/trace", "split_conc": "64", "split_osl": "1024"},
             session_dir=session_dir,
             state=state,
@@ -4637,7 +4639,7 @@ class TestBuildTraceAnalyzeCmd:
         state.model_path = "/models/sglang-model"
         state.precision = "fp8"
         state.baseline_config_path = "/session/materialized.yaml"
-        cmd, _steady = krh._build_trace_analyze_cmd(
+        cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             session_dir=session_dir,
             state=state,
@@ -4659,7 +4661,7 @@ class TestBuildTraceAnalyzeCmd:
     def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.model_path = "/models/flux"
-        cmd, steady = krh._build_trace_analyze_cmd(
+        cmd, steady = ta._build_trace_analyze_cmd(
             {
                 "session_id": "sid",
                 "trace_input": "/t/trace",
@@ -4699,7 +4701,7 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.benchmark_mode = "agentx"
         state.tp = 8
-        cmd, _steady = krh._build_trace_analyze_cmd(
+        cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace-dir"},
             session_dir=session_dir,
             state=state,
@@ -4720,7 +4722,7 @@ class TestBuildTraceAnalyzeCmd:
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
-        cmd, steady = krh._build_trace_analyze_cmd(
+        cmd, steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             session_dir=session_dir,
             state=state,

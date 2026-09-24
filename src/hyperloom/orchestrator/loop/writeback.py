@@ -33,7 +33,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
 )
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
-from ..kernel._recorder_trace import trace_recording_skipped
+from ..actions._recorder_trace import trace_recording_skipped
 from hyperloom.inference_optimizer.session.optimization_journal import (
     Journal,
     JournalEntry,

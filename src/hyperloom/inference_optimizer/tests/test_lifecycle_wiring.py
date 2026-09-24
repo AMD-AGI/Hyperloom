@@ -300,7 +300,7 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
         new=fake_profile,
     )
     p2 = patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
     executor = RooflineExecutor(shared_state=state)

@@ -501,7 +501,7 @@ class PreludePhase(PhaseHandler):
 
     def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
         """Land one champion's file on disk without measuring it."""
-        from ..kernel.request_handlers import (
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             materialize_unified_patch_snapshot,
         )

@@ -522,7 +522,7 @@ class RooflineExecutor:
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
         # atom: the profile sub-step produces *.pt.trace.json.gz that TraceLens consumes unchanged.
-        from ...kernel.request_handlers import trace_analyze_handler
+        from .trace_analyze import trace_analyze_handler
         from .profile import profile_executor
 
         # Every sub-step below goes through this, so a call site added later cannot silently be the one that reports

@@ -304,7 +304,7 @@ async def test_agentx_predispatch_refusal_is_reused_until_overlay_recovers(
     monkeypatch.setattr(c, "_validate_geak_via_geak_harness", fallback)
     monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner unavailable")),
     )
 
@@ -1280,7 +1280,7 @@ async def test_duplicate_enqueue_skips_while_rebench_in_flight(coordinator, tmp_
     coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
@@ -1314,7 +1314,7 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
@@ -1387,7 +1387,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     async def _kernel_entry_without_runner() -> None:
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
-            "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+            "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
             lambda _name: (_ for _ in ()).throw(RuntimeError("geak runner unavailable")),
         )
         try:
@@ -1452,7 +1452,7 @@ def _stub_geak_runner_call(monkeypatch, tmp_path, outcome) -> list[str]:
     phase reached the runner rather than returning at an earlier gate.
     """
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: tmp_path / "geak_runner.py",
     )
     original_to_thread = asyncio.to_thread
@@ -1552,7 +1552,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
@@ -1593,7 +1593,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:

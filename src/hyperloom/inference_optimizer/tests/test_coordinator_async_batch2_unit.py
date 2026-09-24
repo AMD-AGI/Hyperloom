@@ -63,7 +63,7 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     restores: list[tuple[str, str]] = []
     kernel_restores: list[dict] = []
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
-    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
         baseline_module,
@@ -71,7 +71,7 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
         lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
-        kernel_handlers,
+        kernel_agent_tool,
         "_maybe_revert_kernel_patch",
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
@@ -105,10 +105,10 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel_restores: list[dict] = []
-    import hyperloom.orchestrator.kernel.request_handlers as kernel_handlers
+    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
-        kernel_handlers,
+        kernel_agent_tool,
         "_maybe_revert_kernel_patch",
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )

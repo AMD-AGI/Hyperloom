@@ -1281,7 +1281,7 @@ class KernelPhase(PhaseHandler):
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
 
-        from ..kernel.request_handlers import _kernel_agent_tool_path
+        from ..actions.executors._kernel_agent_tool import _kernel_agent_tool_path
 
         def _read_geak_result(path: Path) -> dict[str, Any]:
             if not path.is_file():
