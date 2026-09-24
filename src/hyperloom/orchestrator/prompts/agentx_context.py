@@ -51,7 +51,8 @@ def grading_lines() -> list[str]:
     """Describe what an AgentX KEEP is decided on."""
     return [
         "**Graded on E2E normalised interactivity P50** — the median of",
-        "`OSL_i / E2EL_i` in tok/s/user, on the axis InferenceX ranks a submission on.",
+        "`OSL_i / E2EL_i` in tok/s/user. InferenceX ranks submissions on the P90 of the",
+        "same family; the median is what Hyperloom decides KEEP on, and P90 is held as a guard.",
         f"KEEP needs >=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}% on it while the slow tail (P90) and output",
         "throughput each hold inside the noise band. Anything short of all three is REVERT.",
         "Total token throughput is still measured, and is not the objective.",

@@ -253,7 +253,13 @@ def _within_band(candidate: float, anchor: float, band_pct: float) -> bool:
 
 
 def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
-    """Derive the frontier's y axis onto *measurement* in place; a non-positive chip count leaves it unstamped."""
+    """Derive the frontier's y axis onto *measurement* in place; a non-positive chip count leaves it unstamped.
+
+    The chip count is the tensor-parallel degree, the same stand-in the roofline ceiling and the competitor gap
+    already divide by. It undercounts a deployment that spreads over data or pipeline parallelism, disaggregated
+    prefill, or several nodes; correcting it belongs with those callers, since a second denominator here would
+    publish two different per-GPU figures for one session.
+    """
     if not isinstance(measurement, dict):
         return
     chips = _positive(tp)
