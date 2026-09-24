@@ -46,9 +46,6 @@ from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 from ..collaborator import CoordinatorCollaborator
 
-# ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
-# as a back-reference and the annotation below is a deferred string.
-
 log = __import__("logging").getLogger(__name__)
 
 
