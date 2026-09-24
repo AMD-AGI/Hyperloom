@@ -289,11 +289,11 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     assert gate.last_wall_ms == 0.5
 
 
-def test_a_workspace_git_failure_is_not_an_integrity_violation(
+def test_a_workspace_git_failure_ends_the_session_as_a_rebuild_failure(
     tmp_path: Path,
     monkeypatch,
 ):
-    """An integrity verdict discards the iteration unmeasured, so a broken workspace must not earn one."""
+    """The session's end reason is the ledger's account of why it stopped, and a broken git is not a gate fault."""
     gate, workspace = _gate(tmp_path)
     # What the gate sees when git cannot answer what this session changed.
     shutil.rmtree(workspace / ".git")
@@ -309,10 +309,44 @@ def test_a_workspace_git_failure_is_not_an_integrity_violation(
 
     assert result == {}
     assert gate.end_reason == "jit_rebuild_unavailable"
-    # The outer loop keys REVERT_INTEGRITY, the protected-snapshot restore and the discarded worktree on these two.
+    # Nothing was timed against a binary the rebuild could not be asserted for.
+    assert validation_calls == []
+    assert gate.passed is False
+    # The verdict the outer loop reads is the one the orchestrator recomputes after every session, not whatever the
+    # gate left behind mid-flight.
+    assert gate.finalize_integrity() == ""
     assert gate.integrity_violation is False
     assert gate.integrity_verdict == "clean"
-    # And nothing was timed against a binary the rebuild could not be asserted for.
+
+
+def test_an_unreadable_declared_source_ends_the_session_as_a_rebuild_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A workspace file the loop cannot read is the same class of fault as a workspace git that cannot answer."""
+    gate, workspace = _gate(tmp_path)
+    kernel = (workspace / "aiter" / "csrc" / "kernel.cu").resolve()
+    monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
+    readable = Path.read_bytes
+
+    def refuse(self, *args, **kwargs):
+        if self.resolve() == kernel:
+            raise PermissionError(f"cannot read {self}")
+        return readable(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    validation_calls: list[int] = []
+
+    async def unexpected_validation(**_kwargs):
+        validation_calls.append(1)
+        return {"passed": True}
+
+    monkeypatch.setattr(gate_module, "test_correctness", unexpected_validation)
+
+    result = asyncio.run(gate._on_stop({}, None, None))
+
+    assert result == {}
+    assert gate.end_reason == "jit_rebuild_unavailable"
     assert validation_calls == []
 
 

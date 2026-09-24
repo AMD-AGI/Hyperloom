@@ -24,8 +24,8 @@ from kernelforge.llm.workspace_policy import (
     is_protected_path,
     protected_path_inventory,
 )
-from kernelforge.llm.git import GitError, git
-from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
+from kernelforge.llm.git import git
+from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -436,7 +436,9 @@ class InSessionGate:
         # best; a real win. "block_budget_exhausted" — max_blocks blocked stops spent; hand off to the outer loop to
         # re-validate + keep/revert. "harness_tampered" — harness block cap hit on unrestored protected changes; the
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
-        # performs the one authoritative retry. "gate_error" — the gate itself raised; fail OPEN.
+        # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
+        # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
+        # measures it itself. "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -1093,12 +1095,12 @@ class InSessionGate:
                     self.workspace_root or Path.cwd(),
                     [self.kernel_abs, *self.target_abs],
                 )
-            except GitError as error:
+            except JitRebuildUnavailable as error:
                 # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
                 # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
                 # edit can clear.
                 self.end_reason = "jit_rebuild_unavailable"
-                self.findings.append(f"In-session validation skipped; workspace git unavailable: {error}")
+                self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
                 self._log(
                     f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
                 )

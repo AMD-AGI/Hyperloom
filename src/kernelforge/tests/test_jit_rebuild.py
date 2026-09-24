@@ -12,6 +12,7 @@ import pytest
 
 from kernelforge.llm.git import GitError
 from kernelforge.loop.jit_rebuild import (
+    JitRebuildUnavailable,
     force_jit_rebuild,
     force_jit_rebuild_for_changes,
     tracked_source_changes,
@@ -121,6 +122,32 @@ def test_a_broken_workspace_does_not_read_as_no_source_changes(tmp_path):
     """ "git could not be asked" and "nothing changed" send the rebuild to opposite conclusions."""
     with pytest.raises(GitError):
         tracked_source_changes(tmp_path)
+
+
+def test_either_unreadable_workspace_raises_one_type(tmp_path, monkeypatch):
+    """Callers decide what an unassertable rebuild means to them once, not once per way the workspace can fail."""
+    source = tmp_path / "aiter" / "csrc" / "kernel.cu"
+    source.parent.mkdir(parents=True)
+    source.write_text("kernel", encoding="utf-8")
+    monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
+
+    with pytest.raises(JitRebuildUnavailable, match="GitError"):
+        force_jit_rebuild_for_changes(tmp_path, [str(source)])
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(f"cannot read {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    with pytest.raises(JitRebuildUnavailable, match="PermissionError"):
+        force_jit_rebuild_for_changes(tmp_path, [str(source)])
 
 
 def test_tracked_source_changes_include_undeclared_edits(tmp_path: Path):

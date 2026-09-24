@@ -8,10 +8,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from kernelforge.llm.git import git
+from kernelforge.llm.git import GitError, git
 from kernelforge.loop.aiter_cache import activate_aiter_cache_for_sources
 
 _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")
+
+
+class JitRebuildUnavailable(RuntimeError):
+    """The workspace could not say what to rebuild, or could not be read."""
 
 
 def force_jit_rebuild(paths: Iterable[str]) -> None:
@@ -50,14 +54,22 @@ def force_jit_rebuild_for_changes(
     workspace: str | Path,
     declared_paths: Iterable[str] = (),
 ) -> None:
-    """Rebuild from declared entry points plus every actual tracked source edit."""
+    """Rebuild from declared entry points plus every actual tracked source edit.
 
-    paths = list(
-        dict.fromkeys(
-            [
-                *(str(path) for path in declared_paths if path),
-                *tracked_source_changes(workspace),
-            ]
+    Raises:
+        JitRebuildUnavailable: the workspace could not be diffed or read, so no
+            rebuild was asserted.
+    """
+
+    try:
+        paths = list(
+            dict.fromkeys(
+                [
+                    *(str(path) for path in declared_paths if path),
+                    *tracked_source_changes(workspace),
+                ]
+            )
         )
-    )
-    force_jit_rebuild(paths)
+        force_jit_rebuild(paths)
+    except (GitError, OSError) as error:
+        raise JitRebuildUnavailable(f"{type(error).__name__}: {error}") from error
