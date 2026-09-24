@@ -69,6 +69,7 @@ from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
@@ -820,6 +821,8 @@ def _run_magpie(
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
     probe_root = Path(inferencex_path) if inferencex_path else None
+    # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
+    ensure_eval_unbound_outputs_patched(probe_root)
     if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
         eval_bounds_msg = (
             "eval generation bounds + pathology probe are not installed "

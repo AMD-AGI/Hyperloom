@@ -1135,9 +1135,17 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
     return missing
 
 
-# The harness the single-node path ends up on: InferenceX's benchmark_lib.sh force-reinstalls this commit over
-# whatever pip resolved.
-_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+# Pin consulted on multi-node preflight only: ``_ensure_lm_eval_dep`` skips single-node
+# installs (``single_node_runtime_install``) because InferenceX's ``benchmark_lib.sh``
+# reinstalls its own hardcoded pre-#3293 ref before every accuracy round there. This
+# constant therefore does *not* decide which harness a single-node round runs; the guard
+# appended to ``lm_eval_sitecustomize.py`` in ``_inferencex_patcher.py`` does.
+#
+# v0.4.13 (``ddd6722``). The previous pin matched InferenceX's reinstall ref
+# (2025-12-02, ``b315ef3``): its failure handler logs bare ``outputs``, so a refused
+# connection raises ``UnboundLocalError`` over the real error
+# (EleutherAI/lm-evaluation-harness#3293, fixed upstream 2026-02-24).
+_LM_EVAL_PINNED_REF = "ddd67220430a2470529f25fd5c05a576ca1057a0"
 _LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
 # git first, then the archive, because the sandbox may not ship a git binary.
 _LM_EVAL_PINNED_SPECS = (

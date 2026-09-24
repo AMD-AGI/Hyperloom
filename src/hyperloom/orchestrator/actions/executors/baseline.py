@@ -105,6 +105,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
     failed_patch_anchors_in,
@@ -1764,6 +1765,10 @@ class BaselineExecutor:
             # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
             # rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
+            # Best-effort, unlike the probe below: without it a refused connection ends the round on
+            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+            # was already going to fail -- not a reason to refuse to start one.
+            ensure_eval_unbound_outputs_patched(probe_root)
             if not ensure_eval_probe_patched(probe_root):
                 msg = (
                     "the generation-pathology probe is not installed "
