@@ -2507,7 +2507,7 @@ class BenchmarkRunExecutor:
 
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
-        lifecycle = self._resolve_lifecycle_params(materialized_config_path)
+        lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
             ctx_extra=extra,
@@ -3022,7 +3022,7 @@ class BenchmarkRunExecutor:
             return result
         finally:
             # Defensive teardown so no persistent server leaks.
-            self._teardown_lifecycle_server(
+            _lifecycle.teardown_lifecycle_server(
                 pid_dir=pid_dir,
                 framework=framework,
                 port=port,
@@ -3132,13 +3132,6 @@ class BenchmarkRunExecutor:
             )
             return True
 
-    def _resolve_lifecycle_params(
-        self,
-        materialized_config_path: Path,
-    ) -> dict[str, Any]:
-        """Inspect the materialized YAML for server_lifecycle eligibility."""
-        return _lifecycle.resolve_lifecycle_params(materialized_config_path)
-
     def _write_lifecycle_config(
         self,
         base_config_path: Path,
@@ -3192,20 +3185,6 @@ class BenchmarkRunExecutor:
                 "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
                 exc,
             )
-
-    def _teardown_lifecycle_server(
-        self,
-        *,
-        pid_dir: Path,
-        framework: str,
-        port: int,
-    ) -> None:
-        """Best-effort teardown of a persistent server left by the double-run rounds."""
-        _lifecycle.teardown_lifecycle_server(
-            pid_dir=pid_dir,
-            framework=framework,
-            port=port,
-        )
 
     async def _run_reported_round(
         self,

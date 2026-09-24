@@ -2297,14 +2297,14 @@ def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseli
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     """The defensive teardown unlinks stale pid/meta files without raising."""
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    _write_yaml(tmp_path / "base.yaml", framework="vllm")
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     (pid_dir / "vllm_8888.pid").write_text("2147483646")
     (pid_dir / "vllm_8888.json").write_text("{}")
 
-    executor._teardown_lifecycle_server(
+    sl.teardown_lifecycle_server(
         pid_dir=pid_dir,
         framework="vllm",
         port=8888,
