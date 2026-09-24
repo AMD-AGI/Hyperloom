@@ -23,6 +23,33 @@ _log = logging.getLogger(__name__)
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 
+# ---------------------------------------------------------------------------
+# PR ledger vocabulary — single source of truth shared with kb_writeback.py
+# (orchestrator cannot import from this package, so the constants must live here).
+# ---------------------------------------------------------------------------
+
+#: Append-log filename inside the framework_optimization/ directory.
+#: Must remain stable; kb_writeback.LESSONS_FILE and fa-CLI readers match it.
+LESSONS_FILE: str = "lessons.jsonl"
+
+#: Allowed ``outcome`` values for a PR ledger row.
+OUTCOME_INTEGRATED: str = "integrated"
+OUTCOME_ALREADY_PRESENT: str = "already_present"
+OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
+OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
+OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
+OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
+ALLOWED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        OUTCOME_INTEGRATED,
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        OUTCOME_REJECTED_APPLY_FAIL,
+        OUTCOME_ALREADY_PRESENT,
+        OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+        OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
+    }
+)
+
 #: The only supported override for the mutable KB root; both this module and
 #: ``kb_writeback`` honour it. It reaches the process through the
 #: ``INFERENCE_OPTIMIZER_`` prefix rule in the ``common/env_safety`` dotenv
@@ -368,7 +395,7 @@ def search_kb(query: str, *, domains: list[str] | None = None) -> list[KBFile]:
 def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
     """Read the framework PR outcome ledger from ``lessons.jsonl``."""
     root = kb_root or _resolve_kb_root()
-    path = root / _FRAMEWORK_OPTIMIZATION_ROOT / "lessons.jsonl"
+    path = root / _FRAMEWORK_OPTIMIZATION_ROOT / LESSONS_FILE
     if not path.is_file():
         return []
     out: list[dict] = []
@@ -387,6 +414,14 @@ def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
 
 __all__ = [
     "KBFile",
+    "LESSONS_FILE",
+    "ALLOWED_OUTCOMES",
+    "OUTCOME_INTEGRATED",
+    "OUTCOME_ALREADY_PRESENT",
+    "OUTCOME_REVERTED_SMOKE_FAIL",
+    "OUTCOME_REJECTED_APPLY_FAIL",
+    "OUTCOME_REVERTED_SWITCH_OFF_PARITY",
+    "OUTCOME_REVERTED_PARITY_INCONCLUSIVE",
     "list_domains",
     "get_domain_files",
     "contribute_to_kb",

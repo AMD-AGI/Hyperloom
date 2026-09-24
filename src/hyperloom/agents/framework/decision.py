@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from hyperloom.common.coerce import to_float
 
+from .kb import OUTCOME_ALREADY_PRESENT, OUTCOME_INTEGRATED
 from .models import Candidate, ExploreRequest
 
 
@@ -102,7 +103,7 @@ def prior_score(
 
     def _realized_gain(rec: dict[str, Any]) -> float:
         """Throughput a record actually delivered, else 0."""
-        if str(rec.get("outcome") or "") != "integrated":
+        if str(rec.get("outcome") or "") != OUTCOME_INTEGRATED:
             return 0.0
         if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
             return 0.0
@@ -126,9 +127,9 @@ def prior_score(
         param_score = param_hits / weight_sum
 
     def _success_value(outcome: str) -> float:
-        if outcome == "integrated":
+        if outcome == OUTCOME_INTEGRATED:
             return 1.0
-        if outcome == "already_present":
+        if outcome == OUTCOME_ALREADY_PRESENT:
             return 0.5
         return 0.0
 
