@@ -141,7 +141,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
-| IR-6 use apply_kernel_patch.py --target-file | `request_handlers.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
+| IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |
 
 ## Backend selection

@@ -443,7 +443,9 @@ async def test_kernel_handoff_prepares_source_or_stops_before_delegation(
     def stop_after_handoff(_name: str) -> Path:
         raise RuntimeError("stop after handoff write")
 
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path", stop_after_handoff)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path", stop_after_handoff
+    )
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
     handoff = tmp_path / "geak/handoff.json"
     if source_state in ("unresolved", "changed"):

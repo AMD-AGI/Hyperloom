@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from hyperloom.inference_optimizer.cli import _resolve_run_max_model_len
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     inject_sglang_context_length,
 )
 

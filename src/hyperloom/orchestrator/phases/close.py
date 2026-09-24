@@ -13,6 +13,7 @@ from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
@@ -81,7 +82,7 @@ class ClosePhase(PhaseHandler):
                 and str(evidence.get("sweep_skip_reason") or "") == "budget_exhausted_no_successful_pairs"
             ):
                 return "sweep_failed"
-            if reason and _phase_state.is_valid_stop_reason(reason):
+            if reason and is_valid_stop_reason(reason):
                 return reason
             # Newest CLOSE-bound row had no usable reason — stop rather than use a stale older one.
             break
@@ -549,7 +550,7 @@ class ClosePhase(PhaseHandler):
         # flush_session flips the receipt to final counts and patch_breakdown_langfuse splices it back into
         # session_breakdown.json, so the bundled SBD carries final counts.
         try:
-            from ..trace.langfuse_emitter import (
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import (
                 flush_session,
                 record_session_breakdown,
             )

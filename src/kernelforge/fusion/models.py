@@ -128,11 +128,15 @@ class ValidationResult:
     fused_us: Optional[float]
     kept: bool
     note: str = ""
+    # Whether anything compared the fused path against eager. When this is False,
+    # ``correctness_passed`` records an absence of evidence, not a parity failure.
+    correctness_measured: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "correctness": {
                 "passed": self.correctness_passed,
+                "measured": self.correctness_measured,
                 "max_abs_err": self.max_abs_err,
                 "rtol": self.rtol,
             },

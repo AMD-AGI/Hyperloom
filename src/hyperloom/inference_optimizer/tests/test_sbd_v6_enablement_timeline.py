@@ -22,6 +22,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import fina
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.enablement.recipe.section import recipe_for
 
 
 @pytest.fixture(autouse=True)
@@ -719,9 +720,7 @@ def test_the_tri_state_scans_survive_into_the_recorded_recipe(_bound_session, ob
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=rnd,
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -747,9 +746,7 @@ def test_a_build_linked_only_through_a_kept_round_survives_the_projection(_bound
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=rnd,
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -784,9 +781,7 @@ def test_the_kept_rounds_carry_no_paths_from_the_authoring_host(_bound_session):
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=rnd,
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
     )
 
     blob = _json.dumps(_ext(_bound_session)["recipe"]["kept_rounds"])
@@ -800,9 +795,7 @@ def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=_closing_round(),
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -834,9 +827,7 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=_closing_round(captured=False),
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(_closing_round(captured=False), session_dir=str(_bound_session), mode="all"),
     )
 
     decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
@@ -872,15 +863,15 @@ def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, mo
     while the verdict was computed over the full payload. The pair would then
     contradict each other, so the recipe is replaced by the explicit
     ``not_evaluated`` decision, which every consumer reads as insufficient."""
-    monkeypatch.setattr(enablement_event, "_MAX_RECIPE_BYTES", 8)
+    from hyperloom.orchestrator.enablement.recipe import section as _section
+
+    monkeypatch.setattr(_section, "_MAX_RECIPE_BYTES", 8)
 
     _boot_trigger()
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=_closing_round(),
-        session_dir=str(_bound_session),
-        mode="all",
+        recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -902,7 +893,7 @@ def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_se
     """
     from pathlib import Path as _Path
 
-    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+    from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
     state = {
         "enablement": {
@@ -930,7 +921,7 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
     import json as _json
     from pathlib import Path as _Path
 
-    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+    from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
     state = {
         "enablement": {

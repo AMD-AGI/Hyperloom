@@ -24,12 +24,12 @@ from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _to_float,
     phase_at,
 )
-from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
-from hyperloom.orchestrator.phases.machine_state import is_phase_transition_row
-from hyperloom.orchestrator.state.optimization_journal import (
+from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
+from hyperloom.inference_optimizer.session.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
+from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
 
 
 _TOKEN_IN_KEY = "input_tokens"

@@ -24,6 +24,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.session_resume import is_api_failure
 
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
 from .llm_failure import (
@@ -1332,21 +1333,18 @@ def _run_registered_author_once(
         )
     except OSError:
         log.warning("could not write registered author log %s", log_path)
-    end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
-    subtype = str(getattr(result, "subtype", "") or "")
-    ok = end_reason == "agent_stopped" and subtype in {"", "success"}
-    if not ok:
-        log.warning(
-            "%s author ended without success (end_reason=%s subtype=%s)",
-            backend.name,
-            end_reason,
-            subtype or "none",
-        )
-    if ok:
+    end_reason = result.end_reason
+    if end_reason == "agent_stopped":
         return AUTHOR_RC_OK, False
-    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than
-    # an exception; a turn cap or a session that simply stopped is the task's own answer.
-    return AUTHOR_RC_FAILED, end_reason == "sdk_error"
+    log.warning(
+        "%s author ended without success (end_reason=%s subtype=%s)",
+        backend.name,
+        end_reason,
+        result.subtype or "none",
+    )
+    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than an exception, so
+    # session_resume owns which of them is worth another attempt; a turn cap is the task's own answer.
+    return AUTHOR_RC_FAILED, is_api_failure(result)
 
 
 def run_author(

@@ -28,7 +28,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
-from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS
+from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -607,7 +607,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
     """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_NO_PROMOTE,
         derive_journal_outcome,
     )
@@ -636,7 +636,7 @@ async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
     optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
     naming a KEEP its own entries list never records."""
-    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
 
     coord = _coord(session_dir)
     s = coord.shared_state

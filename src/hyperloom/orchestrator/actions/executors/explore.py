@@ -28,6 +28,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
     FAILURE_STAGE_DECISION,
@@ -39,7 +40,6 @@ from ...state.shared_state import (
     first_positive_tput,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
-    resolved_grading,
     stack_base_params,
 )
 from ..stop_attribution import (
@@ -53,7 +53,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import workload_signature
+from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_base import (
     TS_FAILED,
@@ -79,7 +79,7 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from ._grid_server_args import compose_server_args, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
 
 from ._server_lifecycle import (

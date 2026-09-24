@@ -19,7 +19,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     _gpu_trace_unsupported_reason,
     make_roofline_executor,
 )
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -86,7 +86,7 @@ def _patch_subs(profile_result, ta_result):
         "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
 
@@ -149,7 +149,7 @@ async def test_roofline_passes_resolved_framework_to_trace_analysis(tmp_path, mo
         fake_profile,
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         fake_trace_analyze,
     )
 
@@ -398,7 +398,7 @@ async def test_primary_rank_missing_is_not_retried(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             side_effect=AssertionError("trace_analyze must not run"),
         ),
     ):
@@ -755,7 +755,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state.shared_state import (
+from hyperloom.orchestrator.state._shared_state.attempt_audit import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
     _KEY_METRIC_MAP,
 )
@@ -1258,7 +1258,7 @@ def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -1356,7 +1356,7 @@ def _n26_patch_subs(profile_result, ta_results, *, on_ta_call=None):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
         ta_calls,
@@ -1510,7 +1510,7 @@ async def test_retry_exception_propagates(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -1557,7 +1557,7 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -1747,7 +1747,7 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
