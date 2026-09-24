@@ -184,6 +184,7 @@ separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
 budget line as the urgency signal.
 
 <!-- phase: PRELUDE -->
+<!-- transport: tools -->
 ### PRELUDE — phase goal
 
 Drive `baseline_tput > 0` so the Coordinator advances.
@@ -199,6 +200,12 @@ Send that object to **`emit_intent`**, then end the turn so the Critic can
 review it and the Coordinator can dispatch the approved work. `baseline`
 is never eligible for `run_action_now`. On later turns, inspect `get_running_tasks` or
 `get_recent_outcomes` before requesting another baseline.
+
+<!-- phase: PRELUDE -->
+<!-- transport: structured_output -->
+### PRELUDE — phase goal
+
+Drive `baseline_tput > 0` so the Coordinator advances.
 
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
