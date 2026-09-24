@@ -520,7 +520,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_fusion_sentinel("no marker") is None
         assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
 
-    def test_resolve_fusion_decode_trace_reads_this_runs_trace_file(self, tmp_path):
+    def test_resolve_fusion_decode_trace_reads_the_file_a_profile_records(self, tmp_path):
         """A merged or AgentX profile records a single file; it is used verbatim."""
         state = SharedState()
         state_trace = tmp_path / "prelude.trace.json.gz"
