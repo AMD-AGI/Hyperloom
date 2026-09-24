@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from hyperloom.common.framework_arm import review_row_id as _arm_review_row_id
+from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
     LLMConfigError,
@@ -225,7 +225,7 @@ def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
             continue
         msg_id = str(proposal.get("msg_id") or "")
         payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
-        row_id = _arm_review_row_id(payload)
+        row_id = review_row_id(payload)
         if msg_id and row_id:
             out[msg_id] = row_id
     return out
