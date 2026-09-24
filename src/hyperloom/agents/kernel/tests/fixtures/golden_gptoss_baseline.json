@@ -1,0 +1,271 @@
+{
+  "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDS...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDS..."
+    ],
+    "duration_us": 134148.0,
+    "efficiency_peak_unit": "TFLOPS",
+    "efficiency_peak_value": 1725.0,
+    "efficiency_percent": 30.09,
+    "flops_per_byte": 464.26,
+    "kernel_category": "GEMM",
+    "library": "AITER",
+    "name": "aiter::gemm_a16w16",
+    "shapes": [
+      "(640,4096) bf16",
+      "(2880,4096) bf16",
+      "(2880,) bf16"
+    ],
+    "tracelens_category": "gemm"
+  },
+  "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x64_MI32x32x1_SN_LDSB...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x64_MI32x32x1_SN_LDSB..."
+    ],
+    "duration_us": 151565.0,
+    "efficiency_peak_unit": "TFLOPS",
+    "efficiency_peak_value": 1725.0,
+    "efficiency_percent": 33.29,
+    "flops_per_byte": 475.01,
+    "kernel_category": "GEMM",
+    "library": "AITER",
+    "name": "aiter::gemm_a16w16",
+    "shapes": [
+      "(640,2880) bf16",
+      "(5120,2880) bf16",
+      "(5120,) bf16"
+    ],
+    "tracelens_category": "gemm"
+  },
+  "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x320x64_MI16x16x1_SN_LDSB...": {
+    "call_count": 128,
+    "device_kernel_names": [
+      "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x320x64_MI16x16x1_SN_LDSB..."
+    ],
+    "duration_us": 105412.0,
+    "efficiency_peak_unit": "TFLOPS",
+    "efficiency_peak_value": 1725.0,
+    "efficiency_percent": 52.19,
+    "flops_per_byte": 522.28,
+    "kernel_category": "GEMM",
+    "library": "AITER",
+    "name": "aiter::gemm_a16w16",
+    "shapes": [
+      "(640,2880) bf16",
+      "(201088,2880) bf16"
+    ],
+    "tracelens_category": "gemm"
+  },
+  "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x64_MI16x16x1_SN_LDSB0_...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x64_MI16x16x1_SN_LDSB0_..."
+    ],
+    "duration_us": 57918.0,
+    "efficiency_peak_unit": "TB/s",
+    "efficiency_peak_value": 7.4,
+    "efficiency_percent": 4.94,
+    "flops_per_byte": 102.87,
+    "kernel_category": "GEMM",
+    "library": "AITER",
+    "name": "aiter::gemm_a16w16",
+    "shapes": [
+      "(640,2880) bf16",
+      "(128,2880) bf16",
+      "(128,) bf16"
+    ],
+    "tracelens_category": "gemm"
+  },
+  "_fused_add_rmsnorm_pad": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "_fused_add_rmsnorm_pad"
+    ],
+    "duration_us": 25970.0,
+    "efficiency_peak_unit": "TB/s",
+    "efficiency_peak_value": 7.4,
+    "efficiency_percent": 36.09,
+    "flops_per_byte": 0.61,
+    "kernel_category": "LayerNorm",
+    "library": "AITER",
+    "name": "aiter::fused_add_rmsnorm_pad_",
+    "shapes": [
+      "(640,2880) bf16",
+      "(2880,) bf16",
+      "(640,2880) bf16"
+    ],
+    "tracelens_category": "rmsnorm"
+  },
+  "_fused_qk_rope_reshape_and_cache_kernel": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "_fused_qk_rope_reshape_and_cache_kernel"
+    ],
+    "duration_us": 99373.0,
+    "efficiency_peak_unit": "",
+    "efficiency_peak_value": 0.0,
+    "efficiency_percent": 0.0,
+    "flops_per_byte": 0.0,
+    "kernel_category": "fusedrope",
+    "library": "AITER",
+    "name": "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)",
+    "shapes": [
+      "(640,4096) bf16",
+      "(640,512) bf16",
+      "(640,512) bf16",
+      "(640,) long int"
+    ],
+    "tracelens_category": "fusedrope"
+  },
+  "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1_fp4q_sort_async_v32": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1_fp4q_sort_async_v32"
+    ],
+    "duration_us": 632420.0,
+    "efficiency_peak_unit": "",
+    "efficiency_peak_value": 0.0,
+    "efficiency_percent": 0.0,
+    "flops_per_byte": 78.72,
+    "kernel_category": "MoE",
+    "library": "AITER",
+    "name": "pseudo_op::moe_flydsl_stage1",
+    "shapes": [
+      "(640,3072) bf16",
+      "(128,6144,1536) fp4",
+      "(128,3072,1536) fp4",
+      "(640,4) fp32",
+      "(640,4) int",
+      "(786432,96) fp8",
+      "(393216,96) fp8",
+      "(128,6144) fp32",
+      "(128,3072) fp32"
+    ],
+    "tracelens_category": "moe_unfused"
+  },
+  "mfma_moe2_afp4_wfp4_bf16_cshuffle_t64x256x256_vscale_fix3_fp4opt_v1_pm1": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "mfma_moe2_afp4_wfp4_bf16_cshuffle_t64x256x256_vscale_fix3_fp4opt_v1_pm1"
+    ],
+    "duration_us": 358854.0,
+    "efficiency_peak_unit": "",
+    "efficiency_peak_value": 0.0,
+    "efficiency_percent": 0.0,
+    "flops_per_byte": 77.48,
+    "kernel_category": "MoE",
+    "library": "AITER",
+    "name": "pseudo_op::moe_flydsl_stage2",
+    "shapes": [
+      "(640,3072) bf16",
+      "(128,6144,1536) fp4",
+      "(128,3072,1536) fp4",
+      "(640,4) fp32",
+      "(640,4) int",
+      "(786432,96) fp8",
+      "(393216,96) fp8",
+      "(128,6144) fp32",
+      "(128,3072) fp32"
+    ],
+    "tracelens_category": "moe_unfused"
+  },
+  "paged_attention_decode_sliding_window": {
+    "call_count": 2304,
+    "device_kernel_names": [
+      "paged_attention_decode_sliding_window"
+    ],
+    "duration_us": 68940.0,
+    "efficiency_peak_unit": "TB/s",
+    "efficiency_peak_value": 7.4,
+    "efficiency_percent": 43.34,
+    "flops_per_byte": 14.12,
+    "kernel_category": "SDPA",
+    "library": "AITER",
+    "name": "aiter::pa_decode_gluon",
+    "shapes": [
+      "(640,64,64) bf16",
+      "(640,64,64) bf16",
+      "(313996,8,4,16,16) fp8",
+      "(313996,8,1,64,16) fp8",
+      "(640,) int",
+      "(640,160) int",
+      "() fp32",
+      "() fp32",
+      "(640,8,1,8) fp32",
+      "(640,8,1,8) fp32",
+      "(640,8,1,8,64) bf16",
+      "(64,) bf16"
+    ],
+    "tracelens_category": "inferenceattention"
+  },
+  "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, std::bfloat16_t, 256,...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, std::bfloat16_t, 256,..."
+    ],
+    "duration_us": 26103.0,
+    "efficiency_peak_unit": "TB/s",
+    "efficiency_peak_value": 7.4,
+    "efficiency_percent": 35.32,
+    "flops_per_byte": 0.62,
+    "kernel_category": "LayerNorm",
+    "library": "AITER",
+    "name": "aiter::add_rmsnorm",
+    "shapes": [
+      "(640,2880) bf16",
+      "(640,2880) bf16",
+      "(640,2880) bf16",
+      "(640,2880) bf16",
+      "(2880,) bf16"
+    ],
+    "tracelens_category": "rmsnorm"
+  },
+  "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp..."
+    ],
+    "duration_us": 25394.0,
+    "efficiency_peak_unit": "TB/s",
+    "efficiency_peak_value": 7.4,
+    "efficiency_percent": 12.27,
+    "flops_per_byte": 0.51,
+    "kernel_category": "groupquant",
+    "library": "AITER",
+    "name": "aiter::dynamic_per_group_scaled_quant",
+    "shapes": [
+      "(640,1536) fp4",
+      "(640,3072) bf16",
+      "(640,96) c10::Float8_e8m0fnu"
+    ],
+    "tracelens_category": "groupquant"
+  },
+  "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<...": {
+    "call_count": 4608,
+    "device_kernel_names": [
+      "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<...",
+      "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<ai..."
+    ],
+    "duration_us": 58980.0,
+    "efficiency_peak_unit": "",
+    "efficiency_peak_value": 0.0,
+    "efficiency_percent": 0.0,
+    "flops_per_byte": 0.0,
+    "kernel_category": "MoE",
+    "library": "AITER",
+    "name": "aiter::moe_sorting_opus_fwd",
+    "shapes": [
+      "(640,4) int",
+      "(640,4) fp32",
+      "(10748,) int",
+      "(10748,) fp32",
+      "(168,) int",
+      "(2,) int",
+      "(640,3072) bf16",
+      "(82688,) fp8"
+    ],
+    "tracelens_category": "moe_aux"
+  }
+}

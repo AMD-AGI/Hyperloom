@@ -13,7 +13,6 @@ import csv
 import io
 import re
 from collections import Counter, defaultdict
-from collections.abc import Callable
 from typing import Any
 
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
@@ -22,11 +21,8 @@ from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
-from _bypass_source_resolver import (
-    resolve_by_kernel_name,
-    resolve_source,
-    resolve_triton_py,
-)
+from _kernel_partition import build_kernel_candidates_document
+from _kernel_source import resolve_source_verdict
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
@@ -325,20 +321,6 @@ def _short_name(kernel_name: str) -> str:
     return n[:80] if n else "unknown_kernel"
 
 
-def partition_kernels(
-    hot_kernels: list[dict[str, Any]],
-    is_routable: Callable[[dict[str, Any]], bool],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split a hot-kernel list into ``(routable, skipped)`` one way, everywhere."""
-    routable: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for row in hot_kernels:
-        if not isinstance(row, dict):
-            continue
-        (routable if is_routable(row) else skipped).append(row)
-    return routable, skipped
-
-
 def build_candidates(
     analyze_out: dict[str, Any],
     *,
@@ -357,37 +339,28 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution.
-        source_file, source_line, source_method = resolve_triton_py(
-            k.get("op_kernel_file", "") or "",
-            k.get("op_kernel_backend", "") or "",
-            symbol=kname,
+        # Source resolution: one call to TraceLens' resolver, keyed on the device
+        # symbol (native kernels under HIP graphs arrive with op_name=""); read the
+        # verdict off the ResolveResult (§3.4). A non-patchable kernel now carries a
+        # dispatcher source, so ``op_to_source_patchable`` -- not source presence --
+        # gates routing below.
+        resolution = resolve_source_verdict(
+            kname,
+            kernel_file=k.get("op_kernel_file", "") or "",
+            op_name=op_name,
         )
-        # Native lookup is driven by the device symbol (kname), not op_name: the finder ignores op_name, and device
-        # kernels with no correlated cpu_op (common under HIP graphs) arrive with op_name="".
-        finder_patchable: bool | None = None
-        finder_status = ""
-        finder_reason = ""
-        if not source_file and kname:
-            source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
-            if source_file:
-                source_method = method
-                finder_patchable = True
-                finder_status = "resolved"
-            elif method == "non_patchable":
-                # A positive "known not rewritable" verdict (e.g. a CK template instantiation), NOT a miss.
-                source_method = method
-                finder_patchable = False
-                finder_status = "non_rewritable"
-                finder_reason = (
-                    "non-patchable kernel (symbol-detected: CK template / no single editable __global__ source)"
-                )
-        # Repo-scan is the last resort, and only for a genuine miss -- never when the finder already returned an
-        # authoritative non_patchable verdict.
-        if not source_file and kname and source_method != "non_patchable":
-            source_file, method = resolve_by_kernel_name(kname)
-            if source_file:
-                source_method = method
+        location = resolution.location
+        source_file = location.source_file if location else ""
+        source_line = location.line if location else None
+        source_method = resolution.method
+        if not kc.reusable:
+            skip_reason = kc.skip_reason
+        elif not source_file:
+            skip_reason = "source file not resolved"
+        elif not resolution.patchable:
+            skip_reason = f"non-patchable: {resolution.reason}" if resolution.reason else "non-patchable kernel"
+        else:
+            skip_reason = ""
 
         # Shape resolution waterfall (provenance records the source): 1. torch_trace -- this kernel's own cpu_op Input
         # Dims (precise) 2. capture_backfill -- same-name kernel's capture-time shape 3. launch_grid -- this kernel's
@@ -461,17 +434,13 @@ def build_candidates(
             "source_type": source_type,
             "kernel_kind": kernel_kind,
             "reusable_native_kernel": kc.reusable,
-            # Non-reusable keeps the classifier reason; a reusable kernel with a finder non_patchable verdict reports
-            # that verdict; a reusable kernel with no resolved source is simply not dispatchable.
-            "skip_reason": (
-                kc.skip_reason
-                if not kc.reusable
-                else (
-                    ""
-                    if source_file
-                    else (f"source: {finder_reason}" if finder_patchable is False else "source file not resolved")
-                )
-            ),
+            "skip_reason": skip_reason,
+            # Read per-row by the orchestrator integration layer (writeback,
+            # request_handlers, _kernel_decisions, kernel_stack) for every route.
+            "identity_route": "bypass",
+            "op_to_source_patchable": resolution.patchable,
+            "op_to_source_reason": resolution.reason,
+            "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
             # Seeds for the GEAK harness + rocprof enrichment (only when discover_benchmarks is set).
             "benchmark_files": bench_files,
@@ -485,13 +454,6 @@ def build_candidates(
             # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
             "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
         }
-        # Carry the finder's authoritative patchability verdict (method "symbol_index") so the downstream gate honors
-        # it instead of re-deriving from heuristics, and so a non_patchable verdict is not silently indistinguishable
-        # from an unresolved miss.
-        if finder_patchable is not None:
-            cand["op_to_source_status"] = finder_status
-            cand["op_to_source_patchable"] = finder_patchable
-            cand["op_to_source_reason"] = finder_reason
         # Analytical roofline: derive bound_type / AI / efficiency from captured shapes + measured time for EVERY
         # estimable kernel (rocprof enrichment later refines it to a measured roofline).
         _roofline_shape = (
@@ -506,9 +468,9 @@ def build_candidates(
         )
         if rl:
             cand.update(rl)
-        # A reusable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is visible but
-        # not auto-dispatchable: the kernel-opt gate requires operand dims.
-        if kc.reusable and source_file and not cand["shape_dispatchable"]:
+        # A reusable, patchable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is
+        # visible but not auto-dispatchable: the kernel-opt gate requires operand dims.
+        if kc.reusable and source_file and resolution.patchable and not cand["shape_dispatchable"]:
             cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
         # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency, headroom=1 so
         # it degrades to gpu_pct.
@@ -537,22 +499,26 @@ def build_candidates(
     ):
         c["priority_rank"] = rank
 
-    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt: reusable + resolved source + a
-    # dispatch-grade operand shape.
-    routable_kernels, skipped_kernels = partition_kernels(
-        hot_kernels,
-        lambda c: bool(c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")),
-    )
-    return {
+    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt: reusable + resolved source that
+    # TraceLens confirms patchable + a dispatch-grade operand shape. The four-key document shape and the split are
+    # owned by the shared builder both routes call.
+    header = {
         "source": "bypass",
         "framework": framework,
         "target_platform": target_platform,
         "aggregation_scope": analyze_out.get("aggregation_scope", "full_trace"),
-        "hot_kernels": hot_kernels,
-        "routable_kernels": routable_kernels,
-        "skipped_kernels": skipped_kernels,
-        "task_groups": task_groups,
     }
+    return build_kernel_candidates_document(
+        header,
+        hot_kernels,
+        task_groups,
+        is_routable=lambda c: bool(
+            c.get("reusable_native_kernel")
+            and c.get("source_file")
+            and c.get("op_to_source_patchable")
+            and c.get("shape_dispatchable")
+        ),
+    )
 
 
 def build_summary(

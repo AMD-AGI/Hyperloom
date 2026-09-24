@@ -474,6 +474,8 @@ extend-exclude = [
     ".venv",
     "TraceLens-internal",
     "InferenceX",
+    # Working docs and any scratch scripts under them are not source we own the style of.
+    "Claude_Docs",
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
     # Knowledge base / examples / serving patches, not source we own the style
     # of. The example drivers are .py and would otherwise be reformatted.

@@ -76,7 +76,7 @@ def test_dry_run_writes_the_source_resolution_artifact(
                 "duration_us": 1.0,
                 "source_file": str(source),
                 "source_type": "python",
-                "source_resolution_method": "name_grep",
+                "source_resolution_method": "symbol_index",
             }
         ],
     )
@@ -371,7 +371,7 @@ def test_125_finalize_outputs_source_path_field():
             "shapes": [[16, 1024]],
         }
     ]
-    out = tla._finalize_candidates(candidates, total_dur=100.0)
+    out = tla._finalize_candidates(candidates)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
 
@@ -396,7 +396,6 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["tracelens_category"] == "GEMM"
@@ -515,7 +514,6 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=302429.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
@@ -555,7 +553,6 @@ def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_pat
 
     out = tla._finalize_candidates(
         candidates,
-        total_dur=170086.617,
         perf_report_csv_dir=csv_dir,
     )
 
@@ -588,7 +585,6 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=300.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["shapes"] == []
@@ -610,7 +606,6 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     ]
     out = tla._finalize_candidates(
         candidates,
-        total_dur=100.0,
         perf_report_csv_dir=tmp_path / "does_not_exist",
     )
     assert out[0].get("tracelens_category", "") == ""
@@ -2475,165 +2470,6 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# parse_analysis_md — TraceLens final-report contract
-_FIXTURE_LLAMA70B_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
-)
-
-
-def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert len(cands) == 21, (
-        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from the fixture; got {len(cands)}"
-    )
-
-    by_cat = {}
-    for c in cands:
-        by_cat.setdefault(c["tracelens_category"], []).append(c)
-    assert len(by_cat["gemm"]) == 18
-    assert len(by_cat["sdpa_fwd"]) == 2
-    assert len(by_cat["sdpa_bwd"]) == 1
-
-    p1_first = cands[0]
-    assert p1_first["name"] == "aten::mm"
-    assert p1_first["tracelens_category"] == "gemm"
-    assert p1_first["tracelens_pitem_rank"] == 1
-    assert p1_first["library"] == "Tensile"
-    assert p1_first["bound_type"] == "compute-bound"
-    # Time (ms) -> duration_us; first row of P1 = 7607.463 ms.
-    assert abs(p1_first["duration_us"] - 7607463.0) < 1.0
-    assert p1_first["call_count"] == 320
-    assert abs(p1_first["percent_of_total"] - 13.42) < 0.001
-    assert abs(p1_first["efficiency_percent"] - 68.74) < 0.001
-    assert p1_first["efficiency_peak_value"] == 708.0
-    assert "TFLOPS" in p1_first["efficiency_peak_unit"]
-    assert p1_first["impact_score"] == 15.12  # mid value from p_item marker
-    # Args is "<br>"-joined upstream; parser must normalise to a list of whitespace-trimmed shape strings without
-    # losing entries.
-    assert p1_first["shapes"] == [
-        "(24576,8192) bf16",
-        "(8192,28672) bf16",
-        "(24576,28672) bf16",
-    ]
-    # Kernel Path is "—" for every row in this fixture; parser must keep the field as empty string (not the dash) so
-    # downstream "no source path" checks remain truthy.
-    assert p1_first["source_file"] == ""
-
-    # Last candidate is the lone SDPA_bwd row (P3 in the report).
-    p3_only = cands[-1]
-    assert p3_only["name"] == "flash_attn::_flash_attn_backward"
-    assert p3_only["tracelens_category"] == "sdpa_bwd"
-    assert p3_only["tracelens_pitem_rank"] == 3
-    assert p3_only["library"] == "CK"
-    assert p3_only["call_count"] == 160
-
-
-def test_parse_analysis_md_returns_empty_when_no_detailed_analysis(tmp_path):
-    """Empty Detailed Analysis -> 0 candidates, so caller can fall back."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "# Stub\n\n## Compute Kernel Optimizations\n\n"
-        "✅ No actionable per-category compute-kernel bottlenecks were promoted.\n\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "_No compute-kernel reasoning candidates were promoted._\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_missing_file_returns_empty(tmp_path):
-    """Non-existent report -> 0 candidates (callers fall back, never raise)."""
-    assert tlr.parse_analysis_md(tmp_path / "nope.md", top_k=10) == []
-
-
-def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
-    """top_k caps the per-row total across all P-items, not per category."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=5)
-    assert len(cands) == 5
-    # First 5 rows of the fixture are all P1 GEMMs.
-    assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
-
-
-# Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
-def _write_two_pitem_analysis_md(md: Path) -> None:
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "<!-- impact-begin kind=p_item category=sdpa_fwd mid=1.5 low=0.5 high=3.0 -->\n"
-        "\n"
-        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: GEMM cluster (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| high_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "80% of 708 TFLOPS | compute-bound |\n"
-        "| low_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "5% of 708 TFLOPS | compute-bound |\n"
-        "| unknown_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        " | compute-bound |\n"
-        "| mid_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n"
-        "\n"
-        "<!-- reasoning-candidate tier=compute rank=2 -->\n"
-        "#### 🟡 P2: SDPA (CK)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| p2_sdpa | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "10% of 708 TFLOPS | compute-bound |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n"
-        "**Impact estimate:**\n"
-        "Low end: 1.0 ms savings (0.1% E2E)\n"
-        "High end: 2.0 ms savings (0.2% E2E)\n",
-        encoding="utf-8",
-    )
-
-
-def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """Within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    names = [c["name"] for c in cands]
-    assert names == [
-        # P1 rows sorted ascending by efficiency:
-        "low_eff_gemm",
-        "mid_eff_gemm",
-        "high_eff_gemm",
-        # Unknown / 0.0 efficiency lands last within the P-item:
-        "unknown_eff_gemm",
-        # P2 still after every P1 row regardless of efficiency:
-        "p2_sdpa",
-    ]
-
-
-def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """Budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
-    md = tmp_path / "analysis.md"
-    _write_two_pitem_analysis_md(md)
-
-    cands = tlr.parse_analysis_md(md, top_k=2)
-    names = [c["name"] for c in cands]
-    assert names == ["low_eff_gemm", "mid_eff_gemm"], (
-        "top_k=2 must keep the two lowest-efficiency P1 rows; the "
-        "high-efficiency / unknown rows must be dropped before any P2 row"
-    )
-
-
-# normalize_upstream_category — TraceLens orchestrator_prepare.py enum
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -2697,299 +2533,6 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
-# _extract_pitem_prose extracts Reasoning / Resolution / Impact.
-_SYNTHETIC_PITEM_BODY = """\
-#### 🔴 P1: RMSNorm fused with quantization (Triton)
-
-**Identification:** Four `aiter::rmsnorm_quant` operations were flagged as memory-bound with efficiencies of 0.88%-4.31% against peak HBM bandwidth of 5.3 TB/s. (source: `rmsnorm_metrics.json` → `operations[].efficiency.efficiency_percent`)
-
-**Data:**
-
-| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rmsnorm_quant | (8,4096) bf16 | aiter/ops/rmsnorm.py(76): rmsnorm | 123.4 | 4.2 | 64 | 0.5 | 30% of 5.3 TB/s | memory-bound |
-
-**Reasoning for Slowdown:**
-
-Memory-bound elementwise kernel; HBM bandwidth saturated by the bf16 load + fp8 quant store pair.
-
-**Resolution:**
-
-Fuse RMSNorm with the immediately-following GEMM to amortize global loads, or rewrite as a single-pass Triton kernel with `tl.store(..., mask=)`.
-
-**Impact estimate:**
-
-Low end (baseline shapes): 12.5 ms savings (3.2% E2E). High end (peak decode batch): 40.0 ms savings (10.4% E2E).
-"""
-
-
-def test_extract_pitem_prose_pulls_all_sections():
-    prose = tlr._extract_pitem_prose(_SYNTHETIC_PITEM_BODY)
-    assert "Four `aiter::rmsnorm_quant`" in prose["identification"]
-    assert "rmsnorm_metrics.json" in prose["identification"]
-    assert "Memory-bound elementwise kernel" in prose["reasoning_for_slowdown"]
-    assert "HBM bandwidth saturated" in prose["reasoning_for_slowdown"]
-    assert "Fuse RMSNorm" in prose["resolution"]
-    assert "amortize global loads" in prose["resolution"]
-    assert prose["impact_low_ms"] == 12.5
-    assert prose["impact_low_e2e_pct"] == 3.2
-    assert prose["impact_high_ms"] == 40.0
-    assert prose["impact_high_e2e_pct"] == 10.4
-
-
-def test_extract_pitem_prose_identification_stops_at_data_marker():
-    """Identification ends at ``**Data:**`` — must not leak the 9-column table into the field."""
-    body = (
-        "**Identification:** Three ops flagged at 0.5% efficiency. "
-        "(source: gemm_metrics.json)\n\n"
-        "**Data:**\n\n| Op | Args | ... |\n\n"
-        "**Reasoning for Slowdown:**\nMemory-bound.\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["identification"].startswith("Three ops flagged")
-    assert "gemm_metrics.json" in prose["identification"]
-    assert "| Op |" not in prose["identification"], (
-        "Identification leaked into the Data table — end-marker order is wrong"
-    )
-    assert "Memory-bound" not in prose["identification"]
-
-
-def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the four labels still return the full dict shape (key presence guaranteed)."""
-    prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
-    assert prose["identification"] == ""
-    assert prose["reasoning_for_slowdown"] == ""
-    assert prose["resolution"] == ""
-    assert prose["impact_low_ms"] == 0.0
-    assert prose["impact_low_e2e_pct"] == 0.0
-    assert prose["impact_high_ms"] == 0.0
-    assert prose["impact_high_e2e_pct"] == 0.0
-
-
-def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
-    """Reasoning must not leak into Resolution when both are present."""
-    body = (
-        "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
-        "**Resolution:**\nSecond paragraph.\n\n"
-        "**Impact estimate:**\nLow end: 1.0 ms savings (0.5% E2E).\n"
-        "High end: 2.0 ms savings (1.0% E2E).\n"
-    )
-    prose = tlr._extract_pitem_prose(body)
-    assert prose["reasoning_for_slowdown"] == "First paragraph."
-    assert prose["resolution"] == "Second paragraph."
-    assert prose["impact_low_ms"] == 1.0
-    assert prose["impact_high_ms"] == 2.0
-
-
-def test_extract_between_returns_empty_when_start_marker_missing():
-    """Defensive guard: missing start marker → empty, never raises."""
-    assert tlr._extract_between("body", "**Missing:**", ("**End:**",)) == ""
-
-
-def test_parse_analysis_md_attaches_prose_from_fixture():
-    """Every parsed LLama70B fixture candidate carries non-empty prose fields from its parent P-item block."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "fixture must produce at least one candidate"
-    # All 21 fixture candidates share P-item prose with their group.
-    for c in cands:
-        assert "identification" in c
-        assert "reasoning_for_slowdown" in c
-        assert "resolution" in c
-        assert "impact_low_ms" in c
-        assert "impact_high_ms" in c
-        # The fixture's P-items all have non-empty prose; require it.
-        assert c["reasoning_for_slowdown"], (
-            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} (rank P{c.get('tracelens_pitem_rank')})"
-        )
-        assert c["resolution"], f"empty resolution on candidate {c.get('name')!r}"
-
-    # P1 prose mentions "Tile / wave-occupancy tuning" per the fixture.
-    p1_rows = [c for c in cands if c["tracelens_pitem_rank"] == 1]
-    assert any("wave-occupancy" in c["resolution"] for c in p1_rows), (
-        "P1 resolution should mention wave-occupancy tuning (from fixture)"
-    )
-
-
-# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical ones (attention
-# appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
-_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_qwen3_moe_attention_analysis.md"
-)
-
-
-def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
-    """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
-    cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
-    assert len(cands) == 1, f"expected 1 attention candidate from the 12-column fixture; got {len(cands)}"
-    c = cands[0]
-    assert c["name"] == "vllm::unified_attention_with_output"
-    assert c["tracelens_category"] == "inferenceattention"
-    assert c["tracelens_pitem_rank"] == 1
-    assert c["bound_type"] == "memory-bound"
-    # Time (ms) -> duration_us; row is 45.862 ms.
-    assert abs(c["duration_us"] - 45862.0) < 1.0
-    assert c["call_count"] == 48
-    assert abs(c["percent_of_total"] - 2.61) < 0.001
-    assert abs(c["efficiency_percent"] - 3.69) < 0.001
-    assert c["efficiency_peak_value"] == 8.0
-    assert "TB/s" in c["efficiency_peak_unit"]
-    # impact_score is the mid value carried by the p_item marker.
-    assert c["impact_score"] == 2.2
-    # Kernel Path is a real launcher string (not "—"), so source_file must round-trip the relative path (resolution
-    # happens downstream).
-    assert "qwen3_moe.py" in c["source_file"]
-    # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None, "tracelens_extra_columns missing for 12-col row"
-    assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
-    assert extras.get("workload") == "unknown"
-    assert extras.get("attention pattern") == "GQA (8:1)"
-    # Canonical fields must NOT leak into extras.
-    for canonical_key in (
-        "operation",
-        "args",
-        "kernel path",
-        "time (ms)",
-        "%e2e",
-        "count",
-        "flops/byte",
-        "efficiency",
-        "bound",
-    ):
-        assert canonical_key not in extras
-
-
-def test_unified_attention_fixture_emits_semantic_workload_selectors():
-    candidates = tlr.parse_analysis_md(
-        _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD,
-        top_k=10,
-    )
-    candidate = candidates[0]
-    candidate["kernel_id"] = "k001"
-    group = {
-        "primary_kernel_id": "k001",
-        "rows": [candidate],
-    }
-
-    cases = task_group_contract.build_task_group_shape_cases(group)
-    assert len(cases) == 1
-    selector = cases[0]["selector"]
-    assert selector == {
-        "CASE_ID": "case_001",
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    assert {key: value for key, value in selector.items() if key != "CASE_ID"} == {
-        "QTOKENS": 1087,
-        "QHEADS": 32,
-        "KVHEADS": 4,
-        "HEADSIZE": 128,
-    }
-    canonical_workload = "_".join(f"{key}{selector[key]}" for key in sorted(selector) if key != "CASE_ID")
-    assert canonical_workload == ("HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087")
-
-    grouped_candidate = dict(candidate)
-    grouped_candidate["task_group"] = {
-        **group,
-        "shape_cases": cases,
-    }
-    shapes = task_group_contract.forge_shapes_from_candidate(grouped_candidate)
-    assert shapes["primary"] == selector
-    assert shapes["minimal"] == selector
-    assert shapes["validation"] == [selector]
-
-
-def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
-    """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Generic op cluster (Triton)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency | Bound | Sub-Category |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| custom_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS | compute-bound | scatter_gather |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    cands = tlr.parse_analysis_md(md, top_k=10)
-    assert len(cands) == 1
-    c = cands[0]
-    assert c["name"] == "custom_op"
-    assert c["tracelens_category"] == "other"
-    assert c["bound_type"] == "compute-bound"
-    assert c["call_count"] == 10
-    # ``Sub-Category`` is preserved in extras, never the candidate top-level.
-    extras = c.get("tracelens_extra_columns")
-    assert extras is not None
-    assert extras.get("sub-category") == "scatter_gather"
-    assert "sub-category" not in c
-
-
-def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
-    """Canonical 9-column candidates must NOT carry a ``tracelens_extra_columns`` key."""
-    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
-    assert cands, "Llama70B fixture must produce candidates"
-    for c in cands:
-        assert "tracelens_extra_columns" not in c, (
-            f"canonical 9-col candidate {c.get('name')!r} unexpectedly "
-            f"carries tracelens_extra_columns={c.get('tracelens_extra_columns')!r}"
-        )
-
-
-def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
-    """A table missing a canonical column (here ``Bound``, 8 cols) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Missing column (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
-    """Reordered canonical columns (Bound/Efficiency swapped) must be skipped, not mis-mapped."""
-    md = tmp_path / "analysis.md"
-    md.write_text(
-        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
-        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
-        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "#### 🔴 P1: Reordered columns (Tensile)\n\n"
-        "**Identification:** stub identification\n"
-        "**Data:**\n"
-        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
-        "FLOPS/Byte | Bound | Efficiency |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
-        "compute-bound | 40% of 708 TFLOPS |\n"
-        "**Reasoning for Slowdown:** stub reasoning\n"
-        "**Resolution:** stub resolution\n",
-        encoding="utf-8",
-    )
-    assert tlr.parse_analysis_md(md, top_k=10) == []
-
-
-# classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
     """A stable Triton source is reusable; skip_reason is empty."""
     cand = {
@@ -3956,15 +3499,6 @@ def test_is_native_source_detects_device_extensions():
         assert not tlr._is_native_source(p), p
 
 
-def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
-    """Profiler-derived names can begin with ``-``; grep must not treat them as command-line options."""
-    src = tmp_path / "kernel.py"
-    src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
-
-    tla._GREP_CACHE.clear()
-    assert tla._grep_for_keyword("--danger", tmp_path) == [src]
-
-
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
     """A native .cu kernel invoked from two call sites reports two different ``#L`` lines (no Python AST def-line exists)."""
     src = tmp_path / "rmsnorm.cu"
@@ -4421,57 +3955,6 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.
-
-
-def test_extract_total_time_us_from_gpu_timeline(tmp_path):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir()
-    (csv_dir / "gpu_timeline.csv").write_text(
-        "type,time ms,percent\ncompute_time,100.5,80.0\ntotal_time,125.0,100.0\nidle_time,24.5,20.0\n",
-        encoding="utf-8",
-    )
-    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
-    assert result == 125000.0
-
-
-def test_extract_total_time_us_returns_none_when_missing(tmp_path):
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
-
-
-# gpu_timeline cell reads + low-compute gate evaluation
-
-
-def _write_gpu_timeline(tmp_path, body: str):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir(exist_ok=True)
-    (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        # Duration column renamed beyond the known aliases: the row is found, the number is not.
-        "type,duration,percent\ntotal_time,18186.6,100.0\n",
-        # Row truncated: DictReader yields None for the missing cell, and float(None) raises TypeError rather than
-        # ValueError.
-        "type,time ms,percent\ntotal_time\n",
-        # Present but blank.
-        "type,time ms,percent\ntotal_time,,100.0\n",
-        # Present but not a number.
-        "type,time ms,percent\ntotal_time,n/a,100.0\n",
-    ],
-)
-def test_unreadable_total_time_cell_is_none_not_zero(tmp_path, body):
-    """An unreadable window total must fail open, never read as ``0 ms``."""
-    _write_gpu_timeline(tmp_path, body)
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
-
-
-@pytest.mark.parametrize("column", ["time ms", "time (ms)", "time_ms", "ms"])
-def test_known_duration_column_spellings_are_read(tmp_path, column):
-    """Known alias spellings are read rather than discarded as unknown."""
-    _write_gpu_timeline(tmp_path, f"type,{column},percent\ntotal_time,18186.6,100.0\n")
-    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) == 18186600.0
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
