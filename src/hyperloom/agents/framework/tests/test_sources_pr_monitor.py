@@ -12,7 +12,7 @@ import urllib.error
 import pytest
 
 from hyperloom.agents.framework.sources import pr_monitor as pc
-from hyperloom.agents.framework.sources._shared import GitHubPr, _repo_slug
+from hyperloom.agents.framework.sources._shared import GitHubPr
 
 
 class _FakeResp:
@@ -40,27 +40,6 @@ def _install_urlopen(monkeypatch, handler) -> None:
         return handler(req)
 
     monkeypatch.setattr(pc.urllib.request, "urlopen", fake)
-
-
-def test_repo_slug_parses_https_ssh_and_git_suffix() -> None:
-    """_repo_slug handles https/.git/ssh URLs uniformly."""
-    assert _repo_slug("https://github.com/sgl-project/sglang.git") == "sgl-project/sglang"
-    assert _repo_slug("https://github.com/sgl-project/sglang") == "sgl-project/sglang"
-    assert _repo_slug("git@github.com:sgl-project/sglang.git") == "sgl-project/sglang"
-
-
-def test_repo_slug_rejects_malformed() -> None:
-    """Non-GitHub-shaped URLs raise ValueError."""
-    with pytest.raises(ValueError):
-        _repo_slug("not-a-url")
-
-
-def test_repo_slug_rejects_github_substring_in_path() -> None:
-    """URLs that embed github.com in the path must not be accepted."""
-    with pytest.raises(ValueError):
-        _repo_slug("https://evil.com/github.com/owner/repo.git")
-    with pytest.raises(ValueError):
-        _repo_slug("https://github.com.evil.com/owner/repo.git")
 
 
 def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
@@ -173,4 +152,3 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
             "https://github.com/sgl-project/sglang.git",
             base_url="http://x",
         )
-

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -14,10 +15,9 @@ from pathlib import Path
 
 from hyperloom.common.git_safety import safe_directory_args
 
-from .logging_setup import get_logger
 from .models import Candidate
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 _DISK_MIN_GB_ENV = "FRAMEWORK_EXPLORER_DISK_MIN_GB"
@@ -126,19 +126,14 @@ def prepare_repo_cache(repo_url: str, work_dir: Path) -> Path:
 
 def _worktree_ref(candidate: Candidate) -> str:
     """Choose the ref to materialise in a detached worktree."""
-    if candidate.head_sha:
-        return candidate.head_sha
     if candidate.ref.startswith("PR:"):
         number = candidate.ref.split(":", 1)[1]
         return f"refs/pull/{number}/head"
     return candidate.ref
 
 
-def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
-    """Pre-fetch the candidate's ref into the cache mirror."""
-    if candidate.head_sha:
-        _run_git(["git", "fetch", "origin", candidate.head_sha], cwd=repo_dir)
-        return
+def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
+    """Pre-fetch a PR candidate's head into the cache mirror."""
     if not candidate.ref.startswith("PR:"):
         return
     number = candidate.ref.split(":", 1)[1]
@@ -168,7 +163,7 @@ def prepare_candidate_workspace(
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
     repo_dir = prepare_repo_cache(repo_url, work_dir)
-    fetch_candidate_ref(repo_dir, candidate)
+    _fetch_candidate_ref(repo_dir, candidate)
     if worktree_dir.exists():
         shutil.rmtree(worktree_dir)
     log.info(
@@ -209,7 +204,6 @@ __all__ = [
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
     "disk_preflight",
-    "fetch_candidate_ref",
     "prepare_candidate_workspace",
     "prepare_repo_cache",
 ]
