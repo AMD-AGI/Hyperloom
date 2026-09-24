@@ -327,8 +327,8 @@ def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys)
 
 def test_emit_status_to_returncode_contract():
     k = _load("kno_emit")
-    # ok/restored/noop_missing_backup -> 0; everything else -> 1.
-    for ok_status in ("ok", "restored", "noop_missing_backup"):
+    # Completed operations return zero; failures and unknown states do not.
+    for ok_status in ("ok", "restored", "finalized", "noop_missing_backup"):
         assert k._emit({"status": ok_status}) == 0
     for bad_status in ("failed", "error", ""):
         assert k._emit({"status": bad_status}) == 1
