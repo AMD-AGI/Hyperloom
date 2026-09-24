@@ -13,6 +13,8 @@ from typing import Any
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.common.timeutil import now_iso
 
+from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
+
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
@@ -108,6 +110,14 @@ class GapsStateMixin:
         gap["last_updated_ts"] = now_iso()
         return gap
 
+
+_GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
+    "failure_id",
+    "fingerprint",
+    "stage",
+    "workspace",
+    "server_log_path",
+)
 
 class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
@@ -323,3 +333,81 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if a in {"baseline"}:
             return ("system", "system_specialist")
         return ("framework", authoring_domain_for_framework(framework))
+
+    def _record_explore_round_gaps(
+        self,
+        *,
+        task: "Any | None",
+        result: dict[str, "Any"],
+    ) -> None:
+        """Append per-variant KEEP/REVERT outcomes to the matching gap."""
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list) or not per_variant:
+            return
+        params = dict(task.params or {})
+        canonical = str(params.get("gap_canonical_id") or "").strip() or self._workload_canonical_id()
+        state = self.shared_state
+        existing = state.find_gap(canonical)
+        if existing is None:
+            state.upsert_gap(
+                {
+                    "canonical_id": canonical,
+                    "symptom": "explore round outcomes",
+                    "layer": "framework",
+                    "severity": "medium",
+                    "domain_hint": self._framework_authoring_domain(),
+                    "source": "attempts",
+                }
+            )
+        for outcome in per_variant:
+            if not isinstance(outcome, dict):
+                continue
+            attempt: dict[str, "Any"] = {
+                "action": "explore",
+                "variant_name": str(outcome.get("variant_name") or ""),
+                "outcome": str(outcome.get("outcome") or "").upper(),
+                "gain_pct": outcome.get("gain_pct"),
+                "reason": str(outcome.get("reason") or ""),
+                "error_class": str(outcome.get("error_class") or ""),
+            }
+            for key in _GAP_ATTEMPT_ARTIFACT_KEYS:
+                value = outcome.get(key)
+                if value:
+                    attempt[key] = str(value)
+            state.append_gap_attempt(canonical, attempt)
+
+    def _record_explore_variant_failures(
+        self,
+        *,
+        task: "Any | None",
+        result: dict[str, "Any"],
+    ) -> None:
+        """Record unmeasured per_variant_outcomes rows as failure evidence."""
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list):
+            return
+        task_id = str(task.task_id or "")
+        round_id = str(result.get("round_id") or "")
+        for vo in per_variant:
+            if not isinstance(vo, dict):
+                continue
+            if str(vo.get("outcome") or "").upper() not in UNMEASURED_OUTCOMES:
+                continue
+            fe = failure_from_variant_outcome(task_id=task_id, round_id=round_id, vo=vo)
+            self.shared_state.record_failure_evidence(fe)
+            self.shared_state.record_action_failure(
+                action="explore",
+                task_id=task_id,
+                result={
+                    "variant_name": str(vo.get("variant_name") or ""),
+                    "error_class": str(vo.get("error_class") or ""),
+                    "error": str(vo.get("reason") or ""),
+                    "workspace": vo.get("workspace"),
+                    "stderr_log_path": vo.get("server_log_path"),
+                    "failure_id": fe.get("failure_id"),
+                },
+            )
