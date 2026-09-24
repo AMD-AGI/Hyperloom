@@ -521,6 +521,7 @@ class TestPreDispatchBackstop:
     ):
         """It is registered for cancellation and excluded, but never joined."""
         _set_budget(coord, minutes=600)
+        coord.shared_state.phase = "ENABLEMENT"  # targeted_build is allowed in ENABLEMENT
         task, _ = await coord.tasks.create_or_return_existing(
             kind="targeted_build",
             params={},
@@ -546,6 +547,7 @@ class TestPreDispatchBackstop:
         from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
         _set_budget(coord, minutes=180)
+        coord.shared_state.phase = "SWEEP"  # conc_sweep is only allowed in SWEEP
         task, _ = await coord.tasks.create_or_return_existing(
             kind="conc_sweep",
             params={},
@@ -734,6 +736,7 @@ class TestCancellingInflightActions:
     @pytest.mark.asyncio
     async def test_the_closing_actions_can_be_spared(self, coord: Coordinator):
         """Cancelling the report to save time would leave nothing to show for the run."""
+        coord.shared_state.phase = "CLOSE"  # report is only allowed in CLOSE
         _, atask = await _start_action(coord, kind=_CLOSING_ACTION, key="c-exempt")
         try:
             assert (
@@ -1228,6 +1231,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
     async def test_the_closing_actions_keep_their_reserve(self, coord: Coordinator):
         """The budget hits zero with the closing window still to spend."""
         _quick_poll(coord)
+        coord.shared_state.phase = "CLOSE"  # report is only allowed in CLOSE
         _set_budget(coord, minutes=600, elapsed_min=600.0)
         _task, atask, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="p-closing")
         await asyncio.sleep(0.3)
@@ -1440,6 +1444,7 @@ class TestThePumpOnlyCancelsWhatItSpawned:
     ):
         """Narrowing the sweep must not cost the pump the actions it does own."""
         _quick_poll(coord)
+        coord.shared_state.phase = "CLOSE"  # report is only allowed in CLOSE
         inline = await _start_inline_action(coord, monkeypatch)
         _task, spawned, pump = await _start_action_under_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
         try:

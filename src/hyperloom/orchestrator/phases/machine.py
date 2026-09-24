@@ -200,6 +200,37 @@ class MachinePhase(PhaseHandler):
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
+        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
+        # GPU barrier: cancel all queued tasks and all inflight actions, then confirm silence.
+        allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
+        cancelled = await self.tasks.cancel_queued(
+            allowed_kinds=allowed_kinds,
+            reason=barrier_reason,
+        )
+        await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        running = list(await self.tasks.running())
+        if running:
+            log.debug(
+                "phase_machine: waiting for %d task(s) to stop before committing %s -> %s",
+                len(running),
+                prior or "<unset>",
+                target,
+            )
+            return
+        if cancelled:
+            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "count": len(cancelled),
+                },
+            )
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
@@ -257,26 +288,6 @@ class MachinePhase(PhaseHandler):
             and "no_gain_cycle_streak_effective" in evidence
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
-        allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
-        cancelled = await self.tasks.cancel_queued_not_allowed(
-            allowed_kinds=allowed_kinds,
-            reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
-        )
-        if cancelled:
-            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "queued_tasks_cancelled_on_phase_transition",
-                    "prior_phase": str(prior or ""),
-                    "target_phase": target,
-                    "reason": reason,
-                    "cancelled_task_ids": cancelled,
-                    "count": len(cancelled),
-                    "detail": f"kind not allowed in {target}; re-dispatch if still needed",
-                },
-            )
         _phase_state.record_phase_transition(
             state,
             to_phase=target,

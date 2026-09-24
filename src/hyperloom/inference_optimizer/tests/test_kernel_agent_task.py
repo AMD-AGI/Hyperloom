@@ -265,7 +265,8 @@ async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settl
 
 
 @pytest.mark.asyncio
-async def test_a_spent_phase_budget_leaves_kernel_under_a_running_kernel_agent(coord, monkeypatch):
+async def test_a_spent_phase_budget_leaves_kernel_after_the_barrier_clears(coord, monkeypatch):
+    """Budget exit commits once the barrier confirms no tasks are running."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
@@ -274,8 +275,17 @@ async def test_a_spent_phase_budget_leaves_kernel_under_a_running_kernel_agent(c
     await c.tasks.transition(task.task_id, "running")
     _spend_the_phase_budget(st)
 
+    # First tick: barrier fires, cancel_inflight_actions is a no-op for the
+    # manually-transitioned row (not in dispatcher._inflight_actions), but the
+    # running-task check defers the transition.
     await c._advance_phase_if_needed()
+    assert st.phase == ps.PHASE_KERNEL_AGENT
 
+    # Simulate the task finishing (as it would after the cancellation signal lands).
+    await c.tasks.transition(task.task_id, "cancelled", evidence={"reason": "budget_barrier"})
+
+    # Second tick: no running tasks → barrier passes → phase commits.
+    await c._advance_phase_if_needed()
     assert st.phase == ps.PHASE_SWEEP
     assert st.phase_history[-1]["reason"] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
 
@@ -413,3 +423,85 @@ async def test_a_covered_step_that_raises_is_recorded_failed(coord):
     with pytest.raises(RuntimeError, match="profile crashed"):
         await c.sub.execute_covered(step)
     assert (await c.tasks.get(step.task_id)).state == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Commit 3: phase-transition barrier and phase-incompatible admission guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_is_deferred_while_a_task_is_running(coord, monkeypatch):
+    """The GPU barrier holds the transition until the registry is quiet."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    # skip_to_sweep hint makes the KERNEL exit condition fire immediately.
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    task = await _create_kernel_agent(c)
+    await c.tasks.transition(task.task_id, "running")
+
+    # First tick: exit fires, barrier defers because the task is still running.
+    await c._advance_phase_if_needed()
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+
+    # Task finishes; barrier passes on the next tick.
+    await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
+    await c._advance_phase_if_needed()
+    assert st.phase == ps.PHASE_SWEEP
+
+
+@pytest.mark.asyncio
+async def test_after_phase_transition_registry_has_no_running_tasks(coord, monkeypatch):
+    """After the transition commits, no running tasks remain in the registry."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    task = await _create_kernel_agent(c)
+    # Task already finished: no running tasks for the barrier to block on.
+    await c.tasks.transition(task.task_id, "running")
+    await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
+
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert await c.tasks.running() == []
+
+
+@pytest.mark.asyncio
+async def test_phase_incompatible_task_is_cancelled_at_admission(coord, monkeypatch):
+    """A task whose kind is not in the current phase's allowlist is cancelled when the pump next runs."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    # ``specialist`` is not in the KERNEL allowlist.
+    task, _ = await c.tasks.create_or_return_existing(
+        kind="specialist",
+        params={"scope": "freeform", "domain": "test"},
+        idempotency_key="late-specialist",
+        requires_lanes=[],
+        lease_ttl_sec=60,
+    )
+    assert task.state == "queued"
+
+    # Register a no-op executor so the pump doesn't fail on an unknown kind.
+    c.sub.register_executor("specialist", lambda _ctx: asyncio.sleep(0))
+    await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
+
+    assert (await c.tasks.get(task.task_id)).state == "cancelled"
+
+
+def test_enablement_allowlist_includes_specialist():
+    """specialist is in the ENABLEMENT allowlist; a task of that kind must not be phase-rejected."""
+    allowed = ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_ENABLEMENT]
+    assert "specialist" in allowed
+
+
+def test_kernel_allowlist_excludes_specialist():
+    """specialist is NOT in the KERNEL allowlist after Commit 3."""
+    allowed = ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
+    assert "specialist" not in allowed

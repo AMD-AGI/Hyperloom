@@ -72,6 +72,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "baseline",
             "roofline",
             "profile",
+            # Coordinator-internal: replay a warm recipe from a prior session at PRELUDE entry.
+            "replay_warm_recipe",
         }
     ),
     # ``baseline`` is carried so the Coordinator's revalidation survives the
@@ -99,12 +101,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "profile",
         }
     ),
-    # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase entry, so an LLM re-issuing them per
-    # tick would bypass the lane budget they are derived from.
+    # No specialist: KERNEL is a single-pipeline phase; a specialist dispatched here would occupy gpu_research_lane
+    # that kernel_agent holds via benchmark_lane's expansion, and its authoring output has no path to integration.
     PHASE_KERNEL_AGENT: frozenset(
         {
             "integrate",
-            "specialist",
             "roofline",
             "profile",
             # Coordinator-internal: the phase's whole pipeline, enqueued once at entry.

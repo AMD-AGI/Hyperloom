@@ -273,12 +273,10 @@ entry-hook branch order.
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
-- `kernel_opt`
 - `integrate`
-- `gemm_tuning`
-- `specialist`
 - `roofline`
 - `profile`
+- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
