@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hyperloom.common.github_urls import repo_slug as _repo_slug  # noqa: F401
-
 
 @dataclass(frozen=True)
 class GitHubPr:
@@ -24,4 +22,4 @@ class GitHubPr:
         return f"PR:{self.number}"
 
 
-__all__ = ["GitHubPr", "_repo_slug"]
+__all__ = ["GitHubPr"]

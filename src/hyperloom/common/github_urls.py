@@ -11,12 +11,7 @@ _GITHUB_HOST = "github.com"
 
 
 def repo_slug(repo_url: str) -> str:
-    """Parse ``owner/name`` from a GitHub-style git URL.
-
-    Accepts HTTPS, SSH (``git@github.com:owner/name.git``), and bare
-    ``owner/name[.git]`` forms.  Raises ``ValueError`` when the URL cannot
-    be parsed or does not point at github.com.
-    """
+    """Parse ``owner/name`` from a github.com HTTPS or SSH URL; raise ``ValueError`` for anything else."""
     raw = repo_url.strip()
     if raw.endswith(".git"):
         raw = raw[:-4]

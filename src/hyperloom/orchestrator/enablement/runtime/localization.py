@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable
 
+from hyperloom.common.github_urls import repo_slug
+
 
 # A closure that touches any of these is a compiled / build-backend change and must defer to a targeted build, never
 # localized+booted here.
@@ -173,8 +175,6 @@ def build_localization_diff(
 def _repo_slug_safe(repo_url: str) -> str:
     """Best-effort ``owner/name`` slug from a git URL; ``""`` when unparseable."""
     try:
-        from hyperloom.common.github_urls import repo_slug
-
         return repo_slug(repo_url)
     except ValueError:
         return ""
