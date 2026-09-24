@@ -32,6 +32,7 @@ class ContextProvider:
     running_tasks_reader: Callable[[], str] | None = None
     # Whitelisted lane-light action runner; ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
+    inline_action_names: Callable[[], frozenset[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
 
@@ -294,8 +295,10 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "Run a CHEAP, lane-light action synchronously and get its result "
         "back IN THIS TURN (closes the act->observe loop without waiting "
         "for the next tick). Only a small whitelist of fast, non-GPU / "
-        "non-serving actions is eligible; anything heavy must still go "
-        "through emit_intent delegate (async). PolicyGate still gates the "
+        "non-serving actions is eligible, as listed in action_name's enum. "
+        "For baseline and other heavy work, use emit_intent with a "
+        "propose_action or delegate intent and payload.action_name naming the action, "
+        "then end the turn so the scheduler can dispatch it. PolicyGate still gates the "
         "run (phase / role / paths). Args: action_name (str), optional "
         "params (object). For deep multi-step investigation, delegate to "
         "a specialist sub-agent instead.",
@@ -422,6 +425,14 @@ def build_context_tools_server(
 
     decorated_tools = []
     for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS:
+        if tool_name == "run_action_now" and provider.inline_action_names is not None:
+            names = sorted(provider.inline_action_names())
+            if not names:
+                continue
+            schema = {
+                **schema,
+                "properties": {**schema["properties"], "action_name": {"type": "string", "enum": names}},
+            }
         decorator = tool_factory(tool_name, description, schema)
         decorated_tools.append(decorator(_make_handler(provider, method_name)))
     return server_factory(MCP_SERVER_NAME, "1.0.0", decorated_tools)

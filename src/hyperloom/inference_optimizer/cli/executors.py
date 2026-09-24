@@ -290,6 +290,9 @@ def _register_executors(
         TargetedBuildExecutor(),
     )
 
+    # Context-tool schemas describe the executors that are now registered.
+    coordinator._attach_orchestration_context_tools()
+
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):
             if required_kind not in coordinator.sub.executor_registry:

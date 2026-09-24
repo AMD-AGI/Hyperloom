@@ -105,7 +105,9 @@ class _FakeSub:
 
 
 def _fake_coordinator() -> SimpleNamespace:
-    return SimpleNamespace(sub=_FakeSub(), shared_state=SimpleNamespace())
+    return SimpleNamespace(
+        sub=_FakeSub(), shared_state=SimpleNamespace(), _attach_orchestration_context_tools=lambda: None
+    )
 
 
 def test_register_executors_wires_full_set():

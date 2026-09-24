@@ -580,6 +580,129 @@ async def test_action_handler_rejects_baseline_with_default_whitelist(inline_coo
     assert not coord.dispatcher._inflight_actions
 
 
+async def test_sdk_advertises_dispatcher_inline_actions_and_rejects_baseline(inline_coordinator, monkeypatch):
+    sdk = pytest.importorskip("claude_agent_sdk")
+    from mcp import types
+    from hyperloom.inference_optimizer.cli.executors import _register_executors
+
+    coord = inline_coordinator
+    providers = []
+    monkeypatch.setattr(coord.backends["orchestration"], "set_context_provider", providers.append, raising=False)
+    _register_executors(coord, session_dir=coord.session_dir)
+    server = mct.build_context_tools_server(providers[0], sdk_module=sdk)["instance"]
+    listed = await _sdk_request(server, types.ListToolsRequest(method="tools/list"))
+    action = next(tool for tool in listed.tools if tool.name == "run_action_now")
+    choices = action.inputSchema["properties"]["action_name"]["enum"]
+    assert choices == sorted(coord._inline_action_whitelist())
+    assert "target_analysis" in choices
+    assert "baseline" not in choices
+    for name in ("baseline", "sweep", "profile"):
+        result = await _sdk_request(
+            server,
+            types.CallToolRequest(
+                method="tools/call",
+                params=types.CallToolRequestParams(name="run_action_now", arguments={"action_name": name}),
+            ),
+        )
+        assert result.model_dump(by_alias=True)["isError"] is True
+        assert name in result.content[0].text
+    assert not await coord.tasks.queued()
+    assert not await coord.tasks.running()
+    assert not coord.dispatcher._executions
+    assert "enum" not in mct._RUN_ACTION_SCHEMA["properties"]["action_name"]
+
+    async def target_analysis(ctx):
+        return {"status": "ok"}
+
+    coord.sub.register_executor("target_analysis", target_analysis)
+    accepted = await _sdk_request(
+        server,
+        types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="run_action_now", arguments={"action_name": "target_analysis"}),
+        ),
+    )
+    assert accepted.model_dump(by_alias=True)["isError"] is False
+    assert "inline run complete" in accepted.content[0].text
+    outcomes = await coord.bus.tail(topic="delegated_result")
+    assert len(outcomes) == 1 and outcomes[0].payload["kind"] == "target_analysis"
+
+
+async def test_sdk_omits_inline_tool_when_no_actions_are_eligible():
+    sdk = pytest.importorskip("claude_agent_sdk")
+    from mcp import types
+
+    provider = mct.ContextProvider(shared_state=_shared_state(), inline_action_names=frozenset)
+    server = mct.build_context_tools_server(provider, sdk_module=sdk)["instance"]
+    listed = await _sdk_request(server, types.ListToolsRequest(method="tools/list"))
+    assert "run_action_now" not in {tool.name for tool in listed.tools}
+
+
+@pytest.mark.parametrize("intent_type", ["propose_action", "delegate"])
+async def test_baseline_intent_runs_through_async_scheduler(inline_coordinator, intent_type):
+    from hyperloom.inference_optimizer.protocol.intent import validate_envelope
+    from hyperloom.orchestrator.roles.mcp_emit_intent import _emit_intent_handler
+
+    coord = inline_coordinator
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.max_minutes = 180
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def baseline(ctx):
+        calls.append(ctx.task.task_id)
+        started.set()
+        await release.wait()
+        return {"status": "ok"}
+
+    coord.sub.register_executor("baseline", baseline)
+    envelope = {
+        "intent_type": intent_type,
+        "payload": {"action_name": "baseline", "predicted_gain_pct": 0, "params": {}},
+    }
+    ack = await _emit_intent_handler(envelope)
+    assert not ack.get("is_error")
+    intent = validate_envelope({"intents": [envelope]})[0]
+    await coord._handle_intent("orchestration", intent)
+    assert not calls
+    if intent_type == "propose_action":
+        assert not await coord.tasks.queued()
+        proposal_id = next(iter(coord.state.pending_proposals))
+        approval = validate_envelope(
+            {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {"target_proposal_msg_id": proposal_id, "verdict": "approve"},
+                    }
+                ]
+            }
+        )[0]
+        await coord._handle_intent("critic", approval)
+    queued = await coord.tasks.queued()
+    assert len(queued) == 1 and queued[0].kind == "baseline"
+    task = queued[0]
+    assert "benchmark_lane" in task.requires_lanes
+    assert not calls
+    pump = asyncio.create_task(coord._pump_dispatcher_once())
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        assert (await coord.tasks.get(task.task_id)).state == "running"
+        assert await coord.locks.lane_holders()
+        assert not pump.done()
+        assert coord.shared_state.baseline_tput == 0
+    finally:
+        release.set()
+        await asyncio.wait_for(pump, 3)
+    assert calls == [task.task_id]
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
+    outcomes = await coord.bus.tail(topic="delegated_result")
+    assert len(outcomes) == 1 and outcomes[0].payload["task_id"] == task.task_id
+    assert not outcomes[0].payload.get("inline")
+    assert not await coord.locks.lane_holders()
+    assert coord.shared_state.baseline_tput == 0
+
+
 @pytest.mark.parametrize("abandon", ["timeout", "cancel"])
 async def test_action_handler_keeps_real_dispatcher_execution_exactly_once(inline_coordinator, monkeypatch, abandon):
     from hyperloom.orchestrator.actions.cancel_channel import stop_was_asked_for
