@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..state.shared_state import SharedState
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -889,7 +890,20 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
     body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
-    return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
+    update_fields = [f"- `{name}`: `{expected.__name__}`" for name, expected in SharedState.AGENT_UPDATE_FIELDS.items()]
+    return [
+        "## 7. RULES & OUTPUT PROTOCOL",
+        "",
+        body,
+        "",
+        "### UPDATE_STATE",
+        "",
+        "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
+        *update_fields,
+        "All other known state fields are Coordinator-owned. A forbidden field or a wrong value type",
+        "rejects the entire intent before any assignment. Unknown keys are not applied and appear in",
+        "the observation's `rejected` list; valid fields in that same update still apply.",
+    ]
 
 
 def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:

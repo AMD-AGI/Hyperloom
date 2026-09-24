@@ -108,28 +108,32 @@ def resolve_graded_comparison(
     anchor_tput: float | None = None,
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
-    # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
-    # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
-    # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
-    # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
-    # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
-    # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
-    # with rather than whatever the calling process's environment holds.
+    # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
+    # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
+    # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
+    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
+    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
+    # throughput.
+    #
+    # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
+    # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
+    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
+    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
         GRADED_INTVTY,
-        GRADED_INTVTY_P50,
         GRADED_OUTPUT,
         GradedComparison,
         VERDICT_KEEP,
+        VERDICT_RECORDED,
         VERDICT_REVERT,
-        axis_of,
-        holds_within_band,
+        intvty_of,
         output_tput_of,
+        passes_intvty_gate,
+        passes_tput_guard,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
-        rounds_are_comparable,
         total_tput_of,
     )
     from hyperloom.inference_optimizer.grading import resolved_grading
@@ -146,23 +150,27 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if ref_perf and cand_perf:
-            gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
-            # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
-            # holds identically per GPU.
-            guards_hold = holds_within_band(
-                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
-            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
-            keep = (
-                gain is not None
-                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
-                and guards_hold
-                and rounds_are_comparable(cand_perf, ref_perf)
-            )
+            gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
+            threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
+            if threshold > keep_threshold_pct:
+                log.info(
+                    "graded: raising keep_threshold %.2f%% -> %.2f%% (AgentX floor; "
+                    "the slow-tail percentile's own variance is unmeasured)",
+                    keep_threshold_pct,
+                    threshold,
+                )
+            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
+            if gain is not None and gain >= threshold and tput_holds:
+                verdict = VERDICT_KEEP
+            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
+                verdict = VERDICT_REVERT
+            else:
+                verdict = VERDICT_RECORDED
             return GradedComparison(
-                objective=GRADED_INTVTY_P50,
-                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
-                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
+                objective=GRADED_INTVTY,
+                candidate=intvty_of(cand_perf),
+                reference=intvty_of(ref_perf),
+                verdict=verdict,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
             )
@@ -1053,8 +1061,29 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return inst
 
     @classmethod
+    def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
+        """Reject damaged crash evidence and agent text before migrating a persisted state."""
+        for name, expected in cls.AGENT_UPDATE_FIELDS.items():
+            if name in raw and not isinstance(raw[name], expected):
+                raise ValueError(f"state.json.{name} must be {expected.__name__}, got {type(raw[name]).__name__}")
+        if "crash_count" in raw:
+            count = raw["crash_count"]
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError(f"state.json.crash_count must be int, got {type(count).__name__}")
+        if "crash_timestamps" in raw:
+            timestamps = raw["crash_timestamps"]
+            if not isinstance(timestamps, list):
+                raise ValueError(f"state.json.crash_timestamps must be list, got {type(timestamps).__name__}")
+            for index, timestamp in enumerate(timestamps):
+                if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+                    raise ValueError(
+                        f"state.json.crash_timestamps[{index}] must be a number, got {type(timestamp).__name__}"
+                    )
+
+    @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping."""
+        """Construct state from a mapping, refusing invalid crash evidence or agent text with ``ValueError``."""
+        cls._validate_resume_fields(raw)
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
@@ -1554,27 +1583,48 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
+    AGENT_UPDATE_FIELDS: ClassVar[dict[str, type]] = {
+        "current_action": str,
+        "target_summary": str,
+    }
+
+    @classmethod
+    def agent_update_errors(cls, changes: Mapping[str, Any]) -> dict[str, str]:
+        """Describe forbidden fields and invalid types; unknown keys remain soft rejections.
+
+        The untrusted path serves one caller -- an agent's UPDATE_STATE intent --
+        and the prompt advertises exactly the fields in
+        :data:`AGENT_UPDATE_FIELDS`. Everything else on the state is the
+        Coordinator's to write through its own actions, so a field outside that
+        set is refused by name rather than landing and surfacing later as a
+        confusing failure in the loop; an advertised field is refused when its
+        type is wrong.
+        """
+        known = {f.name for f in fields(cls)}
+        errors: dict[str, str] = {}
+        for key, value in changes.items():
+            if key not in known:
+                continue
+            expected = cls.AGENT_UPDATE_FIELDS.get(key)
+            if expected is None:
+                errors[key] = "Coordinator-owned field"
+            elif not isinstance(value, expected):
+                errors[key] = f"must be {expected.__name__}, got {type(value).__name__}"
+        return errors
+
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written."""
+        """Apply known fields; untrusted calls drop disallowed writes, while PolicyGate rejects whole invalid intents."""
         if not changes:
             return {}
-        core_fields: frozenset[str] = frozenset()
-        if not allow_core:
-            # Lazy import to avoid a shared_state <-> policy import cycle.
-            from ..policy.gate import CORE_STATE_FIELDS
-
-            core_fields = CORE_STATE_FIELDS
+        errors = {} if allow_core else self.agent_update_errors(changes)
         applied: dict[str, Any] = {}
         # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is not writable here.
         writable = {f.name for f in fields(self)}
         for key, value in changes.items():
             if key not in writable:
                 continue
-            if key in core_fields:
-                log.warning(
-                    "apply_changes: dropping core state field %r (allow_core=False)",
-                    key,
-                )
+            if key in errors:
+                log.warning("apply_changes: dropping state field %r (allow_core=False): %s", key, errors[key])
                 continue
             setattr(self, key, value)
             applied[key] = value
