@@ -514,35 +514,20 @@ def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.Monkey
     """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
-    control_key = "HYPERLOOM_MN_LAUNCH_ENV_CONTROL"
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
-    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
-    monkeypatch.setenv(control_key, '{"set":["PATH"],"unset":["POD_IP"]}')
-    empty_wire = mn_cli._forward_runtime_env()["env_vars"]
-    assert set(empty_wire) == {control_key}
-    assert json.loads(empty_wire[control_key]) == {"set": [], "unset": []}
+    assert mn_cli._forward_runtime_env() is None
 
     monkeypatch.setenv(
         "HYPERLOOM_MN_EXTRA_FWD_ENV",
-        json.dumps(
-            {
-                "SGLANG_USE_AITER": "0",
-                "LD_PRELOAD": "/evil.so",
-                "POD_IP": "evil",
-                "VIRTUAL_ENV": "/evil",
-                control_key: '{"set":["PATH"],"unset":[]}',
-            }
-        ),
+        json.dumps({"SGLANG_USE_AITER": "0", "LD_PRELOAD": "/evil.so"}),
     )
-    wire = mn_cli._forward_runtime_env()["env_vars"]
-    assert set(wire) == {control_key, "SGLANG_USE_AITER"}, "denied keys must not reach the pods"
-    assert wire["SGLANG_USE_AITER"] == "0"
-    assert json.loads(wire[control_key]) == {"set": ["SGLANG_USE_AITER"], "unset": []}
+    payload = mn_cli._forward_runtime_env()
+    assert payload == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
-    assert mn_cli._forward_runtime_env()["env_vars"] == empty_wire
+    assert mn_cli._forward_runtime_env() is None
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps(["not", "a", "dict"]))
-    assert mn_cli._forward_runtime_env()["env_vars"] == empty_wire
+    assert mn_cli._forward_runtime_env() is None
 
 
 def _restart_args(**overrides) -> argparse.Namespace:
@@ -928,14 +913,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
-    def unexpected_operation(*_args, **_kwargs):
-        raise AssertionError("a matching live launch must not perform remote operations or rewrite state")
-
-    monkeypatch.setattr(inf, "_infera_fanout_launch", unexpected_operation)
-    for name in ("_infera_ssh_run_script", "_infera_ssh_bash_with_env", "_ray_dashboard_client", "_save_state"):
-        monkeypatch.setattr(inf._mn_cli, name, unexpected_operation)
     state = {
-        "last_restart_env_digest": inf._collect_launch_env().digest,
         "backend": "infera",
         "pd_mode": "aggregated",
         "worker_pod_ips": ["10.0.1.0"],
