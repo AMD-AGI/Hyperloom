@@ -9,7 +9,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import shlex
 import sys
 import tempfile
@@ -487,15 +486,6 @@ def _read_jit_cache_core() -> str:
     return (Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py").read_text(encoding="utf-8")
 
 
-def _strip_pod_script_header(body: str) -> str:
-    """Drop shebang and ``from __future__ import annotations`` from a pod script."""
-    lines = body.splitlines()
-    if lines and lines[0].startswith("#!"):
-        lines = lines[1:]
-    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
-    return "\n".join(lines).strip()
-
-
 _KERNEL_NODE_OPS_DEPS = (
     Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
     _SCRIPTS_DIR / "patch_path_safety.py",
@@ -507,24 +497,23 @@ _LAUNCHER_DEPS = (
 
 
 def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...] = _KERNEL_NODE_OPS_DEPS) -> str:
-    """Bundle stdlib dependencies, preserving kernel-op modules and inlining launcher helpers for Ray workers."""
-    if deps == _KERNEL_NODE_OPS_DEPS:
-        chunks = ["import sys, types\n"]
-        for dep in deps:
-            source = dep.read_text(encoding="utf-8")
-            chunks.append(
-                f"_dependency = types.ModuleType({dep.stem!r})\n"
-                f"_dependency.__file__ = {dep.name!r}\n"
-                f"sys.modules[{dep.stem!r}] = _dependency\n"
-                f"exec(compile({source!r}, _dependency.__file__, 'exec'), _dependency.__dict__)\n"
-            )
-        chunks.append(f"exec(compile({_read_pod_script(main)!r}, {main!r}, 'exec'), globals())\n")
-        return "".join(chunks)
-    chunks = [_strip_pod_script_header(dep.read_text(encoding="utf-8")) for dep in deps]
-    stems = "|".join(re.escape(dep.stem) for dep in deps)
-    main_body = re.sub(rf"^from (?:{stems}) import (?:\([^)]*\)|.*)\n", "", _read_pod_script(main), flags=re.MULTILINE)
-    main_body = _strip_pod_script_header(main_body)
-    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
+    """Bundle a pod script with its dependencies registered under their own module names.
+
+    Pods receive one file, so each dependency is registered in ``sys.modules``
+    before the script runs and keeps importing it by name, on the driver and on
+    any Ray worker that deserializes a function closing over it.
+    """
+    chunks = ["import sys, types\n"]
+    for dep in deps:
+        source = dep.read_text(encoding="utf-8")
+        chunks.append(
+            f"_dependency = types.ModuleType({dep.stem!r})\n"
+            f"_dependency.__file__ = {dep.name!r}\n"
+            f"sys.modules[{dep.stem!r}] = _dependency\n"
+            f"exec(compile({source!r}, _dependency.__file__, 'exec'), _dependency.__dict__)\n"
+        )
+    chunks.append(f"exec(compile({_read_pod_script(main)!r}, {main!r}, 'exec'), globals())\n")
+    return "".join(chunks)
 
 
 def _build_restart_entrypoint(
