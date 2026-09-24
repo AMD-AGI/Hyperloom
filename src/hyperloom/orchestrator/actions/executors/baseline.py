@@ -2720,7 +2720,7 @@ class BaselineExecutor:
 
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
-        lifecycle = self._resolve_lifecycle_params(materialized_config_path)
+        lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
             ctx_extra=extra,
@@ -3344,13 +3344,6 @@ class BaselineExecutor:
                 exc_info=True,
             )
             return True
-
-    def _resolve_lifecycle_params(
-        self,
-        materialized_config_path: Path,
-    ) -> dict[str, Any]:
-        """Inspect the materialized YAML for server_lifecycle eligibility."""
-        return _lifecycle.resolve_lifecycle_params(materialized_config_path)
 
     def _write_lifecycle_config(
         self,
