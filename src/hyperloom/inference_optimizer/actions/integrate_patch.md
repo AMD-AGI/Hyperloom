@@ -30,8 +30,7 @@ patch *files*; this action produces *outcomes*.
 
 ## Who delegates this action
 
-* **Orchestration** only. Robustness can trigger recovery via
-  `delegate(recover)`; it does not directly integrate patches.
+* **Orchestration** only.
 
 ## Inputs (task.params)
 

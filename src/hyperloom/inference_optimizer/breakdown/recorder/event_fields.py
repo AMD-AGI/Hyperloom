@@ -10,6 +10,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.timeutil import now_iso
 
 __all__ = [
@@ -75,19 +76,13 @@ def as_list(value: Any) -> list[Any]:
 
 
 def int_or_none(value: Any) -> int | None:
-    """Best-effort int coercion that reports ``None`` instead of raising."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-int coercion; rejects ``bool``, ``None``, non-finite floats."""
+    return to_int(value)
 
 
 def float_or_none(value: Any) -> float | None:
-    """Best-effort float coercion that reports ``None`` instead of raising."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-float coercion; rejects ``bool``, ``None``, ``nan``/``inf``."""
+    return to_float(value)
 
 
 def bool_or_none(value: Any) -> bool | None:
@@ -213,10 +208,29 @@ def worst_status(statuses: Iterable[Any]) -> str:
     return present[0] if present else "skipped"
 
 
-def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict[str, Any]:
-    """Build the canonical failure row used on runs and on the event."""
+def failure_row(
+    *,
+    stage: str,
+    error_class: str = "",
+    message: Any = "",
+    exc: BaseException | None = None,
+) -> dict[str, Any]:
+    """Build the canonical failure row used on runs and on the event.
+
+    ``stage`` names the step it died at, not the phase it died in: every caller
+    passes a step -- a profiling substep, a baseline round, a phase entry -- and
+    the one consumer that surfaces the field reads it as a stage.
+
+    Pass ``exc`` when the caller has the exception in hand; ``error_class`` and
+    ``message`` fill in only what ``exc`` does not already provide. Every
+    recorder's ``record_fault`` and crash close goes through this one shape.
+    """
+    if exc is not None:
+        error_class = error_class or type(exc).__name__
+        if message in ("", None):
+            message = exc
     return {
-        "phase": str(phase or ""),
+        "stage": str(stage or ""),
         "error_class": str(error_class or ""),
         "message": clip(message, 2000),
     }

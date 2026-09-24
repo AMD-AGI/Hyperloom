@@ -43,7 +43,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
@@ -758,25 +758,6 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
 
 
 @pytest.mark.asyncio
-async def test_resume_reverify_best_promote_clears_flag(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.optimization_stack = [
-        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
-    ]
-    coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="rb-1", params={"source": "resume_reverify_best"})
-    await coord._promote_to_shared_state(
-        "explore",
-        {"winners": [], "best_variant": None, "output_throughput": 118.0},
-        task=task,
-    )
-
-    assert coord.shared_state.resume_pending_revalidation is False
-    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-
-
-@pytest.mark.asyncio
 async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-1"}
@@ -841,7 +822,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
 
 
 # -- _context_analysis_reader fallback (path read) --------------------------
-def test_context_analysis_reader_path_fallback_on_format_error(
+def test_context_analysis_reader_falls_back_to_the_recorded_path(
     coord: Coordinator,
     tmp_path,
     monkeypatch,
@@ -849,11 +830,7 @@ def test_context_analysis_reader_path_fallback_on_format_error(
     md = tmp_path / "analysis.md"
     md.write_text("# roofline snapshot\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-
-    def _boom() -> str:
-        raise RuntimeError("format failed")
-
-    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", _boom)
+    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord._context_analysis_reader()
     assert "roofline snapshot" in out
 
@@ -863,11 +840,7 @@ def test_context_analysis_reader_unreadable_path(
     monkeypatch,
 ) -> None:
     coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
-    monkeypatch.setattr(
-        coord.shared_state,
-        "_format_analysis_md_full",
-        lambda: (_ for _ in ()).throw(RuntimeError("x")),
-    )
+    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord._context_analysis_reader()
     assert "unreadable" in out or "no analysis.md" in out
 
@@ -975,10 +948,9 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    for agent in ("orchestration", "robustness"):
-        out = await coord._compose_prompt(agent)
-        assert "Specialist health" not in out
-        assert "stale" not in out.lower()
+    out = await coord._compose_prompt("orchestration")
+    assert "Specialist health" not in out
+    assert "stale" not in out.lower()
 
 
 @pytest.mark.asyncio
@@ -1119,9 +1091,25 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 0,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": False,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (False, {}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
@@ -1132,11 +1120,25 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
-    monkeypatch.setattr(ps, "compute_plateau_explore", lambda *a, **k: (False, {}))
     monkeypatch.setattr(
         ps,
-        "source_arm_plateaued",
-        lambda *a, **k: (True, {"source_consecutive_no_keep": 3, "source_candidates_exhausted": True}),
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 5.0,
+                "empty_streak": 0,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": True,
+                "config_arm_plateaued": False,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
@@ -1150,9 +1152,25 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            True,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (True, {"source_consecutive_no_keep": 3}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out
@@ -1261,8 +1279,11 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
+    calls: list[dict] = []
+
     class _Scorer:
-        async def score(self, *, gap, proposals):
+        async def score(self, *, gap, proposals, task_id=None, tick=None, phase=None):
+            calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
     coord._proposal_scorer = _Scorer()
@@ -1275,6 +1296,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
         },
         source="specialist:rec-spec-3",
     )
+    assert calls == [{"proposals": [{"name": "p1"}], "task_id": "rec-spec-3"}]
 
 
 # -- finalize_recipe_and_journal (KB path) ---------------------------
@@ -1419,7 +1441,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1437,7 +1459,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         ps, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1454,7 +1476,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1472,7 +1494,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1499,7 +1521,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1581,7 +1603,7 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
 
 
 def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     forwarded: dict = {}
     _forward_integrate_source({}, forwarded)
@@ -1609,27 +1631,6 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
-
-
-@pytest.mark.asyncio
-async def test_materialize_integrate_patch_rejects_missing_owner(
-    coord: Coordinator,
-) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    pending = _pending(
-        "integrate_patch",
-        {"params": {"specialist_task_id": "missing-specialist"}},
-        msg_id="prop-ownerless",
-    )
-    coord.state.pending_proposals[pending.proposal_msg_id] = pending
-
-    await coord._materialize_approved_proposal(pending)
-
-    assert not [task for task in await coord.tasks.queued() if task.kind == "integrate_patch"]
-    assert pending.proposal_msg_id not in coord.state.pending_proposals
-    assert coord.shared_state.get_specialist_patch_verdict("missing-specialist") == "owner_missing"
-    observations = await coord.bus.tail(topic="observation", n=10)
-    assert any(message.payload.get("reason") == "integrate_patch_owner_missing" for message in observations)
 
 
 @pytest.mark.asyncio
@@ -2058,28 +2059,250 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
 
 
 @pytest.mark.asyncio
-async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator, monkeypatch, caplog) -> None:
-    # Defensive audit (log-only): invoking the run_action_now sync bridge on the coordinator loop thread must emit a
-    # log-only audit. run_coroutine_threadsafe is stubbed so the test never actually blocks.
+async def test_run_action_now_async_does_not_starve_database_executor(coord: Coordinator, monkeypatch) -> None:
     import asyncio
-    import logging
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_running_loop()
+    previous_executor = loop._default_executor
+    pool = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(pool)
+    coord._inline_fast_actions_enabled = True
+    coord._coordinator_loop = loop
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.5")
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
+    calls = []
+
+    async def action(name, params):
+        row = await coord.db.fetchone("SELECT 1 AS value")
+        calls.append(params["index"])
+        return f"done:{row['value']}"
+
+    monkeypatch.setattr(coord.dispatcher, "_run_action_now", action)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(coord.dispatcher._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
+            2.0,
+        )
+        assert results == ["done:1"] * 8
+        assert sorted(calls) == list(range(8))
+    finally:
+        loop._default_executor = previous_executor
+        pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coord: Coordinator, monkeypatch) -> None:
+    import asyncio
+    from unittest.mock import Mock
 
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
     coord._coordinator_loop = asyncio.get_running_loop()
+    create_action = Mock(side_effect=AssertionError("same-loop sync calls must not create an action coroutine"))
+    schedule = Mock(side_effect=AssertionError("same-loop sync calls must not schedule work"))
+    monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
 
-    class _ImmediateFuture:
-        def result(self, timeout=None):
-            return "(stubbed inline result)"
+    out = coord._run_action_now_sync("inline_probe")
 
-    def _fake_schedule(coro, loop):
-        coro.close()
-        return _ImmediateFuture()
+    assert "unavailable" in out and "coordinator loop thread" in out
+    create_action.assert_not_called()
+    schedule.assert_not_called()
 
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_schedule)
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-        out = coord._run_action_now_sync("report")
+# -- atomic config levers ride with the patch they are inseparable from -----
+def _autosubmitted_integrate_params(coord: Coordinator) -> dict:
+    """Return the params of the integrate_patch proposal the bridge just queued."""
+    rows = [p for p in coord.state.pending_proposals.values() if getattr(p, "action_name", "") == "integrate_patch"]
+    assert rows, "the bridge queued no integrate_patch proposal"
+    return dict((getattr(rows[-1], "payload", {}) or {}).get("params") or {})
 
-    assert any("run_action_now:" in r.getMessage() for r in caplog.records)
-    assert "stubbed inline result" in out
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) -> None:
+    """A lever the specialist marked ``atomic`` reaches integrate_patch with its patch.
+
+    The patch clears a framework guard that the server then asserts on through the
+    flag, so a round that applies one without the other cannot boot.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-atomic-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [
+                {
+                    "name": "deepseek-v4-rocm-enable",
+                    "atomic": True,
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "extra_envs": {"VLLM_MHC_TORCH_FALLBACK": "1"},
+                }
+            ],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert params["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert params["extra_envs"] == {"VLLM_MHC_TORCH_FALLBACK": "1"}
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator) -> None:
+    """An ordinary companion lever stays the config bridge's business, not the patch's."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-plain-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "opt-only", "extra_args": "--speculative-num-steps 3"}],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert "extra_server_args" not in params
+    assert "extra_envs" not in params
+
+
+@pytest.mark.asyncio
+async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic(coord: Coordinator) -> None:
+    """An ENABLEMENT round takes the lever from the lane, not from ``atomic``.
+
+    Observed live: a specialist emitted ``atomic: false`` on a lever whose own
+    reason read "Required to boot at all once the patch lands". Trusting that
+    boolean drops ``--kv-cache-dtype fp8``, every launch dies on the assertion the
+    patch was written to get past, no round is ever kept, and the recipe the run
+    exists to produce is never emitted.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-enablement-lever"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-enablement",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [
+                {
+                    "name": "dsv4-flash-fp8-kvcache-fp8",
+                    "atomic": False,
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "reason": "Required to boot at all once the patch lands.",
+                }
+            ],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert params["extra_server_args"] == "--kv-cache-dtype fp8"
+
+
+@pytest.mark.asyncio
+async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordinator) -> None:
+    """Outside enablement the precedence is unchanged: a patch is its own outcome."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-opt-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "opt-only", "atomic": False, "extra_args": "--speculative-num-steps 3"}],
+        },
+    )
+    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_enablement_round_inherits_the_flags_earlier_rounds_established(coord: Coordinator) -> None:
+    """A flag the architecture requires outlives the deliverable that first named it.
+
+    Observed live: round 1 established ``--kv-cache-dtype fp8``, round 3's specialist
+    was working a different blocker and restated no lever at all, and the round went
+    straight back to ``AssertionError: DeepseekV4 only supports fp8 kv-cache format
+    for now, got auto`` -- a wall round 1 had already cleared. ``_rearm_on_advanced``
+    accumulates these into ``accepted_config``; the launch has to read them back.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {
+        "extra_server_args": "--kv-cache-dtype fp8",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    sid = "spec-inherit"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-inherit",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            # This round restates nothing, exactly as the live round-3 deliverable did.
+            "proposal_set": [{"name": "rocm-aiter-sparse-indexer", "atomic": False, "extra_args": ""}],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert "--kv-cache-dtype fp8" in params["extra_server_args"]
+    assert params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> None:
+    """Inheriting is not pinning: the current round still has the last word."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {"extra_server_args": "--max-num-seqs 64"}
+    sid = "spec-override"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-override",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "raise-seqs", "atomic": False, "extra_args": "--max-num-seqs 128"}],
+        },
+    )
+    args = _autosubmitted_integrate_params(coord)["extra_server_args"]
+    assert "--max-num-seqs 128" in args
+    assert "64" not in args
+
+
+@pytest.mark.asyncio
+async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
+    """The inheritance is an enablement rule; optimization keeps its own precedence."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {"extra_server_args": "--kv-cache-dtype fp8"}
+    sid = "spec-no-inherit"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
+    )
+    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)

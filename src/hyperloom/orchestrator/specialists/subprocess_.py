@@ -30,9 +30,9 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -59,8 +59,11 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.common.proctree import collect_tree, kill_tree
 
+from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
+from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -163,7 +166,6 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
-        "LLM_GATEWAY_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
     }
@@ -772,7 +774,7 @@ class _RayLeaseProcess:
         latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
         real failure immediately rather than looping until the wall-clock cap.
         """
-        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+        from hyperloom.orchestrator.actions.executors._ray_serving import (
             _RAY_ACTOR_DIED_RC,
         )
 
@@ -786,9 +788,45 @@ class _RayLeaseProcess:
         self.returncode = rc
         return self.returncode
 
-    def reap(self) -> None:
-        """Reap the subprocess tree via the actor (lease released separately)."""
-        self._lease.stop()
+    def reap(self) -> bool:
+        """Confirm teardown, consuming one late ACK before abandoning the actor."""
+        confirmed = self._lease.stop() is True
+        # close() destroys the actor, so retain its exit status while it is observable.
+        self.returncode = self._lease.exit_code()
+        return confirmed or self._lease.close() is True
+
+
+def _local_tree_pgid(proc: Any) -> int | None:
+    """The process group to name in an operator's log for this specialist, or None.
+
+    Nothing probes this number. A served process is setsid'd by design, so it
+    leaves the group its spawn created, and every attempt to decide from such an
+    identity whether a lane was free was refuted in review. What the number is
+    still worth is a starting point for the human who has to clear a retained
+    lane by hand.
+
+    A local specialist is spawned with ``start_new_session=True``, so its root
+    pid is also the id of the group and session it leads, and that number keeps
+    naming the group once the root itself has exited.
+
+    A group id means something only inside the PID namespace that issued it, and
+    a Ray actor's ids come from whichever node Ray placed the actor on. Printing
+    one of those would point the operator at a process on a different host, so
+    an actor names nothing here.
+
+    Args:
+        proc: The specialist's process handle, which may be absent when the
+            cleanup that failed never spawned one.
+
+    Returns:
+        int | None: A local process group to record for an operator's benefit,
+        or None when there is none to name. Either way the lane is retained:
+        nothing reclaims it from this number.
+    """
+    if proc is None or isinstance(proc, _RayLeaseProcess):
+        return None
+    pid = getattr(proc, "pid", None)
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
 # Dispatcher
@@ -871,6 +909,9 @@ class SpecialistSubprocessDispatcher:
                 any), exit code, timing, timeout / stale-heartbeat flags,
                 process log path, and discovered patches.
         """
+        scope = current_cancel_scope()
+        if scope is not None and scope.cancelled:
+            raise CancelledError(scope.reason)
         # Drop any extension left over from a prior run of this task id.
         clear_wall_budget_extension(task_id)
         # The pre-image the harvest diffs against, so it must be read before
@@ -898,7 +939,7 @@ class SpecialistSubprocessDispatcher:
         env = _build_specialist_env()
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
+        from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
@@ -973,131 +1014,152 @@ class SpecialistSubprocessDispatcher:
             for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
 
-        log_fh: Any = None
-        proc_started: float
-        if gpu_lease is not None:
-            # Non-blocking start: submit the actor launch, then poll for
-            # the pid with ``asyncio.sleep`` between polls. This keeps the
-            # Coordinator event loop responsive while Ray schedules the actor
-            # (no blocking ``ray.get``), and — combined with the timing split
-            # below — excludes Ray *pending* time from the specialist's running
-            # wall budget. A bounded pending deadline turns a permanently
-            # unschedulable request into a structured task failure instead of an
-            # unbounded stall. The actor opens process.log inside its worker
-            # (same host on single-node), so the reaper below reads it directly.
+        with cancel_scope_listener() as scope:
+            log_fh: Any = None
+            proc: Any = None
+            proc_started: float
             try:
-                gpu_lease.start_async(
-                    cmd,
-                    env=env,
-                    cwd=str(worktree or workspace),
-                    log_path=str(process_log),
-                    env_mode="replace",
-                    stdin_path=str(prompt_file),
-                )
-            except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
-                return SpecialistSubprocessResult(
-                    done_payload=None,
-                    exit_code=None,
-                    elapsed_seconds=0.0,
-                    process_log_path=str(process_log),
-                    error=f"failed to submit specialist GPU actor: {exc!r}",
-                )
-            pending_deadline_sec = _ray_specialist_pending_deadline_sec()
-            pending_start = time.monotonic()
-            pid: int | None = None
-            while True:
-                try:
-                    pid = gpu_lease.poll_started()
-                except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
-                    gpu_lease.close()
-                    return SpecialistSubprocessResult(
-                        done_payload=None,
-                        exit_code=None,
-                        elapsed_seconds=0.0,
-                        process_log_path=str(process_log),
-                        error=f"specialist GPU actor start failed: {exc!r}",
-                    )
-                if pid is not None:
-                    break
-                pending_elapsed = time.monotonic() - pending_start
-                if pending_elapsed >= pending_deadline_sec:
-                    gpu_lease.close()
-                    return SpecialistSubprocessResult(
-                        done_payload=None,
-                        exit_code=None,
-                        elapsed_seconds=0.0,
-                        process_log_path=str(process_log),
-                        error=(
-                            f"specialist GPU actor did not schedule within "
-                            f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
-                            "cluster fully occupied"
-                        ),
-                    )
-                await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
-            proc: Any = _RayLeaseProcess(gpu_lease, pid)
-            # Timing split: the wall-budget clock starts
-            # only now that a real pid exists — the Ray pending time above is
-            # excluded so a slow-to-schedule actor is never mis-reaped.
-            proc_started = time.monotonic()
-        else:
-            proc_started = time.monotonic()
-            log_fh = process_log.open("w", encoding="utf-8")
-            try:
-                process_log.chmod(0o600)
-            except OSError:
-                # Tightening the mode is advisory; the run continues on filesystems
-                # that reject chmod.
-                pass
-            stdin_fh: Any = None
-            try:
-                stdin_fh = prompt_file.open("rb")
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=stdin_fh,
-                    stdout=log_fh,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    cwd=str(worktree or workspace),
-                    start_new_session=True,
-                )
-            except (FileNotFoundError, OSError) as exc:
-                log_fh.close()
-                return SpecialistSubprocessResult(
-                    done_payload=None,
-                    exit_code=None,
-                    elapsed_seconds=0.0,
-                    process_log_path=str(process_log),
-                    error=f"failed to spawn {backend} subprocess: {exc!r}",
-                )
-            finally:
-                # Popen duplicates the descriptor before returning. Close the
-                # parent's copy on success and every spawn failure.
-                if stdin_fh is not None:
+                if scope is not None and scope.cancelled:
+                    raise CancelledError(scope.reason)
+                if gpu_lease is not None:
+                    # Non-blocking start: submit the actor launch, then poll for
+                    # the pid with ``asyncio.sleep`` between polls. This keeps the
+                    # Coordinator event loop responsive while Ray schedules the actor
+                    # (no blocking ``ray.get``), and — combined with the timing split
+                    # below — excludes Ray *pending* time from the specialist's running
+                    # wall budget. A bounded pending deadline turns a permanently
+                    # unschedulable request into a structured task failure instead of an
+                    # unbounded stall. The actor opens process.log inside its worker
+                    # (same host on single-node), so the reaper below reads it directly.
                     try:
-                        stdin_fh.close()
+                        gpu_lease.start_async(
+                            cmd,
+                            env=env,
+                            cwd=str(worktree or workspace),
+                            log_path=str(process_log),
+                            env_mode="replace",
+                            stdin_path=str(prompt_file),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
+                        return SpecialistSubprocessResult(
+                            done_payload=None,
+                            exit_code=None,
+                            elapsed_seconds=0.0,
+                            process_log_path=str(process_log),
+                            error=f"failed to submit specialist GPU actor: {exc!r}",
+                        )
+                    pending_deadline_sec = _ray_specialist_pending_deadline_sec()
+                    pending_start = time.monotonic()
+                    pid: int | None = None
+                    while True:
+                        if scope is not None and scope.cancelled:
+                            raise CancelledError(scope.reason)
+                        try:
+                            pid = gpu_lease.poll_started()
+                        except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
+                            gpu_lease.close()
+                            return SpecialistSubprocessResult(
+                                done_payload=None,
+                                exit_code=None,
+                                elapsed_seconds=0.0,
+                                process_log_path=str(process_log),
+                                error=f"specialist GPU actor start failed: {exc!r}",
+                            )
+                        if pid is not None:
+                            break
+                        pending_elapsed = time.monotonic() - pending_start
+                        if pending_elapsed >= pending_deadline_sec:
+                            gpu_lease.close()
+                            return SpecialistSubprocessResult(
+                                done_payload=None,
+                                exit_code=None,
+                                elapsed_seconds=0.0,
+                                process_log_path=str(process_log),
+                                error=(
+                                    f"specialist GPU actor did not schedule within "
+                                    f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
+                                    "cluster fully occupied"
+                                ),
+                            )
+                        await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
+                    proc = _RayLeaseProcess(gpu_lease, pid)
+                    # Timing split: the wall-budget clock starts
+                    # only now that a real pid exists — the Ray pending time above is
+                    # excluded so a slow-to-schedule actor is never mis-reaped.
+                    proc_started = time.monotonic()
+                else:
+                    proc_started = time.monotonic()
+                    log_fh = process_log.open("w", encoding="utf-8")
+                    try:
+                        process_log.chmod(0o600)
                     except OSError:
-                        log.warning("failed to close specialist prompt stdin", exc_info=True)
+                        # Tightening the mode is advisory; the run continues on filesystems
+                        # that reject chmod.
+                        pass
+                    stdin_fh: Any = None
+                    try:
+                        stdin_fh = prompt_file.open("rb")
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdin=stdin_fh,
+                            stdout=log_fh,
+                            stderr=subprocess.STDOUT,
+                            env=env,
+                            cwd=str(worktree or workspace),
+                            start_new_session=True,
+                        )
+                    except (FileNotFoundError, OSError) as exc:
+                        log_fh.close()
+                        return SpecialistSubprocessResult(
+                            done_payload=None,
+                            exit_code=None,
+                            elapsed_seconds=0.0,
+                            process_log_path=str(process_log),
+                            error=f"failed to spawn {backend} subprocess: {exc!r}",
+                        )
+                    finally:
+                        # Popen duplicates the descriptor before returning. Close the
+                        # parent's copy on success and every spawn failure.
+                        if stdin_fh is not None:
+                            try:
+                                stdin_fh.close()
+                            except OSError:
+                                log.warning("failed to close specialist prompt stdin", exc_info=True)
 
-        # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-        try:
-            outcome = await self._reap_loop(
-                proc=proc,
-                workspace=workspace,
-                done_files=tuple(done_candidates),
-                partial_files=tuple(partial_candidates),
-                heartbeat_file=heartbeat_file,
-                deadline=deadline,
-                started=proc_started,
-                progress_cb=progress_cb,
-                task_id=task_id,
-            )
-        finally:
-            if log_fh is not None:
-                log_fh.close()
-            try:
-                await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
+                # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
+                outcome = await self._reap_loop(
+                    proc=proc,
+                    workspace=workspace,
+                    done_files=tuple(done_candidates),
+                    partial_files=tuple(partial_candidates),
+                    heartbeat_file=heartbeat_file,
+                    deadline=deadline,
+                    started=proc_started,
+                    progress_cb=progress_cb,
+                    task_id=task_id,
+                )
+            except (CancelledError, asyncio.CancelledError):
+                try:
+                    if gpu_lease is not None:
+                        confirmed = gpu_lease.close() is True or gpu_lease.close() is True
+                    else:
+                        confirmed = self._kill(proc) if proc is not None else True
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
+                    ) from exc
+                if confirmed is not True:
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
+                    )
+                raise
             finally:
-                clear_wall_budget_extension(task_id)
+                if log_fh is not None:
+                    log_fh.close()
+                try:
+                    await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
+                finally:
+                    clear_wall_budget_extension(task_id)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
@@ -1409,7 +1471,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+            except Exception:
                 log.exception("specialist progress callback raised")
             break
         return newest
@@ -1473,9 +1535,14 @@ class SpecialistSubprocessDispatcher:
         # agent never self-writes heartbeat.json.
         process_log = workspace / "process.log"
         last_partial_mtime: float = 0.0
+        scope = current_cancel_scope()
 
         while True:
+            if scope is not None and scope.cancelled:
+                raise CancelledError(scope.reason)
             await asyncio.sleep(cfg.poll_interval_seconds)
+            if scope is not None and scope.cancelled:
+                raise CancelledError(scope.reason)
             now = time.monotonic()
             elapsed = now - started
             outcome["elapsed"] = elapsed
@@ -1484,11 +1551,15 @@ class SpecialistSubprocessDispatcher:
             if any(p.exists() for p in done_files):
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
+                    if scope is not None and scope.cancelled:
+                        raise CancelledError(scope.reason)
                     await asyncio.sleep(2.0)
+                if scope is not None and scope.cancelled:
+                    raise CancelledError(scope.reason)
                 # Still alive after grace — reap it so no orphaned subprocess leaks.
                 if proc.poll() is None:
                     self._kill(proc)
-                outcome["exit_code"] = proc.poll()
+                outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
@@ -1528,7 +1599,7 @@ class SpecialistSubprocessDispatcher:
                     f"(> {cfg.heartbeat_stale_seconds:.0f}s threshold)"
                 )
                 self._kill(proc)
-                outcome["exit_code"] = proc.poll()
+                outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
@@ -1539,52 +1610,37 @@ class SpecialistSubprocessDispatcher:
                 outcome["timed_out"] = True
                 outcome["error"] = f"specialist subprocess killed {elapsed:.0f}s in, at its deadline"
                 self._kill(proc)
-                outcome["exit_code"] = proc.poll()
+                outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
         return outcome
 
     @staticmethod
-    def _kill(proc: Any) -> None:
-        """Tear down an agent subprocess.
-
-        Kills the whole process group (SIGTERM, then SIGKILL after a 5s
-        grace) so child SDK / curl invocations die with it. No-op if the
-        process already exited. For a :class:`_RayLeaseProcess` (Ray
-        GPU-specialist actor) the reap is delegated to the actor, which reaps
-        the whole tree inside its worker (the lease is released separately).
-
-        Args:
-            proc (Any): The subprocess to terminate — ``subprocess.Popen`` or
-                :class:`_RayLeaseProcess`.
-        """
+    def _kill(proc: Any) -> bool:
+        """Confirm teardown of the live specialist tree before releasing ownership."""
         if isinstance(proc, _RayLeaseProcess):
-            proc.reap()
-            return
+            if proc.reap():
+                return True
+            # No ``tree_pgid``: see :func:`_local_tree_pgid`.
+            raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: actor cleanup unconfirmed")
         if proc.poll() is not None:
-            return
+            # A re-parented descendant can outlive its root and old process group.
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: exited root has no verifiable tree", tree_pgid=proc.pid
+            )
         try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
-        # Give SIGTERM 5s before SIGKILL.
-        for _ in range(10):
-            if proc.poll() is not None:
-                return
-            time.sleep(0.5)
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
+            tree = collect_tree([proc.pid])
+            if not any(pid == proc.pid for pid, _ in tree.members) or not kill_tree(tree):
+                raise ExecutionCleanupUnconfirmed(
+                    f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid
+                )
+            proc.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: tree cleanup failed: {exc}", tree_pgid=proc.pid
+            ) from exc
+        return True
 
     @staticmethod
     def _harvest_pathspec(targets: Sequence[str] = ()) -> list[str]:

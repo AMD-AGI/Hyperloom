@@ -30,7 +30,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
-from .conftest import chatty_child, suppression_window_s
+from .conftest import chatty_child
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +139,6 @@ def _run_capturing_variant_notes(
                 grid=grid,
                 output_root=out,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
                 keep_going_on_failure=True,
             )
@@ -219,7 +218,6 @@ class TestKeepGoingAsymmetry:
                     grid=[GridVariant(name="c0"), GridVariant(name="c1")],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                     keep_going_on_failure=False,
                 )
@@ -258,6 +256,7 @@ class TestKeepGoingAsymmetry:
 
     def test_rc_nonzero_invalid_measurement_breaks(self, tmp_path, monkeypatch):
         """Contrast: an ``rc != 0`` invalid measurement DOES break the loop."""
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
@@ -275,6 +274,7 @@ class TestKeepGoingAsymmetry:
 
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
         """Last-resort: empty pipe and no log files, diagnostic only in report.errors."""
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
@@ -333,7 +333,6 @@ class TestAutoWarmupTeardown:
                     grid=[GridVariant(name="cand")],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                 )
             )
@@ -547,7 +546,6 @@ class TestVariantHeartbeat:
                     grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                 )
             )
@@ -665,4 +663,7 @@ class TestVariantHeartbeat:
         )
 
         assert [r.status for r in results] == ["succeeded"]
-        assert progress_cadence.widest_silence() < suppression_window_s()
+        running = [note for note in progress_cadence.notes if note["status"] == "running"]
+        assert len(running) >= 3
+        assert all(note["output_lines"] > 0 for note in running)
+        assert progress_cadence.widest_silence() <= 150.0

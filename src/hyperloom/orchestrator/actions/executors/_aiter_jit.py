@@ -9,6 +9,7 @@ import csv
 import importlib.util
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -64,7 +65,7 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery."""
     try:
         spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+    except (ImportError, ValueError):
         return []
     if spec is None or not spec.origin:
         return []
@@ -132,9 +133,12 @@ def _any_live_compiler(
         return None
     try:
         normalized_dirs = [str(path.resolve()) for path in (build_dirs or [])]
-        for proc in psutil.process_iter(["name", "cmdline", "cwd"]):
+        unknown = False
+        for proc in psutil.process_iter(["name", "cmdline", "cwd", "status"]):
             try:
                 info = proc.info
+                if info.get("status") == psutil.STATUS_ZOMBIE:
+                    continue
                 name = (info.get("name") or "").strip()
                 cmdline = info.get("cmdline") or []
                 is_compiler = name in COMPILER_PROCESS_NAMES
@@ -143,6 +147,8 @@ def _any_live_compiler(
                     if first in COMPILER_PROCESS_NAMES:
                         is_compiler = True
                 if not is_compiler:
+                    if info.get("name") is None or info.get("cmdline") is None:
+                        unknown = True
                     continue
                 if not normalized_dirs:
                     return True
@@ -153,12 +159,16 @@ def _any_live_compiler(
                     for build_dir in normalized_dirs
                 ):
                     return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                if info.get("cwd") is None or info.get("cmdline") is None:
+                    unknown = True
+            except psutil.AccessDenied:
+                unknown = True
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
     except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
         log.warning("aiter_jit: compiler-liveness scan failed: %s", exc)
         return None
-    return False
+    return None if unknown else False
 
 
 def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None = None) -> list[Path]:
@@ -310,24 +320,20 @@ def sweep_stale_aiter_locks_if_dead(
     """Sweep orphaned aiter JIT locks, gated on no live compiler process."""
     resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
     alive = _any_live_compiler(resolved_dirs)
-    if alive is True:
+    if alive is not False:
+        if alive is None:
+            log.warning("aiter lock sweep skipped: compiler liveness is unknown")
         return {
             "dir": None,
             "dirs": [],
             "scanned": 0,
             "deleted": 0,
             "skipped_fresh": 0,
-            "errors": 0,
-            "compiler_alive": True,
-            "skipped_live": True,
+            # An unverified sweep must not look like a successfully empty tree.
+            "errors": int(alive is None),
+            "compiler_alive": alive,
+            "skipped_live": alive is True,
         }
-    if alive is None:
-        stats = clean_stale_aiter_locks(
-            aiter_jit_dir,
-            stale_minutes=AITER_LOCK_STALE_MINUTES,
-        )
-        stats["compiler_alive"] = None
-        return stats
     stats = clean_stale_aiter_locks(
         aiter_jit_dir,
         stale_minutes=AITER_LOCK_STALE_MINUTES,
@@ -436,6 +442,16 @@ AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
     "AITER_CONFIG_GEMM_A4W4": ("module_gemm_a4w4_blockscale",),
 }
 
+# The ``tuned_file_name`` aiter resolves each variable under, which is both the shipped
+# table's stem and the glob it discovers model overlays with.
+AITER_ENV_TO_TUNED_FILE: dict[str, str] = {
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm",
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm",
+    "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm",
+    "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm",
+    "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm",
+}
+
 
 def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
     """True when logs show a tuned CSV kernel name missing from the compiled .so."""
@@ -443,28 +459,35 @@ def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
     return COMPILED_REGISTRY_MARKER in blob
 
 
-def csv_kernel_names(
-    csv_path: Path,
-    *,
-    skip_libtypes: frozenset[str] | None = None,
-) -> set[str]:
-    """Return non-empty ``kernelName`` values from a tuned GEMM CSV."""
-    names: set[str] = set()
-    try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                name = str(row.get("kernelName") or "").strip()
-                if not name:
-                    continue
-                libtype = str(row.get("libtype") or "").strip().lower()
-                if skip_libtypes and libtype in skip_libtypes:
-                    continue
-                if skip_libtypes and not libtype and name.startswith("_ZN"):
-                    continue
-                names.add(name)
-    except OSError:
-        return set()
-    return names
+#: How aiter names the kernel it could not find: ``kernel '<name>' is not present``.
+_MISSING_KERNEL_RE = re.compile(r"kernel '([^']+)' is not present", re.IGNORECASE)
+
+
+def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
+    """Serving modules that own the kernels a registry mismatch named.
+
+    The env a round carries does not always reach the module at fault: a round tuning
+    one CSV still boots against every CSV aiter merges, so the missing kernel can
+    belong to a variable the round never set -- and to one absent from
+    :data:`AITER_ENV_TO_SERVING_MODULES` entirely, which leaves the env-keyed drop
+    with nothing to unlink and the retry certain to fail the same way. The error text
+    names the kernel, and the kernel names its module.
+
+    Args:
+        texts: Error strings or log excerpts from the failed round.
+
+    Returns:
+        Module stems to unlink, deduplicated, empty when no kernel was named.
+    """
+    blob = "\n".join(t for t in texts if t)
+    modules: list[str] = []
+    for kernel in _MISSING_KERNEL_RE.findall(blob):
+        # libtype is not in the message; the prefix table answers for ck, and a
+        # cktile kernel carries it in its own name.
+        resolved = serving_module_for_kernel(kernel, "cktile" if "cktile" in kernel else "ck")
+        if resolved:
+            modules.append(resolved)
+    return tuple(dict.fromkeys(modules))
 
 
 def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
@@ -477,7 +500,12 @@ def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
 
 
 def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``."""
+    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``.
+
+    The tables this reads ship with aiter, so their encoding and field sizes are not
+    ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
+    ``csv.Error``, and either escaping here would skip the whole coverage check.
+    """
     rows: list[tuple[str, str]] = []
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
@@ -491,7 +519,8 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
                 if not libtype and name.startswith("_ZN"):
                     continue
                 rows.append((name, libtype))
-    except OSError:
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
     return rows
 
@@ -603,15 +632,44 @@ def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(modules))
 
 
+def csvs_aiter_will_load(configs_dir: Path, tuned_file_name: str, value: str) -> list[Path]:
+    """The CSV set this boot resolves to, by aiter's own two-branch rule.
+
+    ``jit/core.py::get_config_file`` either takes the env var literally or, when it is
+    unset, discovers per-model overlays and merges them on top of the shipped default.
+    A coverage check that only looks at what a round names therefore misses the overlay
+    an *unset* variable pulls in -- which is how ``fmoe_ck``, tuning only
+    ``AITER_CONFIG_FMOE``, booted against the dsv3 bpreshuffle overlay and failed on a
+    kernel it never tuned.
+
+    Args:
+        configs_dir: aiter's ``configs/`` directory.
+        tuned_file_name: The table's stem, e.g. ``a8w8_blockscale_bpreshuffle_tuned_gemm``.
+        value: The env var's value, empty when unset.
+
+    Returns:
+        The CSV paths this boot will read, shipped default first when it applies.
+    """
+    if value.strip():
+        # Set: precisely the ``:``-joined paths. The shipped default is not prepended and
+        # model overlays are not discovered.
+        return [Path(p) for p in value.split(":") if p.strip()]
+    overlays = sorted(
+        p for p in (configs_dir / "model_configs").glob(f"*{tuned_file_name}*.csv") if "untuned" not in p.name
+    )
+    return [configs_dir / f"{tuned_file_name}.csv", *overlays]
+
+
 def prepare_serving_so_for_csvs(
     envs: dict[str, str],
     *,
     backup_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Skip when serving .so already covers the CSV; otherwise unlink and re-JIT.
+    """Skip when serving .so already covers the CSVs this boot loads; otherwise re-JIT.
 
     Args:
-        envs: ``AITER_CONFIG_*`` paths about to be used to start the server.
+        envs: The round's ``AITER_CONFIG_*`` values; a variable it does not name is
+            checked on aiter's unset branch, which is where the model overlays come in.
         backup_dir: Where to move ``jit/build`` if invalidation runs.
 
     Returns:
@@ -620,21 +678,24 @@ def prepare_serving_so_for_csvs(
     jit_dir = _resolve_serving_jit_dir()
     if jit_dir is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
+    # Only the unset branch reads this; a value the round pinned is taken verbatim, so a tree
+    # without configs/ beside jit/ still gets its named tables checked.
+    configs_dir = jit_dir.parent / "configs"
     modules_needed: list[str] = []
-    for env_var, csv_path_raw in envs.items():
-        modules = AITER_ENV_TO_SERVING_MODULES.get(str(env_var), ())
-        if not modules:
+    for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
+        tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
+        if not tuned_file_name:
             continue
-        csv_path = Path(str(csv_path_raw))
-        if not csv_path.is_file():
-            continue
-        if serving_modules_cover_csv(jit_dir, modules, csv_path):
-            continue
-        modules_needed.extend(modules)
-        for name, libtype in csv_jit_kernel_rows(csv_path):
-            resolved = serving_module_for_kernel(name, libtype)
-            if resolved:
-                modules_needed.append(resolved)
+        for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
+            if not csv_path.is_file():
+                continue
+            if serving_modules_cover_csv(jit_dir, modules, csv_path):
+                continue
+            modules_needed.extend(modules)
+            for name, libtype in csv_jit_kernel_rows(csv_path):
+                resolved = serving_module_for_kernel(name, libtype)
+                if resolved:
+                    modules_needed.append(resolved)
     modules_needed_t = tuple(dict.fromkeys(modules_needed))
     if not modules_needed_t:
         return {"action": "skip", "jit_dir": str(jit_dir)}
@@ -658,12 +719,21 @@ def drop_serving_so_for_envs(
     envs: dict[str, str] | None = None,
     *,
     backup_dir: Path | None = None,
+    also_modules: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds."""
+    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds.
+
+    Args:
+        envs: ``AITER_CONFIG_*`` the round carried; ``None`` means every known module.
+        backup_dir: Where to park the invalidated ``jit/build``.
+        also_modules: Modules to unlink on top of the env's own, for a mismatch whose
+            kernel belongs to a variable this round never set. Without them an env
+            that maps to no module unlinks nothing and the retry repeats the failure.
+    """
     jit_dir = _resolve_serving_jit_dir()
     if jit_dir is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    modules = _modules_for_envs(envs)
+    modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     removed = _unlink_serving_modules(jit_dir, modules)
     invalidation = _invalidate_jit_build(jit_dir, dest)
@@ -687,6 +757,7 @@ def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool
 __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
     "AITER_ENV_TO_SERVING_MODULES",
+    "AITER_ENV_TO_TUNED_FILE",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "BASELINE_COLD_START_TIMEOUT_SEC",
@@ -696,12 +767,13 @@ __all__ = [
     "NON_JIT_SO_LIBTYPES",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
-    "csv_kernel_names",
+    "csvs_aiter_will_load",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
     "serving_modules_cover_csv",

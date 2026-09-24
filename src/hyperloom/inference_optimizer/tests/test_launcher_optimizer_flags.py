@@ -22,7 +22,6 @@ PACKAGE_ROOT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer"
 LAUNCHERS = (
     (PACKAGE_ROOT / "assets" / "slurm" / "_incontainer.sh.in", 2),
     (PACKAGE_ROOT / "assets" / "slurm" / "run_hyperloom.sbatch", 0),
-    (PACKAGE_ROOT / "tools" / "robustness_monitor.sh.example", 2),
 )
 
 # Retired with the kernel LLM role.

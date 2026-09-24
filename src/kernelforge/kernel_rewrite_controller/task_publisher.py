@@ -19,7 +19,12 @@ from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tre
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.experience_sink import detect_framework
+from kernelforge.knowledge.implementation_identity import (
+    canonical_framework_version,
+    canonical_owner_framework,
+    normalize_operator_name,
+)
 from kernelforge.knowledge.kernel_identity import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.llm.git import GitError, git
 
@@ -45,6 +50,11 @@ WITHDRAWN_KEY = "withdrawn"
 #: name is stable so the prompt can point at it.
 REJECTION_FILENAME = "rejection.json"
 
+#: What the detector answers when no known package owns a path, and what it folds
+#: every spelling of "this kernel belongs to no package" to. Read from the
+#: detector rather than spelled out so the two cannot drift.
+_UNOWNED_FRAMEWORK = detect_framework("", framework_override="")
+
 
 @dataclass(frozen=True)
 class TaskPublicationResult:
@@ -68,11 +78,27 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
                 continue
             identity[field] = value.strip().lower()
         # Host-owned, like base_commit and driver_path below: the parser derives
-        # it too, and writing it here is what makes the published task.json state
-        # the identity the controller went on to use rather than the draft's.
+        # these too, and writing them here is what makes the published task.json
+        # state the identity the controller went on to use rather than the draft's.
         operator_name = normalized.get("operator_name")
         if isinstance(operator_name, str) and operator_name.strip():
             identity["kernel_name"] = normalize_operator_name(operator_name)
+        identity["framework_version"] = canonical_framework_version(identity.get("framework_version", ""))
+        # The declared framework reaches forge-loop as an override, and the
+        # override is resolved before it becomes an address: ``aiter_meta`` is
+        # ``aiter``, and every spelling of "this kernel belongs to no package" --
+        # ``standalone``, ``none`` -- is the one word for not knowing which. A
+        # draft keeping its own spelling names one page in its directory and its
+        # published pointer while the run files its result under another. Asking
+        # the detector with no path is asking it about the override alone, which
+        # is the whole of what it does with one.
+        # Guarded like the loop above rather than coerced like the line above:
+        # a draft that wrote something other than a string here is one the parser
+        # refuses by name, and one bad draft must not cost the sweep the other
+        # drafts staged beside it.
+        declared_framework = identity.get("framework")
+        if isinstance(declared_framework, str):
+            identity["framework"] = detect_framework("", framework_override=declared_framework)
         normalized["identity"] = identity
     repo_root = normalized.get("repo_root")
     if isinstance(repo_root, str):
@@ -124,6 +150,38 @@ def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
             ) from error
 
 
+def _validate_framework_against_sources(task: KernelRewriteTask) -> None:
+    """Refuse a framework that none of this task's own paths sit under.
+
+    The declared framework reaches forge-loop as an override, and an override
+    short-circuits the path inference the detector exists for -- so nothing
+    downstream ever notices the dimension naming a package the source does not
+    live in, and the run files its result on that package's page. The paths were
+    just checked to exist at the base commit, which makes them the one witness
+    available here.
+
+    This refuses a contradiction and never re-derives. One path can sit under two
+    packages at once -- the store holds ``sglang/aiter/ops/flydsl/...`` -- and
+    which of them owns the kernel is not a question the order of a tuple should
+    answer, so a declared framework that appears anywhere in the paths stands. A
+    path under no known package witnesses nothing and is left alone.
+    """
+    owned = [
+        path
+        for path in dict.fromkeys((task.kernel_path, *task.source_files))
+        if detect_framework(path, framework_override="") != _UNOWNED_FRAMEWORK
+    ]
+    if not owned:
+        return
+    declared = task.identity.framework
+    if any(canonical_owner_framework(part) == declared for path in owned for part in Path(path).parts):
+        return
+    raise ValueError(
+        f"identity.framework is {declared!r}, which none of this task's paths sit under: {', '.join(owned)}. "
+        "Name the package that owns the source being ported."
+    )
+
+
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
@@ -161,6 +219,7 @@ def publish_staged_task(
             enforce_directory_identity=False,
         )
         _validate_task_sources_at_base(task)
+        _validate_framework_against_sources(task)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return TaskPublicationResult(source_dir=source, reason=f"invalid staged task: {error}")
 

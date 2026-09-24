@@ -5,22 +5,16 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
-
-    return shared_state
-
+from .phase_state import GAP_SEVERITY_RANK, _shared_state_module
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
@@ -226,56 +220,6 @@ class _RenderMixin:
             lines.append(reloop_line)
         return "\n".join(lines)
 
-    def to_phase_budget_telemetry(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase)."""
-        from ...phases.machine_state import (
-            DEFAULT_PHASE_BUDGET_PCT,
-            PHASE_NAMES,
-            is_phase_transition_row,
-            normalize_budget_pct,
-            phase_elapsed_seconds,
-        )
-
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        # Aggregate elapsed per phase using real transitions only.
-        elapsed_per_phase: dict[str, float] = {}
-        history = [row for row in (self.phase_history or []) if is_phase_transition_row(row)]
-        for idx, row in enumerate(history):
-            if not isinstance(row, dict):
-                continue
-            phase = str(row.get("to_phase") or "").upper()
-            entered = float(row.get("ts_unix") or 0.0)
-            if not phase or entered <= 0:
-                continue
-            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
-                exited = float(history[idx + 1].get("ts_unix") or entered)
-            else:
-                # Currently-active segment — measure to now.
-                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
-                exited = entered + elapsed_now
-            elapsed_per_phase[phase] = elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
-        if not elapsed_per_phase:
-            return "(no phase history yet)"
-        mm = float(self.max_minutes or 0.0)
-        total_budget_sec = mm * 60.0
-        lines: list[str] = []
-        # Iterate PHASE_NAMES for stable order.
-        for phase in PHASE_NAMES:
-            if phase not in elapsed_per_phase:
-                continue
-            elapsed = elapsed_per_phase[phase]
-            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
-            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
-            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
-            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
-            lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
-        return "\n".join(lines) or "(no phase history yet)"
-
     def to_resource_pools_summary(self) -> str:
         """Render the GPU pool / lane capacity block."""
         from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
@@ -464,8 +408,6 @@ class _RenderMixin:
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        rank = {"high": 3, "medium": 2, "low": 1}
-
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
@@ -487,7 +429,7 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
+                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
 
@@ -901,10 +843,7 @@ class _RenderMixin:
             gain_str = "?"
         # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
         # the verbatim md.
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "0",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "

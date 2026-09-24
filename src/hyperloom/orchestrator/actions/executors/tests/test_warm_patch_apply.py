@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _revert_patches,
     _revert_warm_patch_state,
     _revert_warm_patch_trees,
+    _stamp_warm_patch_outcome,
 )
 
 
@@ -439,6 +440,41 @@ def test_multiple_patches_partial_success(fake_repo, output_dir):
     assert result[0]["patch_file"] == "vllm/fp8.py"
 
 
+def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo, output_dir):
+    """The bare list carries only what landed. Without the per-patch statuses
+    behind it, a patch that was silently skipped leaves nothing behind, and the
+    round is measured on a tree no reader downstream can describe."""
+    params = {
+        "patches": [
+            {
+                "patch_file": "bad.py",
+                "patch_content": "this is not a valid diff at all\n",
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            },
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": VALID_PATCH,
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            },
+        ],
+    }
+    applied = _apply_warm_patches(params, str(fake_repo), output_dir)
+
+    round_result: dict = {}
+    _stamp_warm_patch_outcome(round_result, applied, params, "")
+    reported = round_result["warm_patch_result"]["patches"]
+
+    assert round_result["warm_patch_result"]["required"] is False
+    assert [row["patch_ref"] for row in reported] == ["bad.py", "vllm/fp8.py"]
+    assert reported[0]["status"] == "failed"
+    assert reported[0]["reason"] == "unsafe_or_non_text_diff"
+    assert reported[1]["status"] != "failed"
+    # Only the structured path names trees, which is what prelude promotes from.
+    assert "warm_patch_trees" not in round_result
+
+
 def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
     # SWSPLAT-42326: KB-sourced patch_content that is not a unified diff must be skipped before git apply (never
     # applied), leaving the tree untouched.
@@ -681,47 +717,84 @@ def test_snapshot_revert_rejects_head_mismatch(
     assert result["errors"][0].startswith("head_mismatch:")
 
 
-def test_required_timeline_refuses_a_repo_with_no_head(tmp_path, output_dir):
-    """prelude promotes this tree against a pre_sha it cannot get here."""
+def test_required_timeline_applies_in_a_repo_with_no_head(tmp_path, output_dir):
+    """An unborn repo has no sha, so its backups carry the replay instead."""
+    _require_patch_cli()
     repo = tmp_path / "unborn"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     target = repo / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
 
-    result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(repo),
-        output_dir,
-    )
+    result = _apply_warm_patches(params, str(repo), output_dir)
 
-    assert result["status"] == "failed"
-    assert result["failure"] == "missing_git_head"
-    assert "original = True" in target.read_text(), "must not leave a patched tree"
+    assert result["status"] == "prepared"
+    assert [entry["status"] for entry in result["applied"]] == ["applied_nogit"]
+    assert "patched = True" in target.read_text()
+    assert params["_warm_patch_nogit_backups"], "the only way back must be recorded"
 
 
-def test_required_timeline_refuses_a_non_git_install_tree(tmp_path, output_dir):
-    """Same contract for an install tree that was never a repo."""
+def test_required_timeline_applies_on_a_non_git_install_tree(tmp_path, output_dir):
+    """A pip-installed framework is the tree a KB recipe is usually measured on."""
+    _require_patch_cli()
     install_root = tmp_path / "dist-packages"
     target = install_root / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
 
-    result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(install_root),
+    result = _apply_warm_patches(params, str(install_root), output_dir)
+
+    assert result["status"] == "prepared"
+    assert [entry["status"] for entry in result["applied"]] == ["applied_nogit"]
+    assert "patched = True" in target.read_text()
+    tree = result["trees"][0]
+    assert tree["root"] == str(install_root)
+    assert tree["nogit_backups"], "promote reads the restore channel off these"
+
+
+def test_the_record_persisted_before_the_apply_reads_as_written_to(fake_repo, output_dir):
+    """A crash between the persist and the apply must still restore the tree."""
+    persisted: list[list] = []
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+
+    _apply_warm_patches(
+        params,
+        str(fake_repo),
         output_dir,
+        before_mutation=lambda records: persisted.append(records) or True,
     )
 
-    assert result["status"] == "failed"
-    assert result["failure"] == "missing_git_head"
+    assert [tree["mutated"] for tree in persisted[0]] == [True]
+
+
+def test_required_timeline_on_a_non_git_tree_reverts_whole(tmp_path, output_dir):
+    """The replay that could not be kept has to leave the install tree pristine."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+    result = _apply_warm_patches(params, str(install_root), output_dir)
+
+    restore = _revert_warm_patch_trees(result["trees"])
+
+    assert restore["ok"] is True
     assert "original = True" in target.read_text()
 
 

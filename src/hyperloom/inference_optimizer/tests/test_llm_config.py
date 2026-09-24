@@ -38,10 +38,12 @@ from hyperloom.common.llm_config import (
     get_async_openai_client,
     get_openai_client,
     openai_client_kwargs,
-    parse_custom_headers,
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
     provider_model_defaults,
     resolve_forge_llm_model,
 )
+from hyperloom.common.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -200,9 +202,10 @@ def test_explicit_openai_side_wins_key_and_url_independently():
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
 
-def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+def test_retired_gateway_key_loses_to_the_anthropic_fallback():
+    """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -251,9 +254,14 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
-def test_openai_agent_credential_requires_the_api_key_not_a_bare_base_url():
+def test_openai_agent_credential_requires_a_key_not_a_bare_base_url():
     assert not llm_config.openai_agent_credentialed({"OPENAI_BASE_URL": "https://gw/v1"})
     assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
+
+
+def test_a_retired_gateway_key_does_not_credential_the_openai_side():
+    """`_validate_credentials` admits a run on OPENAI_API_KEY alone, so the ranking names the same one name."""
+    assert not llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
 
 
 @pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
@@ -275,6 +283,8 @@ def test_a_managed_gateway_drives_the_claude_cli_without_naming_a_key(gateway):
         (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
         (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
         (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
+        # A retired key names no credential on either side, so the tie falls back to the SDK and Claude keeps it.
+        (True, True, {"OPENAI_BASE_URL": "https://gw/v1", "LLM_GATEWAY_KEY": "gw"}, llm_config.AGENT_BACKEND_CLAUDE),
         # The one shape a managed gateway decides: it holds the Anthropic side
         # against a real OpenAI key that would otherwise win on its own.
         (
@@ -292,8 +302,8 @@ def test_preferred_agent_backend_ranks_credentials_then_sdk(
     env: dict[str, str],
     expected: str,
 ) -> None:
-    monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: claude_sdk)
-    monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: codex_sdk)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: claude_sdk)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: codex_sdk)
     assert llm_config.preferred_agent_backend(env) == expected
 
 
@@ -324,7 +334,7 @@ def test_openai_kwargs_error_names_every_searched_key():
     with pytest.raises(LLMConfigError) as excinfo:
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
     message = str(excinfo.value)
-    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 
@@ -533,7 +543,8 @@ def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
 
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
-    assert resolve_forge_llm_model("codex", env={}, default="gpt-default") == "gpt-default"
+    assert resolve_forge_llm_model("codex", env={}) == DEFAULT_CODEX_MODEL
+    assert resolve_forge_llm_model("claude", env={}) == DEFAULT_CLAUDE_MODEL
     assert (
         resolve_forge_llm_model(
             "claude",

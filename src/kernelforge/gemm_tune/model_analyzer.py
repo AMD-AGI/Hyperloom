@@ -45,14 +45,10 @@ class ModelProfile:
     qk_rope_head_dim: int = 0
     o_lora_rank: int = 0
     o_groups: int = 0
-    # Activation
-    hidden_act: str = "silu"
     # Quantization (from config or CLI override)
     quant_method: str = ""  # "", "fp8", "awq", "gptq", "compressed-tensors"
     quant_bits: int = 0
     quant_group_size: int = 0
-    # Gate/up fusion: most MoE models fuse gate+up (use_g1u1=1)
-    use_g1u1: bool = True
     # Model dtype from config.json (torch_dtype field)
     model_dtype: str = "bfloat16"
     # Raw config for advanced consumers
@@ -79,19 +75,6 @@ class ModelProfile:
     def keeps_dense_layers_at_model_dtype(self) -> bool:
         """Whether substantial dense GEMMs stay at model dtype after quantization."""
         return any(name.rsplit(".", 1)[-1].lower() != "lm_head" for name in self.unquantized_linear_modules)
-
-    @property
-    def activation_type_str(self) -> str:
-        """Map hidden_act to aiter ActivationType enum string."""
-        mapping = {
-            "silu": "ActivationType.Silu",
-            "swiglu": "ActivationType.Silu",
-            "gelu": "ActivationType.Gelu",
-            "gelu_new": "ActivationType.Gelu",
-            "gelu_fast": "ActivationType.Gelu",
-            "relu": "ActivationType.Relu",
-        }
-        return mapping.get(self.hidden_act.lower(), "ActivationType.Silu")
 
 
 def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -170,9 +153,6 @@ def analyze_model(model_path: str) -> ModelProfile:
     moe_intermediate_size = int(llm_cfg.get("moe_intermediate_size", 0))
     num_hidden_layers = int(llm_cfg.get("num_hidden_layers", 0))
 
-    # Activation
-    hidden_act = str(llm_cfg.get("hidden_act", "silu")).lower()
-
     # Model dtype
     model_dtype = str(llm_cfg.get("torch_dtype", config.get("torch_dtype", "bfloat16"))).replace("torch.", "")
 
@@ -194,10 +174,6 @@ def analyze_model(model_path: str) -> ModelProfile:
     # Quantization
     quant_method, quant_bits, quant_group_size = _extract_quant_info(config)
 
-    # Gate/up fusion heuristic: almost all modern MoE models use fused gate+up Exception: some very old models or
-    # custom architectures
-    use_g1u1 = True
-
     profile = ModelProfile(
         model_path=model_path,
         architecture=arch,
@@ -218,11 +194,9 @@ def analyze_model(model_path: str) -> ModelProfile:
         qk_rope_head_dim=qk_rope_head_dim,
         o_lora_rank=o_lora_rank,
         o_groups=o_groups,
-        hidden_act=hidden_act,
         quant_method=quant_method,
         quant_bits=quant_bits,
         quant_group_size=quant_group_size,
-        use_g1u1=use_g1u1,
         model_dtype=model_dtype,
         raw_config=config,
     )

@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
-import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -130,7 +129,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -415,7 +413,11 @@ class TestQueueFusionSiblings:
     """A KEPT fusion nomination is queued as sibling records, not integrated inline."""
 
     @pytest.mark.asyncio
-    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
+    @pytest.mark.parametrize("override, expected", [(None, 1.0), ("invalid", 1.0), ("2.5", 2.5)])
+    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path, monkeypatch, override, expected):
+        monkeypatch.delenv("HYPERLOOM_FUSION_KEEP_PCT", raising=False)
+        if override is not None:
+            monkeypatch.setenv("HYPERLOOM_FUSION_KEEP_PCT", override)
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -458,9 +460,8 @@ class TestQueueFusionSiblings:
         assert rec_a["action_label"] == "fusion"
         assert rec_a["artifact_path"] == "/out/fuse_a.patch"
         assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
-        # The fusion-specific keep bar (default 3.0%) rides on the record so the generic drain grades against it
-        # rather than the integrate default.
-        assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
+        # The fusion-specific keep bar rides on the record rather than the integrate default.
+        assert rec_a["keep_threshold_pct"] == pytest.approx(expected)
         assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
     @pytest.mark.asyncio
@@ -748,7 +749,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -849,7 +850,7 @@ class TestForgeGemmRuntimeConfigMerge:
             }
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -909,7 +910,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return responses[len(calls) - 1]
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -950,6 +951,8 @@ class TestForgeGemmRuntimeConfigMerge:
             "gemm_tune_fmoe_ck",
             "gemm_tune_dense_bf16",
         ]
+        assert calls[0]["keep_threshold_pct"] == pytest.approx(1.0)
+        assert calls[1]["keep_threshold_pct"] == pytest.approx(1.0)
         assert calls[0]["base_tput"] == 110.0
         assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": str(fmoe_candidate)}
@@ -1640,6 +1643,7 @@ class TestKernelE2EMeasurementPromotion:
         from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
             ROUTE_FORGE,
+            SOURCE_GEMM_TUNING,
             assemble_kernel_ext,
         )
         from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -1674,8 +1678,8 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
         # The gain is graded on the session's own axis, and the run says which
         # one, so an interactivity gain is never read back as an output gain.
-        [run] = ext["forge"]["lanes"]["gemm_tuning_runs"]
-        assert run["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
+        [run] = [row for row in ext["attempts"] if row["source_kind"] == SOURCE_GEMM_TUNING]
+        assert run["detail"]["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):
@@ -2543,13 +2547,10 @@ class TestValidateForgeGemmTuningE2E:
         assert result["e2e_results"]["reverted"] == []
 
     @pytest.mark.asyncio
-    async def test_timeout_fallback_when_explore_helper_raises(self, tmp_path, monkeypatch):
+    async def test_gemm_validation_uses_fixed_benchmark_budget(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
 
-        def _raise(**kwargs):
-            raise ValueError("no runtime budget")
-
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", _raise)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
 
         captured: dict[str, object] = {}
 
@@ -2576,8 +2577,7 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_gemm_tuning_e2e(result)
 
-        # Fallback budget is 15 minutes.
-        assert captured["budget"] == 15
+        assert captured["budget"] == 130
 
     @pytest.mark.asyncio
     async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):

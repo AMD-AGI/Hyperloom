@@ -578,8 +578,13 @@ class TestCustomAdapterMeasurement:
         assert rep["success"] is True
         assert float(rep["throughput"]["output_throughput"]) == pytest.approx(1.29)
 
-    def test_an_inert_env_variant_measures_without_a_harness_error(self, tmp_path, monkeypatch):
-        """A default-off extra_env must still produce a valid measurement (probe 3)."""
+    @pytest.mark.parametrize(
+        ("timeout_override", "expected_timeout"), [(None, 7800.0), ("10", 10.0)], ids=["default", "override"]
+    )
+    def test_an_inert_env_variant_measures_without_a_harness_error(
+        self, tmp_path, monkeypatch, timeout_override, expected_timeout
+    ):
+        """An inert env variant measures under the shared scriptable benchmark caps."""
         import asyncio
         import subprocess
         import sys
@@ -607,6 +612,10 @@ class TestCustomAdapterMeasurement:
         )
 
         def _ok(cmd, *a, **k):
+            assert k["timeout"] == expected_timeout
+            assert k["silence_timeout_sec"] == 600
+            assert k["server_log_path"] is None
+            assert k["session_deadline_sec"] is None
             slot = Path(cmd[cmd.index("--output-dir") + 1])
             ws = slot / "benchmark_custom_20260101_000000"
             ws.mkdir(parents=True, exist_ok=True)
@@ -626,10 +635,15 @@ class TestCustomAdapterMeasurement:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
+        if timeout_override is None:
+            monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
+        else:
+            monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", timeout_override)
         with patch(
             "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
             side_effect=_ok,
-        ):
+        ) as launch:
             results = asyncio.run(
                 run_grid(
                     base_yaml_path=base,
@@ -643,10 +657,11 @@ class TestCustomAdapterMeasurement:
                     ],
                     output_root=tmp_path / "out",
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi355x",
                 )
             )
+        assert launch.call_count == 2
         assert [r.status for r in results] == ["succeeded", "succeeded"]
+        assert [r.output_throughput for r in results] == pytest.approx([1.29, 1.29])
         assert all(not r.error_class for r in results)
         assert not list((tmp_path / "out").glob("variant_*/abort_reason.json"))

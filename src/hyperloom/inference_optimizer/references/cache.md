@@ -23,17 +23,22 @@ First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
 `--gpu-memory-utilization` / `--cuda-graph-max-bs` / `--quantization` /
 `--enable-torch-compile`; pod rebuild; manual cache `rm`; aiter source patch.
 
-## Auto-detection + timeout
+## Cold-start diagnostics and benchmark limits
 
-The baseline executor counts aiter `.so` files (**< 20 = COLD**) and
-picks a subprocess timeout accordingly: COLD → 9000s (150 min,
-`BASELINE_COLD_START_TIMEOUT_SEC`), WARM → 7800s (130 min,
-`BASELINE_DEFAULT_TIMEOUT_SEC`); `task.params['timeout_sec']` always wins. The
-profile executor inherits the same probe with a 14400s (4 h) warm default, so a
-COLD probe there lowers the cap to 9000s. Each launch logs a
-`baseline_executor: ...` marker and the cache state lands in the
-`Preflight diagnostics:` block. If COLD_START repeats across retries the JIT was
-killed mid-`hipcc` — bump `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` above the
-9000s default (e.g. `=12000`; it replaces the cold cap outright, so a smaller
-value shortens it). Override the probe dir via
-`INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
+Cold-start detection remains diagnostic; it does not select a separate
+benchmark deadline. Every actual benchmark spawn uses
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800` seconds), including
+weight load, JIT startup, and accuracy evaluation. After real server readiness,
+`INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default `600` seconds) also
+bounds output silence. Neither startup before readiness nor a server-less
+scriptable workload arms that silence timer. Both values must be finite and
+positive; output never extends the hard deadline.
+
+Inspect server/compiler logs and cache artifacts before deciding a repeated cold
+start was interrupted. Quiet logs alone do not prove a hang, and busy logs alone
+do not prove useful progress. Profile, KernelForge, GEAK, and LLM budgets remain
+separate. Session `--max-hours` and cancellation still apply; session shutdown is
+cooperative and cannot guarantee termination of a frozen Coordinator.
+
+See [Benchmark config](benchmark.md#benchmark-deadlines) for output-buffering
+limitations and the full benchmark policy.

@@ -57,7 +57,7 @@ class KernelStackPhase(PhaseHandler):
                     if str(result.get("decision") or "").upper() == "KEEP":
                         await self._record_integrate_keep(result)
                 state.save(self.session_dir)
-            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+            except Exception as exc:
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
@@ -345,10 +345,12 @@ class KernelStackPhase(PhaseHandler):
         entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
-        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+        from ..actions.executors.baseline import BaselineExecutor
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
-        from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
+        from ..actions.executors.benchmark_result import is_valid_measurement
         from ..kernel.patch_lifecycle import cleanup_verdict, lifecycle_complete
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
@@ -396,9 +398,9 @@ class KernelStackPhase(PhaseHandler):
                     # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
                     # on throughput alone.
                     "quality_ref_exempt": True,
-                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it leaves no
-                    # baseline event.
-                    SBD_INNER_STEP_PARAM: True,
+                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
+                    # that event rather than leaving a baseline event of its own.
+                    INLINE_EVENT_PARAM: kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
@@ -460,24 +462,21 @@ class KernelStackPhase(PhaseHandler):
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
-                try:
-                    accuracy_gate = _grade_integrate_accuracy(
-                        bench_result,
-                        session_dir=self.session_dir,
-                        workspace=workspace,
-                        # The args the bench server ran under, so a serving context too small to host an eval is not
-                        # read as a broken eval.
-                        server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                accuracy_gate = _grade_integrate_accuracy(
+                    bench_result,
+                    session_dir=self.session_dir,
+                    workspace=workspace,
+                    # The args the bench server ran under, so a serving context too small to host an eval is not
+                    # read as a broken eval.
+                    server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                )
+                if accuracy_gate.get("blocked"):
+                    decision = "NEEDS_REVIEW"
+                    log.info(
+                        "stack-validate: accuracy gate blocked KEEP for %s: %s",
+                        stack_id,
+                        accuracy_gate.get("reason"),
                     )
-                    if accuracy_gate.get("blocked"):
-                        decision = "NEEDS_REVIEW"
-                        log.info(
-                            "stack-validate: accuracy gate blocked KEEP for %s: %s",
-                            stack_id,
-                            accuracy_gate.get("reason"),
-                        )
-                except Exception:  # noqa: BLE001
-                    log.debug("stack-validate: accuracy gate failed", exc_info=True)
 
             finalize_results: list[dict[str, Any]] = []
             stack_reverts: list[dict[str, Any]] = []

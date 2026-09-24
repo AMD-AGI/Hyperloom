@@ -8,16 +8,24 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from hyperloom.common import io as _common_io
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_unix
 from hyperloom.common.perf_metric import agentx_active
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 ComparisonReason = Literal["target_unavailable", "concurrency_mismatch", "measurement_unavailable"]
+
+#: A hint older than this no longer describes the session's current
+#: environment (GPU occupancy, neighbour tenancy, install state can all
+#: change mid-session) and is dropped rather than kept advisory forever.
+HINT_STALE_AFTER = timedelta(hours=6)
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
@@ -41,7 +49,14 @@ def _coerce_hint(raw: Any) -> dict[str, Any] | None:
         "source": source,
         "domain_tags": domain_tags,
         "status": str(raw.get("status") or "proposed").strip() or "proposed",
+        "observed_at": str(raw.get("observed_at") or "").strip() or now_iso(z_suffix=True),
     }
+
+
+def _is_stale(hint: dict[str, Any]) -> bool:
+    """True when a hint was observed longer ago than :data:`HINT_STALE_AFTER`."""
+    observed = to_unix(hint.get("observed_at"))
+    return observed is not None and time.time() - observed > HINT_STALE_AFTER.total_seconds()
 
 
 def _hint_key(hint: dict[str, Any]) -> str:
@@ -49,8 +64,8 @@ def _hint_key(hint: dict[str, Any]) -> str:
     return f"{hint['what'].lower()}::{hint['source'].lower()}"
 
 
-def load_hints(session_dir: Path) -> list[dict[str, Any]]:
-    """Return the structured hints written so far (empty on miss/parse error)."""
+def _recorded_hints(session_dir: Path) -> list[dict[str, Any]]:
+    """Every hint on disk, fresh or not (empty on miss/parse error)."""
     path = session_paths.research_hints_json(session_dir)
     try:
         if not path.exists():
@@ -62,12 +77,17 @@ def load_hints(session_dir: Path) -> list[dict[str, Any]]:
     items = data.get("hints") if isinstance(data, dict) else data
     if not isinstance(items, list):
         return []
-    out: list[dict[str, Any]] = []
-    for item in items:
-        coerced = _coerce_hint(item)
-        if coerced is not None:
-            out.append(coerced)
-    return out
+    return [hint for hint in (_coerce_hint(item) for item in items) if hint is not None]
+
+
+def load_hints(session_dir: Path) -> list[dict[str, Any]]:
+    """Return the hints still fresh enough to advise on, dropping stale ones.
+
+    The stale ones stay on disk as the record of what was once observed; they
+    are withheld from readers because a prior's environment can be re-measured
+    out from under it mid-session.
+    """
+    return [hint for hint in _recorded_hints(session_dir) if not _is_stale(hint)]
 
 
 def _render_md(hints: list[dict[str, Any]]) -> str:
@@ -87,6 +107,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
             f"- accuracy_risk: {h['accuracy_risk'] or '-'}",
             f"- domain_tags: {tags}",
             f"- status: {h['status']}",
+            f"- observed_at: {h['observed_at']}",
             f"- source: {h['source']}",
             "",
         ]
@@ -98,8 +119,7 @@ def write_hints_skeleton(session_dir: Path) -> None:
     md_path = session_paths.research_hints_md(session_dir)
     if md_path.exists():
         return
-    existing = load_hints(session_dir)
-    _persist(session_dir, existing)
+    _persist(session_dir, _recorded_hints(session_dir))
 
 
 def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
@@ -121,7 +141,9 @@ def append_hints(
     incoming: list[Any],
 ) -> tuple[int, int]:
     """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added)."""
-    existing = load_hints(session_dir)
+    # Against the whole record, not just the fresh view: deduping against the
+    # latter re-adds a hint as new the moment it goes stale.
+    existing = _recorded_hints(session_dir)
     seen = {_hint_key(h) for h in existing}
     added = 0
     dropped = 0

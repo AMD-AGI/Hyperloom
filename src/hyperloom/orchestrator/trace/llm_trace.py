@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import append_jsonl
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
+    call_key_fields,
     coerce_optional_int as _coerce_optional_int,
     coerce_optional_str as _coerce_optional_str,
     validate_closed_row,
@@ -32,7 +32,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "dynamic_action",
         "specialist",
         "critic",
-        "robustness",
         "proposal_scorer",
         "geak",
         "forge",
@@ -56,35 +55,6 @@ VALID_STATUSES: frozenset[str] = frozenset({LLM_STATUS_OK, LLM_STATUS_ERROR})
 _ERROR_MESSAGE_MAX = 500
 
 
-# Canonical field contract for one ``llm_calls.jsonl`` row; the closed-schema check compares serialized keys against
-# this set exactly.
-_ROW_FIELDS: frozenset[str] = frozenset(
-    {
-        "session_id",
-        "ts",
-        "component",
-        "call_id",
-        "role",
-        "task_id",
-        "dyn_id",
-        "tick",
-        "phase",
-        "turn",
-        "model",
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "reasoning_output_tokens",
-        "latency_ms",
-        "reviewed_msg_ids",
-        "status",
-        "error_type",
-        "error_message",
-    }
-)
-
-
 class LLMTraceRowError(ValueError):
     """Raised when an LLM-call row violates the closed schema."""
 
@@ -92,10 +62,6 @@ class LLMTraceRowError(ValueError):
 def new_call_id() -> str:
     """Mint a per-call id for the two halves of one LLM call to share."""
     return uuid.uuid4().hex
-
-
-# Canonical timestamp helper; kept importable for callers.
-_now_iso = now_iso
 
 
 @dataclass
@@ -136,17 +102,7 @@ class LLMCallRecord:
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs)."""
         return {
-            "session_id": str(self.session_id),
-            "ts": _now_iso(),
-            "component": str(self.component),
-            "call_id": _coerce_optional_str(self.call_id),
-            "role": _coerce_optional_str(self.role),
-            "task_id": _coerce_optional_str(self.task_id),
-            "dyn_id": _coerce_optional_str(self.dyn_id),
-            "tick": _coerce_optional_int(self.tick),
-            "phase": _coerce_optional_str(self.phase),
-            "turn": _coerce_optional_int(self.turn),
-            "model": _coerce_optional_str(self.model),
+            **call_key_fields(self),
             "input_tokens": _coerce_optional_int(self.input_tokens),
             "output_tokens": _coerce_optional_int(self.output_tokens),
             "cache_creation_input_tokens": _coerce_optional_int(self.cache_creation_input_tokens),
@@ -281,16 +237,12 @@ def append_llm_call(
         from .langfuse_emitter import get_emitter
 
         get_emitter(session_dir).record_llm_call(row)
-    except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+    except Exception:
         log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
-# Sanity guard: the dataclass fields (minus the write-time ``ts``) must stay in lockstep with the on-disk row schema,
-# caught at import.
-_DATACLASS_FIELDS: frozenset[str] = frozenset(f.name for f in fields(LLMCallRecord))
-assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
-    f"LLMCallRecord fields drifted from _ROW_FIELDS: dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"
-)
+# The closed on-disk schema: every record field plus the write-time ``ts``.
+_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(LLMCallRecord)) | {"ts"}
 
 
 __all__ = [

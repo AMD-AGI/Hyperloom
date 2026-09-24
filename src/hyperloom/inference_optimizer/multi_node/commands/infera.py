@@ -90,6 +90,17 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
+    # Forward no-patch shape-discovery config; the pod-side launcher sets
+    # PYTHONPATH itself (it is blocked from SSH forwarding).
+    for _shape_key in (
+        "TRACELENS_ROOT",
+        "TRACELENS_SHAPE_DISCOVERY",
+        "HYPERLOOM_SGLANG_SHAPE_MODE",
+        "HYPERLOOM_SGLANG_VERSION_PIN",
+    ):
+        _shape_val = os.environ.get(_shape_key, "").strip()
+        if _shape_val and _shape_key not in fwd:
+            fwd[_shape_key] = _shape_val
     unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
     if unset_fwd:
         try:
@@ -139,7 +150,7 @@ def _infera_fanout_launch(
     print_logs: bool,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
-    script = _mn_cli._read_pod_script("launch_infera_node.py")
+    script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
@@ -531,7 +542,7 @@ def _infera_ssh_node_op(
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = str(target.get("podIP") or "").strip()
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py")
+    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
         cp = _mn_cli._infera_ssh_run_script(
             state,

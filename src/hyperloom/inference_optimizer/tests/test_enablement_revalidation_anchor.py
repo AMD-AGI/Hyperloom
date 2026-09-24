@@ -48,9 +48,7 @@ def coordinator(session_dir, monkeypatch):
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
-    backends = {
-        name: MockBackend(ScriptedPlan(turns=[]), name=name) for name in ("orchestration", "critic", "robustness")
-    }
+    backends = {name: MockBackend(ScriptedPlan(turns=[]), name=name) for name in ("orchestration", "critic")}
     coord = Coordinator(session_dir, backends=backends)
     yield coord
     coord.db.close()

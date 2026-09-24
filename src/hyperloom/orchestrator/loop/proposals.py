@@ -6,9 +6,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    patch_owner_phase,
-)
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -90,7 +87,7 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
             materialized=True,
             task_id=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — observability cannot break the loop
+    except Exception:
         log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
 
 
@@ -104,19 +101,12 @@ def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
 
-    try:
-        recorder.record_proposal_step(
-            pending.proposal_msg_id,
-            step=STEP_ROUTED,
-            outcome="materialized",
-            reason=str(task_id or ""),
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config routed step failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(
+        pending.proposal_msg_id,
+        step=STEP_ROUTED,
+        outcome="materialized",
+        reason=str(task_id or ""),
+    )
 
 
 def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
@@ -135,19 +125,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
         STEP_DROPPED,
     )
 
-    try:
-        recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
-        recorder.settle_proposal(
-            pending.proposal_msg_id,
-            disposition=DISPOSITION_DROPPED,
-            reason=reason,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config drop row failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
+    recorder.settle_proposal(
+        pending.proposal_msg_id,
+        disposition=DISPOSITION_DROPPED,
+        reason=reason,
+    )
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
@@ -183,6 +166,8 @@ class ProposalsCollaborator:
         precision = str(getattr(ss, "precision", "") or "")
         model_type = str(getattr(ss, "model_type", "") or "")
         architectures = getattr(ss, "model_architectures", None) or []
+        from hyperloom.common.perf_metric import agentx_active
+
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
@@ -191,6 +176,7 @@ class ProposalsCollaborator:
             precision=precision,
             model_type=model_type,
             architectures=architectures,
+            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
@@ -208,7 +194,7 @@ class ProposalsCollaborator:
                 )
                 or {}
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
         self._coord._local_recipe_cache = (tick, row)
         return row
@@ -291,25 +277,11 @@ class ProposalsCollaborator:
         config = getattr(getattr(self, "knowledge_plane", None), "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
-        # See agentx_kb_blocked for why; this is one of three sinks.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_blocked,
-        )
+        from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_kb_blocked(self.shared_state):
-            log.info(
-                "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or "
-                "workload dimension, so an agentic-replay throughput would overwrite "
-                "a synthetic best_throughput and be tagged isl/osl=%s/%s.",
-                getattr(self.shared_state, "isl", "?"),
-                getattr(self.shared_state, "osl", "?"),
-            )
+        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
-        try:
-            cid = self._workload_canonical_id()
-        except Exception:  # noqa: BLE001
-            log.exception("_kb_amend_recipe: cid derivation failed")
-            return
+        cid = self._workload_canonical_id()
 
         ss = self.shared_state
         framework = str(getattr(ss, "framework", "") or "")
@@ -428,7 +400,7 @@ class ProposalsCollaborator:
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
             self._coord._local_recipe_cache = None
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
@@ -442,49 +414,16 @@ class ProposalsCollaborator:
         baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
         if baseline_accuracy > 0:
             params.setdefault("accuracy_baseline", baseline_accuracy)
-        # Warm measure-round anchor for the decision-round overtime kill.
+        # Warm measure-round anchor for admission costing.
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        kill_ratio = float(
-            getattr(
-                self.shared_state,
-                "explore_overtime_kill_ratio",
-                0.0,
-            )
-            or 0.0
-        )
-        if kill_ratio > 0:
-            params.setdefault("explore_overtime_kill_ratio", kill_ratio)
-        variant_timeout_override = int(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_sec_override",
-                0,
-            )
-            or 0
-        )
-        if variant_timeout_override > 0:
-            params.setdefault("variant_timeout_sec", variant_timeout_override)
-        safety_margin_override = float(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_safety_margin",
-                -1.0,
-            )
-        )
-        if safety_margin_override >= 0:
-            params.setdefault(
-                "variant_timeout_safety_margin",
-                safety_margin_override,
-            )
-        # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
-        # not an eligibility gate.
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and es.get("tested"):
-            params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
+        # The round-id seed: the executor holds no cross-round state, so the round
+        # it labels itself with has to come from the durable cursor.
+        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        params.setdefault("explore_search_cursor", cursor)
 
     async def _materialize_approved_proposal(
         self,
@@ -537,39 +476,8 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            owner = patch_owner_phase(params)
-            if not owner:
-                specialist_task_id = str(params.get("specialist_task_id") or "")
-                self.state.pending_proposals.pop(
-                    pending.proposal_msg_id,
-                    None,
-                )
-                if specialist_task_id:
-                    self.shared_state.record_specialist_patch_verdict(
-                        specialist_task_id,
-                        "owner_missing",
-                    )
-                    try:
-                        self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
-                        log.exception(
-                            "failed to persist terminal owner-missing verdict for specialist=%s",
-                            specialist_task_id,
-                        )
-                await self._record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_materialize_skipped",
-                        "reason": "integrate_patch_owner_missing",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                        "specialist_task_id": specialist_task_id,
-                    },
-                )
-                return
-            params["source_phase"] = owner
+            # ``source_phase`` is stamped where the specialist is created and carried from there; a
+            # second derivation here would be a second decision, and could write an empty owner.
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
             # Seed the patched-eval server with the same base args/config every other eval server uses, else it
             # launches on bare framework defaults and crashes at startup regardless of the patch.
@@ -650,18 +558,18 @@ class ProposalsCollaborator:
         if not proposal_msg_id or not task_id:
             return
         try:
-            from ..trace.llm_trace import _now_iso
+            from hyperloom.common.timeutil import now_iso
             from hyperloom.common.io import append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)
             row = {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }
             append_jsonl(path, row, make_parents=True, sort_keys=True)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,

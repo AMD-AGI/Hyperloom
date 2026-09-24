@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Offline ``recover-session`` subcommand."""
+"""Offline report recovery and explicit task-cleanup confirmation."""
 
 from __future__ import annotations
 
@@ -54,6 +54,30 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
         return 2
 
+    task_id = getattr(args, "confirm_stopped", None)
+    reason = getattr(args, "confirmation_reason", None)
+    if task_id is not None or reason is not None:
+        if not task_id or not task_id.strip() or not reason or not reason.strip():
+            print(
+                "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
+            )
+            return 2
+        if getattr(args, "force", False) or getattr(args, "backfill_trace", False):
+            print("ERROR: cleanup confirmation cannot be combined with --force or --backfill-trace.", file=sys.stderr)
+            return 2
+        from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
+
+        try:
+            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
+        except CleanupConfirmationError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"cleanup confirmation: task={ascii(task_id[:80])} status={result['status']} "
+            f"released_leases={result['released_leases']} released_gpu_leases={result['released_gpu_leases']}"
+        )
+        return 0
+
     status = _session_recovery_status(session_dir)
     print(
         f"recover-session   : {session_dir}\n"
@@ -72,7 +96,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
         breakdown_path = write_breakdown_json(session_dir)
         print(f"  rebuilt breakdown : {breakdown_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: breakdown rebuild failed")
         return 1
 
@@ -88,7 +112,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: langfuse push failed (non-fatal)")
 
     # 3) Optional full generation replay (off by default).
@@ -98,7 +122,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
             rc = ingest(build_plan(session_dir))
             print(f"  trace backfill    : rc={rc}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recover-session: trace backfill failed (non-fatal)")
 
     # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
@@ -108,7 +132,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         pkg_path = package_session_artifacts(session_dir)
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0

@@ -11,29 +11,25 @@ What lives here: the Coordinator's state snapshots, the backend build
 provenance carried by a kernel-agent result (which reaches the optimizer
 through nothing else).
 
-Every helper is best-effort: all failures are swallowed (logged at debug).
+Every helper is best-effort: spool failures degrade the section and never
+propagate into the run they are describing.
 Payloads are shaped to the matching ``schema.py`` TypedDict.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
 
-from .session_metadata import snapshot_metadata
 from . import tool_versions
+from .session_metadata import snapshot_metadata
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
-
-_FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 
 
 def _recorder(session_dir: Path | str, producer: str):
@@ -53,23 +49,10 @@ def snapshot_state_sections(
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
-    rec = None
-    try:
-        rec = _recorder(session_dir, producer)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("recorder unavailable", exc_info=True)
-        trace_skip(reason="writer raised", section="session", error=exc)
-        return
+    rec = _recorder(session_dir, producer)
 
-    for name, fn in (
-        ("session", _snapshot_session),
-        ("metadata", snapshot_metadata),
-    ):
-        try:
-            fn(rec, state)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("snapshot section %s failed", name, exc_info=True)
-            trace_skip(reason="writer raised", section=name, error=exc)
+    _snapshot_session(rec, state)
+    snapshot_metadata(rec, state)
 
 
 def _unset_or_int(st: Any, attr: str) -> int | None:
@@ -142,7 +125,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
     delegated optimizer's own campaign, which is a different producer's account
     of a different run.
     """
-    from .kernel_event import active_kernel_recorder
+    from .kernel_event import LANE_FAULTED_STATUSES, active_kernel_recorder
 
     recorder = active_kernel_recorder()
     if recorder is None:
@@ -174,7 +157,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
             is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
             status_lower = str(att.get("status") or "").lower()
             decision = str(att.get("decision") or "").upper()
-            if not decision and status_lower in _FAILED_STATUSES:
+            if not decision and status_lower in LANE_FAULTED_STATUSES:
                 decision = "FAILED"
             if is_adopted and kernel_decision:
                 decision = kernel_decision
@@ -206,6 +189,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
                 started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
                 ended_at=str(att.get("ended_at") or ""),
                 duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
+                error_class=str(att.get("error_class") or ""),
                 failure_reason=str(att.get("error") or att.get("error_message") or ""),
             )
         return
@@ -213,7 +197,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     decision = str(proposal.get("decision") or "").upper()
-    failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
+    failed = status in LANE_FAULTED_STATUSES or (decision == "REVERT" and bool(err_class))
     skipped = status == "skipped"
     if not failed and not skipped:
         return
@@ -233,6 +217,7 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
         # distinction this row exists to draw.
         skip_reason=str(result.get("reason") or result.get("skip_reason") or err_class or status or ""),
         micro_decision=decision or ("SKIPPED" if skipped else "FAILED"),
+        error_class=err_class,
         failure_reason=str(result.get("error") or err_class or ""),
     )
 
@@ -256,44 +241,40 @@ def record_backend_versions_and_timeline(
             section="versions",
         )
         return
-    try:
-        result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        attempts = result.get("attempts")
-        attempts = attempts if isinstance(attempts, list) else []
-        recorded: set[str] = set()
-        for att in attempts:
-            if not isinstance(att, dict):
-                continue
-            backend = str(att.get("backend") or "").lower()
-            if not backend or backend in recorded:
-                continue
-            recorded.add(backend)
-            att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+    result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    attempts = result.get("attempts")
+    attempts = attempts if isinstance(attempts, list) else []
+    recorded: set[str] = set()
+    for att in attempts:
+        if not isinstance(att, dict):
+            continue
+        backend = str(att.get("backend") or "").lower()
+        if not backend or backend in recorded:
+            continue
+        recorded.add(backend)
+        att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+        tool_versions.record_tool_version(
+            session_dir,
+            tool=backend,
+            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
+            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+            producer=producer,
+        )
+    # No attempts means the run failed before any backend launched. The
+    # backend the result names is still the one whose build was in play --
+    # unless it names none, which is the pre-dispatch gating case that
+    # never resolved a build to report.
+    if not recorded:
+        backend = str(result.get("backend") or "").lower()
+        if backend:
             tool_versions.record_tool_version(
                 session_dir,
                 tool=backend,
-                root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-                version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+                root=str(result_meta.get("root_dir") or "") or None,
+                version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-        # No attempts means the run failed before any backend launched. The
-        # backend the result names is still the one whose build was in play --
-        # unless it names none, which is the pre-dispatch gating case that
-        # never resolved a build to report.
-        if not recorded:
-            backend = str(result.get("backend") or "").lower()
-            if backend:
-                tool_versions.record_tool_version(
-                    session_dir,
-                    tool=backend,
-                    root=str(result_meta.get("root_dir") or "") or None,
-                    version=str(result_meta.get("version") or "") or None,
-                    producer=producer,
-                )
-        _mirror_backend_attempts_to_kernel_timeline(result)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_backend_versions_and_timeline failed", exc_info=True)
-        trace_skip(reason="writer raised", section="versions", error=exc)
+    _mirror_backend_attempts_to_kernel_timeline(result)
 
 
 __all__ = [

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown import schema
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import conc_sweep_event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     ARM_BASELINE,
@@ -733,6 +734,25 @@ def test_a_sweep_that_declined_before_running_says_which_prerequisite_failed(_bo
     # A decline is not the same outcome as a ladder that ran and produced
     # nothing usable, which is what ``was_skipped`` alone conflates.
     assert result["declined"] is True
+    # A prerequisite that was not met is not something that broke.
+    assert event["ext"]["failure"] is None
+
+
+def test_a_decline_caused_by_an_error_still_names_it(_bound_session):
+    recorder = _recorder()
+    recorder.record_declined(
+        {
+            "status": "skipped",
+            "skip_reason": "framework_script_mismatch",
+            "error_class": "framework_script_mismatch",
+            "error": "bench script does not accept --max-concurrency",
+        }
+    )
+
+    failure = _events(_bound_session)[0]["ext"]["failure"]
+    assert failure["stage"] == "decline"
+    assert failure["error_class"] == "framework_script_mismatch"
+    assert "max-concurrency" in failure["message"]
 
 
 def test_a_ladder_that_ran_and_produced_no_pair_is_not_a_decline(_bound_session):
@@ -771,11 +791,21 @@ def test_closing_twice_does_not_publish_two_verdicts(_bound_session):
     assert [event["status"] for event in _events(_bound_session)] == ["succeeded"]
 
 
-def test_the_session_stop_reason_reaches_the_failure_block(_bound_session):
+def test_the_session_stop_reason_is_recorded_as_runtime_not_failure(_bound_session):
+    """A sweep the session stopped measured what it got to; nothing about it failed."""
     recorder = _recorder()
     recorder.finish(_final(status="failed"), stop_reason="sweep_timeout")
 
-    assert _ext(_bound_session)["failure"]["stop_reason"] == "sweep_timeout"
+    ext = _ext(_bound_session)
+    assert ext["runtime"]["stop_reason"] == "sweep_timeout"
+    assert ext["failure"] is None
+
+
+def test_a_completed_sweep_carries_no_failure_block(_bound_session):
+    recorder = _recorder()
+    recorder.finish(_final())
+
+    assert _ext(_bound_session)["failure"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -818,3 +848,123 @@ def test_a_recorder_with_no_sink_declines_instead_of_raising(_bound_session):
 def test_a_malformed_event_id_declines_instead_of_breaking_the_sweep(_bound_session):
     with pytest.raises(ValueError):
         make_sink("not-an-event-id", producer=PRODUCER)
+
+
+def _ceiling() -> dict[str, Any]:
+    """The decode roofline the sweep attaches, shaped as its builder writes it."""
+    return {
+        "schema_version": 1,
+        "source": "roofline_ceiling.py",
+        "gpu_type": "mi300x",
+        "precision": "fp8",
+        "tp": 8,
+        "isl": 1024,
+        "osl": 1024,
+        "model_meta": {
+            "weight_bytes": 700_000_000_000,
+            "active_weight_bytes": 37_000_000_000,
+            "num_experts": 160,
+            "experts_per_tok": 8,
+            "expert_weight_bytes": 600_000_000_000,
+            "num_layers": 61,
+            "num_kv_heads": 1,
+            "head_dim": 576,
+            "weight_dtype_bytes": 1.0,
+        },
+        "rows": [
+            {
+                "conc": 64,
+                "t_mem_tok_s": 9000.0,
+                "t_cmp_tok_s": 12000.0,
+                "t_peak_tok_s": 9000.0,
+                "bound_kind": "memory",
+                "mbu_baseline_pct": 55.5,
+                "mbu_optimized_pct": 71.1,
+            }
+        ],
+    }
+
+
+def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
+    """The wire and its TypedDicts, compared key for key.
+
+    Nothing else compares them, so a field added to one and not the other
+    drifts silently -- which is how ``V6ConcSweepPoint`` came to declare a
+    latency field under a name the sweep's flattening does not write.
+    """
+    recorder = _recorder()
+    _plan(recorder)
+    recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--enable-torch-compile", extra_envs={"SGLANG_X": "1"})
+    recorder.record_arm_grid(ARM_OPTIMIZED, rungs=[{"name": "c64", "conc": 64, "num_prompts": 320}])
+    recorder.record_arm_strategy(
+        ARM_OPTIMIZED,
+        strategy=STRATEGY_SINGLE_SERVER,
+        reason="lifecycle_eligible",
+        lifecycle_eligible=True,
+        lifecycle_reason="sglang keeps a server across rungs",
+        port=30000,
+        framework="sglang",
+        serving_lease_held=True,
+    )
+    recorder.record_variant(
+        ARM_OPTIMIZED,
+        stage=STAGE_BOOT,
+        conc=64,
+        point=_point(64),
+        num_prompts=320,
+        start_time="2026-01-01T00:00:00Z",
+        wall_duration_sec=240.0,
+        granted_cap_sec=1800.0,
+        budget_remaining_sec=7000.0,
+    )
+    recorder.record_arm_boot(ARM_OPTIMIZED, succeeded=True, booted_conc=64, attempted_concs=[64], failed_concs=[])
+    recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
+    recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
+    recorder.record_arm_refused(ARM_BASELINE, reason="insufficient_remaining_for_variant", remaining_sec=12.0)
+    recorder.record_progress(
+        comparison=[
+            {
+                "conc": 64,
+                "baseline_tput": 5000.0,
+                "optimized_tput": 6400.0,
+                "speedup": 1.28,
+                "delta_pct": 28.0,
+                "baseline_status": "succeeded",
+                "optimized_status": "succeeded",
+            }
+        ],
+        summary=_final()["summary"],
+    )
+    recorder.finish(_final(roofline_ceiling=_ceiling(), budget_skip_reason="", budget_remaining_sec=100.0))
+
+    ext = _ext(_bound_session)
+    arm = ext["arms"][ARM_OPTIMIZED]
+    ceiling = ext["roofline_ceiling"]
+    blocks = {
+        # ``superseded_sweeps`` is written only when a second sweep lands.
+        "ext": (set(ext) | {"superseded_sweeps"}, schema.V6ConcSweepExt),
+        "request": (set(ext["request"]), schema.V6ConcSweepRequest),
+        "workload": (set(ext["workload"]), schema.V6ConcSweepWorkload),
+        "input_anchor": (set(ext["input_anchor"]), schema.V6ConcSweepInputAnchor),
+        "plan": (set(ext["plan"]), schema.V6ConcSweepPlan),
+        "budget": (set(ext["budget"]), schema.V6ConcSweepBudget),
+        "environment": (set(ext["environment"]), schema.V6ConcSweepEnvironment),
+        "artifacts": (set(ext["artifacts"]), schema.V6ConcSweepArtifacts),
+        "result": (set(ext["result"]), schema.V6ConcSweepResult),
+        "runtime": (set(ext["runtime"]), schema.V6ConcSweepRuntime),
+        "roofline_ceiling": (set(ceiling), schema.V6ConcSweepCeiling),
+        "roofline_ceiling.model_meta": (set(ceiling["model_meta"]), schema.V6ConcSweepCeilingModel),
+        "roofline_ceiling.rows": (set(ceiling["rows"][0]), schema.V6ConcSweepCeilingRow),
+        "arm": (set(arm), schema.V6ConcSweepArm),
+        "arm.lifecycle": (set(arm["lifecycle"]), schema.V6ConcSweepLifecycle),
+        "arm.grid": (set(arm["grid"][0]), schema.V6ConcSweepRung),
+        "arm.boot": (set(arm["boot"]), schema.V6ConcSweepBoot),
+        "arm.boot.attempts": (set(arm["boot"]["attempts"][0]), schema.V6ConcSweepBootAttempt),
+        "arm.points": (set(arm["points"][0]), schema.V6ConcSweepPoint),
+        "comparison": (set(ext["comparison"][0]), schema.V6ConcSweepPair),
+        "baseline.refused": (set(ext["arms"][ARM_BASELINE]["refused"]), schema.V6ConcSweepRefused),
+    }
+
+    assert {name: recorded ^ set(declared.__annotations__) for name, (recorded, declared) in blocks.items()} == {
+        name: set() for name in blocks
+    }

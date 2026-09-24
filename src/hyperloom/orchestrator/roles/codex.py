@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from ..trace.llm_trace import new_call_id
-from .agent_role import DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
     BackendTurnResult,

@@ -28,6 +28,7 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
+    benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
@@ -660,20 +661,25 @@ def _validate_trace_structure(
             skip_reason="main trace could not be sampled",
         )
     else:
+        # Shape markers left by either mechanism: the sglang_profiler:: op
+        # namespace, or the kernel_shape_profiler frame (when with_stack is on).
+        _shape_markers = ("sglang_profiler::", "kernel_shape_profiler")
+        _shape_present = any(m in main_text for m in _shape_markers)
         _note_check(
             CHECK_SGLANG_SHAPE_PROFILER,
-            status="passed" if "kernel_shape_profiler" in main_text else "failed",
+            status="passed" if _shape_present else "failed",
             sampled_file=main_traces[0].name,
             sampled_bytes=_TRACE_INSPECT_BYTES,
         )
-        if "kernel_shape_profiler" not in main_text:
+        if not _shape_present:
             issues.append(
                 f"[5] sglang main trace ({main_traces[0].name}, sampled "
                 f"first {_TRACE_INSPECT_BYTES // 1_000_000} MB) lacks "
-                "kernel_shape_profiler events — shape-discovery "
-                "patch didn't reach the live SGLang. Verify "
-                "_server_patcher (PR #207) succeeded for the "
-                "deployed SGLang version (check log warnings)."
+                "kernel-shape events — shape discovery didn't reach the live "
+                "SGLang. For SGLang < 0.5.18 verify the _server_patcher "
+                "git-apply succeeded; for >= 0.5.18 verify the kernel_shape_tool "
+                "is on the server PYTHONPATH and TRACELENS_SHAPE_DISCOVERY=1 "
+                "(check log warnings)."
             )
 
     if issues:
@@ -798,6 +804,8 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BaselineExecutor):
     """Subclass that swaps the default config + extracts trace_dir."""
 
+    benchmark_watchdog = False
+
     def __init__(
         self,
         *,
@@ -881,10 +889,7 @@ class ProfileExecutor(BaselineExecutor):
 
         from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
+        roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(
             probe_dir=probe_dir,
             source_roots=roots,
@@ -928,7 +933,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+        except Exception as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -996,7 +1001,10 @@ class ProfileExecutor(BaselineExecutor):
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
+        # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
+        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
+        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
+        serving_path = benchmark_serving_path_in(ix_root)
 
         def _contains(path: Path, needle: str) -> bool:
             """Check whether ``needle`` appears in ``path``'s text."""
@@ -1052,7 +1060,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+        except Exception as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,

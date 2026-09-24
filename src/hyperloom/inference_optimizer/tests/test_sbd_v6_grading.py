@@ -30,7 +30,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION as METADATA_SECTION, _grading
+from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION as METADATA_SECTION
+from hyperloom.inference_optimizer.breakdown.session_facts import grading_block
 from hyperloom.inference_optimizer.cli.bootstrap import seed_grading
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -134,7 +135,7 @@ def test_metadata_grading_declares_the_axis_and_the_guard_band():
         grading={"objective": GRADED_INTVTY, "noise_pct": 3.5},
     )
 
-    assert _grading(state) == {
+    assert grading_block(state) == {
         "benchmark_mode": "agentx",
         "objective": GRADED_INTVTY,
         "tput_guard": {"enabled": True, "noise_pct": 3.5},
@@ -144,7 +145,7 @@ def test_metadata_grading_declares_the_axis_and_the_guard_band():
 def test_metadata_grading_reports_no_guard_on_a_synthetic_session():
     state = _state(benchmark_mode="synthetic", grading=seed_grading("sglang", "synthetic"))
 
-    block = _grading(state)
+    block = grading_block(state)
     assert block["objective"] == GRADED_OUTPUT
     assert block["tput_guard"]["enabled"] is False
 
@@ -152,7 +153,7 @@ def test_metadata_grading_reports_no_guard_on_a_synthetic_session():
 def test_metadata_grading_names_the_mode_a_session_with_no_recorded_axis_ran():
     # ``benchmark_mode`` reaches ``reports/final.json`` but nothing else in the breakdown, so an AgentX
     # session would otherwise be unidentifiable in this document.
-    assert _grading(_state(benchmark_mode="agentx", framework="sglang"))["benchmark_mode"] == "agentx"
+    assert grading_block(_state(benchmark_mode="agentx", framework="sglang"))["benchmark_mode"] == "agentx"
 
 
 def test_the_grading_block_reaches_the_exported_metadata(tmp_path):
@@ -194,7 +195,7 @@ def test_metadata_grading_is_not_resolved_from_what_a_promotion_graded_on():
     # reporting interactivity in ``outcome`` would put that label on an output figure.
     state = _state(benchmark_mode="agentx", grading={"objective": GRADED_INTVTY, "noise_pct": 5.0})
 
-    assert _grading(state)["objective"] == GRADED_INTVTY
+    assert grading_block(state)["objective"] == GRADED_INTVTY
 
 
 # ---------------------------------------------------------------------------

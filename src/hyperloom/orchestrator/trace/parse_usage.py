@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -67,34 +68,38 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     return projected
 
 
+def _iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any]]:
+    """Yield each JSON object of a line-delimited ``kind`` log, in stream order."""
+    path = Path(log_path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log.warning("parse_usage: failed reading %s log %s: %r", kind, path, exc)
+
+
 def parse_claude_stream_json_usage(
     log_path: str | Path,
 ) -> dict[str, int | None] | None:
     """Extract the final ``usage`` from a Claude CLI ``stream-json`` log."""
-    path = Path(log_path)
     last_usage: dict[str, Any] | None = None
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                usage = obj.get("usage")
-                if isinstance(usage, dict) and usage:
-                    # A result-typed row is authoritative over earlier usage.
-                    if obj.get("type") == "result" or last_usage is None:
-                        last_usage = usage
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
-        return None
+    for obj in _iter_json_events(log_path, "stream-json"):
+        usage = obj.get("usage")
+        if isinstance(usage, dict) and usage:
+            # A result-typed row is authoritative over earlier usage.
+            if obj.get("type") == "result" or last_usage is None:
+                last_usage = usage
     return normalize_usage(last_usage)
 
 
@@ -102,40 +107,23 @@ def parse_claude_stream_json_response(
     log_path: str | Path,
 ) -> str | None:
     """Recover the assistant's full reply text from a Claude CLI stream-json log."""
-    path = Path(log_path)
     result_text: str | None = None
     assistant_chunks: list[str] = []
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                obj_type = obj.get("type")
-                if obj_type == "result":
-                    res = obj.get("result")
-                    if isinstance(res, str) and res.strip():
-                        result_text = res
-                elif obj_type == "assistant":
-                    message = obj.get("message")
-                    if not isinstance(message, dict):
-                        continue
-                    for block in message.get("content") or []:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text = block.get("text")
-                            if isinstance(text, str) and text:
-                                assistant_chunks.append(text)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
-        return None
+    for obj in _iter_json_events(log_path, "stream-json"):
+        obj_type = obj.get("type")
+        if obj_type == "result":
+            res = obj.get("result")
+            if isinstance(res, str) and res.strip():
+                result_text = res
+        elif obj_type == "assistant":
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            for block in message.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str) and text:
+                        assistant_chunks.append(text)
     if result_text is not None:
         return result_text
     if assistant_chunks:
@@ -182,52 +170,35 @@ def parse_claude_stream_json_turn_usages(
     log_path: str | Path,
 ) -> list[dict[str, int | None]]:
     """Recover *per-API-response* usage from a Claude CLI stream-json log."""
-    path = Path(log_path)
     usages: list[dict[str, int | None]] = []
     seen_ids: set[str] = set()
     saw_message_id = False
     session_output: int | None = None
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                if obj.get("type") == "result":
-                    recovered = _claude_result_output_tokens(obj)
-                    if recovered is not None:
-                        session_output = recovered
-                    continue
-                if obj.get("type") != "assistant":
-                    continue
-                message = obj.get("message")
-                usage = message.get("usage") if isinstance(message, dict) else None
-                normalized = normalize_usage(usage if isinstance(usage, dict) else None)
-                if normalized is None:
-                    continue
-                message_id = message.get("id") if isinstance(message, dict) else None
-                if isinstance(message_id, str) and message_id:
-                    saw_message_id = True
-                    if message_id in seen_ids:
-                        continue
-                    seen_ids.add(message_id)
-                usages.append(normalized)
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
-        return []
+    for obj in _iter_json_events(log_path, "stream-json"):
+        if obj.get("type") == "result":
+            recovered = _claude_result_output_tokens(obj)
+            if recovered is not None:
+                session_output = recovered
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        normalized = normalize_usage(usage if isinstance(usage, dict) else None)
+        if normalized is None:
+            continue
+        message_id = message.get("id") if isinstance(message, dict) else None
+        if isinstance(message_id, str) and message_id:
+            saw_message_id = True
+            if message_id in seen_ids:
+                continue
+            seen_ids.add(message_id)
+        usages.append(normalized)
     if len(usages) > 1 and not saw_message_id:
         log.warning(
             "parse_usage: stream-json log %s names no message ids; per-turn rows "
             "cannot be de-duplicated, deferring to the cumulative result row",
-            path,
+            log_path,
         )
         return []
     return _reattach_turn_output(usages, session_output)
@@ -237,40 +208,20 @@ def parse_claude_stream_json_tool_calls(
     log_path: str | Path,
 ) -> list[dict[str, Any]]:
     """Recover the intel/tool calls a specialist made from its stream-json log."""
-    path = Path(log_path)
     calls: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(obj, dict) or obj.get("type") != "assistant":
-                    continue
-                message = obj.get("message")
-                if not isinstance(message, dict):
-                    continue
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
-                        continue
-                    name = str(block.get("name") or "").strip()
-                    if not name:
-                        continue
-                    calls.append(
-                        {
-                            "tool": name,
-                            "query": _summarize_tool_input(block.get("input")),
-                        }
-                    )
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
-        return []
+    for obj in _iter_json_events(log_path, "stream-json"):
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name") or "").strip()
+            if not name:
+                continue
+            calls.append({"tool": name, "query": _summarize_tool_input(block.get("input"))})
     return calls
 
 
@@ -348,27 +299,6 @@ _CODEX_ERROR_MESSAGE_KEYS: tuple[str, ...] = (
 _CODEX_ERROR_MESSAGE_LIMIT = 2000
 
 
-def _iter_codex_events(log_path: str | Path) -> "Any":
-    """Yield each JSON object of a ``codex exec --json`` log, in stream order."""
-    path = Path(log_path)
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if isinstance(obj, dict):
-                    yield obj
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        log.warning("parse_usage: failed reading codex jsonl log %s: %r", path, exc)
-
-
 def _codex_error_message(value: Any, *, depth: int = 0) -> str | None:
     """Extract and sanitize a scalar message from a known error payload."""
     if isinstance(value, str):
@@ -394,7 +324,7 @@ def parse_codex_jsonl_error(log_path: str | Path) -> str | None:
     """Recover the most authoritative actionable Codex failure message."""
     best_authority = 0
     best_message: str | None = None
-    for event in _iter_codex_events(log_path):
+    for event in _iter_json_events(log_path, "codex jsonl"):
         event_type = event.get("type")
         authority = 0
         payload: Any = None
@@ -437,7 +367,7 @@ def parse_codex_jsonl_usage(
 ) -> dict[str, int | None] | None:
     """Extract the session token usage from a ``codex exec --json`` log."""
     totals: dict[str, int] = {}
-    for event in _iter_codex_events(log_path):
+    for event in _iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "turn.completed":
             continue
         usage = event.get("usage")
@@ -455,7 +385,7 @@ def parse_codex_jsonl_response(
 ) -> str | None:
     """Recover the agent's reply text from a ``codex exec --json`` log."""
     chunks: list[str] = []
-    for event in _iter_codex_events(log_path):
+    for event in _iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "item.completed":
             continue
         item = event.get("item")
@@ -472,7 +402,7 @@ def parse_codex_jsonl_turn_usages(
 ) -> list[dict[str, int | None]]:
     """Recover per-turn usage from a ``codex exec --json`` log."""
     usages: list[dict[str, int | None]] = []
-    for event in _iter_codex_events(log_path):
+    for event in _iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "turn.completed":
             continue
         normalized = _codex_usage_to_canonical(event.get("usage"))
@@ -503,7 +433,7 @@ def parse_codex_jsonl_tool_calls(
     calls: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     unknown_types: set[str] = set()
-    for event in _iter_codex_events(log_path):
+    for event in _iter_json_events(log_path, "codex jsonl"):
         if event.get("type") not in _CODEX_ITEM_EVENTS:
             continue
         item = event.get("item")

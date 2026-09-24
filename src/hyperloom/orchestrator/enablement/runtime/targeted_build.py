@@ -859,7 +859,7 @@ def run_vllm_source_build(
                 timeout_sec=1800,
                 run=_run,
             )
-    except Exception:  # noqa: BLE001 — best-effort; the editable install still runs
+    except Exception:
         import logging as _logmod
 
         _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)

@@ -22,7 +22,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.loop import maintenance as maint
 from hyperloom.orchestrator.loop.maintenance import (
     MaintenanceCollaborator,
     run_lease_and_db_reclaim,
@@ -37,37 +36,40 @@ class _Reconciler:
     holds. ``raises`` stands in for a report this pass could not produce.
     """
 
-    def __init__(self, reaped=0, raises=False):
-        self.last_report = None if raises else SimpleNamespace(leases_reaped=reaped)
+    def __init__(self, reaped=0, raises=False, unverifiable=0, rate=(0, 0)):
+        self.last_report = (
+            None
+            if raises
+            else SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
+        )
+        self._rate = rate
+
+    async def cleanup_confirmation_rate(self):
+        """The ratio that says whether retained lanes are routine.
+
+        Not wrapped in a swallow at the call site on purpose: if this breaks,
+        the maintenance summary must lose the tick rather than quietly ship a
+        summary that looks complete and is missing the one number the retention
+        decision rests on.
+        """
+        return self._rate
 
 
 class _Pool:
-    def __init__(self, count=0, raises=False):
-        self._count, self._raises = count, raises
-
     async def reap_expired(self):
-        if self._raises:
-            raise RuntimeError("pool gone")
-        return self._count
+        pytest.fail("maintenance must not expire occupied GPUs")
 
 
 class _Tasks:
-    def __init__(self, reclaimed=(), raises=False):
-        self._reclaimed, self._raises = reclaimed, raises
-        self.reason = None
-
     async def reclaim_expired_running(self, *, reason):
-        self.reason = reason
-        if self._raises:
-            raise RuntimeError("task table locked")
-        return list(self._reclaimed)
+        pytest.fail("maintenance must not fail tasks by age")
 
 
 def _host(**kw):
     return SimpleNamespace(
         reconciler=kw.get("reconciler", _Reconciler(reaped=2)),
-        gpu_specialist_pool=kw.get("pool", _Pool(count=3)),
-        tasks=kw.get("tasks", _Tasks(reclaimed=["t1"])),
+        gpu_specialist_pool=kw.get("pool", _Pool()),
+        tasks=kw.get("tasks", _Tasks()),
         db=kw.get("db", object()),
     )
 
@@ -93,21 +95,38 @@ class TestReclaimReportsWhatEachStepDid:
 
         assert summary == {
             "leases_reaped": 2,
-            "gpu_leases_reaped": 3,
+            "leases_unverifiable": 0,
             "running_tasks_reclaimed": 1,
             "events_pruned": 5,
             "tasks_pruned": 2,
         }
 
     @pytest.mark.asyncio
-    async def test_the_reason_reaches_the_task_reclaim(self, monkeypatch: pytest.MonkeyPatch):
-        """The R6 watchdog records why a running task was failed."""
+    async def test_lanes_held_with_nothing_left_to_probe_are_counted_every_tick(self, monkeypatch: pytest.MonkeyPatch):
+        """The starvation signal an operator reads first, because no command reports it.
+
+        A lane whose ended holder left nothing verifiable is retained on
+        purpose and stays retained -- no age or TTL will ever take it back. The
+        only thing that surfaces it is this count sitting at a non-zero value
+        tick after tick while the queue does not drain; the sweep logs the
+        per-row remedy once alongside it.
+        """
         _patch_retention(monkeypatch)
-        tasks = _Tasks()
+        summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(tasks=tasks), {}, reason="cycle_soft_restart")
+        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(unverifiable=6)), summary, reason="r")
 
-        assert tasks.reason == "cycle_soft_restart"
+        assert summary["leases_unverifiable"] == 6
+
+    @pytest.mark.asyncio
+    async def test_soft_restart_does_not_expire_running_work(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_retention(monkeypatch)
+        summary: dict = {}
+
+        await run_lease_and_db_reclaim(_host(), summary, reason="cycle_soft_restart")
+
+        assert summary["running_tasks_reclaimed"] == 1
+        assert "gpu_leases_reaped" not in summary
 
 
 class TestNoSingleStepCanEndTheRun:
@@ -119,28 +138,9 @@ class TestNoSingleStepCanEndTheRun:
         await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
 
         assert "leases_reaped" not in summary
-        assert summary["gpu_leases_reaped"] == 3
-        assert summary["events_pruned"] == 5
-
-    @pytest.mark.asyncio
-    async def test_a_failed_gpu_lease_reap_is_survived(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
-        summary: dict = {}
-
-        await run_lease_and_db_reclaim(_host(pool=_Pool(raises=True)), summary, reason="r")
-
-        assert "gpu_leases_reaped" not in summary
-        assert summary["leases_reaped"] == 2
-
-    @pytest.mark.asyncio
-    async def test_a_failed_task_reclaim_is_survived(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
-        summary: dict = {}
-
-        await run_lease_and_db_reclaim(_host(tasks=_Tasks(raises=True)), summary, reason="r")
-
+        assert "leases_unverifiable" not in summary
         assert "running_tasks_reclaimed" not in summary
-        assert summary["tasks_pruned"] == 2
+        assert summary["events_pruned"] == 5
 
     @pytest.mark.asyncio
     async def test_a_failed_db_retention_is_survived(self, monkeypatch: pytest.MonkeyPatch):
@@ -321,24 +321,6 @@ class TestTheTickItself:
 
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
-        assert got["events_pruned"] == 5
-
-    @pytest.mark.asyncio
-    async def test_a_failing_disk_monitor_does_not_lose_the_rest_of_the_tick(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ):
-        _patch_retention(monkeypatch)
-        c = MaintenanceCollaborator(_coordinator(tmp_path))
-        monkeypatch.setattr(
-            maint.MaintenanceCollaborator,
-            "_maybe_prune_runs_for_disk",
-            lambda _self: (_ for _ in ()).throw(RuntimeError("statvfs exploded")),
-        )
-
-        got = await c._run_maintenance(tick=3)
-
-        assert "disk" not in got
-        assert got["tick"] == 3
         assert got["events_pruned"] == 5
 
     def test_unknown_attributes_fall_through_to_the_coordinator(self, tmp_path):

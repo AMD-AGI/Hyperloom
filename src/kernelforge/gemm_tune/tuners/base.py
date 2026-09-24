@@ -47,8 +47,7 @@ class TuneResult:
     error_class: str = ""
     # Skip reason (from router)
     skip_reason: str = ""
-    # Where the tuned shapes/keys came from: "runtime_observed" when the caller supplied them from a live dispatch
-    # log, "config_derived" when this tuner inferred them from the model config.
+    # Where the tuned shapes/keys came from; "runtime_observed" means a live dispatch log or a caller-supplied CSV.
     key_source: str = ""
 
     @property
@@ -172,7 +171,7 @@ class BaseTuner(ABC):
             result = self.run()
             result.elapsed_s = time.time() - started
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - tuner body is subclass-supplied
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",

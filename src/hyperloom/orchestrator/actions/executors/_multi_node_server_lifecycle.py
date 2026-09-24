@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -371,13 +372,18 @@ async def restart_server_for_round(
             os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
         # Multi-node TraceLens SGLang patch fan-out (fail-soft).
-        try:
-            from ._server_patcher import _tracelens_patch_enabled
-        except Exception:  # noqa: BLE001
-            _tracelens_patch_enabled_fn = lambda: True  # noqa: E731 - safe default
-        else:
-            _tracelens_patch_enabled_fn = _tracelens_patch_enabled
-        if _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+        from ._server_patcher import resolve_sglang_shape_mode
+        from ._workload_envs import _tracelens_patch_enabled
+
+        _tracelens_patch_enabled_fn = _tracelens_patch_enabled
+        _sglang_shape_mode_val = resolve_sglang_shape_mode()
+        if _sglang_shape_mode_val == "sitecustomize":
+            # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
+            log.info(
+                "restart_server_for_round: SGLang shape mode=sitecustomize; "
+                "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."
+            )
+        elif _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -517,7 +523,7 @@ async def restart_server_for_round(
                     os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
                 try:
                     rc = await asyncio.to_thread(cmd_restart_server, ns)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
                 finally:
                     if force_full:
@@ -555,7 +561,7 @@ async def restart_server_for_round(
                 except ServerRestartFailed as exc:
                     _collect_worker_server_logs(_read_state() or {}, str(exc))
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     _collect_worker_server_logs(_read_state() or {}, repr(exc))
                     raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
 
@@ -563,12 +569,7 @@ async def restart_server_for_round(
                 await _restart_and_wait(force_full_restart)
             except ServerRestartFailed as first_exc:
                 # C — multi-node VRAM reclaim before exactly one retry.
-                if os.environ.get(_MN_RESTART_RECLAIM_RETRY_ENV, "1").strip().lower() in {
-                    "0",
-                    "false",
-                    "no",
-                    "off",
-                }:
+                if not env_flag(_MN_RESTART_RECLAIM_RETRY_ENV, default=True):
                     raise
                 log.warning(
                     "restart_server_for_round: restart failed (%s); attempting "
@@ -757,13 +758,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     ready: set[str] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     _wedge_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "420") or 420)
-    _wedge_enabled = os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-        "",
-    }
+    _wedge_enabled = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
     # Startup-crash fast-fail: an argparse rejection / fatal exit is terminal, so bail within seconds instead of the
     # full gate.
     _crash_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", "45") or 45)
@@ -872,7 +867,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     ts = _t.strftime("%Y%m%dT%H%M%SZ", _t.gmtime())
     try:
         os.makedirs(out_dir, exist_ok=True)
-    except Exception:
+    except OSError:
         return
     key_path = state.get("ssh_key_path")
     known_hosts = state.get("ssh_known_hosts")
@@ -880,12 +875,9 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     default_port = int(state.get("ssh_port") or 2233)
     ssh_run = None
     if key_path and known_hosts:
-        try:
-            from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
+        from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
 
-            ssh_run = _ssh_run
-        except Exception:
-            ssh_run = None
+        ssh_run = _ssh_run
     for role in ("prefill", "decode", "worker"):
         for pod in state.get(role + "_pods") or []:
             ip = pod.get("podIP")
@@ -915,7 +907,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     if cp.stderr:
                         body += "\n--- ssh stderr ---\n" + cp.stderr
                     source = "ssh:" + str(remote)
-                except Exception:
+                except Exception:  # noqa: BLE001 - one pod's SSH must not stop the sweep
                     continue
             else:
                 continue
@@ -925,7 +917,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     fh.write("# collected on restart failure (" + source + "): " + str(reason) + "\n")
                     fh.write(body)
                 log.info("collected worker server log -> %s", dest)
-            except Exception:
+            except OSError:
                 continue
 
 
@@ -1008,7 +1000,7 @@ async def _wait_for_server_health_async(
                         if mresp.status_code == 200:
                             try:
                                 data = mresp.json()
-                            except Exception:
+                            except ValueError:
                                 data = {}
                             models = data.get("data") if isinstance(data, dict) else None
                             if isinstance(models, list) and len(models) > 0:
@@ -1021,11 +1013,7 @@ async def _wait_for_server_health_async(
                                         health_ok_at,
                                     )
                                 # Worker-readiness probe: tiny completion.
-                                model_id = ""
-                                try:
-                                    model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
-                                except Exception:
-                                    model_id = ""
+                                model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
                                 if not model_id:
                                     last_err = "completion_probe: no model id"
                                     consecutive_completion_ok = 0
@@ -1045,7 +1033,7 @@ async def _wait_for_server_health_async(
                                         if cresp.status_code == 200:
                                             try:
                                                 gen_toks = _probe_generated_tokens(cresp.json())
-                                            except Exception:
+                                            except ValueError:
                                                 gen_toks = 0
                                             if gen_toks >= completion_probe_min_tokens:
                                                 consecutive_completion_ok += 1

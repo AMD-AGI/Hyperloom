@@ -724,6 +724,100 @@ def test_no_stop_when_not_genuine_baseline():
     assert rec.stop_reason == ""
 
 
+def _dead_server_log(tmp_path, name="server.log"):
+    """A round whose server booted, served the benchmark, then lost its engine."""
+    p = tmp_path / name
+    p.write_text(
+        "INFO:     Application startup complete\n"
+        "INFO 01:40:00 Avg generation throughput: 188.0 tokens/s\n"
+        "ERROR 01:57:28 [serving.py:448] "
+        "vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue.\n"
+        "INFO:     Shutting down\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_accuracy_stop_names_the_server_death(tmp_path, caplog):
+    # The round's throughput succeeded and only then did the engine die, so the eval hit a closed port and wrote no
+    # results*.json. The stop still fires -- there is no usable accuracy -- but it must not send the operator after a
+    # "broken baseline setup" while the engine's traceback sits in that round's own server.log.
+    log_path = _dead_server_log(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        reason = _stopped(
+            "vllm",
+            {
+                "status": "succeeded",
+                "run_eval_disabled": False,
+                "server_log_path": str(log_path),
+            },
+        )
+    assert reason == "baseline_accuracy_failed"
+    assert "EngineDeadError" in caplog.text
+    # The context the stop is recorded under carries the distinction too, not just the prose above it.
+    assert "baseline:vllm:server_died" in caplog.text
+    # And the stop's own line must not assert the opposite of what the line above it just established.
+    assert "broken baseline setup" not in caplog.text
+    assert "a fatal engine death on record for this round" in caplog.text
+    # The report must stay evidence, not a verdict: the marker carries no ordering against the eval, so nothing here
+    # may claim the death is why the reference is missing.
+    assert "because the server died" not in caplog.text
+
+
+def test_accuracy_stop_keeps_a_measured_zero_out_of_the_death_story(tmp_path, caplog):
+    # A zero is a measurement: the eval ran and wrote its results. Saying "no eval could measure this and no
+    # results*.json was ever written" would contradict the very artifacts the zero came from -- however dead the
+    # server became afterwards.
+    log_path = _dead_server_log(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        reason = _stopped(
+            "vllm",
+            {
+                "status": "succeeded",
+                "run_eval_disabled": False,
+                "accuracy": 0.0,
+                "server_log_path": str(log_path),
+            },
+        )
+    assert reason == "baseline_accuracy_failed"
+    assert "produced no result" in caplog.text
+    assert "server_died" not in caplog.text
+    assert "fatal engine death" not in caplog.text
+
+
+def test_accuracy_stop_stays_plain_when_the_server_lived(tmp_path, caplog):
+    # A server that never died must not be accused of it: the missing accuracy is then a genuine setup problem.
+    p = tmp_path / "server.log"
+    p.write_text(
+        "INFO:     Application startup complete\nINFO 01:40:00 Avg generation throughput: 188.0 tokens/s\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        reason = _stopped(
+            "vllm",
+            {"status": "succeeded", "run_eval_disabled": False, "server_log_path": str(p)},
+        )
+    assert reason == "baseline_accuracy_failed"
+    # Positive control: an absence assertion over caplog is satisfied by an empty caplog, so pin the line that must
+    # be there before trusting the one that must not.
+    assert "produced no result" in caplog.text
+    assert "broken baseline setup" in caplog.text
+    assert "server_died" not in caplog.text
+
+
+def test_accuracy_stop_survives_an_unreadable_server_log(caplog):
+    # The probe is diagnostics: a path that is missing, or a directory, must not turn a clean stop into a crash.
+    with caplog.at_level(logging.WARNING):
+        reason = _stopped(
+            "vllm",
+            {"status": "succeeded", "run_eval_disabled": False, "server_log_path": "/nonexistent/server.log"},
+        )
+    assert reason == "baseline_accuracy_failed"
+    assert "produced no result" in caplog.text
+    assert "broken baseline setup" in caplog.text
+    assert "server_died" not in caplog.text
+
+
 def test_no_stop_when_baseline_failed():
     reason = _stopped("sglang", {"status": "failed", "error": "boom"})
     assert reason == ""
@@ -897,7 +991,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
 
 
 # --- eval-origin enablement routing (flag on) ------------------------------
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E402
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,

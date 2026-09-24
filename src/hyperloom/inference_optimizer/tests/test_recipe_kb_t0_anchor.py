@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
+    _donor_is_trustworthy,
     _experience_rows,
     _warm_recipe_source,
     run_t0_anchor,
@@ -28,6 +29,27 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 def test_warm_recipe_source_is_local_recipe_kb() -> None:
     assert _warm_recipe_source({}, kb=object()) == "recipe-kb"
     assert _warm_recipe_source(None, kb=object()) == "recipe-kb"
+
+
+def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
+    donor = {
+        "replayable": True,
+        "best_config": {"extra_server_args": "--page-size 32"},
+        "sessions": [{"gain_pct": 20.0}],
+        "architectures": "arch",
+        "model_type": "mt",
+        "conc": 64,
+        "isl": 2048,
+        "osl": 512,
+    }
+    assert _donor_is_trustworthy(
+        donor,
+        target_arch_slug="arch",
+        target_model_type="mt",
+        target_conc=64,
+        target_isl=None,
+        target_osl=None,
+    )
 
 
 # Fake SharedState — only the fields the anchor reads
@@ -52,7 +74,7 @@ class _FakeSharedState:
     baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
     compute_partition: dict[str, Any] = field(default_factory=dict)
 
-    def save(self, _path: Path) -> None:  # noqa: D401
+    def save(self, _path: Path) -> None:
         """No-op save — tests don't care about disk persistence here."""
 
 

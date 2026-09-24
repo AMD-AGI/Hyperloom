@@ -1,77 +1,22 @@
-###############################################################################
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-#
-# See LICENSE for license information.
-###############################################################################
 
-"""The producer side of the AgentX timeout defect."""
+"""Rebaseline uses the benchmark policy rather than a task- or AgentX-derived cap."""
 
-from types import SimpleNamespace
+from __future__ import annotations
 
-from hyperloom.orchestrator.kernel.request_handlers import (
-    _agentx_rebaseline_timeout,
-)
+import sys
 
-# the two values observed killing real rounds
-OBSERVED = (7200, 9000)
+import pytest
+
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
 
-def test_default_path_is_untouched(monkeypatch):
-    """AgentX off: the resolved value passes through, exactly as before."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    for value in (*OBSERVED, 60, 50000):
-        assert _agentx_rebaseline_timeout(value) == value
-
-
-def test_default_path_untouched_with_stale_agentx_vars(monkeypatch):
-    """A leftover AGENTX_* var must not switch the raise on by itself."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")
-    assert _agentx_rebaseline_timeout(7200) == 7200
-
-
-def test_raises_the_observed_killers(monkeypatch):
+@pytest.mark.parametrize("task_cap", [60, 7200, 9000, 50000])
+def test_rebaseline_task_cannot_shrink_or_expand_round_cap(monkeypatch, tmp_path, task_cap):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    for value in OBSERVED:
-        assert _agentx_rebaseline_timeout(value) == 32400
-
-
-def test_never_lowers_a_larger_value(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    assert _agentx_rebaseline_timeout(50000) == 50000
-
-
-def test_tracks_the_baseline_derivation(monkeypatch):
-    """One number, not two: it follows baseline's own resolver."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    assert _agentx_rebaseline_timeout(7200) == 10800
-
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "44000")
-    assert _agentx_rebaseline_timeout(7200) == 44000
-
-
-def test_persisted_benchmark_mode_raises_without_the_env_var(monkeypatch):
-    """A re-baseline driven from a subprocess that never inherited ``HYPERLOOM_AGENTX`` must still get the raise from the session's persisted ``benchmark_mode`` -- otherwise it reproduces the exact mid-warmup kill this function exists to prevent."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    shared_state = SimpleNamespace(benchmark_mode="agentx")
-    assert _agentx_rebaseline_timeout(7200, shared_state=shared_state) == 32400
-
-
-def test_unrelated_benchmark_mode_does_not_raise(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    shared_state = SimpleNamespace(benchmark_mode="synthetic")
-    assert _agentx_rebaseline_timeout(7200, shared_state=shared_state) == 7200
+    monkeypatch.setenv("AGENTX_DURATION", "50000")
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "50000")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
+    executor = BaselineExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    assert executor._resolve_timeout({"timeout_sec": task_cap, "accuracy_timeout_sec": task_cap}) == 7800

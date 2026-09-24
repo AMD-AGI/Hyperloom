@@ -32,6 +32,18 @@ _OLD_PATH_PATTERN = re.compile(
     # Relative imports carry no package prefix, and a function-local one raises
     # only on the branch that runs it.
     r"|from \.\.framework\.(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)"
+    # ``from <package> import <module>`` never spells the module's dotted path,
+    # so every pattern above -- each anchored on ``package.module`` or
+    # ``package/module`` -- looks straight past the most ordinary way to import
+    # a module. This guard exists to prove the move left nothing behind, and it
+    # was green over two such imports: one raised ImportError in a single test,
+    # the other broke collection in 53 files. ``[\w.]*`` carries both the
+    # absolute prefix and a relative ``..``; the optional group ahead of each
+    # name covers a multi-name import that lists it second.
+    r"|from [\w.]*phases import (?:[\w, ]+, *)?_enablement_artifacts\b"
+    r"|from [\w.]*framework import (?:[\w, ]+, *)?"
+    r"(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)\b"
+    r"|from [\w.]*agents\.framework import (?:[\w, ]+, *)?enablement(_ops)?\b"
 )
 
 #: ``(path glob, line regex, why)``. An entry that stops matching is a dead
@@ -121,6 +133,44 @@ def test_no_stray_pre_relocation_module_paths() -> None:
         if not _is_allowed(rel, line)
     ]
     assert not stray, "references to moved modules:\n  " + "\n  ".join(stray[:40])
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "from hyperloom.orchestrator.phases import _enablement_artifacts as art",
+        "from ..phases import _enablement_artifacts",
+        "from hyperloom.orchestrator.framework import targeted_build",
+        "from ..framework import adapters",
+        "from hyperloom.agents.framework import enablement",
+        "from hyperloom.agents.framework import enablement_ops",
+        "from ..phases import machine_state, _enablement_artifacts",
+    ],
+)
+def test_the_pattern_sees_a_module_imported_from_its_package(line: str) -> None:
+    """``from <package> import <module>`` is the form the sweep used to miss.
+
+    Every other alternative anchors on ``package.module`` or ``package/module``,
+    which this spelling never writes. The sweep stayed green over two live
+    examples -- one raised ImportError in a single test, the other broke
+    collection in 53 files -- so the cases are pinned here rather than left to
+    the next relocation to rediscover.
+    """
+    assert _OLD_PATH_PATTERN.search(line), f"the sweep would not see: {line}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "from hyperloom.orchestrator.enablement.runtime import targeted_build",
+        "from hyperloom.orchestrator.framework import paths as fp",
+        "from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for",
+        "from hyperloom.orchestrator.enablement import artifacts as art",
+    ],
+)
+def test_the_pattern_leaves_the_surviving_spellings_alone(line: str) -> None:
+    """The new alternatives must not condemn the paths the move kept."""
+    assert not _OLD_PATH_PATTERN.search(line), f"false positive on: {line}"
 
 
 def test_no_agents_framework_imports_orchestrator() -> None:

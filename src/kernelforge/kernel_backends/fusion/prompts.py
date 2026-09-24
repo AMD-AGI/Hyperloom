@@ -12,7 +12,6 @@ from kernelforge.fusion.validate import (
     DEFAULT_SNR_THRESHOLD_DB,
     DEFAULT_TARGET_SPEEDUP,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 _PROVEN_PATTERNS = """\
 ## Proven fusions (all validated on real sglang serving, CUDA graph ON)
@@ -52,6 +51,7 @@ _PROVEN_PATTERNS = """\
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the Fusion kernel backend — a specialist in decode-path kernel fusion for the sglang
@@ -103,10 +103,10 @@ accumulates differently. Pre-filter on SNR (>= {DEFAULT_SNR_THRESHOLD_DB:g} dB),
 strict `allclose`. If you cannot reach it, the fusion is wrong — do not widen
 the tolerance.
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## When to Stop
-- Parity holds, the task's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
+- Parity holds, the driver's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
   measured numbers
 - The chain is already covered by a framework compile pass → say so and stop;
   claiming the existing pass beats authoring a duplicate

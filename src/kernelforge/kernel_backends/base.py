@@ -14,6 +14,7 @@ from kernelforge.kernel_backends.constants import (
     KERNEL_BACKEND_PROMPT_MODULES,
     resolve_language_dirs,
 )
+from kernelforge.loop.scoring import canonical_gate_prompt
 
 log = logging.getLogger(__name__)
 
@@ -66,5 +67,7 @@ def build_single_kernel_backend_prompt(
         defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
     )
 
+    # The backend is resolved here and nowhere else, so this is the one place that can pair a prompt with the gate the
+    # loop will apply to it. A prompts module naming its own backend would be a second copy of that pairing.
     build_prompt = importlib.import_module(module_path).build_system_prompt
-    return build_prompt(config.gpu_target, knowledge)
+    return build_prompt(config.gpu_target, knowledge, canonical_gate_prompt(backend))

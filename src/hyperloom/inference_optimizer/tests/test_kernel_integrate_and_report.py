@@ -37,6 +37,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.message_bus import Message
 
 
 # fixtures
@@ -64,7 +65,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
@@ -985,8 +986,8 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
     dropped: list[dict] = []
     extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}
 
-    def _drop(envs=None, *, backup_dir=None):
-        dropped.append({"envs": envs, "backup_dir": backup_dir})
+    def _drop(envs=None, *, backup_dir=None, also_modules=()):
+        dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
     monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
@@ -2386,7 +2387,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
 
 # ReportExecutor
 @pytest.mark.asyncio
-async def test_report_executor_writes_md_and_json(session_dir):
+@pytest.mark.parametrize("record_alert", [False, True], ids=["no-alert", "recorded-alert"])
+async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     """Run the report runner against seeded state + bus events; both files parse."""
     state = SharedState(
         session_id=session_dir.name,
@@ -2424,13 +2426,15 @@ async def test_report_executor_writes_md_and_json(session_dir):
                 payload={"action_name": "explore", "predicted_gain_pct": 5.0},
             ),
         )
-        await c._handle_intent(
-            "robustness",
-            Intent(
-                type=IntentType.ALERT,
-                payload={"severity": "low", "summary": "noise"},
-            ),
-        )
+        if record_alert:
+            await c.bus.append_and_seq(
+                Message.new(
+                    from_agent="coordinator",
+                    to_agent="orchestration",
+                    topic="alert",
+                    payload={"severity": "warning", "summary": "Recorded report alert"},
+                )
+            )
         c.shared_state.save(session_dir)
     finally:
         await c.stop()
@@ -2459,9 +2463,14 @@ async def test_report_executor_writes_md_and_json(session_dir):
     assert summary["baseline_tput"] == 800.0
     assert summary["cumulative_gain_validated"] == 12.5
     assert summary["stop_reason"] == "target_reached"
-    assert summary["event_counts_by_topic"].get("proposal", 0) >= 2
-    assert summary["event_counts_by_topic"].get("alert", 0) >= 1
+    assert summary["event_counts_by_topic"].get("proposal", 0) == 2
+    assert summary["event_counts_by_topic"].get("alert", 0) == int(record_alert)
+    alerts = [item for item in summary["highlights"] if item["topic"] == "alert"]
+    assert len(alerts) == int(record_alert)
+    if record_alert:
+        assert alerts[0]["summary"] == "sev=warning Recorded report alert"
     md_text = md.read_text()
+    assert ("Recorded report alert" in md_text) is record_alert
     assert session_dir.name in md_text
     assert "## Throughput" in md_text
     assert "12.50%" in md_text

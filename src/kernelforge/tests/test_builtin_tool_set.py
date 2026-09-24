@@ -86,37 +86,3 @@ def test_subagents_keep_the_task_tool_reachable() -> None:
 )
 def test_the_filter_dedupes_and_drops_mcp_names(names: list[str], expected: list[str]) -> None:
     assert _builtin_tools(names) == expected
-
-
-# ── an SDK too old for the field ──────────────────────────────────────────────
-
-
-def test_an_sdk_without_the_field_still_builds_its_options() -> None:
-    """The base set is a saving, not a requirement.
-
-    ``tools`` reached ``ClaudeAgentOptions`` only in newer SDKs. Passing it to an
-    older one would raise before the session ever started, turning a token
-    optimization into a hard failure, so it is dropped when the field is absent.
-    """
-    import dataclasses
-
-    from kernelforge.agent_backends.claude import _options_accept
-
-    @dataclasses.dataclass
-    class _Old:
-        allowed_tools: list
-
-    @dataclasses.dataclass
-    class _New:
-        allowed_tools: list
-        tools: list
-
-    assert _options_accept(_New, "tools") is True
-    assert _options_accept(_Old, "tools") is False
-
-    class _Fake:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    # A test double takes anything, and must be treated as the type it replaces.
-    assert _options_accept(_Fake, "tools") is True

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -20,9 +21,24 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
+def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
+    return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
+    from hyperloom.orchestrator.kernel import controller_submit, request_handlers
+
+    real_tool_path = request_handlers._kernel_agent_tool_path
+
+    def _tool_path_without_geak_runner(tool_name: str) -> Path:
+        if tool_name == "backends/geak_runner.py":
+            raise FileNotFoundError(tool_name)
+        return real_tool_path(tool_name)
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
 
@@ -41,10 +57,10 @@ def test_phase_names_are_monotonic():
 
 
 def test_allowed_actions_disjoint_phases():
-    # recover is in every phase; kernel_agent-owned actions only in KERNEL (Inv-2.1).
+    # Kernel-agent-owned actions only run in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        assert "recover" in allowed
+        assert "recover" not in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     # ENABLEMENT carries baseline so the Coordinator's revalidation survives the
@@ -628,7 +644,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -643,7 +658,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -700,10 +714,10 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 ):
     c = coordinator_with_mocks
     try:
-        c.shared_state.framework_agent_phase_enabled = False
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
         first_history = list(c.shared_state.phase_history)
         # No state change → no new transition.
         await c.tick(1)

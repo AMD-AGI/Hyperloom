@@ -328,7 +328,7 @@ def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_pat
         duration_sec=1.0,
         disable_cuda_graph=False,
         profile_result=None,
-        failure={"phase": "profile", "error_class": "RuntimeError", "message": "boom"},
+        failure={"stage": "profile", "error_class": "RuntimeError", "message": "boom"},
         instrumentation={
             "check_id": "instrumentation_preflight",
             "status": "failed",
@@ -391,7 +391,7 @@ def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
         duration_sec=12.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(trace_health={"zero_ops": True, "issues": ["[7] no ops"], "checks": []}),
-        failure={"phase": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
+        failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
     )
     recorder.record_profile_run(
         run_index=2,
@@ -436,7 +436,7 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
         duration_sec=5.0,
         trace_input="/w/traces/a.gz",
         ta_result=_ta_result(status="failed"),
-        failure={"phase": "trace_analyze", "error_class": "", "message": "steady_state_chunk_low_quality"},
+        failure={"stage": "trace_analyze", "error_class": "", "message": "steady_state_chunk_low_quality"},
     )
     retried = _ta_result(n26_auto_retry={"applied": True, "from_mode": "mixed", "to_mode": "decode_only"})
     recorder.record_analysis_run(
@@ -480,7 +480,7 @@ def test_failed_action_names_the_failing_substep(tmp_path: Path) -> None:
     assert event["end_time"]
     action = event["ext"]["actions"][0]
     assert action["failed_substep"] == "analysis"
-    assert action["failure"]["phase"] == "trace_analyze"
+    assert action["failure"]["stage"] == "trace_analyze"
     assert action["in_flight_substep"] is None
 
 
@@ -905,7 +905,7 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
                 "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "failed"}],
             }
         ),
-        failure={"phase": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
+        failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
     )
     recorder.record_profile_run(
         run_index=2,
@@ -946,7 +946,7 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
     assert event["status"] == "failed"
     action = event["ext"]["actions"][0]
     assert action["failure"]["error_class"] == "RuntimeError"
-    assert action["failure"]["phase"] == "profile"
+    assert action["failure"]["stage"] == "profile"
     assert action["failed_substep"] == "profile"
 
 
@@ -967,7 +967,7 @@ def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Pat
 
     action = _actions(tmp_path)[0]
     assert action["failed_substep"] == "analysis"
-    assert action["failure"]["phase"] == "analysis"
+    assert action["failure"]["stage"] == "analysis"
     assert action["profile"]["runs"][0]["status"] == "succeeded"
 
 

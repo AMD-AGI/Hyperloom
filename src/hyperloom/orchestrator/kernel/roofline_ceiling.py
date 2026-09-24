@@ -42,6 +42,8 @@ _MI355X_PEAK_TFLOPS: dict[str, float] = {
     "mxfp4": 10066.4,
     "fp4": 10066.4,
     "float4": 10066.4,
+    "fp32": 157.3,
+    "float32": 157.3,
 }
 HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {
@@ -1086,25 +1088,22 @@ def compute_roofline_breakdown_from_state(
     legacy = RooflineBreakdown(mem, cmp, peak, bound_kind)
 
     # Prefer the bottom-up PerfModel peak; legacy is the fallback.
-    try:
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            gpu_type=gpu_type,
-            concurrency=concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=num_gpus,
-            precision_tag=precision_tag,
+    pm_bd = compute_roofline_from_perfmodel(
+        meta=meta,
+        gpu_type=gpu_type,
+        concurrency=concurrency,
+        isl=runtime.isl,
+        osl=runtime.osl,
+        num_gpus=num_gpus,
+        precision_tag=precision_tag,
+    )
+    if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
+        return RooflineBreakdown(
+            mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
+            cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
+            peak_tok_per_sec=pm_bd.decode_tok_per_s,
+            bound_kind=pm_bd.bound_kind,
         )
-        if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
-            return RooflineBreakdown(
-                mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
-                cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
-                peak_tok_per_sec=pm_bd.decode_tok_per_s,
-                bound_kind=pm_bd.bound_kind,
-            )
-    except Exception:  # noqa: BLE001 — PerfModel is best-effort
-        pass
 
     return legacy
 
@@ -1146,21 +1145,6 @@ _MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
     "fp32": 194.0,
     "float32": 194.0,
 }
-_MI355X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 1686.0,
-    "bfloat16": 1686.0,
-    "fp16": 1686.0,
-    "float16": 1686.0,
-    "fp8": 3567.0,
-    "float8_e4m3fn": 3567.0,
-    "float8_e5m2": 3567.0,
-    "mxfp4": 5663.0,
-    "fp4": 5663.0,
-    "float4": 5663.0,
-    "fp32": 137.0,
-    "float32": 137.0,
-}
-
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
     "mi300x": {
         "hbm_bw_gbps": 5300.0,
@@ -1171,11 +1155,6 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
         "hbm_bw_gbps": 6000.0,
         "hbm_gb": 256.0,
         "peak_tflops": _MI325X_ACHIEVABLE_TFLOPS,
-    },
-    "mi355x": {
-        "hbm_bw_gbps": 8000.0,
-        "hbm_gb": 288.0,
-        "peak_tflops": _MI355X_ACHIEVABLE_TFLOPS,
     },
 }
 
@@ -1330,14 +1309,17 @@ def compute_roofline_from_perfmodel(
         return None
     if not meta.hidden_size or not meta.num_attention_heads:
         return None
-    spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
+    gpu_key = (gpu_type or "").strip().lower()
+    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
     bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
     tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = _resolve_achievable_tflops(gpu_type, tag) * max(num_gpus, 1)
+    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)) * max(
+        num_gpus, 1
+    )
     if f_peak_tflops <= 0:
         return None
     f_peak = f_peak_tflops * 1e12

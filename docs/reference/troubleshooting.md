@@ -10,8 +10,7 @@ A consolidated symptom → cause → fix index for the most common Hyperloom fai
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
-[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
-[`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
+[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md).
 
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
@@ -232,11 +231,10 @@ the baseline benchmark fails with VRAM allocation errors.
    `--max-model-len`.
 4. Lower `CONC` to reduce simultaneous KV cache pressure.
 
-The Robustness agent classifies repeated OOMs as a `log_error_pattern`
-high-severity symptom and emits an `escalate_strategy_change` intent;
-check the latest finding in
-`$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl` for
-context.
+Inspect the failed action's server log and result artifacts under
+`$SESSION_DIR/runs/<action>/<task_id>/` for the first allocation failure and
+its workload context. There is no runtime recovery agent that diagnoses or
+restarts the session for you.
 
 ---
 
@@ -259,6 +257,77 @@ bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
+
+---
+
+## Codex SDK turns stall or TraceLens roofline times out
+
+**Symptom**: On code paths that use the shared Codex SDK session helper
+(TraceLens roofline via `run_codex_turn`, orchestrator Codex turns), one or
+more of:
+
+* A Codex stage hits its phase budget with no declared output (for example,
+  no `analysis.md`).
+* Individual turns take minutes even when the upstream LLM responds in seconds.
+* Codex internal logs report `pool timed out while waiting for an open
+  connection` or `state db update_thread_metadata failed`.
+
+**Cause**: Hyperloom picks exactly one parent directory for each SDK turn via
+`_codex_home_parent` in `codex_session.py`:
+
+1. `HYPERLOOM_RUNTIME_DIR` when set (must be outside a source checkout and
+   creatable, or the turn raises `CodexSessionUnavailableError`).
+2. Otherwise the first safe declared **writable root** for that turn.
+3. Otherwise the run working directory.
+
+Each turn then creates a mode-`0700` `.hyperloom-codex-home-*` directory under
+that parent; Codex stores SQLite (WAL) state there. When the SDK client closes,
+`_cleanup_codex_home` removes that directory — it is not left behind for a
+post-stage listing.
+
+Installers often **export** `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
+that is launch configuration, not a separate placement rule inside
+`_codex_home_parent`. If that path (or an unset-runtime writable root) sits on
+storage that does not support the file locking SQLite needs, concurrent writers
+from the main agent and spawned sub-agents can block for minutes on the critical
+path.
+
+**Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
+It does **not** cover Forge-fusion / GEAK Codex (KernelForge uses its own home
+under `~/.cache/kernelforge/codex_home`) or subprocess **specialist** Codex
+tasks (`CODEX_HOME=<task-workspace>/.codex`, which also ignores
+`HYPERLOOM_RUNTIME_DIR`). Treat stalls on those paths as separate placement
+issues.
+
+**Fix**: Before launch, set `HYPERLOOM_RUNTIME_DIR` to a private directory
+outside any source checkout, on storage suitable for SQLite (typically
+node-local fast disk). Session artifacts can stay under `USER_DATA_PATH` on a
+shared mount:
+
+```bash
+export USER_DATA_PATH=/path/on/shared/storage/hyperloom-sessions
+export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime
+mkdir -p "$HYPERLOOM_RUNTIME_DIR"
+chmod 700 "$HYPERLOOM_RUNTIME_DIR"
+```
+
+Use a per-job subdirectory when several runs can share one node (for example,
+`/var/lib/hyperloom/runtime-$SLURM_JOB_ID`).
+
+**Verify**:
+
+1. Before and during the run, confirm the configured parent is on suitable
+   storage:
+   ```bash
+   df -T "$HYPERLOOM_RUNTIME_DIR"
+   ```
+2. While a turn is still open (before the SDK client closes), pool-timeout
+   warnings in Codex `logs_*.sqlite` under the active `.hyperloom-codex-home-*`
+   directory indicate the parent is still unsuitable. After close, rely on the
+   stage finishing within budget rather than inspecting removed directories.
+
+See [Environment variables](environment-variables.md) for
+`HYPERLOOM_RUNTIME_DIR` and Codex `CODEX_HOME` lifecycle.
 
 ---
 
@@ -455,8 +524,8 @@ python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
-# 3. Any Robustness findings since the last tick?
-tail -n 5 "$SD"/agents/robustness/findings/*.jsonl 2>/dev/null
+# 3. What phase, lifecycle events, and stop reason are persisted?
+python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.env import env_bool
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
@@ -45,14 +46,11 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when absent or raising."""
+    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 — report must never crash on annotations
-        return default
+    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
@@ -186,7 +184,7 @@ def _build_failure_summary(
                 from ._subprocess_kill import server_log_death_excerpt
 
                 excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:  # noqa: BLE001 — excerpt enrichment is best-effort
+            except Exception:
                 log.debug("server_log_death_excerpt failed", exc_info=True)
                 excerpt = None
             if excerpt:
@@ -217,7 +215,7 @@ def _build_failure_summary(
         if suppressed:
             summary["suppressed_benign"] = suppressed[:5]
         return summary
-    except Exception:  # noqa: BLE001 — report must never crash on the summary
+    except Exception:
         log.warning(
             "report_executor: failed to build failure_summary",
             exc_info=True,
@@ -336,7 +334,7 @@ def _explain_conc_sweep_skip(state) -> str:
         return ""
     # Imported here, not at module scope: ``kernel.conc_sweep`` imports the grid runner in this same package, so a
     # top-level import is the edge CodeQL reports as a cycle.
-    from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
+    from ...kernel.conc_sweep import conc_sweep_declined_to_run
 
     detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
     if conc_sweep_declined_to_run(last):
@@ -437,7 +435,9 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
         or summary["cumulative_gain_validated"]
     ):
         return "unavailable"
-    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"]:
+    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"] or summary.get(
+        "has_unvalidated_keeps"
+    ):
         return "stale"
     from hyperloom.common.perf_metric import VERDICT_KEEP
 
@@ -590,13 +590,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
     stack_len = summary.get("optimization_stack_len", 0) or 0
+    changed_since_validation = stack_len > val_len or bool(summary.get("has_unvalidated_keeps"))
     if val_ts:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
     elif val_gain or val_len:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
@@ -1282,7 +1283,7 @@ class ReportExecutor:
                 output_dir=output_dir,
                 state=state,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
         if conc_sweep_curve_png is not None:
             try:
@@ -1331,8 +1332,7 @@ class ReportExecutor:
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
         """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
-        auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
-        if not service_url and auto_publish not in {"1", "true", "yes"}:
+        if not service_url and not env_bool("HYPERLOOM_RESULTS_AUTO_PUBLISH"):
             return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
 
         repo_root = Path(__file__).resolve().parents[3]
@@ -1369,7 +1369,7 @@ class ReportExecutor:
                 "stdout": proc.stdout[-4000:],
                 "stderr": proc.stderr[-4000:],
             }
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             log.warning("report_executor: result publish failed: %s", e)
             return {"enabled": True, "error": str(e)}
 

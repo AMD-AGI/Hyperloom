@@ -148,9 +148,9 @@ def test_build_client_from_env_none_when_url_is_unparseable(monkeypatch):
 
 # --- discovery source ---------------------------------------------------
 
-from hyperloom.agents.framework import sources  # noqa: E402
-from hyperloom.agents.framework.models import Candidate, ExploreRequest  # noqa: E402
-from hyperloom.agents.framework.sources import pr_kb as pr_kb_source  # noqa: E402
+from hyperloom.agents.framework import sources
+from hyperloom.agents.framework.models import Candidate, ExploreRequest
+from hyperloom.agents.framework.sources import pr_kb as pr_kb_source
 
 
 class _DiscoveryClient:

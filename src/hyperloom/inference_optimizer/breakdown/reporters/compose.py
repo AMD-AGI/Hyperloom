@@ -13,7 +13,7 @@ from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
 # Import every renderer module for its @register_renderer side effect.
-from ._renderers import (  # noqa: F401  (side-effect imports)
+from ._renderers import (
     session as _r_session,
     workload as _r_workload,
     baseline as _r_baseline,
@@ -41,9 +41,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ),
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
-    # The two side-channel agents watch the run rather than take part in it, so
-    # they sit after the optimization story and before the raw trace.
-    ("Review & Robustness", ["critic", "robustness"]),
+    ("Review", ["critic", "robustness"]),
     ("Run Trace", ["phase_timeline"]),
 ]
 
@@ -110,12 +108,13 @@ def render_session_report(
         except Exception as exc:  # noqa: BLE001
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
+    used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")
     md = _stitch(
         sections=sections,
         global_facts=global_facts,
         llm_exec_summary=exec_summary_llm,
         llm_narratives=narratives,
-        used_llm=llm_client is not None and not llm_raw.startswith("<llm_error"),
+        used_llm=used_llm,
         breakdown=breakdown,
     )
     return ComposeResult(
@@ -124,7 +123,7 @@ def render_session_report(
         global_facts=global_facts,
         llm_user_prompt=user_prompt,
         llm_raw_response=llm_raw,
-        used_llm=llm_client is not None,
+        used_llm=used_llm,
     )
 
 

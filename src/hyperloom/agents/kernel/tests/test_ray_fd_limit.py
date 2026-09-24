@@ -17,7 +17,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
     if d not in sys.path:
         sys.path.insert(0, d)
 
-import ray_runtime  # noqa: E402
+import ray_runtime
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
@@ -69,6 +69,8 @@ class _FakeResource:
 
 class _Proc:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
 def test_install_sh_fd_limit_function_returns_success_when_hard_cap_sufficient():
@@ -336,6 +338,60 @@ def test_ensure_ray_cluster_declares_serving_slot(monkeypatch):
     assert "--num-gpus=4" in starts[0]
 
 
+def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
+    """Make ``ray start`` exit non-zero with output, leaving the cluster down."""
+
+    class _FailedProc:
+        returncode = 1
+
+        def __init__(self):
+            self.stdout = stdout
+            self.stderr = stderr
+
+    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: False)
+
+    def _fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ray", "start"]:
+            return _FailedProc()
+        return _Proc()
+
+    monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)
+
+
+def test_failed_ray_start_without_a_log_sink_carries_its_output(monkeypatch):
+    """Without a log path the output is the only evidence, so it must reach the error.
+
+    Discarding it leaves the caller with 'see None' and nothing to diagnose from.
+    """
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_failing_ray_start(
+        monkeypatch,
+        stdout="",
+        stderr="ModuleNotFoundError: No module named 'ray.thirdparty_files'",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ray_runtime.ensure_ray_cluster(num_gpus=1)
+
+    message = str(excinfo.value)
+    assert "ModuleNotFoundError: No module named 'ray.thirdparty_files'" in message, message
+    assert "see None" not in message, message
+
+
+def test_failed_ray_start_with_a_log_sink_names_the_file(monkeypatch, tmp_path):
+    """With a log path the output is already on disk, so the error names it."""
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_failing_ray_start(monkeypatch, stdout="", stderr="boom")
+    log_path = tmp_path / "ray.log"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ray_runtime.ensure_ray_cluster(num_gpus=1, log_path=log_path)
+
+    assert f"see {log_path}" in str(excinfo.value)
+
+
 def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     """A version-mismatch restart re-declares serving_slot on the fresh head."""
     events: list = []
@@ -350,7 +406,7 @@ def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     _assert_declares_serving_slot(starts[0])
 
 
-import pytest  # noqa: E402
+import pytest
 
 
 _ISO_ENV_VARS = ("HL_RAY_HEAD_PORT", "RAY_ADDRESS")

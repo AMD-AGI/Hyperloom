@@ -17,13 +17,11 @@ workdirs survived pruning is what the section it replaces did.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
+
+from ._common import _dict_rows, _mapping
 
 __all__ = ["collect_v6_critic"]
-
-
-def _rows(value: Any) -> list[dict[str, Any]]:
-    return [dict(r) for r in value if isinstance(r, Mapping)] if isinstance(value, list) else []
 
 
 def collect_v6_critic(recorded: Any = None) -> dict[str, Any]:
@@ -36,5 +34,4 @@ def collect_v6_critic(recorded: Any = None) -> dict[str, Any]:
         dict[str, Any]: ``{"iterations": [...]}``. An empty ``iterations`` says
         the critic never completed a review, which is itself an answer.
     """
-    view = recorded if isinstance(recorded, Mapping) else {}
-    return {"iterations": _rows(view.get("iterations"))}
+    return {"iterations": _dict_rows(_mapping(recorded).get("iterations"))}

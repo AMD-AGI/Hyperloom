@@ -10,11 +10,14 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
+from functools import partial
+from concurrent.futures import Future
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -47,11 +50,10 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskNotFound
 from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
-    coerce_needs_gpu,
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
@@ -149,9 +151,37 @@ class DispatcherCollaborator:
         # and an exhausted wall-clock budget have to break. Entries remove
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
+        self._executions: set[asyncio.Task[Any]] = set()
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
+
+    async def close_db_after_executions(self) -> None:
+        """Drain physical cleanup and completion before the entry-point loop exits.
+
+        An unconfirmed execution retains its database and capacity. In particular,
+        cancelling an asyncio task cannot establish that its worker thread stopped.
+        """
+        for entry in self._inflight_actions.values():
+            entry.scope.cancel(reason="dispatcher_shutdown")
+        executions = set(self._executions)
+        pending = {execution for execution in executions if not execution.done()}
+        if pending:
+            log.warning("dispatcher: draining %d execution cleanup(s) before database close", len(pending))
+            _done, pending = await asyncio.wait(pending, timeout=_COOPERATIVE_CANCEL_GRACE_SEC)
+        unconfirmed = {
+            execution
+            for execution in (executions - pending) & self._executions
+            if execution.cancelled() or execution.exception() is not None
+        }
+        if pending or unconfirmed:
+            log.error(
+                "dispatcher: shutdown cleanup unconfirmed (%d pending, %d interrupted); retaining database and ownership",
+                len(pending),
+                len(unconfirmed),
+            )
+            return
+        self.db.close()
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
@@ -196,13 +226,10 @@ class DispatcherCollaborator:
         phase = (getattr(state, "phase", "") or "").upper()
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
-        try:
-            remaining = _phase_state.phase_budget_remaining_seconds(
-                state,
-                budget_pct=self._phase_budget_pct,
-            )
-        except Exception:  # noqa: BLE001 — never let the guard wedge dispatch
-            return False
+        remaining = _phase_state.phase_budget_remaining_seconds(
+            state,
+            budget_pct=self._phase_budget_pct,
+        )
         return remaining is not None and remaining <= 0.0
 
     async def cancel_inflight_actions(
@@ -227,9 +254,9 @@ class DispatcherCollaborator:
         card. So the cancel goes out on the action's :class:`CancelScope` first
         -- the channel the blocking side polls -- and work that is listening on
         it is given :data:`_COOPERATIVE_CANCEL_GRACE_SEC` to stop itself and
-        return through its own ``finally`` blocks. Whatever is still running
-        after that is cancelled the old way, which is no worse than not having
-        asked.
+        return through its own ``finally`` blocks. Past that bound only the
+        caller is cancelled; shielded execution retains capacity until cleanup
+        actually returns.
 
         Every scope is cancelled before the first await, so a caller that is
         itself being cancelled still leaves no action running unattended: the
@@ -247,7 +274,7 @@ class DispatcherCollaborator:
                 spent budget needs.
 
         Returns:
-            list[str]: Task ids that were stopped (empty when nothing ran).
+            list[str]: Task ids asked to stop; cleanup may still be pending.
         """
         victims = [
             (task_id, entry)
@@ -342,8 +369,6 @@ class DispatcherCollaborator:
           fails while it is still retry-eligible, this same tick;
         * the failure that reclaim implies, charged once;
         * the lane leases that holder still held;
-        * a running row past its TTL, covering a recycled holder PID or a
-          missing holder record, which the dead-PID check cannot see;
         * an ``integrate_patch`` row cancelled at dispatch whose critic verdict
           was restored afterwards by a resume.
         """
@@ -356,30 +381,22 @@ class DispatcherCollaborator:
                     len(dead_tasks),
                     ", ".join(t[:12] for t in dead_tasks),
                 )
-        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+        except Exception:
             log.exception("dispatcher: dead-running task reclaim failed")
+        report = getattr(getattr(self, "reconciler", None), "last_report", None)
+        dead_tasks.extend(getattr(report, "failed_tasks", ()))
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
-            except Exception:  # noqa: BLE001 — bookkeeping never aborts the pump
+            except Exception:
                 log.exception("dispatcher: dead-holder failure accounting failed")
         try:
             await self.locks.reap_dead_holders()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("dispatcher: dead-holder lease reap failed")
         try:
-            expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
-            if expired_tasks:
-                log.warning(
-                    "dispatcher: reclaimed %d expired-running task(s): %s",
-                    len(expired_tasks),
-                    ", ".join(t[:12] for t in expired_tasks),
-                )
-        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
-            log.exception("dispatcher: expired-running task reclaim failed")
-        try:
             await self._reconcile_cancelled_policy_denied_integrate_tasks()
-        except Exception:  # noqa: BLE001 — reconcile must not abort the pump
+        except Exception:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def _pump_dispatcher_once(self) -> None:
@@ -422,27 +439,12 @@ class DispatcherCollaborator:
                     timeout=self._dispatcher_poll_sec,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                # A joined task can hold this tick body for hours, and the stamp
-                # the supervisor reads only advances at the main loop boundary.
-                await self.reconciler.stamp_progress(time.time())
                 if not done:
                     # Poll elapsed with no completion; re-scan in case a lane freed.
                     continue
-                remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-                completed: list[tuple[Task, Any, Any]] = []
-                for entry in inflight:
-                    task, atask, gpu_lease = entry
-                    if atask in done:
-                        try:
-                            maybe_result: Any = atask.result()
-                        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
-                            maybe_result = exc
-                        completed.append((task, maybe_result, gpu_lease))
-                    else:
-                        remaining.append(entry)
-                inflight = remaining
-                for task, maybe_result, gpu_lease in completed:
-                    await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+                # Execution owns completion too, so a cancelled pump cannot lose it.
+                await asyncio.gather(*done, return_exceptions=True)
+                inflight = [entry for entry in inflight if entry[1] not in done]
         finally:
             # ``_inflight_actions`` is dispatcher-wide: the inline path registers
             # a handle there too, and that action is meant to outlive the caller
@@ -480,7 +482,7 @@ class DispatcherCollaborator:
         created: list[str] = []
         try:
             cancelled = await self.tasks.by_state("cancelled")
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("dispatcher: reconcile could not list cancelled tasks")
             return []
 
@@ -609,9 +611,10 @@ class DispatcherCollaborator:
             if not join_in_pump and task.task_id in self._inflight_actions:
                 # Still running from an earlier pump that returned without it.
                 continue
-            if await self._cancel_queued_task_over_budget(task):
+            retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
+            if not retired and await self._cancel_queued_task_over_budget(task):
                 continue
-            lanes_needed = list(task.requires_lanes or [])
+            lanes_needed = [] if retired else list(task.requires_lanes or [])
             if lanes_needed:
                 # SQLite lane gate. Under single-node Ray execution the
                 # authoritative GPU mutex is Ray's custom
@@ -650,7 +653,7 @@ class DispatcherCollaborator:
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
+                needs_gpu = is_truthy(params.get("needs_gpu"))
                 # Absolute stop instant, tightened by the session bound.
                 specialist_deadline = self._specialist_deadline(
                     needs_gpu=needs_gpu,
@@ -665,10 +668,7 @@ class DispatcherCollaborator:
                     # any probe failure is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
-                        try:
-                            _immediate_pause = _serving_slot_busy_fn()
-                        except Exception:  # noqa: BLE001 — never block dispatch
-                            _immediate_pause = False
+                        _immediate_pause = _serving_slot_busy_fn()
                     if _immediate_pause:
                         # Serving is active — defer this GPU specialist to a
                         # later pass (keep it queued) rather than piling onto the
@@ -708,12 +708,7 @@ class DispatcherCollaborator:
                         gpu_count = default_gpu_count
                     # A bench-capable specialist floors gpu_count up to the
                     # serving TP; others keep their explicit count.
-                    bench_raw = params.get("bench", False)
-                    bench = (
-                        bench_raw.strip().lower() in ("1", "true", "yes", "on")
-                        if isinstance(bench_raw, str)
-                        else bool(bench_raw)
-                    )
+                    bench = is_truthy(params.get("bench"))
                     serving_tp = self._resolve_serving_tp() or 0
                     if bench and serving_tp > 0 and gpu_count < serving_tp:
                         log.info(
@@ -801,23 +796,20 @@ class DispatcherCollaborator:
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            try:
-                _coord = object.__getattribute__(self, "_coord")
-                _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
-                if (
-                    isinstance(_execs, dict)
-                    and _execs
-                    and task.kind not in _execs
-                    and task.kind != "specialist"
-                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
-                ):
-                    log.warning(
-                        "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
-                        task.task_id,
-                        task.kind,
-                    )
-            except Exception:  # noqa: BLE001 - audit must never affect dispatch
-                pass
+            _coord = object.__getattribute__(self, "_coord")
+            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            if (
+                isinstance(_execs, dict)
+                and _execs
+                and task.kind not in _execs
+                and task.kind != "specialist"
+                and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+            ):
+                log.warning(
+                    "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
+                    task.task_id,
+                    task.kind,
+                )
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
                 self.run_task_registered(
@@ -827,6 +819,9 @@ class DispatcherCollaborator:
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
+                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=gpu_lease)
+                    if join_in_pump
+                    else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
@@ -868,6 +863,7 @@ class DispatcherCollaborator:
         gpu_lease: Any = None,
         gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
+        on_complete: Callable[[SubAgentResult], Awaitable[None]] | None = None,
     ) -> "SubAgentResult | None":
         """Run one task under the wall-clock defences, and hand back what it held.
 
@@ -886,13 +882,16 @@ class DispatcherCollaborator:
             cancel_scope: The caller's cancel channel. The pump passes one
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
+            on_complete: Completion owned by the execution, independent of its
+                caller's lifetime. Inline and unjoined tasks retain their own policies.
 
         Returns:
             The runner's result, or ``None`` when the task's lanes were busy, in
             which case the row is untouched and still queued.
         """
         lease = prebound_lease
-        if lease is None and task.requires_lanes:
+        retired = task.kind == "recover" and task.kind not in self.sub.executor_registry and task.state == "queued"
+        if lease is None and task.requires_lanes and not retired:
             lease = await self.locks.try_acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
@@ -929,35 +928,50 @@ class DispatcherCollaborator:
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
                 dispatched_unix=time.time(),
             )
-        except Exception:  # noqa: BLE001 — an action outranks its own record
+        except Exception:
             log.debug("dispatcher: phase dispatch record failed", exc_info=True)
-        try:
-            # Every LLM call this action makes, in-process or in a child, is
-            # labelled with its kind from here.
-            with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
-                return await self.sub.run_task(
-                    task,
-                    prebound_lease=lease,
-                    extra_context=extra_context,
-                )
-        finally:
-            self._inflight_actions.pop(task.task_id, None)
-            if gpu_lease is not None:
-                try:
-                    await self.gpu_specialist_pool.release(gpu_lease)
-                except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
-                    log.exception(
-                        "dispatcher: finally GPU-lease release failed for task=%s",
-                        task.task_id,
-                    )
+
+        async def release_resources() -> bool:
             if gpu_specialist_lease is not None:
-                try:
-                    gpu_specialist_lease.close()
-                except Exception:  # noqa: BLE001 — teardown must not raise
-                    log.exception(
-                        "dispatcher: finally GpuSpecialistLease close failed for task=%s",
-                        task.task_id,
-                    )
+                closed = await asyncio.to_thread(gpu_specialist_lease.close)
+                if closed is not True:
+                    log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
+                    return False
+            if gpu_lease is not None:
+                await self.gpu_specialist_pool.release(gpu_lease)
+            return True
+
+        async def execute_and_complete() -> SubAgentResult:
+            result = await self.sub.run_task(
+                task,
+                prebound_lease=lease,
+                extra_context=extra_context,
+                release_resources=release_resources,
+            )
+            try:
+                if on_complete is not None:
+                    await on_complete(result)
+                return result
+            finally:
+                self._inflight_actions.pop(task.task_id, None)
+                self._executions.discard(asyncio.current_task())
+
+        with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
+            execution = asyncio.create_task(execute_and_complete())
+        self._executions.add(execution)
+        execution.add_done_callback(self._report_unjoined_failure(task))
+        try:
+            return await asyncio.shield(execution)
+        except asyncio.CancelledError:
+            cancel_scope.cancel(reason="caller_cancelled")
+            grace = _COOPERATIVE_CANCEL_GRACE_SEC if cancel_scope.has_listeners else _CANCEL_NOTICE_SEC
+            await asyncio.wait({execution}, timeout=grace)
+            if not execution.done():
+                log.warning(
+                    "dispatcher: task=%s execution cleanup still pending; retaining capacity and running state",
+                    task.task_id,
+                )
+            raise
 
     def _specialist_progress_publisher(self, task: Task) -> Any:
         """Build the callback that turns partial checkpoints into observations.
@@ -1040,11 +1054,11 @@ class DispatcherCollaborator:
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         budget_sec = budget_min * 60.0
         from ..specialists.profile import resolve_specialist_profile
-        from ..specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
         profile = resolve_specialist_profile(params or {})
         if profile.reserves_benchmark_lane:
-            budget_sec = max(budget_sec, float(DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60))
+            budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec
 
     def _specialist_deadline(
@@ -1144,11 +1158,7 @@ class DispatcherCollaborator:
             self._dead_holder_accounted.add(task_id)
             try:
                 task = await self.tasks.get(task_id)
-            except Exception:  # noqa: BLE001 — a missing row must not abort the pump
-                log.exception(
-                    "dispatcher: dead-holder accounting could not load task=%s",
-                    task_id,
-                )
+            except TaskNotFound:
                 continue
             await self._handle_unpromotable_result(
                 task,
@@ -1172,9 +1182,9 @@ class DispatcherCollaborator:
     ) -> None:
         """Run completion bookkeeping for one finished dispatched task.
 
-        Performs per-task post-completion handling (GPU-lease
-        release, specialist auto-retry, ``delegated_result`` emission, ledgers,
-        shared-state promotion, fact-write, explore-gap refresh).
+        Performs post-completion bookkeeping: specialist auto-retry,
+        ``delegated_result`` emission, ledgers, shared-state promotion,
+        fact-write and explore-gap refresh. Execution owns resource cleanup.
 
         Args:
             task: The finished dispatched task.
@@ -1185,14 +1195,6 @@ class DispatcherCollaborator:
             [(task, None, gpu_lease)],
             [maybe_result],
         ):
-            if gpu_lease is not None:
-                try:
-                    await self.gpu_specialist_pool.release(gpu_lease)
-                except Exception:  # noqa: BLE001 — defensive cleanup
-                    log.exception(
-                        "dispatcher: failed to release GPU specialist lease for task=%s",
-                        task.task_id,
-                    )
             if isinstance(maybe_result, asyncio.CancelledError):
                 # Asked for, not gone wrong: the wall-clock defences stop
                 # in-flight actions on purpose. Logged as the deliberate act it
@@ -1215,15 +1217,9 @@ class DispatcherCollaborator:
             # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
             # task and skip this attempt's bookkeeping. Semantic empties fall
             # through and are recorded.
-            if task.kind == "specialist":
-                try:
-                    if await self._maybe_auto_retry_specialist(task, result):
-                        continue
-                except Exception:  # noqa: BLE001 — never block the dispatch loop
-                    log.exception(
-                        "specialist auto-retry hook failed for task=%s",
-                        task.task_id,
-                    )
+            if task.kind == "specialist" and result.state != "cancelled":
+                if await self._maybe_auto_retry_specialist(task, result):
+                    continue
             if isinstance(result.result, dict):
                 reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
                 if reauthor_attempt not in (None, ""):
@@ -1243,7 +1239,7 @@ class DispatcherCollaborator:
                         },
                     )
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception(
                     "dispatcher: failed to append delegated_result for task=%s",
                     task.task_id,
@@ -1258,94 +1254,52 @@ class DispatcherCollaborator:
                 result_dict = result.result if isinstance(result.result, dict) else {}
                 done_payload = result_dict.get("specialist_done") or {}
                 if isinstance(done_payload, dict):
-                    try:
-                        await self._record_specialist_result(
-                            task=task,
-                            done_payload=done_payload,
-                            source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "specialist bookkeeping hook failed for task=%s",
-                            task.task_id,
-                        )
+                    await self._record_specialist_result(
+                        task=task,
+                        done_payload=done_payload,
+                        source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                        run_error=str(result.error or ""),
+                    )
                     # FRAMEWORK authoring bridge for an EMPTY deliverable: a
                     # specialist that authored no patch never spawns an
                     # integrate_patch; stamp the terminal progress row here to
                     # avoid a pump livelock.
-                    try:
-                        self._record_framework_agent_authoring_empty_outcome(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
+                    self._record_framework_agent_authoring_empty_outcome(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
                     # Harvest a discovery specialist's candidates into the
                     # source arm's batch.
-                    try:
-                        self._ingest_candidate_discovery(
-                            task=task,
-                            done_payload=done_payload,
-                            run_error=str(result.error or ""),
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK: candidate discovery ingest failed for task=%s",
-                            task.task_id,
-                        )
+                    self._ingest_candidate_discovery(
+                        task=task,
+                        done_payload=done_payload,
+                        run_error=str(result.error or ""),
+                    )
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
-                try:
-                    self._record_intervention_for_task(task, result.result)
-                except Exception:  # noqa: BLE001
-                    log.exception(
-                        "intervention ledger update failed for task=%s",
-                        task.task_id,
-                    )
+                self._record_intervention_for_task(task, result.result)
             # integrate_patch completion handling.
-            if task.kind == "integrate_patch":
+            if task.kind == "integrate_patch" and result.state != "cancelled":
                 # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
                 if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
-                    try:
-                        self._record_framework_agent_authored_outcome(
-                            task=task,
-                            result=result,
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "FRAMEWORK authored-outcome bridge failed for task=%s",
-                            task.task_id,
-                        )
+                    self._record_framework_agent_authored_outcome(
+                        task=task,
+                        result=result,
+                    )
                 # Unified rearm: handles enablement and apply_failed perf-lane
                 # results (schedules retry or stamps terminal).
                 res_dict = getattr(result, "result", None)
-                try:
-                    await self._maybe_rearm_authored_lane(res_dict)
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "AUTHORED_LANE rearm failed for task=%s",
-                        task.task_id,
-                    )
+                await self._maybe_rearm_authored_lane(res_dict)
                 # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
-                try:
-                    await self._drain_apply_fail_retry_pending()
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "apply_fail retry drain failed for task=%s",
-                        task.task_id,
-                    )
+                await self._drain_apply_fail_retry_pending()
             # Auto-promote succeeded results into CORE_STATE_FIELDS
             # (Coordinator-only writer).  Warm replay is deliberately routed
             # through its promote handler even when dispatch itself failed:
             # that handler owns rollback of pre-applied framework patches and
             # clears the PRELUDE ``in_flight`` gate.
             result_payload = dict(result.result or {})
-            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state != "succeeded"
+            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
             if replay_needs_cleanup:
                 result_payload.setdefault("status", "failed")
                 result_payload.setdefault("error_class", "dispatch_failed")
@@ -1371,8 +1325,10 @@ class DispatcherCollaborator:
                     macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     action=str(task.kind or ""),
                 )
-            except Exception:  # noqa: BLE001 — a verdict outranks its own record
+            except Exception:
                 log.debug("dispatcher: phase settle record failed", exc_info=True)
+            if result.state == "cancelled":
+                continue
             try:
                 if kept:
                     await self._promote_to_shared_state(
@@ -1391,7 +1347,7 @@ class DispatcherCollaborator:
                     if result.error_class and not unpromotable_result.get("error_class"):
                         unpromotable_result["error_class"] = result.error_class
                     await self._handle_unpromotable_result(task, unpromotable_result)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
                     task.task_id,
@@ -1406,7 +1362,7 @@ class DispatcherCollaborator:
             if task.kind != "replay_warm_recipe":
                 try:
                     await self._fact_write_hook(task=task, result=result, kept=kept)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.exception(
                         "dispatcher: fact-write hook failed for task=%s",
                         task.task_id,
@@ -1418,33 +1374,15 @@ class DispatcherCollaborator:
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
-                try:
-                    self._record_explore_round_gaps(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "gaps refresh: explore-round update failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    self._record_explore_variant_failures(
-                        task=task,
-                        result=result_dict,
-                    )
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "explore: per-variant failure recording failed for task=%s",
-                        task.task_id,
-                    )
-                try:
-                    await self._refresh_gaps(reason="explore_round")
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "gaps refresh: _refresh_gaps after explore failed for task=%s",
-                        task.task_id,
-                    )
+                self._record_explore_round_gaps(
+                    task=task,
+                    result=result_dict,
+                )
+                self._record_explore_variant_failures(
+                    task=task,
+                    result=result_dict,
+                )
+                await self._refresh_gaps(reason="explore_round")
 
     @staticmethod
     def _lanes_fit(
@@ -1645,7 +1583,7 @@ class DispatcherCollaborator:
                 "cancelled",
                 evidence={"reason": "time_budget", "error": str(denied)},
             )
-        except Exception:  # noqa: BLE001 — a lost row must not abort the pump
+        except Exception:
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,
@@ -1658,33 +1596,21 @@ class DispatcherCollaborator:
             task.kind,
             denied,
         )
-        try:
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "dispatch_denied_time_budget",
-                    "task_id": task.task_id,
-                    "action": task.kind,
-                    "error": str(denied),
-                    "hint": getattr(denied, "hint", ""),
-                },
-            )
-        except Exception:  # noqa: BLE001 — observability must not block dispatch
-            log.exception(
-                "dispatcher: could not record time-budget denial for task=%s",
-                task.task_id,
-            )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "dispatch_denied_time_budget",
+                "task_id": task.task_id,
+                "action": task.kind,
+                "error": str(denied),
+                "hint": getattr(denied, "hint", ""),
+            },
+        )
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
         # would idle. Stamp the skip here so the phase machine closes on sweep_done.
         if str(task.kind or "") == "conc_sweep":
-            try:
-                self._record_session_budget_conc_sweep_skip(denied=denied)
-            except Exception:  # noqa: BLE001 — a stamp miss must not abort the pump
-                log.exception(
-                    "dispatcher: could not record conc_sweep time-budget skip for task=%s",
-                    task.task_id,
-                )
+            self._record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
     def _sequence_denial_for_request(
@@ -1727,10 +1653,7 @@ class DispatcherCollaborator:
         Returns:
             bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
         """
-        return os.environ.get(
-            "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING",
-            "",
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        return env_bool("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING")
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
@@ -1805,22 +1728,14 @@ class DispatcherCollaborator:
             allowed.add(name)
         return frozenset(allowed)
 
-    def _run_action_now_sync(
+    def _schedule_inline_action(
         self,
         action_name: str,
         params: dict[str, Any] | None = None,
-    ) -> str:
-        """Bridge callable for the ``run_action_now`` context tool (A3): marshals the executor coroutine onto the Coordinator loop and blocks with a timeout.
-
-        Args:
-            action_name: Name of the action to run inline; must be
-                inline-eligible per :meth:`_inline_action_whitelist`.
-            params: Optional parameter mapping forwarded to the executor.
-
-        Returns:
-            A human-readable status string describing the inline run outcome,
-            disablement, ineligibility, timeout, or error.
-        """
+        *,
+        synchronous: bool = False,
+    ) -> str | tuple[Future[str], str, float]:
+        """Admit and submit an inline action, returning its future and caller wait budget."""
         if not self._inline_fast_actions_enabled:
             return (
                 "(run_action_now disabled: set "
@@ -1841,19 +1756,12 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
-        # Defensive audit (log-only): detect and log if this sync bridge is
-        # invoked on the coordinator loop thread. Behaviour is unchanged.
         try:
-            _running = asyncio.get_running_loop()
-            if _running is loop:
-                log.warning(
-                    "run_action_now: invoked on the coordinator loop thread (action=%r)",
-                    name,
-                )
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
-        except Exception:  # noqa: BLE001 - audit must never affect flow
-            pass
+            running_loop = None
+        if synchronous and running_loop is loop:
+            return "(run_action_now unavailable: sync bridge invoked on the coordinator loop thread)"
         coro = self._run_action_now(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:
@@ -1870,8 +1778,13 @@ class DispatcherCollaborator:
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except RuntimeError as exc:
             return f"(run_action_now: could not schedule on coordinator loop: {exc!r})"
+        return fut, name, timeout_s
+
+    @staticmethod
+    def _inline_action_result(fut: Future[str], name: str, timeout_s: float, *, wait_timeout_s: float) -> str:
+        """Render one shared result contract for synchronous and asynchronous callers."""
         try:
-            return fut.result(timeout=timeout_s)
+            return fut.result(timeout=wait_timeout_s)
         except FuturesTimeoutError:
             return (
                 f"(run_action_now: {name!r} still running after "
@@ -1889,9 +1802,33 @@ class DispatcherCollaborator:
             return (
                 f"(run_action_now: {name!r} was cancelled — the session is shutting down or out of wall-clock budget)"
             )
-        except Exception as exc:  # noqa: BLE001 — never crash the turn
+        except Exception as exc:
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
+
+    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        """Wait from another thread without allowing the coordinator loop to wait on itself."""
+        scheduled = self._schedule_inline_action(action_name, params, synchronous=True)
+        if isinstance(scheduled, str):
+            return scheduled
+        future, name, timeout_s = scheduled
+        return self._inline_action_result(future, name, timeout_s, wait_timeout_s=timeout_s)
+
+    async def _run_action_now_wait(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        """Wait without blocking the loop or cancelling the action when its caller leaves."""
+        scheduled = self._schedule_inline_action(action_name, params)
+        if isinstance(scheduled, str):
+            return scheduled
+        future, name, timeout_s = scheduled
+        waiting = asyncio.wrap_future(future)
+
+        def consume_completion(done: asyncio.Future[str]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        waiting.add_done_callback(consume_completion)
+        await asyncio.wait({waiting}, timeout=timeout_s)
+        return self._inline_action_result(future, name, timeout_s, wait_timeout_s=0)
 
     async def _inline_action_denial(
         self,
@@ -1970,12 +1907,26 @@ class DispatcherCollaborator:
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )
-        if was_existing and task.state not in (
-            "queued",
-            "succeeded",
-            "failed",
-            "cancelled",
-        ):
+        if was_existing and task.state in ("succeeded", "failed", "cancelled"):
+            for entry in reversed(task.history):
+                evidence = entry.get("evidence") or {}
+                outcome = evidence.get("outcome")
+                if outcome is None:
+                    continue
+                if evidence.get("cleanup_confirmed") is False:
+                    return (
+                        f"(run_action_now: {action_name!r} task {task.task_id} is {task.state!r}; "
+                        f"cleanup unconfirmed; stored outcome is diagnostic only: {json.dumps(outcome)})"
+                    )
+                rendered = _format_inbox_event(
+                    Message.new("coordinator", "orchestration", "delegated_result", {**outcome, "kind": task.kind})
+                )
+                return f"inline run complete: {rendered}"
+            return (
+                f"(run_action_now: {action_name!r} task {task.task_id} is already {task.state!r}; "
+                "no stored result payload; not rerunning)"
+            )
+        if was_existing and task.state != "queued":
             return (
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
@@ -2000,7 +1951,7 @@ class DispatcherCollaborator:
                     {**result_payload, "inline": True},
                 )
             )
-        except Exception:  # noqa: BLE001 — audit best-effort
+        except Exception:
             log.exception(
                 "run_action_now: failed to append delegated_result for %s",
                 task.task_id,

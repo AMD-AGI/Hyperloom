@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom.common.unified_diff import parse_unified_diff
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
@@ -185,14 +186,8 @@ def _added_lines(patch_text: str) -> set[str]:
     Blank and near-blank additions carry no identity, so they cannot witness
     that a side survived a merge.
     """
-    added: set[str] = set()
-    for line in patch_text.splitlines():
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        body = " ".join(line[1:].split())
-        if len(body) >= 4:
-            added.add(body)
-    return added
+    bodies = (" ".join(line.split()) for change in parse_unified_diff(patch_text) for line in change.added)
+    return {body for body in bodies if len(body) >= 4}
 
 
 def _missing_additions(repo: Path, patch_path: Path) -> list[str]:
@@ -394,7 +389,6 @@ def _anthropic_resolver() -> ConflictResolver:
             build_http_timeout,
             resolve_forge_llm_model,
         )
-        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
 
         prompt = _resolver_prompt(
             relative_path=relative_path,
@@ -408,9 +402,7 @@ def _anthropic_resolver() -> ConflictResolver:
         result = await aanthropic_completion(
             component="forge",
             operation="patch_conflict_merge",
-            # A default is mandatory: `CLAUDE_MODEL` is unset on every run that
-            # authenticates by OAuth token, and the resolver would post `""`.
-            model=resolve_forge_llm_model("claude", default=DEFAULT_CLAUDE_MODEL),
+            model=resolve_forge_llm_model("claude"),
             system=_RESOLVER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_LLM_MAX_TOKENS,
@@ -443,7 +435,6 @@ def _codex_resolver() -> ConflictResolver:
             get_async_openai_client,
             resolve_forge_llm_model,
         )
-        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
         from hyperloom.orchestrator.roles.base import build_chat_messages
 
         prompt = _resolver_prompt(
@@ -456,7 +447,7 @@ def _codex_resolver() -> ConflictResolver:
             intent=intent,
         )
         params: dict[str, object] = {
-            "model": resolve_forge_llm_model("codex", default=DEFAULT_CODEX_MODEL),
+            "model": resolve_forge_llm_model("codex"),
             "messages": build_chat_messages(_RESOLVER_SYSTEM, prompt),
             "max_completion_tokens": _LLM_MAX_TOKENS,
         }

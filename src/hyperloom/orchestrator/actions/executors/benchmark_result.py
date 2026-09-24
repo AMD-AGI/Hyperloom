@@ -259,7 +259,7 @@ def harvest_leaked_artifacts(
     # benchmark_report.json (no-op single-node).
     try:
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - telemetry harvest must not fail the run
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
     # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
@@ -528,6 +528,8 @@ def _merge_raw_result(
             raw.get("p99_e2el_ms"),
             raw.get("p99_latency_ms"),
         )
+    if measurement.get("requested_requests") is None:
+        measurement["requested_requests"] = first_int(raw.get("num_prompts"))
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
@@ -643,6 +645,10 @@ def extract_benchmark_measurement(
             throughput.get("num_images"),
         ),
         "duration_seconds": to_float(throughput.get("duration_seconds")),
+        # What the client was asked to send, as the client recorded it. Read
+        # back rather than taken from the env stack: the env is what we asked
+        # for, this is what the run actually requested.
+        "requested_requests": first_int(throughput.get("num_prompts")),
         "ttft_mean_ms": to_float(ttft.get("mean_ms")),
         "ttft_p99_ms": to_float(ttft.get("p99_ms")),
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
@@ -800,6 +806,30 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     return completed is not None and completed > 0
 
 
+def served_complete_protocol(result: dict[str, Any]) -> bool:
+    """Return whether the run served every request its protocol asked for.
+
+    This is what separates a benchmark that finished from one that stopped
+    early, and it is the question a non-zero exit code cannot answer on its
+    own. A server that died mid-run leaves fewer completed requests than were
+    requested; a wrapper that failed on its way out leaves the full count and a
+    measurement taken over the same protocol as a clean round.
+
+    Both counts come from the run's own result artifact, so this answers for
+    every caller of :func:`extract_benchmark_measurement` rather than only the
+    ones that happen to declare the request count in their own env layer.
+
+    A run that recorded no request count did not get far enough to state its
+    protocol, so it cannot be judged complete. Scriptable workloads drive their
+    own iteration count and never record one.
+    """
+    requested = to_int(result.get("requested_requests"))
+    if requested is None:
+        return False
+    completed = to_int(result.get("completed_requests"))
+    return completed is not None and completed >= requested
+
+
 # ── Approximate throughput for killed-overtime variants ──
 _SGLANG_GEN_TPUT_RE = re.compile(
     r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
@@ -908,5 +938,6 @@ __all__ = [
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "is_valid_measurement",
+    "served_complete_protocol",
     "_materialize_rescue_into_workspace",
 ]

@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -39,16 +40,6 @@ from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 log = logging.getLogger(__name__)
 
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
-
-#: The gateway Hyperloom points Forge at publishes both ``gpt-5.6`` and
-#: ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
-#: behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found"
-#: on both ChatCompletions and Responses. Hyperloom's own install guide
-#: already names ``gpt-5.6-sol`` and says it is a deployment name rather
-#: than a suffixed variant; this default disagreed with it, so a
-#: deployment that named no model started every Codex session on an id the
-#: gateway rejects.
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 
 class CodexBackendError(AgentProviderError):
@@ -672,7 +663,7 @@ class CodexBackend:
             """Run the blocking SDK turn in a bounded daemon thread."""
             try:
                 outcome["result"] = turn.run()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
             finally:
                 completed.set()
@@ -701,7 +692,7 @@ class CodexBackend:
                 )
                 worker.start()
                 if not completed.wait(timeout_sec):
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(Exception):  # broad-suppress: interrupt must not shadow the timeout
                         turn.interrupt()
                     raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
@@ -773,19 +764,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,
@@ -812,7 +803,7 @@ class CodexBackend:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
                     _ = await turn_task
 
         result = _normalize_sdk_result(sdk_result, thread_id)
@@ -828,7 +819,7 @@ class CodexBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.file_changes = actual_changes
@@ -874,7 +865,6 @@ __all__ = [
     "CodexBackendError",
     "CodexExecutionError",
     "CodexUnavailableError",
-    "DEFAULT_CODEX_MODEL",
     "resolve_codex_cli",
     "resolve_codex_gateway",
     "resolve_codex_model",
