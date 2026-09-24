@@ -35,7 +35,7 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
     patch_owner_phase,
 )
-from ..collaborator import CoordinatorCollaborator
+from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
@@ -492,8 +492,17 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
 
 
-class FrameworkPhase(CoordinatorCollaborator):
+class FrameworkPhase(PhaseHandler):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
+
+    # Max tried-candidate rows fed into the ranker/discovery working memory.
+    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
+    # Tail of outcomes from the priors ledger to evaluate.
+    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
+    # Backstop: max Critic-review submissions for a single candidate.
+    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
+    # Multi-node: cap on specialist proposal_set entries materialised per round.
+    _MN_AUTO_EXPLORE_GRID_CAP: int = 6
 
     def _framework_timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
