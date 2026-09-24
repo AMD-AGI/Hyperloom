@@ -122,22 +122,22 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-def _stamp_fleet_kb_exposure(
+def _stamp_kb_exposure(
     router: Any,
     payload: dict[str, Any],
     *,
     source: str,
 ) -> None:
     """Attach the current orchestration read to proposals emitted by that tick."""
-    evidence = getattr(router, "_fleet_kb_last_read", None)
+    evidence = getattr(router, "_kb_last_read", None)
     if (
         source != "orchestration"
         or evidence is None
         or int(getattr(evidence, "tick", -1)) != int(getattr(router.shared_state, "tick", 0) or 0)
     ):
         return
-    payload["fleet_kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
-    payload["fleet_kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+    payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
+    payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
 
 
 def _record_config_proposal(router: Any, pending: Any) -> None:
@@ -155,12 +155,12 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
     if recorder is None:
         return
     payload = getattr(pending, "payload", None) or {}
-    fleet_kb_read_id = str(payload.get("fleet_kb_read_id") or "")
-    rendered_refs = payload.get("fleet_kb_rendered_refs") or []
-    if fleet_kb_read_id or rendered_refs:
+    kb_read_id = str(payload.get("kb_read_id") or "")
+    rendered_refs = payload.get("kb_rendered_refs") or []
+    if kb_read_id or rendered_refs:
         recorder.record_proposal(
             proposal_id,
-            fleet_kb_read_id=fleet_kb_read_id,
+            kb_read_id=kb_read_id,
             rendered_refs=rendered_refs,
         )
     if str(getattr(pending, "action_name", "") or "") != "explore":
@@ -190,7 +190,7 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
         producer_ref=producer_ref,
         lever_kind=LEVER_CONFIG,
         scope=scopes.pop() if len(scopes) == 1 else "",
-        fleet_kb_read_id=fleet_kb_read_id,
+        kb_read_id=kb_read_id,
         rendered_refs=rendered_refs,
     )
     recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
@@ -585,7 +585,7 @@ class IntentRouter:
             await self._record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
-        _stamp_fleet_kb_exposure(self, payload, source=source)
+        _stamp_kb_exposure(self, payload, source=source)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):

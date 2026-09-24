@@ -437,7 +437,7 @@ def test_publish_maps_ready_attempts_and_writes_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kb = FakeKB()
-    monkeypatch.setenv("HYPERLOOM_KB_ENABLE", "true")
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setattr(experience_v1, "import_module", lambda _name: fake_module(kb))
 
     receipt = experience_v1.publish_framework_experiences(tmp_path, breakdown())
@@ -458,13 +458,13 @@ def test_publish_maps_ready_attempts_and_writes_receipt(
     assert report["source"] == "session_breakdown.timeline[type=framework_agent].ext.attempts"
 
 
-def test_publish_preserves_fleet_kb_exposure(
+def test_publish_preserves_kb_exposure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     value = breakdown()
     proposal = value["timeline"][0]["ext"]["proposals"][0]
-    proposal["fleet_kb_read_id"] = "read-1"
+    proposal["kb_read_id"] = "read-1"
     proposal["rendered_refs"] = [
         {
             "id": "exp-00000000000000000000000000000001",
@@ -472,7 +472,7 @@ def test_publish_preserves_fleet_kb_exposure(
         }
     ]
     kb = FakeKB()
-    monkeypatch.setenv("HYPERLOOM_KB_ENABLE", "true")
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setattr(experience_v1, "import_module", lambda _name: fake_module(kb))
 
     experience_v1.publish_framework_experiences(tmp_path, value)
@@ -485,7 +485,7 @@ def test_publish_preserves_fleet_kb_exposure(
         ),
     )
     keep_begin = next(call for call in kb.begin_calls if call["baseline_value"] == 800.0)
-    assert keep_begin["provenance"].extra["fleet_kb_read_id"] == "read-1"
+    assert keep_begin["provenance"].extra["kb_read_id"] == "read-1"
 
 
 def test_publish_receipt_distinguishes_remote_spool(
@@ -493,7 +493,7 @@ def test_publish_receipt_distinguishes_remote_spool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kb = FakeKB("spooled")
-    monkeypatch.setenv("HYPERLOOM_KB_ENABLE", "true")
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setattr(experience_v1, "import_module", lambda _name: fake_module(kb))
 
     receipt = experience_v1.publish_framework_experiences(tmp_path, breakdown())
@@ -549,7 +549,7 @@ def test_baseline_material_rejects_credential_envs(tmp_path: Path) -> None:
 def test_disabled_publisher_does_not_import_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("HYPERLOOM_KB_ENABLE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     monkeypatch.setattr(
         experience_v1,
         "import_module",

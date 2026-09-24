@@ -37,7 +37,8 @@ The report covers:
 - `install.sh --check-only`;
 - model path, torch/HIP visibility, GPU occupancy, and stale serving processes;
 - serving-framework import and version;
-- Experience KB declaration and local-store bootstrap when enabled;
+- Experience KB SDK bootstrap and authenticated service health when
+  `HYPERLOOM_KB_URL` is set;
 - verified TLS to the configured LLM endpoint;
 - one real, tool-free request through the production orchestration backend.
 

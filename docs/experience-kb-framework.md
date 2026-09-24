@@ -67,18 +67,18 @@ remain separate.
 
 ## Configuration
 
-Publication is disabled by default:
+Publication is disabled until the Experience KB service is configured:
 
 ```bash
-export HYPERLOOM_KB_ENABLE=true
-export HYPERLOOM_KB_BACKEND=local
-export HYPERLOOM_KB_HOME=/path/to/local-kb
-export HYPERLOOM_KB_DECL=/path/to/examples/hyperloom-kb-inference.yaml
+export HYPERLOOM_KB_URL=https://kb.example
+export HYPERLOOM_KB_TOKEN=...
 ```
 
-When explicitly enabled, CLI startup validates the external `hyperloom_kb`
-configuration before the normal optimizer preflight. Export failures never
-replace or invalidate `session_breakdown.json`.
+The URL enables publication; the `hyperloom_kb` SDK owns the Experience
+declaration. CLI startup validates the SDK configuration before the normal
+optimizer preflight. New Experiences are written as `unverified`. Export
+failures never replace or invalidate `session_breakdown.json`; a network
+failure spools the write for retry.
 
 ## Reasoning provenance
 
@@ -95,5 +95,6 @@ The current producer generates a deterministic factual reflection from the
 recorded outcome and marks its source in provenance. This does not impersonate
 an LLM-authored post-outcome explanation.
 
-`rendered_refs` is empty until Local KB retrieval is integrated. Actual LLM use
-requires the separate usage-trace design.
+`rendered_refs` records the `verified` Experiences the service injected into the
+FRAMEWORK_AGENT decision that produced the attempt. Whether the LLM actually
+relied on them requires the separate usage-trace design.
