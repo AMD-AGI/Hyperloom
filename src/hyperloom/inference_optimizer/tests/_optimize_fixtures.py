@@ -91,14 +91,8 @@ class FakeCoordinator:
             # A collaborator-internal helper: reachable only from inside its own class in production, so it has no
             # delegation entry.
             owner = self._sole_owner(name)
-        key = f"_collab_{owner}"
-        collaborator = self.__dict__.get(key)
-        if collaborator is None:
-            module_path, cls_name = Coordinator._COLLAB_MODULES[owner]
-            module = importlib.import_module(f"hyperloom.orchestrator.{module_path}")
-            collaborator = getattr(module, cls_name)(self)
-            self.__dict__[key] = collaborator
-        return getattr(collaborator, name)
+        # The Coordinator property, so a method reached by name and one reached through ``phase_*`` share one instance.
+        return getattr(getattr(self, owner), name)
 
     @staticmethod
     def _sole_owner(name: str) -> str:

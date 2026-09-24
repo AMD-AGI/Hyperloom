@@ -54,6 +54,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGH
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, record_lifecycle_event
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..framework.artifacts import candidate_key
 from ..state.attempt_ledger import record_config_attempt
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState, resolve_graded_comparison, stack_base_params
@@ -329,8 +330,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     that measured nothing still lands, which is the case
     :func:`_record_config_attempts` never sees.
     """
-    ph = getattr(coord, "phase_framework", None)
-    recorder = ph.timeline() if ph is not None else None
+    recorder = coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.common.timeutil import now_iso
@@ -371,8 +371,7 @@ def _record_config_attempts(
     unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
     ``KILLED_OVERTIME`` into a plain revert.
     """
-    ph = getattr(coord, "phase_framework", None)
-    recorder = ph.timeline() if ph is not None else None
+    recorder = coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
@@ -1408,10 +1407,7 @@ class WritebackCollaborator:
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
-        if task.kind == "integrate_patch" and (task.params or {}).get("framework_agent_candidate_id"):
-            ph = getattr(self, "phase_framework", None)
-            if ph is not None:
-                ph.record_settled_candidate(task, result_payload)
+        self.phase_framework.record_unpromoted_candidate(task, result_payload)
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.
@@ -2818,8 +2814,8 @@ class WritebackCollaborator:
             "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
-        recorder = self._framework_timeline() if source_phase == PHASE_FRAMEWORK_AGENT else None
-        if recorder is not None:
+        recorder = self.phase_framework.timeline()
+        if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
             recorder.record_run(str(task.task_id or ""), **product)
             return
         try:
@@ -2941,9 +2937,15 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        ph = getattr(self, "phase_framework", None)
-        if ph is not None:
-            await ph.on_specialist_settled(task, done_payload)
+        # Multi-node only: auto-materialise the proposal_set into a
+        # benchmarked explore task. No-op single-node (LLM drives explore
+        # directly there) and no-op when the proposal_set is empty / has
+        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
+        await self._maybe_materialize_mn_explore(
+            task=task,
+            domain=domain,
+            proposals=proposals,
+        )
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
@@ -2978,6 +2980,18 @@ class WritebackCollaborator:
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
+        # Push specialist-authored patches to the Critic so integrate_patch can pass.
+        await self._maybe_autosubmit_specialist_patches(
+            task=task,
+            done_payload=done_payload,
+        )
+        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
+        # but a proposal_set of serving flags / env vars) is routed through the
+        # same integrate_patch gate via its config_changes channel.
+        await self._maybe_autosubmit_framework_config(
+            task=task,
+            done_payload=done_payload,
+        )
 
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
         """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
@@ -5812,7 +5826,7 @@ class WritebackCollaborator:
                     # by the canonical candidate key, so reconcile on both.
                     stack_action = _FRAMEWORK_STACK_ACTION
                     cand = res.get("candidate")
-                    variant = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
+                    variant = candidate_key(cand if isinstance(cand, dict) else None)
                 elif kind == "explore":
                     bv = res.get("best_variant") or {}
                     variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")

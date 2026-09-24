@@ -122,7 +122,7 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
         {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
     ]
-    priors = coord._collect_framework_agent_candidate_priors()
+    priors = coord.phase_framework._collect_framework_agent_candidate_priors()
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
     # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
@@ -428,12 +428,12 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
 # _record_framework_agent_authored_outcome
 def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -> None:
     # result.result not a dict -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
     )
     # empty status -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
     )
@@ -461,7 +461,7 @@ def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> Non
             "accuracy_pass": True,
         }
     )
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
     rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
@@ -477,7 +477,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
         params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
     )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"
@@ -492,16 +492,16 @@ def _enter_fpr(coord: Coordinator) -> None:
 def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     _enter_fpr(coord)
     # Not authoring -> no-op.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(task_id="t", params={}), done_payload={}
     )
     # Patch present -> no-op (integrate_patch will own the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
     # Config-lever deliverable -> no-op (config autosubmit owns the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"extra_envs": {"X": "1"}}]},
     )
@@ -519,14 +519,14 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
     assert row["status"] == "already_present"
     # Idempotent: a second call does not append a duplicate.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
@@ -536,7 +536,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     _enter_fpr(coord)
     coord.shared_state.framework_agent_phase_progress = []
     # not_present -> not_applicable.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-a",
             params={
@@ -548,7 +548,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
         done_payload={"patches_written": [], "summary": "missing"},
     )
     # no audit -> author_empty.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-b",
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},

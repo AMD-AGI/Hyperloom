@@ -42,12 +42,17 @@ class _MiniCoord:
     """Minimal binding of the framework progress helpers under test."""
 
     _MAX_REPEATED_REVIEW_SUBMISSIONS = FrameworkPhase._MAX_REPEATED_REVIEW_SUBMISSIONS
-    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
-    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
-    _stamp_framework_progress = Coordinator._stamp_framework_progress
-    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
-    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
+    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
+    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
+    _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
+    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
+    _select_next_framework_agent_candidate = FrameworkPhase._select_next_framework_agent_candidate
+    record_unpromoted_candidate = FrameworkPhase.record_unpromoted_candidate
     _handle_unpromotable_result = Coordinator._handle_unpromotable_result
+
+    @property
+    def phase_framework(self) -> "_MiniCoord":
+        return self
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
@@ -143,8 +148,8 @@ class _ReviewCoord(_MiniCoord):
     # Borrowed alongside the method that reads it: the stub used to get away without it because the helper swallowed
     # its own AttributeError.
     _CRITIC_PRIORS_OUTCOME_TAIL = FrameworkPhase._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
-    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
+    _collect_framework_agent_candidate_priors = FrameworkPhase._collect_framework_agent_candidate_priors
+    _submit_framework_agent_candidate_for_review = FrameworkPhase._submit_framework_agent_candidate_for_review
 
     def __init__(self, tmp_path: Path) -> None:
         super().__init__(tmp_path)
@@ -157,7 +162,7 @@ class _ReviewCoord(_MiniCoord):
 
 def _submit(coord: _ReviewCoord, cand: dict[str, Any]) -> None:
     asyncio.run(
-        Coordinator._submit_framework_agent_candidate_for_review(coord, cand)  # type: ignore[arg-type]
+        FrameworkPhase._submit_framework_agent_candidate_for_review(coord, cand)  # type: ignore[arg-type]
     )
 
 

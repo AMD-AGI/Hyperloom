@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -67,16 +68,13 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
     """The framework recorder to write one config-arm proposal's step onto.
 
     ``None`` whenever the step is not a config-arm one to record: another
-    action, or a phase whose event is not open. Recording is read off the
-    collaborator defensively because this module's methods get borrowed onto
-    lightweight stand-ins in tests, which carry no recorder.
+    action, or a phase whose event is not open.
     """
     if str(getattr(pending, "action_name", "") or "") != "explore":
         return None
     if not str(getattr(pending, "proposal_msg_id", "") or ""):
         return None
-    ph = getattr(coll, "phase_framework", None)
-    return ph.timeline() if ph is not None else None
+    return coll.phase_framework.timeline()
 
 
 def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
@@ -443,8 +441,8 @@ class ProposalsCollaborator:
         approved_variant_names: set[str] | None = None,
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
-        ph = getattr(self, 'phase_framework', None)
-        if ph is not None and await ph.on_proposal_approved(pending):
+        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
+            await self.phase_framework.materialize_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.

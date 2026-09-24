@@ -1895,21 +1895,21 @@ def _enter_framework(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
     _enter_framework(coord)
     coord.shared_state.framework_agent_phase_done = True
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
     _enter_framework(coord)
     await coord.tasks.create(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
 
 @pytest.mark.asyncio
@@ -1925,7 +1925,7 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     coord.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
     assert coord.shared_state.framework_agent_phase_done is True
 
 
@@ -1945,7 +1945,7 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
         lambda: candidate,
     )
 
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
 
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
@@ -1968,8 +1968,8 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
         lambda: candidate,
     )
 
-    await coord._pump_framework_agent_phase()
-    await coord._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
+    await coord.phase_framework._pump_framework_agent_phase()
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 

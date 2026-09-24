@@ -710,12 +710,8 @@ class ConversationCollaborator:
         returns a number the agent never saw. Both arms are recorded whether or
         not either fired -- "evaluated and did not trip" is the reading that
         explains a phase staying open.
-
-        The recorder is reached through ``getattr`` because tests borrow this
-        method onto lightweight stand-ins that carry no phase-handler machinery.
         """
-        ph = getattr(self, "phase_framework", None)
-        recorder = ph.timeline() if ph is not None else None
+        recorder = self.phase_framework.timeline()
         if recorder is None:
             return
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (

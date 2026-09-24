@@ -17,7 +17,6 @@ from ..bus.message_bus import Message
 from ..state.attempt_ledger import record_patch_attempt
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -29,7 +28,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
-from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX as _LOCAL_EXPLORE_PREFIX
+from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
@@ -177,8 +176,8 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
 #: Progress-row status for a candidate the Critic rejected. The gate writes it
-#: and the working-memory and priors readers select on it, so the ledger is the
-#: only record of a denial and the three sites agree by construction.
+#: and the priors reader selects on it, so the ledger is the only record of a
+#: denial and both sites agree by construction.
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
@@ -489,88 +488,46 @@ class FrameworkPhase(PhaseHandler):
 
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
-    # Tail of outcomes from the priors ledger to evaluate.
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-    # Backstop: max Critic-review submissions for a single candidate.
+    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-    # Multi-node: cap on specialist proposal_set entries materialised per round.
+    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
     _MN_AUTO_EXPLORE_GRID_CAP: int = 6
 
-    # ------------------------------------------------------------------
-    # Public hook interface — loop modules call these instead of private names
-    # ------------------------------------------------------------------
+    def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any], *, run_error: str) -> None:
+        """Stamp an empty authoring round's terminal row and harvest a discovery round's candidates."""
+        # An authoring specialist that wrote no patch never spawns an integrate_patch; stamp its terminal row here.
+        self._record_framework_agent_authoring_empty_outcome(task=task, done_payload=done_payload, run_error=run_error)
+        self._ingest_candidate_discovery(task=task, done_payload=done_payload, run_error=run_error)
 
-    def timeline(self):
-        """Return the open FrameworkEventRecorder, or None."""
-        return self._framework_timeline()
-
-    async def pump(self, *, caller: str = "") -> None:
-        """Run one framework pump pass (called every tick and run)."""
-        await self._pump_framework_agent_phase_safely(caller=caller)
-
-    async def on_task_settled(self, task: "Task", result: Any) -> None:
-        """Notify the framework arm that a task has settled."""
-        params = getattr(task, "params", None) or {}
-        kind = str(params.get("task_kind") or "").strip()
-        if task.kind == "specialist":
-            if kind == "candidate_discovery":
-                done_payload = (result.result if isinstance(result.result, dict) else None) or {}
-                err = result.error if hasattr(result, "error") else None
-                await self._ingest_candidate_discovery(task=task, done_payload=done_payload, run_error=err)
-            elif bool(params.get("framework_agent_authoring")):
-                await self._record_framework_agent_authoring_empty_outcome(
-                    task=task,
-                    done_payload=(result.result if isinstance(result.result, dict) else None) or {},
-                    run_error=getattr(result, "error", None),
-                )
-        elif task.kind == "integrate_patch" and bool(params.get("framework_agent_authoring")):
+    async def on_integrate_patch_settled(self, task: "Task", result: Any) -> None:
+        """Record an authored patch's KEEP/REVERT, then re-arm or drain the authored lane."""
+        if bool((task.params or {}).get("framework_agent_authoring")):
             self._record_framework_agent_authored_outcome(task=task, result=result)
+        await self._maybe_rearm_authored_lane(result.result)
+        await self._drain_apply_fail_retry_pending()
 
-    async def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any]) -> None:
-        """Called when any specialist settles with a deliverable."""
-        await self._maybe_materialize_mn_explore(
-            task=task,
-            domain=str((getattr(task, "params", None) or {}).get("domain") or ""),
-            proposals=(done_payload.get("proposal_set") or []) if isinstance(done_payload, dict) else [],
-        )
-        await self._maybe_autosubmit_specialist_patches(task=task, done_payload=done_payload)
-        await self._maybe_autosubmit_framework_config(task=task, done_payload=done_payload)
-
-    async def on_verdict(self, pending: Any, *, verdict: str, reasoning: str = "", advisory: Any = None) -> None:
-        """Route a Critic verdict for a framework-arm proposal."""
-        if verdict == "reject":
-            await self._record_framework_agent_critic_denied(pending, reasoning)
-        elif verdict == "needs_review":
-            await self._maybe_reauthor_from_critic_feedback(pending, advisory)
-
-    async def on_proposal_approved(self, pending: Any) -> bool:
-        """Materialise an approved upstream-PR pre-screen proposal.
-
-        Returns True when this was a framework pre-screen (and was handled),
-        False when the caller should continue with the normal materialisation.
-        """
-        from hyperloom.common.framework_arm import is_upstream_pr_prescreen
-
-        if not is_upstream_pr_prescreen(pending.action_name, pending.payload or {}):
-            return False
-        await self._materialize_framework_agent_candidate(pending)
-        return True
-
-    def record_settled_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
-        """Stamp a no_result_failed progress row for a settled authored task."""
-        params = getattr(task, "params", None) or {}
-        cand_key = self._framework_candidate_key(params)
-        if not cand_key:
+    def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
+        """Stamp ``no_result_failed`` for an upstream-PR candidate task that settled without a promotable result."""
+        params = task.params or {}
+        if task.kind != "integrate_patch" or not params.get("framework_agent_candidate_id"):
+            return
+        cand = params.get("candidate")
+        cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
+        if not cand_id:
             return
         self._stamp_framework_progress(
-            candidate_id=cand_key,
-            batch_id=str(params.get("framework_batch_id") or ""),
+            candidate_id=cand_id,
+            batch_id=str(params.get("batch_id") or ""),
             status="no_result_failed",
             kept=False,
-            rationale="task completed with no result",
+            rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
+            provenance="executor",
+            extra={"status": str(result_payload.get("status") or "")},
         )
 
-    def _framework_timeline(self):
+    def timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
 
         Read through ``getattr`` because the handler delegates unknown
@@ -640,7 +597,7 @@ class FrameworkPhase(PhaseHandler):
         recomputed: re-reading both arms here would report counts over a
         history that kept growing.
         """
-        recorder = self._framework_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         self._framework_timeline_recorder = None
@@ -1421,9 +1378,11 @@ class FrameworkPhase(PhaseHandler):
         # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
         progress = getattr(state, "framework_agent_phase_progress", None) or []
         settled = sum(
-            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith(_LOCAL_EXPLORE_PREFIX)
+            1
+            for p in progress
+            if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
         )
-        cand_id = self._framework_candidate_key(candidate) or f"{_LOCAL_EXPLORE_PREFIX}{settled}"
+        cand_id = self._framework_candidate_key(candidate) or f"{LOCAL_EXPLORE_CANDIDATE_PREFIX}{settled}"
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
@@ -1545,7 +1504,7 @@ class FrameworkPhase(PhaseHandler):
         return ids
 
     def _build_framework_working_memory(self) -> dict[str, Any]:
-        """Aggregate the FRAMEWORK working memory from the three ledgers (deterministic, zero-LLM)."""
+        """Summarise the most recent tried candidates from the progress ledger (deterministic, zero-LLM)."""
         state = self.shared_state
         progress = getattr(state, "framework_agent_phase_progress", None) or []
         rows = [p for p in progress if isinstance(p, dict) and self._framework_candidate_key(p)]
@@ -1562,18 +1521,6 @@ class FrameworkPhase(PhaseHandler):
                     "why": why[:200],
                 }
             )
-        # Learnings: distinct Critic denial rationales (negative priors), capped.
-        learnings: list[str] = []
-        seen_learn: set[str] = set()
-        for row in rows:
-            if str(row.get("status") or "").strip().lower() != FRAMEWORK_CRITIC_DENIED_STATUS:
-                continue
-            rationale = str(row.get("rationale") or "").strip()
-            if rationale and rationale not in seen_learn:
-                seen_learn.add(rationale)
-                learnings.append(rationale[:200])
-            if len(learnings) >= self._FRAMEWORK_TRIED_MEMORY_CAP:
-                break
         return {
             "tried_and_why": tried,
         }
@@ -1834,7 +1781,7 @@ class FrameworkPhase(PhaseHandler):
                 cand_id,
             )
 
-    async def _materialize_framework_agent_candidate(
+    async def materialize_candidate(
         self,
         pending: "PendingProposal",
     ) -> None:
@@ -1956,7 +1903,7 @@ class FrameworkPhase(PhaseHandler):
         )
         return True
 
-    async def _record_framework_agent_critic_denied(
+    async def record_critic_denial(
         self,
         pending: "PendingProposal",
         reasoning: str,
@@ -1992,7 +1939,7 @@ class FrameworkPhase(PhaseHandler):
             str(reasoning or "")[:200],
         )
 
-    async def _maybe_reauthor_from_critic_feedback(
+    async def maybe_reauthor_from_critic_feedback(
         self,
         pending: "PendingProposal",
         advisory: dict[str, Any] | None,
@@ -2124,7 +2071,7 @@ class FrameworkPhase(PhaseHandler):
             },
         )
 
-    async def _pump_framework_agent_phase_safely(self, *, caller: str) -> None:
+    async def pump(self, *, caller: str) -> None:
         """Best-effort FRAMEWORK pump wrapper shared by tick and run.
 
         A pump that raises must not take the tick down -- the phase is driven
@@ -2574,8 +2521,6 @@ class FrameworkPhase(PhaseHandler):
             known.add(key)
             out.append(cand)
         return out
-
-
 
     async def _maybe_materialize_mn_explore(
         self,
