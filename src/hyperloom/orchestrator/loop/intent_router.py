@@ -44,6 +44,7 @@ from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from ..collaborator import CoordinatorCollaborator
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -371,7 +372,7 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
-class IntentRouter:
+class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:

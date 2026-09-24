@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_UPSTREAM_PR,
     patch_owner_phase,
 )
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -357,7 +358,7 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
 
 
-class FrameworkPhase:
+class FrameworkPhase(CoordinatorCollaborator):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
     def _framework_timeline(self):

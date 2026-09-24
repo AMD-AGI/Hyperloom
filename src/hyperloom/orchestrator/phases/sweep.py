@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 from ..state.task_registry import Task
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
 
 
-class SweepPhase:
+class SweepPhase(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:

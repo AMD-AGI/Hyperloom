@@ -42,6 +42,7 @@ from ..loop.coordinator_helpers import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
+from ..collaborator import CoordinatorCollaborator
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
@@ -167,7 +168,7 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-class PreludePhase:
+class PreludePhase(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _internal_analysis_kind(self) -> str:

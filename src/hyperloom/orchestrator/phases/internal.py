@@ -12,11 +12,12 @@ from typing import Any
 from hyperloom.common.env import env_bool
 
 from ..state.task_registry import Task
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class InternalTasksPhase:
+class InternalTasksPhase(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _enqueue_internal_research_scout_task(

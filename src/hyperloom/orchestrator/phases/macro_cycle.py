@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 
+from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 from ..loop.maintenance import run_lease_and_db_reclaim
 
@@ -16,7 +17,7 @@ log = _logging.getLogger(__name__)
 __all__ = ["MacroCycleCollaborator"]
 
 
-class MacroCycleCollaborator:
+class MacroCycleCollaborator(CoordinatorCollaborator):
     """Macro-cycle planning, focus scoring, soft-restart, reprofile, and orchestration-memory helpers."""
 
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:

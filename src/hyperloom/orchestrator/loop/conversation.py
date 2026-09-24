@@ -17,6 +17,7 @@ from .coordinator_helpers import _parse_iso_unix
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
 
 
-class ConversationCollaborator:
+class ConversationCollaborator(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _attach_orchestration_context_tools(self) -> None:

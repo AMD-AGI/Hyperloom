@@ -103,6 +103,7 @@ from .coordinator_shared import (
     _extract_enablement_launch_log,
 )
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -485,8 +486,11 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
-class WritebackCollaborator:
+class WritebackCollaborator(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+
+    _journal: Journal | None
+    _lifecycle_last_save: float
 
     def _emit_lifecycle(
         self,
@@ -1675,10 +1679,10 @@ class WritebackCollaborator:
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = getattr(self, "_journal", None)
-        if existing is None:
+        journal: Journal | None = getattr(self, "_journal", None)
+        if journal is None:
             ss = self.shared_state
-            self._journal = Journal.load_or_create(
+            journal = self._journal = Journal.load_or_create(
                 self.session_dir,
                 session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
                 or str(getattr(ss, "session_id", "") or "")
@@ -1690,8 +1694,8 @@ class WritebackCollaborator:
             )
         else:
             # Backfill baseline once the baseline executor finishes.
-            existing.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
-        return self._journal
+            journal.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
+        return journal
 
     def _pitfall_severity_for(
         self,

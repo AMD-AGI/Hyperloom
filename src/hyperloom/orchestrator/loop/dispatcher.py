@@ -60,6 +60,7 @@ from .coordinator_helpers import (
 
 from .coordinator_shared import _format_inbox_event
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator:
+class DispatcherCollaborator(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _init_dispatch_state(self) -> None:

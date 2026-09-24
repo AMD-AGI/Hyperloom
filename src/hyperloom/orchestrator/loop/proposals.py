@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from .coordinator_shared import PendingProposal
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -146,8 +147,10 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
-class ProposalsCollaborator:
+class ProposalsCollaborator(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+
+    _local_recipe_cache: tuple[int, dict[str, Any]] | None
 
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""

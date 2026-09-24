@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
+from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
 
@@ -59,7 +60,7 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
 _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 
 
-class EnablementBuild:
+class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
     async def _maybe_escalate_to_targeted_build(

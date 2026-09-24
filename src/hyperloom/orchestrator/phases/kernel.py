@@ -65,6 +65,7 @@ from ..loop.coordinator_helpers import (
     _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -191,7 +192,7 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
-class KernelPhase:
+class KernelPhase(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     @staticmethod

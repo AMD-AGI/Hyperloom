@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
+from ..collaborator import CoordinatorCollaborator
 from ..delivery.archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
@@ -65,7 +66,7 @@ _KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried", "levers_without_readers
 _MIN_LEASE_SEC = 300.0
 
 
-class EnablementLane:
+class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
     def _enablement_admitted(self) -> bool:
