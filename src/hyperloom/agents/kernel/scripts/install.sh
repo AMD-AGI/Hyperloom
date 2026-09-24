@@ -1437,14 +1437,14 @@ from kernelforge.agent_backends.claude import ClaudeBackend, resolve_claude_cli
 def claude_runtime():
     """Return Forge's runtime when it executes Claude, else None.
 
-    An unresolvable provider is not this installer's failure to report: the
-    default CLI is still ensured, and the backend surfaces its own error.
+    An unnamed provider is not this installer's failure to report: the default
+    CLI is still ensured, and the backend raises when the session starts.
     """
-    try:
-        from kernelforge.config import Config
+    from kernelforge.config import Config
 
+    try:
         runtime = Config.from_env().agent_runtime()
-    except (ImportError, ValueError):
+    except ValueError:
         return None
     return runtime if runtime.provider == "claude" else None
 
