@@ -17,13 +17,13 @@ from hyperloom.common.jsonio import read_json
 
 from . import collectors
 from .recorder.event_finalize import finalize_events
+from .recorder.recorder_warnings import RECORDING_ERRORS
 from .schema import SCHEMA_VERSION_V6
-from ..session.session_paths import manifest_path, state_path
+from ..session.session_paths import BREAKDOWN_FILENAME, manifest_path, state_path
 
 log = logging.getLogger(__name__)
 
 EXPORTER_VERSION = "session-breakdown-1.0.0"
-BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
 def _recorded_session_value(value: Any) -> bool:
@@ -36,15 +36,24 @@ def _recorded_session_value(value: Any) -> bool:
     return value is not None and value != ""
 
 
+_COLLECTOR_OWNED_SESSION = frozenset({"stop_reason", "ended_at_utc", "elapsed_minutes"})
+
+
 def _merge_session(fragment: Any, collector_value: Any) -> Any:
-    """Overlay the recorder's live ``session`` fields on the collected section."""
+    """Overlay the recorder's live ``session`` fields on the collected section.
+
+    Lifecycle fields the collector derives from CLOSE and timestamps stay
+    collector-owned when the collector actually produced a value. A degraded
+    collect (``None`` / empty) keeps the recorder fragment.
+    """
     if not isinstance(fragment, dict) or not fragment:
         return collector_value
     merged = dict(collector_value) if isinstance(collector_value, dict) else {}
     for key, value in fragment.items():
+        if key in _COLLECTOR_OWNED_SESSION and _recorded_session_value(merged.get(key)):
+            continue
         if _recorded_session_value(value) or key not in merged:
             merged[key] = value
-    merged["elapsed_minutes"] = collectors.session_elapsed_minutes(merged)
     return merged
 
 
@@ -118,9 +127,18 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
         default={},
     )
-    # Events whose phase was killed before it could close them are closed here, before the timeline is read: their
-    # fragments are on disk, and an event left open would otherwise be read back as still running.
-    _safe_collect("timeline_finalize", lambda: finalize_events(sd), warnings, default=[])
+    # Events whose phase was killed before it could close them are closed here,
+    # before the timeline is read: their fragments are on disk, and an event
+    # left open would otherwise be read back as still running. Programming
+    # errors in finalize are left to raise; spool failures are a dedicated
+    # warning rather than a generic collector miss.
+    try:
+        closed = finalize_events(sd)
+    except RECORDING_ERRORS as exc:
+        warnings.append(f"timeline_finalize: {type(exc).__name__}: {exc}")
+        closed = []
+    if closed:
+        log.info("timeline_finalize: closed %s orphan event(s)", len(closed))
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(sd, warnings),
@@ -146,6 +164,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             close=v6_close,
             state=state,
             timeline=timeline,
+            warnings=warnings,
         ),
         warnings,
         default={},
@@ -165,18 +184,8 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
         default={},
     )
-    v6_critic = _safe_collect(
-        "critic",
-        lambda: collectors.collect_v6_critic(assembled.get("critic")),
-        warnings,
-        default={},
-    )
-    v6_robustness = _safe_collect(
-        "robustness",
-        lambda: collectors.collect_v6_robustness(assembled.get("robustness")),
-        warnings,
-        default={},
-    )
+    v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
+    v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces. An export used to also carry
     # a top-level copy taken partway through, which was a strict subset and so
@@ -204,6 +213,7 @@ def _load_assembled(
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
     if env_bool("INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER"):
+        warnings.append("recorder: disabled by INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER")
         return {}
     try:
         from .recorder import assemble_parts, has_parts
@@ -212,7 +222,7 @@ def _load_assembled(
             return {}
         out = assemble_parts(session_dir, warnings=warnings)
         return out if isinstance(out, dict) else {}
-    except Exception as exc:
+    except RECORDING_ERRORS as exc:
         log.exception("recorder: assemble_parts failed")
         warnings.append(f"recorder: assemble_parts failed: {type(exc).__name__}: {exc}")
         return {}
@@ -225,7 +235,12 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default``."""
+    """Run a collector; any failure becomes a warning plus ``default``.
+
+    Collectors are allowed to see drifted session artifacts, so an unexpected
+    shape must not abort the rest of the export. The assembler and event
+    finalize paths are narrower: they catch :data:`RECORDING_ERRORS` only.
+    """
     try:
         return fn()
     except Exception as exc:
@@ -245,7 +260,7 @@ def write_breakdown_json(
 
     Also triggers ``reports/trace/decision_trace.jsonl``, which is not part of
     the breakdown (see
-    :func:`hyperloom.orchestrator.trace.decision_trace.write_session_decision_trace`)
+    :func:`hyperloom.inference_optimizer.trace.decision_trace.write_session_decision_trace`)
     but is produced from here because every caller that flushes Langfuse goes
     through this function.
 
@@ -269,7 +284,7 @@ def write_breakdown_json(
     # a session's artifacts goes through this function and the file has to land
     # before any flush reads it.
     try:
-        from hyperloom.orchestrator.trace.decision_trace import write_session_decision_trace
+        from ..trace.decision_trace import write_session_decision_trace
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
@@ -329,7 +344,7 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Returns:
         ``True`` when the langfuse block was refreshed, ``False`` otherwise.
     """
-    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
+    from ..trace.langfuse_emitter import read_receipt
 
     def _revise(sd: Path, breakdown: dict[str, Any]) -> bool:
         receipt = read_receipt(sd)
@@ -420,7 +435,6 @@ def write_minimal_final_report(
     output_path: Path | str | None = None,
 ) -> Path:
     """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
@@ -429,7 +443,7 @@ def write_minimal_final_report(
     if target.exists() and target.stat().st_size > 0:
         return target
 
-    state = SharedState.load_or_init(sd)
+    state = read_json(state_path(sd), default={}, require_dict=True)
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
@@ -446,14 +460,16 @@ def write_minimal_final_report(
 
     from .. import framework_registry
 
-    current_best = state.current_best or {}
+    framework = str(state.get("framework") or "")
+    baseline_tput = state.get("baseline_tput") or 0.0
+    current_best = state.get("current_best") or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
     # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT shows per-image latency e2el_mean_ms
     # (ms).
-    baseline_metric_s = framework_registry.format_primary_metric(state.framework, state.baseline_tput, precision=2)
+    baseline_metric_s = framework_registry.format_primary_metric(framework, baseline_tput, precision=2)
     cb_metric_s = (
-        framework_registry.format_primary_metric(state.framework, cb_tput, precision=2)
+        framework_registry.format_primary_metric(framework, cb_tput, precision=2)
         if isinstance(cb_tput, (int, float))
         else "-"
     )
@@ -466,22 +482,22 @@ def write_minimal_final_report(
         + "full audit trail open `session_breakdown.json` next to this "
         + "file.",
         "",
-        f"- session_id     : `{state.session_id or '-'}`",
-        f"- model_path     : `{state.model_path or '-'}`",
-        f"- framework      : `{state.framework or '-'}`",
-        f"- gpu_type       : `{state.gpu_type or '-'}`",
-        f"- phase (last)   : `{state.phase or '-'}`",
-        f"- stop_reason    : `{state.stop_reason or '-'}`",
+        f"- session_id     : `{state.get('session_id') or '-'}`",
+        f"- model_path     : `{state.get('model_path') or '-'}`",
+        f"- framework      : `{framework or '-'}`",
+        f"- gpu_type       : `{state.get('gpu_type') or '-'}`",
+        f"- phase (last)   : `{state.get('phase') or '-'}`",
+        f"- stop_reason    : `{state.get('stop_reason') or '-'}`",
         f"- baseline       : `{baseline_metric_s}`",
         f"- current_best   : `{cb_action}` @ `{cb_metric_s}`",
-        f"- cumul_gain     : `{state.cumulative_gain_validated:.2f}%` (validated)",
-        f"- stack_entries  : `{len(state.optimization_stack or [])}`",
+        f"- cumul_gain     : `{state.get('cumulative_gain_validated') or 0.0:.2f}%` (validated)",
+        f"- stack_entries  : `{len(state.get('optimization_stack') or [])}`",
         "",
         "## Last action attempts",
         "",
-        _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
-        _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
-        _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
+        _fmt_attempt(state.get("last_baseline"), "last_baseline"),
+        _fmt_attempt(state.get("last_profile"), "last_profile"),
+        _fmt_attempt(state.get("last_explore"), "last_explore"),
         "",
         "## Structured detail",
         "",
@@ -524,7 +540,6 @@ def write_minimal_final_json(
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
 
-    from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
@@ -550,31 +565,32 @@ def write_minimal_final_json(
         if not overwrite:
             return target
 
-    state = SharedState.load_or_init(sd)
+    state = read_json(state_path(sd), default={}, require_dict=True)
+    gpu_type = state.get("gpu_type") or ""
     summary: dict[str, Any] = {
         # Crash-safe markers: a consumer can distinguish this from the full ReportExecutor output and know the run did
         # not finish gracefully.
         "safety_net": True,
         "report_complete": False,
         "producer": producer,
-        "session_id": state.session_id,
-        "model_name": state.model_name,
-        "model_path": state.model_path,
-        "model_class": state.model_class,
-        "framework": state.framework,
-        "gpu_type": state.gpu_type,
-        "phase": state.phase,
-        "stop_reason": state.stop_reason,
-        "baseline_tput": state.baseline_tput,
-        "baseline_accuracy": state.baseline_accuracy,
-        "current_best": state.current_best,
-        "cumulative_gain_validated": state.cumulative_gain_validated,
-        "optimization_stack_len": len(state.optimization_stack or []),
-        "crash_count": state.crash_count,
-        "max_minutes": state.max_minutes,
+        "session_id": state.get("session_id") or "",
+        "model_name": state.get("model_name") or "",
+        "model_path": state.get("model_path") or "",
+        "model_class": state.get("model_class") or "",
+        "framework": state.get("framework") or "",
+        "gpu_type": gpu_type,
+        "phase": state.get("phase") or "",
+        "stop_reason": state.get("stop_reason") or "",
+        "baseline_tput": state.get("baseline_tput") or 0.0,
+        "baseline_accuracy": state.get("baseline_accuracy") or 0.0,
+        "current_best": state.get("current_best") or {},
+        "cumulative_gain_validated": state.get("cumulative_gain_validated") or 0.0,
+        "optimization_stack_len": len(state.get("optimization_stack") or []),
+        "crash_count": state.get("crash_count") or 0,
+        "max_minutes": state.get("max_minutes") or 0,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": _crash_safe_platform(state.gpu_type),
+        "platform": _crash_safe_platform(gpu_type),
     }
     if extra:
         summary.update(extra)

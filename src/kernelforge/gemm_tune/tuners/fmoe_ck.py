@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult
+from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
 
@@ -65,16 +65,6 @@ class FmoeCKTuner(BaseTuner):
             return "Model is not MoE; fmoe_ck tuner not applicable"
         if profile.num_experts < 1:
             return "num_experts < 1"
-        if profile.effective_moe_intermediate < 1:
-            return "moe_intermediate_size not set in model config"
-        tp = max(1, int(self.ctx.tp or 1))
-        if profile.effective_moe_intermediate % tp:
-            # A non-divisible width means the serving shard size cannot be derived here; emitting a truncated one
-            # would key the table on a shape the runtime never asks for.
-            return (
-                f"moe_intermediate_size {profile.effective_moe_intermediate} is not "
-                f"divisible by tp {tp}; cannot derive the per-partition inter_dim"
-            )
         if getattr(self.ctx, "moe_untuned_csv", None) is None and not self._demand_key():
             return _NO_RUNTIME_KEY
         return None
@@ -139,8 +129,8 @@ class FmoeCKTuner(BaseTuner):
                     "none of the %d observed MoE token count(s) appear in the "
                     "CK 2-stage token hint %s" % (len(tokens), sorted(allowed)[:8])
                 )
-        # Without a restrictive token hint, the caller's token-list length is the budget: keep that many observed
-        # counts, spread across their range.
+        # The length of ``ctx.tokens`` is the caller's coverage budget: at most that many rows, thinned out across
+        # the observed range rather than truncated at either end.
         budget = len(self.ctx.tokens) if self.ctx.tokens else 0
         if budget and len(tokens) > budget:
             observed = len(tokens)
@@ -346,17 +336,10 @@ class FmoeCKTuner(BaseTuner):
         # mirrored here.
 
         # Compute metrics.
-        improved = [r for r in shape_results if r.get("improved")]
-        # Guard against a present-but-None speedup (mirrors the dense path): a candidate-CSV fallback row has
-        # speedup=None, and `None > 1.0` raises TypeError, so filter to real numbers before comparing.
-        speedups = [
-            r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
-        ]
+        metrics = micro_metrics(shape_results)
 
         total = len(shape_results)
-        n_improved = len(improved)
-        best_speedup = max(speedups) if speedups else 1.0
-        avg_speedup = sum(speedups) / len(speedups) if speedups else 1.0
+        n_improved = len([r for r in shape_results if r.get("improved")])
 
         if total == 0:
             status = "empty_output"
@@ -376,9 +359,9 @@ class FmoeCKTuner(BaseTuner):
             error=f"Unusable MoE compare artifact: {artifact_problem}" if status == "failed" else "",
             error_class="missing_artifact" if status == "failed" else "",
             total_shapes=total,
-            improved_shapes=n_improved,
-            best_micro_speedup=best_speedup,
-            avg_micro_speedup=avg_speedup,
+            improved_shapes=metrics.improved,
+            best_micro_speedup=metrics.best,
+            avg_micro_speedup=metrics.avg,
             shape_results=shape_results,
             key_source=key_source,
         )

@@ -337,3 +337,85 @@ async def test_failed_kernel_request_recorded_in_last_action_failures(session_di
         assert "unknown_kernel_kind" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
+    """An integrate request returns deferred (not failed) when the benchmark lanes are held."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.shared_state.baseline_tput = 800.0  # satisfy the execution_order gate
+    try:
+        # Hold the integrate lanes with an external holder.
+        lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
+        held = await c.locks.try_acquire_many(
+            lanes,
+            holder_id="blocker",
+            task_id="blocker",
+            action="test_holder",
+            ttl_sec=60,
+        )
+        assert held is not None
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "integrate",
+                    "patch_path": "/tmp/fake.patch",
+                },
+            ),
+        )
+
+        # Response message should carry status=deferred.
+        msgs = await c.bus.tail(topic="response", n=100)
+        responses = [m for m in msgs if m.payload.get("kind") == "integrate_done"]
+        assert responses, "expected integrate_done response"
+        assert responses[-1].payload["status"] == "deferred"
+        # The failed-requests ledger must NOT record this as a failure.
+        assert not any(
+            f.get("error_class") == "handler_exception" or f.get("kind") == "integrate"
+            for f in (c.shared_state.last_action_failures or [])
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monkeypatch, tmp_path):
+    """An integrate request acquires lanes, runs, and releases them."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.shared_state.baseline_tput = 800.0  # satisfy the execution_order gate
+    try:
+        lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
+
+        # Verify lanes are free before the request.
+        holders_before = await c.locks.lane_holders()
+        for lane in lanes:
+            assert int(holders_before.get(lane, 0)) == 0
+
+        # A minimal integrate that reverts immediately (no patch file exists).
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "integrate",
+                    "patch_path": str(tmp_path / "nonexistent.patch"),
+                    "kernel_id": "k-test",
+                },
+            ),
+        )
+
+        # Lanes must be free after the handler returned.
+        holders_after = await c.locks.lane_holders()
+        for lane in lanes:
+            assert int(holders_after.get(lane, 0)) == 0, f"lane {lane!r} still held after integrate"
+    finally:
+        await c.stop()

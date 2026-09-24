@@ -32,20 +32,20 @@ from typing import Any
 from hyperloom.inference_optimizer import framework_registry
 
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     )
 except ImportError:
     _resolve_flydsl_source_roots = None
 
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_known_source_prefixes as _resolve_known_source_prefixes,
     )
 except ImportError:
@@ -154,6 +154,13 @@ try:
         _KSC = None  # type: ignore[assignment]
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
+
+try:
+    from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+except ImportError:  # pragma: no cover - standalone invocation
+    # Without the board table there is no arch to name, which is the same
+    # outcome this tool already produces for an unrecognised platform.
+    gfx_arch_for_gpu_type = lambda _gpu_type: None  # noqa: E731
 
 try:
     from hyperloom.common.kernel_shape_contract import (
@@ -3561,8 +3568,8 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         item["patch_strategy"] = "vendor_playbook"
         item["vendor_operator_playbook"] = playbook
         item["vendor_playbook_role"] = playbook.get("role", "")
-        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
-        # source_file before it will dispatch to any backend; a vendor
+        # Coordinator kernel handlers gate dispatch on a non-empty, path-shaped
+        # source_file before they will send work to any backend; a vendor
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
@@ -4455,12 +4462,6 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
-_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
 _FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
 _FLYDSL_BUFFER_LOAD_MARKERS = (
     "make_buffer_tensor",
@@ -4512,9 +4513,7 @@ def _flydsl_kernel_params(
         The FlyDSL kernel-params dict (possibly partial).
     """
     params: dict[str, Any] = {}
-    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
-        (target_platform or "").strip().lower(),
-    )
+    arch = gfx_arch_for_gpu_type(target_platform)
     if arch:
         params["FLYDSL_TARGET_ARCH"] = arch
     cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()

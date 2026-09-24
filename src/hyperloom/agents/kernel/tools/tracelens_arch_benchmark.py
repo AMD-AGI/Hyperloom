@@ -151,7 +151,7 @@ _HYPERLOOM_DTYPE_TO_MATRIX_KEY: dict[str, str] = {
 
 def build_hyperloom_arch_spec(platform: str) -> dict | None:
     """Build a TraceLens arch spec from hyperloom's own hardware tables."""
-    from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
+    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
 
     key = (platform or "").strip().lower()
     # Achievable first, vendor theoretical when a GPU has no measured entry: the same order the

@@ -495,26 +495,6 @@ def _installed_package_dir(pkg: str) -> str:
     return str(Path(spec.origin).parent)
 
 
-# The engine runs in a child process whose name does not contain the launcher's
-# command line, so a pkill written against the launcher leaves it holding the
-# card. Observed on this hardware: 283 of 288 GiB still allocated after the
-# server was "killed".
-_ENGINE_CHILD_PATTERNS = ("VLLM::EngineCore", "EngineCore_", "sglang::scheduler")
-
-
-def _pkill(pattern: str) -> None:
-    """Kill our own processes matching ``pattern``, and no one else's.
-
-    These patterns name an engine, not a run: ``VLLM::EngineCore`` matches every
-    such process on the box. Validation hosts are shared, so an unrestricted
-    pkill here reaps a colleague's serving run as readily as the one this smoke
-    just started. Scope it to the calling user; ``getuid`` is absent off POSIX,
-    where ``pkill`` is not there to be called either.
-    """
-    scope = f"-u {os.getuid()} " if hasattr(os, "getuid") else ""
-    subprocess.run(f"pkill -9 {scope}-f '{pattern}'", shell=True, capture_output=True)
-
-
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
     run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
@@ -658,12 +638,6 @@ def serving_smoke_verdict(
     server = None
     fh: object = None
     try:
-        _pkill(f"vllm serve.*{port}" if is_vllm else f"sglang.launch_server.*port={port}")
-        # The launcher's children do not carry its command line, so the pattern
-        # above misses them and they keep the card allocated.
-        for child in _ENGINE_CHILD_PATTERNS:
-            _pkill(child)
-        _time.sleep(2)
         try:
             fh = open(slog, "w")
         except OSError:
@@ -1027,7 +1001,17 @@ def _tail(text: str, n: int = 400) -> str:
     return " ".join((text or "").split())[-n:]
 
 
-def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class WiringEvidence:
+    """What a static read of the framework edit proved about the fused call site."""
+
+    verdict: str
+    """``"wired"``, ``"not_wired"``, or ``"unchecked"`` when the gate could not judge."""
+
+    reason: str
+
+
+def fused_symbol_invocation_evidence(source_file: str) -> WiringEvidence:
     """Whether the framework edit CALLS the fused module, or only imports it.
 
     A fusion is delivered as two edits: a new fused-kernel module, and a wiring
@@ -1043,22 +1027,19 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
     This is the missing wiring check, and it is deliberately static: an import
     bound by a name that appears nowhere else in the file (the ``# noqa: F401``
     shape an agent produces when it authors the kernel but forgets the call site)
-    cannot execute, whatever the runtime does. Everything else fails OPEN --
-    an unreadable or unparseable source, and equally a source that imports no
-    fused module at all, which is what an INLINE fusion (the fused call written
-    straight into the framework file) legitimately looks like. The gate exists
-    to catch one provable defect, not to demote a KEEP it could not inspect.
-
-    Returns:
-        ``(True, reason)`` when the fused module is referenced somewhere other
-        than its own import statement, or when the check could not run.
+    cannot execute, whatever the runtime does. Everything else is ``unchecked``,
+    which does not block a KEEP -- an unreadable or unparseable source, and
+    equally a source that imports no fused module at all, which is what an INLINE
+    fusion (the fused call written straight into the framework file) legitimately
+    looks like. The gate exists to catch one provable defect, not to demote a KEEP
+    it could not inspect, and equally not to claim it inspected one it did not.
     """
     from .emit import _is_fused_module_name
 
     try:
         tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
     except (OSError, SyntaxError, ValueError) as exc:
-        return True, f"unchecked ({type(exc).__name__}: {exc})"
+        return WiringEvidence("unchecked", f"{type(exc).__name__}: {exc}")
 
     # Names the wiring edit binds from a fused-kernel module, at any nesting
     # depth: a lazy import inside ``forward`` is a legitimate wiring style.
@@ -1073,10 +1054,10 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
                 if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
                     bound.add(alias.asname or alias.name.split(".")[0])
     if not bound:
-        # A fusion authored INLINE in the framework file imports nothing, and is
-        # wired by construction. Only a bound-but-unused import is provable, so
-        # this branch fails open like the unreadable-source one above.
-        return True, f"unchecked ({Path(source_file).name} imports no fused-kernel module)"
+        # A fusion authored INLINE in the framework file imports nothing, so
+        # there is no import to prove unused -- indistinguishable here from a
+        # wiring edit that was never made.
+        return WiringEvidence("unchecked", f"{Path(source_file).name} imports no fused-kernel module")
 
     # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
     # load of a bound identifier is by construction a use outside the import.
@@ -1088,10 +1069,11 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
         }
     )
     if used:
-        return True, f"{Path(source_file).name} references {', '.join(used)}"
-    return False, (
+        return WiringEvidence("wired", f"{Path(source_file).name} references {', '.join(used)}")
+    return WiringEvidence(
+        "not_wired",
         f"{Path(source_file).name} imports {', '.join(sorted(bound))} from a fused-kernel "
-        f"module and never references it -- the fused kernel is dead code in the served model"
+        f"module and never references it -- the fused kernel is dead code in the served model",
     )
 
 
@@ -1130,6 +1112,7 @@ def validate_recipe(
         kind = "triton JIT" if comp.is_triton else "module import"
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,
@@ -1144,6 +1127,7 @@ def validate_recipe(
     if not samples:
         return ValidationResult(
             correctness_passed=False,
+            correctness_measured=False,
             max_abs_err=None,
             rtol=rtol,
             kernel_speedup=None,

@@ -43,7 +43,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -64,7 +64,6 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # launch needs.
 from ._grid_runner import (
     SessionDirField,
-    _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
@@ -105,6 +104,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
     failed_patch_anchors_in,
@@ -515,7 +515,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)
@@ -1556,6 +1556,62 @@ def _revert_legacy_warm_patch_trees(
     )
 
 
+def restore_warm_kernel_snapshots(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Restore exact kernel target bytes captured before each mutation."""
+    errors: list[str] = []
+    for snapshot in reversed(snapshots):
+        target = Path(str(snapshot.get("target") or ""))
+        try:
+            if snapshot.get("existed"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(Path(str(snapshot.get("backup") or "")).read_bytes())
+                if snapshot.get("mode") is not None:
+                    target.chmod(int(snapshot["mode"]))
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            if snapshot.get("existed"):
+                expected = Path(str(snapshot.get("backup") or "")).read_bytes()
+                if not target.is_file() or target.read_bytes() != expected:
+                    raise OSError("kernel restore verification failed")
+            elif target.exists() or target.is_symlink():
+                raise OSError("kernel target still exists after restore")
+        except OSError as exc:
+            errors.append(f"{target}:{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
+
+
+def revert_warm_kernel_patches(
+    applied: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Rollback kernels exactly, reporting every failure."""
+    from ._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    errors: list[str] = []
+    for apply_result in reversed(applied):
+        if not apply_result.get("manifest_path"):
+            continue
+        try:
+            reverted = _maybe_revert_kernel_patch(apply_result)
+            if reverted.get("status") != "ok":
+                raise RuntimeError(
+                    str(
+                        reverted.get("error")
+                        or reverted.get("reason")
+                        or f"kernel revert status={reverted.get('status')}"
+                    )
+                )
+        except Exception as exc:
+            log.warning("warm-kernel KB: revert failed", exc_info=True)
+            errors.append(f"{type(exc).__name__}:{exc}")
+    if snapshots:
+        restored = restore_warm_kernel_snapshots(snapshots)
+        errors.extend(restored.get("errors") or [])
+    return {"ok": not errors, "errors": errors}
+
+
 def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
@@ -1563,9 +1619,8 @@ def _rollback_warm_kernel_apply_results(
     """Rollback kernel mutations and report whether every restore succeeded."""
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...phases.prelude import PreludePhase
 
-    return PreludePhase._revert_warm_kernel_patches(
+    return revert_warm_kernel_patches(
         [r for r in results if isinstance(r, dict)],
         list(snapshots) if isinstance(snapshots, list) else None,
     )
@@ -1764,6 +1819,10 @@ class BaselineExecutor:
             # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
             # rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
+            # Best-effort, unlike the probe below: without it a refused connection ends the round on
+            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+            # was already going to fail -- not a reason to refuse to start one.
+            ensure_eval_unbound_outputs_patched(probe_root)
             if not ensure_eval_probe_patched(probe_root):
                 msg = (
                     "the generation-pathology probe is not installed "
@@ -3382,7 +3441,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round."""
+        """Remove the pid/json files a previous round left for this framework and port."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -3391,15 +3450,6 @@ class BaselineExecutor:
                     p.unlink()
             except OSError:
                 pass
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
-        try:
-            await asyncio.to_thread(_kill_stale_servers)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
-                exc,
-            )
 
     def _teardown_lifecycle_server(
         self,

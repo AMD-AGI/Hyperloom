@@ -127,6 +127,17 @@ def test_candidate_serializes_to_a_dict() -> None:
     }
 
 
+def test_a_tuner_with_no_baseline_publishes_no_micro_numbers() -> None:
+    # TunableOp picks a solution per shape but never times the untuned dispatch, so a reader must be able to tell this
+    # apart from a tuner that benchmarked and found no gain.
+    (cand,) = per_tuner_candidates(
+        [_ok("vllm_dense_tunableop", candidate=True, improved_shapes=None, best_micro_speedup=None)]
+    )
+    d = cand.to_dict()
+    assert d["best_micro_speedup"] is None
+    assert d["improved_shapes"] is None
+
+
 def test_candidate_is_frozen() -> None:
     cand = TunerCandidate(tuner="a", env={}, artifact_path="", best_micro_speedup=1.0, improved_shapes=0)
     import dataclasses

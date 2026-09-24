@@ -45,8 +45,22 @@ def promotion(tmp_path, monkeypatch, request):
         benchmark_mode="synthetic",
         baseline_tput=100.0,
         baseline_accuracy=0.8,
-        baseline_perf={"total_throughput": 900.0, "e2e_norm_intvty_p90": 100.0},
-        current_best={"action": "explore", "tput": 110.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
+        baseline_perf={
+            "total_throughput": 900.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
+        current_best={
+            "action": "explore",
+            "tput": 110.0,
+            "total_throughput": 1000.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
         model_path="/models/test",
         gpu_type="mi355x",
         isl=1024,
@@ -66,6 +80,9 @@ def promotion(tmp_path, monkeypatch, request):
         "final_overlay": str(overlay),
         "total_throughput": 1500.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
     }
     with session_scope(tmp_path):
@@ -112,15 +129,30 @@ async def test_geak_acceptance_requires_native_retention(
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     result["e2e_norm_intvty_p90"] = claimed_intvty
+    result["e2e_norm_intvty_p50"] = claimed_intvty
+    result["duration_seconds"] = 900.0
+    result["request_error_rate"] = 0.0
     state.geak_result = deepcopy(result)
     coord._record_geak_candidate(result)
     state.resume_pending_revalidation = True
     before_best = deepcopy(state.current_best)
     before_stack = deepcopy(state.optimization_stack)
     before_gain = state.cumulative_gain_validated
-    measurement = {"conc": 64, "output_throughput": 120.0, "accuracy": 0.9, "fingerprint": "candidate"}
+    measurement = {
+        "conc": 64,
+        "output_throughput": 120.0,
+        "accuracy": 0.9,
+        "fingerprint": "candidate",
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     if fresh_intvty is not None:
-        measurement.update(total_throughput=1200.0, input_throughput=1080.0, e2e_norm_intvty_p90=fresh_intvty)
+        measurement.update(
+            total_throughput=1200.0,
+            input_throughput=1080.0,
+            e2e_norm_intvty_p90=fresh_intvty,
+            e2e_norm_intvty_p50=fresh_intvty,
+        )
     sweep_calls = []
 
     async def replay(**kwargs):
@@ -406,8 +438,8 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     ],
 )
 def test_legacy_readdition_survives_retention_and_rematerialization(promotion, explicit_append, readded, removal):
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
-    from hyperloom.orchestrator.actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
     coord, result, _ = promotion
     state = coord.shared_state

@@ -887,7 +887,7 @@ class ProfileExecutor(BaselineExecutor):
             log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
             return ""
 
-        from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
         roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(

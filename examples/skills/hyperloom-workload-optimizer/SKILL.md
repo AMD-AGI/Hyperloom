@@ -32,9 +32,6 @@ for credentials and run mode, the demo skills for a workload preset, and
 `inference_optimizer` for the launcher gates and monitoring. They ship with the
 runtime, so they always match the installed version.
 
-This is the agent-facing form of the human quickstart in
-[examples/README.md](../../README.md).
-
 ## Out of scope for this skill
 
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` yourself.

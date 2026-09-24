@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import json
-import os
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import EnvValueError, env_bool, env_int
 
 log = logging.getLogger(__name__)
 
@@ -142,13 +141,17 @@ DEFAULT_MAX_LINES = 2_000_000
 DEFAULT_MAX_KEYS_PER_TABLE = 50_000
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+def _env_positive_int(name: str, default: int) -> int:
+    """Read a bound on one parse; zero or less is a configuration error, not a request for the default.
+
+    Every truncation this bound causes is logged as "raise <name>", so quietly
+    substituting a number the operator did not write sends them back to a
+    variable that is not the one in force.
+    """
+    value = env_int(name, default)
+    if value <= 0:
+        raise EnvValueError(f"{name}={value} must be positive")
+    return value
 
 
 @dataclass
@@ -308,8 +311,8 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
     dispatch: dict[str, Any] = {}
     vllm_moe: dict[str, list[str]] = {"hit": [], "miss": []}
 
-    max_lines = _env_int(_MAX_LINES_ENV, DEFAULT_MAX_LINES)
-    max_keys = _env_int(_MAX_KEYS_ENV, DEFAULT_MAX_KEYS_PER_TABLE)
+    max_lines = _env_positive_int(_MAX_LINES_ENV, DEFAULT_MAX_LINES)
+    max_keys = _env_positive_int(_MAX_KEYS_ENV, DEFAULT_MAX_KEYS_PER_TABLE)
     truncated: dict[str, Any] = {}
     lines_read = 0
 

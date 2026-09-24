@@ -989,32 +989,14 @@ def record_review_evidence(
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
-    """Build a recorder already opened on the timeline, or ``None``. Phase
-    behavior must not depend on the recorder existing, so construction failures
-    that are not recorder bugs degrade to "no event", and an unbound session declines rather than writing
-    the timeline into an arbitrary directory."""
-    from ...session.session_binding import session_is_bound
+    """Build a recorder already opened on the timeline, or ``None`` when unbound."""
+    from .construct import decline_unbound
 
-    from .recorder_warnings import RECORDING_ERRORS
-
-    try:
-        if not session_is_bound():
-            log.warning(
-                "framework timeline: no session bound; this phase entry's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the entry ran outside the session's context"
-            )
-            return None
-        recorder = FrameworkEventRecorder(
-            make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
-            macro_cycle=int(macro_cycle or 0),
-        )
-    except RECORDING_ERRORS:
-        log.warning(
-            "framework timeline: recorder construction failed; this phase entry's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("framework"):
         return None
+    recorder = FrameworkEventRecorder(
+        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        macro_cycle=int(macro_cycle or 0),
+    )
     recorder.begin()
     return recorder

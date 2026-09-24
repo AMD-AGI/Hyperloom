@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None = None) -> str:

@@ -16,11 +16,12 @@ import time
 from pathlib import Path
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
     GridVariant,
 )
-from ._grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
 log = logging.getLogger(__name__)
 
@@ -361,7 +362,7 @@ def _matches_unsafe_unified_attn_stack(
     gpu_type: str,
     stack_fingerprint: dict | None,
 ) -> bool:
-    if framework.strip().lower() != "sglang" or gpu_type.strip().lower() not in {"mi355x", "gfx950"}:
+    if framework.strip().lower() != "sglang" or not is_gfx_arch(gpu_type, "gfx950"):
         return False
     stack = stack_fingerprint if isinstance(stack_fingerprint, dict) else {}
     if any(

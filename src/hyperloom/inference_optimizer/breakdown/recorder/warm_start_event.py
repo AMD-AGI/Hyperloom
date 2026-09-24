@@ -38,7 +38,6 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
-from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +101,7 @@ def warm_start_event_id(macro_cycle: Any = 0) -> str:
 
 
 def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
-    """Record one KB read served while a T0 lookup is in flight. Never raises.
+    """Record one KB read served while a T0 lookup is in flight.
 
     Called from the recipe audit hook, which sees writes as well as reads, and
     reads from every seam that consults the KB. Both are filtered here: a write
@@ -115,15 +114,12 @@ def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
         return
     if not isinstance(audit_event, Mapping) or str(audit_event.get("op") or "") != "read":
         return
-    try:
-        from .recorder import recorder_for
+    from .recorder import recorder_for
 
-        recorder_for(session_dir, producer=PRODUCER).record_item(
-            SECTION_READ,
-            _read_row(active.event_id, active.next_read_ordinal(), audit_event),
-        )
-    except Exception as exc:  # noqa: BLE001 — a read's record must not cost the read
-        note_failure(section="warm_start_event", error=exc, detail="record warm_start read failed")
+    recorder_for(session_dir, producer=PRODUCER).record_item(
+        SECTION_READ,
+        _read_row(active.event_id, active.next_read_ordinal(), audit_event),
+    )
 
 
 def _read_row(event: str, ordinal: int, audit_event: Mapping[str, Any]) -> dict[str, Any]:
@@ -319,26 +315,24 @@ def make_warm_start_recorder(
     scope: Mapping[str, Any] | None = None,
     start_time: str = "",
 ) -> WarmStartEventRecorder | None:
-    """Open the T0 lookup's event, or ``None`` when it cannot be recorded.
+    """Open the T0 lookup's event, or ``None`` when no session is bound.
 
-    ``None`` means no session is bound or the open write failed; ``start_time``
-    defaults to now. Recording is best-effort: the anchor outranks its record.
+    ``start_time`` defaults to now.
     """
-    try:
-        from ...session.session_binding import bound_session
+    from ...session.session_binding import bound_session
+    from .construct import decline_unbound
 
-        recorder = WarmStartEventRecorder(
-            make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
-            requested_canonical_id=requested_canonical_id,
-            scope=scope,
-            start_time=start_time or _now(),
-            session=bound_session(),
-        )
-        recorder.begin()
-        return recorder
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="warm_start_event", error=exc, detail="open warm_start event failed")
+    if decline_unbound("warm_start"):
         return None
+    recorder = WarmStartEventRecorder(
+        make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
+        requested_canonical_id=requested_canonical_id,
+        scope=scope,
+        start_time=start_time or _now(),
+        session=bound_session(),
+    )
+    recorder.begin()
+    return recorder
 
 
 def assemble_warm_start_ext(

@@ -32,7 +32,7 @@ from ..bus.resource_lock import (
 )
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
-from ..trace.task_progress import ProgressReporter, progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
@@ -350,17 +350,7 @@ class SubAgentRunner:
             # Workspace prep is inside the terminal-writing block: an ENOSPC
             # there is a task that failed, not a task still running.
             try:
-                workspace = self._pre_mkdir_workspace(task)
-                extra: dict = {}
-                if workspace is not None:
-                    extra["workspace"] = str(workspace)
-                if self.session_dir is not None:
-                    extra["session_dir"] = str(self.session_dir)
-                if self.shared_state is not None:
-                    extra["shared_state"] = self.shared_state
-                if extra_context:
-                    extra.update(dict(extra_context))
-                ctx = RunnerContext(task=task, lease=lease, extra=extra)
+                ctx = self._context_for(task, lease=lease, extra_context=extra_context)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -450,6 +440,37 @@ class SubAgentRunner:
                         raise ExecutionCleanupUnconfirmed(
                             f"task={task.task_id}: physical cleanup unconfirmed", result=outcome
                         ) from cleanup_error
+
+    def _context_for(self, task: Task, *, lease: Lease | None, extra_context: dict | None) -> RunnerContext:
+        """Build the executor context: workspace, session dir, live state, then the caller's extras."""
+        workspace = self._pre_mkdir_workspace(task)
+        extra: dict = {}
+        if workspace is not None:
+            extra["workspace"] = str(workspace)
+        if self.session_dir is not None:
+            extra["session_dir"] = str(self.session_dir)
+        if self.shared_state is not None:
+            extra["shared_state"] = self.shared_state
+        if extra_context:
+            extra.update(dict(extra_context))
+        return RunnerContext(task=task, lease=lease, extra=extra)
+
+    async def execute_covered(self, task: Task) -> dict:
+        """Run ``task``'s executor as a step of the task running this call.
+
+        The caller's lease, cancel scope and progress sink cover the step.
+        ``task`` is never written to the registry: a queued row would be visible
+        to the pump in the await gaps, and a lane claim of its own would
+        conflict with the lanes the caller already holds.
+
+        Args:
+            task: An unpersisted task naming the executor and its params.
+
+        Returns:
+            The executor's result payload.
+        """
+        ctx = self._context_for(task, lease=None, extra_context=None)
+        return await self.executor_registry[task.kind](ctx)
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

@@ -83,7 +83,6 @@ class TestAnalyzeModel:
             "moe_intermediate_size": 768,
             "num_local_experts": 128,
             "num_experts_per_tok": 8,
-            "hidden_act": "silu",
         }
         (tmp_path / "config.json").write_text(json.dumps(config))
         profile = analyze_model(str(tmp_path))

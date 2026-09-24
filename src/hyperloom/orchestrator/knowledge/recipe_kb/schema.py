@@ -71,20 +71,29 @@ def _normalize_best_config(best_config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # Arbor-aligned sub-shapes
-@dataclass
-class Finding:
-    """An "X helped" insight — what worked + the measured impact."""
+def _experience_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep one ``what_worked`` / ``what_failed`` row whole, rejecting the two types its readers cannot use.
 
-    description: str
-    measured_impact: str
-
-
-@dataclass
-class Failure:
-    """An "X didn't help" insight — what failed + the reason."""
-
-    description: str
-    reason: str
+    The Coordinator owns the keys on these rows, so a row is stored as written
+    rather than through a field list that a new key would have to be taught.
+    ``extra_envs`` and ``gain_pct`` are checked when present because the warm-start
+    readers index one as a mapping and grade on the other as a number; a wrong type
+    there is worth a failed write rather than a row that persists with the value gone.
+    """
+    out = dict(row)
+    envs = out.get("extra_envs")
+    if envs is not None and not isinstance(envs, Mapping):
+        raise TypeError(f"extra_envs must be a mapping, got {type(envs).__name__}")
+    gain = out.get("gain_pct")
+    if gain is not None and not isinstance(gain, (int, float)):
+        raise TypeError(f"gain_pct must be a number, got {type(gain).__name__}")
+    if not out.get("name"):
+        # Only a row that actually stored a ``description`` can name its variant this way. Coordinator rows went
+        # through a projection that wrote ``description: ""``, so theirs was already lost when it was written.
+        legacy = out.get("description")
+        if legacy:
+            out["name"] = str(legacy)
+    return out
 
 
 @dataclass
@@ -216,11 +225,11 @@ class Recipe:
     framework_version: str = ""
     precision: str = ""
 
-    # ----- arbor payload (verbatim shape) -----
+    # ----- arbor payload (verbatim shape, except the experience columns below, which are stored as the producer wrote them) -----
     best_config: dict[str, str] = field(default_factory=dict)
     best_throughput: float = 0.0
-    what_worked: list[Finding] = field(default_factory=list)
-    what_failed: list[Failure] = field(default_factory=list)
+    what_worked: list[dict[str, Any]] = field(default_factory=list)
+    what_failed: list[dict[str, Any]] = field(default_factory=list)
     remaining_gaps: list[Gap] = field(default_factory=list)
     pitfalls: list[Pitfall] = field(default_factory=list)
     lessons: list[Lesson] = field(default_factory=list)
@@ -254,10 +263,8 @@ class Recipe:
             "precision": str(self.precision),
             "best_config": dict(self.best_config),
             "best_throughput": float(self.best_throughput),
-            "what_worked": [
-                {"description": f.description, "measured_impact": f.measured_impact} for f in self.what_worked
-            ],
-            "what_failed": [{"description": f.description, "reason": f.reason} for f in self.what_failed],
+            "what_worked": [dict(f) for f in self.what_worked],
+            "what_failed": [dict(f) for f in self.what_failed],
             "remaining_gaps": [{"description": g.description, "metrics": g.metrics} for g in self.remaining_gaps],
             "pitfalls": [{"description": p.description, "severity": p.severity} for p in self.pitfalls],
             "lessons": [{"statement": l.statement, "measured_impact": l.measured_impact} for l in self.lessons],
@@ -338,22 +345,8 @@ class Recipe:
             precision=str(d.get("precision") or ""),
             best_config=_normalize_best_config(d.get("best_config") or {}),
             best_throughput=float(d.get("best_throughput") or 0.0),
-            what_worked=[
-                Finding(
-                    description=str(f.get("description") or ""),
-                    measured_impact=str(f.get("measured_impact") or ""),
-                )
-                for f in (d.get("what_worked") or [])
-                if isinstance(f, dict)
-            ],
-            what_failed=[
-                Failure(
-                    description=str(f.get("description") or ""),
-                    reason=str(f.get("reason") or ""),
-                )
-                for f in (d.get("what_failed") or [])
-                if isinstance(f, dict)
-            ],
+            what_worked=[_experience_row(f) for f in (d.get("what_worked") or []) if isinstance(f, dict)],
+            what_failed=[_experience_row(f) for f in (d.get("what_failed") or []) if isinstance(f, dict)],
             remaining_gaps=[
                 Gap(
                     description=str(g.get("description") or ""),
@@ -459,8 +452,6 @@ class Attempt:
 
 __all__ = [
     "Attempt",
-    "Failure",
-    "Finding",
     "Gap",
     "KernelOptimization",
     "Lesson",

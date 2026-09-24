@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom.common.llm_headers import parse_custom_headers
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"

@@ -60,22 +60,22 @@ See [Hyperloom authentication and credentials](authentication.md) for credential
 credentials. `tr '\0' '\n' < /proc/<pid>/environ | grep ANTHROPIC_API_KEY` on the
 running optimizer shows the previous key.
 
-**Cause**: `install.sh` snapshots the resolved credentials into
-`$USER_DATA_PATH/runtime/kernel-agent.env.sh`, and every launch sources `.env`
-first and that file second. The snapshot is a fallback, so the rotated value
-wins — but only if it is in the environment when the file is sourced. Sourcing
-the file in a shell that never loaded the new `.env` still yields the old key.
+**Cause**: `install.sh` snapshots credentials into
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Optimizer preflight loads the
+workspace settings before this fallback, preserving caller exports. An old key
+still exported by the launching shell therefore wins over a rotated `.env` value.
 
 **Fix**:
 
-1. Source `.env` before `kernel-agent.env.sh`, which is the documented launch
-   order:
+1. Reconcile any stale credential export, then use the shared workspace loader:
    ```bash
-   set -a; . "$REPO_ROOT/.env"; set +a
-   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+   INSTALL_SH="$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
+   [ -f "$INSTALL_SH" ] || INSTALL_SH="$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+   . "${INSTALL_SH%/*}/runtime_env.sh"
+   load_dotenv_no_clobber
    ```
-   The file prints `ANTHROPIC_API_KEY differs from the install-time snapshot` on
-   a mismatch; that line means the rotated value is the one in effect.
+   Do not print credential values. Let optimizer preflight load the runtime
+   snapshot; do not source it over the current launch environment.
 2. To refresh the snapshot itself, re-run the installer:
    ```bash
    bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"

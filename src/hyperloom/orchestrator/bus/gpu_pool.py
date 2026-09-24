@@ -83,7 +83,7 @@ def resolve_whole_machine_devices() -> list[int]:
     if mask_present:
         return mask_ids
     # No mask: fall back to the detected machine GPU count.
-    from ..policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return list(range(max(0, int(detect_gpu_count() or 0))))
 
