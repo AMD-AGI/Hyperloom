@@ -147,15 +147,15 @@ another GPU's block/KV settings or the final settings of a previous optimization
 ### Kernel Backend
 
 Preserve an explicit `KERNEL_OPT_BACKEND_ORDER` from the caller or `.env`.
-Otherwise leave it unset/empty so the ATOM CLI defaults to `forge`. Matching is
-exact after whitespace trimming and lowercasing: `FORGE` and ` forge ` select
-Forge; other non-empty values, including `forge,geak`, route to GEAK. Report
+Otherwise leave it unset/empty so the ATOM CLI defaults to `forge`. Exact
+`forge` opts in; other non-empty values, including `forge,geak`, route to
+GEAK. Report
 GEAK's unproven ATOM rewrite-seam support and obtain the operator's choice before
 continuing; do not silently clear or replace it. There is no backend CLI flag.
 
 Forge is included in Hyperloom; do not clone it or set `FORGE_PATH`. Preserve the
-selected agent provider and `FORGE_AGENT_CLI`; startup preflight validates the
-selected Claude CLI when applicable. Persist `FRAMEWORK=atom` in `.env` only when
+selected agent provider and `FORGE_AGENT_CLI`; the runtime installer prepares
+and checks that CLI. Persist `FRAMEWORK=atom` in `.env` only when
 requested, and never add a backend key merely to reproduce the CLI default.
 
 ### Selected Python and Setup
@@ -238,8 +238,8 @@ bash "$INSTALL_SH"
 ```
 
 For every launch, including resume, the optimizer loads `kernel-agent.env.sh`
-in process. Startup preflight checks the selected framework and validates the
-selected Claude CLI when applicable. Do not source the generated runtime file in
+in process. Startup preflight checks the selected framework. Do not source the
+generated runtime file in
 the shell. Readiness failures require diagnosis and approval for repairs, not a provider switch.
 
 ## Launch Requirements

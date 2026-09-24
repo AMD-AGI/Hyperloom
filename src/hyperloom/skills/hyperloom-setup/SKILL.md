@@ -228,8 +228,7 @@ Common keys:
 - `KERNEL_OPT_BACKEND_ORDER` (write `forge` when explicitly selected in Step 7).
   Preserve an existing explicit value from `.env` or the shell. With no selection,
   do not add a key: the CLI defaults ATOM to `forge` and other frameworks to GEAK.
-  Match after trimming whitespace and lowercasing: exact `forge` selects Forge;
-  any other non-empty normalized value routes to GEAK. Keep the original value.
+  Keep the original value; exact `forge` opts in, anything else routes to GEAK.
 
 ### AMD APIM subscription header
 
@@ -414,9 +413,9 @@ container-side detection, hand off to `hyperloom-qwen3-14b-fp8-12h-atom`.
 GEAK's live rewrite-seam resolution is unproven on ATOM, so recommend the CLI's
 `forge` default rather than offering a routine backend-choice question. If no
 backend was selected, write nothing to `.env`. Preserve an explicit shell or
-`.env` value; if it is non-empty after trimming whitespace and lowercasing and
-not exactly `forge`, report the original value and ask whether to keep it or
-explicitly switch before launch. Never silently unset or delete it.
+`.env` value; if it is non-empty and does not opt in, report the original value
+and ask whether to keep it or explicitly switch before launch. Never silently
+unset or delete it.
 
 Present exactly these two option labels in this order:
 
@@ -430,8 +429,8 @@ The choice selects which demo skill to load and sets
 `KERNEL_OPT_BACKEND_ORDER`:
 
 - `geak` → load `hyperloom-qwen3-14b-fp8-12h`. Leave `KERNEL_OPT_BACKEND_ORDER`
-  unset, or write `geak`; after trimming whitespace and lowercasing, anything
-  other than exact `forge` means GEAK for this SGLang/vLLM demo.
+  unset, or write `geak`; anything that does not opt in means GEAK for this
+  SGLang/vLLM demo.
 - `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge` and write
   `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
   the same backend.

@@ -207,8 +207,8 @@ ulimit -Sn 65536 || true
 bash "$INSTALL_SH"
 ```
 
-Startup preflight loads `kernel-agent.env.sh` in process and validates the selected
-Claude CLI when applicable. Do not source the generated file in the launch shell.
+Startup preflight loads `kernel-agent.env.sh` in process. Do not source the
+generated file in the launch shell.
 Confirm this demo's backend before launching:
 
 ```bash
