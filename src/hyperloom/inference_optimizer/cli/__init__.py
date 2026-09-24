@@ -43,6 +43,7 @@ from .model_gate import (
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
+    _resolve_amd_gpu_type,
     _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
@@ -2004,7 +2005,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 

@@ -71,7 +71,14 @@ export HYPERLOOM_FLEET_KB_SCOPE_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
 export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH}/fleet-kb-spool/$SLACK_JOB_ID"
+
+# Recommended MI325X example. The hardware probe wins if it reports otherwise.
+export TARGET_GPU_TYPE=mi325x
 ```
+
+Do not set `GPU_TYPE` from the example. Hyperloom persists the resolved real
+board (`mi325x`) but may internally export `GPU_TYPE=mi300x` as the Magpie
+runner label because MI300X and MI325X both use gfx942.
 
 During FRAMEWORK_AGENT, the orchestration prompt performs one Fleet read for
 each proposal-generation decision. Retries inside that decision reuse the same

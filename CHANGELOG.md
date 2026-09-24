@@ -19,7 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   unverified and unavailable by default; runtime reads see only Experiences a
   Slack user explicitly marked `verified_for_scope` for that Run. The demo
   branch wheel also installs the Slack toolbox, event bridge, and Worker-run
-  Skills into Claude/Cursor/Agents discovery directories.
+  Skills into Claude/Cursor/Agents discovery directories. Worker GPU identity
+  now prefers the real product probe or `TARGET_GPU_TYPE`; MI325X remains the
+  persisted Experience identity even though its Magpie runner label is
+  `mi300x`.
 
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,
