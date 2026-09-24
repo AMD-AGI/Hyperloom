@@ -449,10 +449,18 @@ async def test_run_text_blocks_collected_into_raw_text():
 
 
 @pytest.mark.asyncio
-async def test_run_no_emit_intent_raises_no_intent_emitted():
+@pytest.mark.parametrize(
+    "text",
+    [
+        "just thinking, no tool call.",
+        '{"intent_type":"propose_action","payload":{"action_name":"baseline","predicted_gain_pct":0}}',
+        '{"intents":[{"intent_type":"delegate","payload":{"action_name":"baseline"}}]}',
+    ],
+)
+async def test_run_no_emit_intent_raises_no_intent_emitted(text):
     msg = FakeAssistantMessage(
         content=[
-            TextBlock(text="just thinking, no tool call."),
+            TextBlock(text=text),
             ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
         ]
     )
