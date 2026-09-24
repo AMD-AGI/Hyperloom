@@ -6257,8 +6257,6 @@ def _build_split_cmd(
             split_cmd += ["--R", r_str]
     if args.split_llm_inference:
         split_cmd += ["--llm-inference"]
-    if args.split_max_num_seq is not None:
-        split_cmd += ["--max-num-seq", str(args.split_max_num_seq)]
     return split_cmd
 
 
@@ -6271,26 +6269,31 @@ def _collect_split_chunks(
 
     Returns ``(selected_chunk, split_meta, mode_to_chunks)``.
     """
-    def _collect(prefix: str) -> "list[Path]":
+    def _collect(pattern: str) -> "list[Path]":
         out: list[Path] = []
         for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
-            out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))
+            out.extend(sorted(split_dir.rglob(f"{pattern}.{ext}")))
         return out
 
-    mixed_chunks = _collect("mixed")
-    decode_chunks = _collect("decode_only")
-    prefill_chunks = _collect("prefilldecode")
+    mixed_chunks = _collect("mixed_steady_state_*")
+    decode_chunks = _collect("decode_only_steady_state_*")
+    prefill_chunks = _collect("prefilldecode_steady_state_*")
+    generic_chunks = _collect("steady_state_*")
+    # Exclude LLM-inference chunks from the generic set
+    llm_set = set(str(p) for p in mixed_chunks + decode_chunks + prefill_chunks)
+    generic_chunks = [p for p in generic_chunks if str(p) not in llm_set]
 
     split_meta = {
         "chunks_by_mode": {
             "mixed": len(mixed_chunks),
             "decode_only": len(decode_chunks),
             "prefilldecode": len(prefill_chunks),
+            "generic": len(generic_chunks),
         },
-        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks),
+        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks) + len(generic_chunks),
     }
 
-    if not (mixed_chunks or decode_chunks or prefill_chunks):
+    if not (mixed_chunks or decode_chunks or prefill_chunks or generic_chunks):
         raise RuntimeError(
             "trace_split_no_steady_state: TraceLens splitter "
             "produced no steady-state chunks; refusing to run "
@@ -6301,6 +6304,7 @@ def _collect_split_chunks(
         "mixed": ("mixed_steady_state", mixed_chunks),
         "decode_only": ("decode_only_steady_state", decode_chunks),
         "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
+        "generic": ("steady_state", generic_chunks),
     }
     chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
     if not selected_chunks:
@@ -6544,18 +6548,8 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--split-max-num-seq",
-        type=int,
-        default=None,
-        help=(
-            "Maximum number of concurrent sequences (decode batch size cap). "
-            "Maps to --max-num-seq on the TraceLens splitter. Iterations with "
-            "batch size above this value are classified as prefill-bearing."
-        ),
-    )
-    parser.add_argument(
         "--steady-state-mode",
-        choices=("mixed", "decode_only", "prefilldecode"),
+        choices=("mixed", "decode_only", "prefilldecode", "generic"),
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which of TraceLens splitter's three steady-state chunks to "

@@ -5108,7 +5108,6 @@ def _build_trace_analyze_cmd(
     is_bypass: bool,
     scriptable: bool,
     workload: dict,
-    server_args_argv: list,
     model_name: str,
     framework: str,
     target_platform: str,
@@ -5169,6 +5168,7 @@ def _build_trace_analyze_cmd(
     # Scriptable frameworks still forward denoise-step count for per-step
     # roofline timings. Priority: payload override > baseline workload metadata.
     if scriptable:
+        cmd += ["--steady-state-mode", "generic"]
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -5189,10 +5189,7 @@ def _build_trace_analyze_cmd(
         split_r = payload.get("split_r") or workload.get("random_range_ratio")
         if split_r not in (None, ""):
             cmd += ["--split-r", str(split_r).strip()]
-        for i, tok in enumerate(server_args_argv):
-            if tok == "--max-num-seqs" and i + 1 < len(server_args_argv):
-                cmd += ["--split-max-num-seq", server_args_argv[i + 1]]
-                break
+
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
@@ -5430,8 +5427,6 @@ async def trace_analyze_handler(
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
 
-    server_args_argv = metadata.get("runtime_args", {}).get("server_args_argv", []) if isinstance(metadata, dict) else []
-
     cmd, steady_state_mode = _build_trace_analyze_cmd(
         payload,
         session_dir=session_dir,
@@ -5442,7 +5437,6 @@ async def trace_analyze_handler(
         is_bypass=is_bypass,
         scriptable=scriptable,
         workload=workload,
-        server_args_argv=server_args_argv,
         model_name=model_name,
         framework=framework,
         target_platform=target_platform,
