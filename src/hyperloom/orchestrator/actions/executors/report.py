@@ -360,11 +360,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
     comparison = summary.get("performance_comparison")
     if comparison is not None:
-        from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, INTVTY_V1
+        from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
 
-        # The objective is the interactivity axis; total throughput is the guard the verdict also consulted, so it is
-        # rendered as a second axis rather than as the figure the session was scored on.
-        graded_on_intvty = comparison["objective"] == GRADED_INTVTY
+        # Read the family, not one percentile: the graded axis is the median while the session marker still names
+        # the tail, and pinning either one here prints the wrong mode for the other.
+        graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
         lines.extend(["## Performance comparison", ""])
         lines.append(f"- objective           : `{comparison['objective']}`")
         lines.append(f"- reference           : `{comparison['reference']:.1f}`")
@@ -444,8 +444,7 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     comparison = summary["performance_comparison"]
     if not comparison["comparable"] or comparison["gain_pct"] is None:
         return "unavailable"
-    # Anything short of KEEP -- a REVERT, or a RECORDED point the frontier neither promotes nor discards -- disagrees
-    # with a stamp claiming the stack's gain was validated.
+    # Anything short of KEEP disagrees with a stamp claiming the stack's gain was validated.
     if comparison["verdict"] != VERDICT_KEEP or not math.isclose(
         summary["cumulative_gain_validated"], comparison["gain_pct"], abs_tol=1e-9
     ):

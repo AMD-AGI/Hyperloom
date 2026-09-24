@@ -517,8 +517,7 @@ class KernelStackPhase(PhaseHandler):
                 "bench_result": bench_result,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
-                # A stack cannot be left half-applied, so RECORDED reverts like
-                # REVERT does; the verdict says which one it was.
+                # A stack cannot be left half-applied, so anything short of KEEP reverts it whole.
                 "graded_verdict": graded_verdict,
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),

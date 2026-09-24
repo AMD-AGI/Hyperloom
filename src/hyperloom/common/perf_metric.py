@@ -27,6 +27,10 @@ GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
 
+# Every percentile of the interactivity family. A consumer asking "was this graded on interactivity" must read this
+# rather than one axis name, or it silently answers no the next time the graded percentile moves.
+INTVTY_OBJECTIVES = (GRADED_INTVTY, GRADED_INTVTY_P50)
+
 # The y axis InferenceX plots the frontier on. Reported, not graded: tensor parallelism is fixed for a session, so
 # dividing both sides of a ratio by it leaves the guard's verdict unchanged.
 GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
@@ -325,7 +329,7 @@ class GradedComparison:
     @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
-        return self.objective == GRADED_INTVTY_P50
+        return self.objective in INTVTY_OBJECTIVES
 
 
 __all__ = [
@@ -340,6 +344,7 @@ __all__ = [
     "GRADED_OUTPUT",
     "GRADED_OUTPUT_PER_GPU",
     "GRADED_TOTAL",
+    "INTVTY_OBJECTIVES",
     "INTVTY_V1",
     "VERDICT_KEEP",
     "VERDICT_REVERT",

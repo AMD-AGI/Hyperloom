@@ -968,15 +968,17 @@ throughput moves along the frontier rather than violating a rule.
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
 
-- **KEEP** — E2E normalised interactivity P90 (slow tail) gain ≥ `keep_threshold_pct`
-  **and** token throughput per chip not worse than the noise band.
-- **REVERT** — both axes worse than the anchor.
-- **RECORDED** — neither dominates; the point is stored for reporting but not
-  promoted to the optimization stack.  A point that loses at the measured
-  concurrency may still be the frontier winner at another rung.
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 3%, **and** the P90
+  slow tail and output throughput each no worse than the noise band, **and** the
+  pair is comparable: benchmark windows within 5% of each other and no more failed
+  requests than the anchor.
+- **REVERT** — anything short of all of that.
 
-The minimum `keep_threshold_pct` floor for AgentX sessions is 2% (`AGENTX_KEEP_THRESHOLD_FLOOR_PCT`).
-The slow-tail variance is unmeasured; this floor is a conservative placeholder.
+The median bar is the fixed `AGENTX_KEEP_P50_THRESHOLD_PCT` (3%), not
+`keep_threshold_pct`: it is a property of the objective rather than of how far
+into the session a round lands, so the decaying session threshold does not apply
+to it. Total token throughput no longer participates in the verdict — on this
+corpus it is almost entirely prefill, so it cannot see an output collapse.
 
 Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
 grading and advisory comparison. This is aiperf's summary **P10** of the
@@ -997,8 +999,8 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P90 (slow tail) as the primary objective, with per-chip token throughput as a secondary guard. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to both axes of the 2-D domination check. A candidate whose interactivity or throughput sits within this band of the anchor is not considered strictly worse on that axis. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value falls back to the default. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 

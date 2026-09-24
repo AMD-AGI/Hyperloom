@@ -140,17 +140,25 @@ class V6MetadataLangfuse(TypedDict, total=False):
 
 
 class V6GradedAxes(TypedDict, total=False):
-    """The four axes an AgentX measurement is ranked on.
+    """The axes an AgentX measurement is ranked and reported on.
+
+    ``e2e_norm_intvty_p50`` is the objective; the tail and ``output_tput_per_gpu`` are its guards. The rest are the
+    figures the frontier and the latency detail view are drawn from.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero". A synthetic run
-    carries four nulls.
+    carries nulls throughout.
     """
 
     e2e_norm_intvty_p90: float | None
+    e2e_norm_intvty_p50: float | None
     total_throughput: float | None
+    output_tput_per_gpu: float | None
     input_throughput: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
     tpot_p90_ms: float | None
 
 
