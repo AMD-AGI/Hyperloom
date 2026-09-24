@@ -181,14 +181,6 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 #: only record of a denial and the three sites agree by construction.
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
-# Artifact references copied from a per-variant outcome onto its gap attempt.
-_GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
-    "failure_id",
-    "fingerprint",
-    "stage",
-    "workspace",
-    "server_log_path",
-)
 
 
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
@@ -2509,98 +2501,7 @@ class FrameworkPhase(PhaseHandler):
             out.append(cand)
         return out
 
-    def _record_explore_round_gaps(
-        self,
-        *,
-        task: "Task | None",
-        result: dict[str, Any],
-    ) -> None:
-        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
 
-        Args:
-            task: The explore task whose params carry the gap canonical id;
-                ``None`` is a no-op.
-            result: The explore result; its ``per_variant_outcomes`` drive the
-                appended gap attempts.
-        """
-        if task is None:
-            return
-        per_variant = result.get("per_variant_outcomes")
-        if not isinstance(per_variant, list) or not per_variant:
-            return
-        params = dict(task.params or {})
-        canonical = str(params.get("gap_canonical_id") or "").strip() or self._workload_canonical_id()
-        state = self.shared_state
-        existing = state.find_gap(canonical)
-        if existing is None:
-            state.upsert_gap(
-                {
-                    "canonical_id": canonical,
-                    "symptom": "explore round outcomes",
-                    "layer": "framework",
-                    "severity": "medium",
-                    "domain_hint": self._framework_authoring_domain(),
-                    "source": "attempts",
-                }
-            )
-        for outcome in per_variant:
-            if not isinstance(outcome, dict):
-                continue
-            attempt: dict[str, Any] = {
-                "action": "explore",
-                "variant_name": str(outcome.get("variant_name") or ""),
-                "outcome": str(outcome.get("outcome") or "").upper(),
-                "gain_pct": outcome.get("gain_pct"),
-                "reason": str(outcome.get("reason") or ""),
-                "error_class": str(outcome.get("error_class") or ""),
-            }
-            for key in _GAP_ATTEMPT_ARTIFACT_KEYS:
-                value = outcome.get(key)
-                if value:
-                    attempt[key] = str(value)
-            state.append_gap_attempt(canonical, attempt)
-
-    def _record_explore_variant_failures(
-        self,
-        *,
-        task: "Task | None",
-        result: dict[str, Any],
-    ) -> None:
-        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``.
-
-        A crashed variant does not fail the round, so the round-level recorder
-        never sees it.
-
-        Args:
-            task: The completed explore task; ``None`` is a no-op.
-            result: The explore result dict carrying ``per_variant_outcomes``.
-        """
-        if task is None:
-            return
-        per_variant = result.get("per_variant_outcomes")
-        if not isinstance(per_variant, list):
-            return
-        task_id = str(task.task_id or "")
-        round_id = str(result.get("round_id") or "")
-        for vo in per_variant:
-            if not isinstance(vo, dict):
-                continue
-            if str(vo.get("outcome") or "").upper() not in UNMEASURED_OUTCOMES:
-                continue
-            fe = failure_from_variant_outcome(task_id=task_id, round_id=round_id, vo=vo)
-            self.shared_state.record_failure_evidence(fe)
-            self.shared_state.record_action_failure(
-                action="explore",
-                task_id=task_id,
-                result={
-                    "variant_name": str(vo.get("variant_name") or ""),
-                    "error_class": str(vo.get("error_class") or ""),
-                    "error": str(vo.get("reason") or ""),
-                    "workspace": vo.get("workspace"),
-                    "stderr_log_path": vo.get("server_log_path"),
-                    "failure_id": fe.get("failure_id"),
-                },
-            )
 
     async def _maybe_materialize_mn_explore(
         self,
