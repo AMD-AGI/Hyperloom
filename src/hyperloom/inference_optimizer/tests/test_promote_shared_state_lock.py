@@ -18,7 +18,7 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
     ScriptedPlan,
 )
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
@@ -2711,7 +2711,7 @@ async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
     finds it closed, which is how every row outside that window went missing.
     """
     coord = _coord(session_dir)
-    assert coord._framework_timeline() is None
+    assert coord.phase_framework.timeline() is None
 
     await coord._fact_write_hook(
         task=_task("explore", task_id="ex-1"),

@@ -48,7 +48,7 @@ from ...state.shared_state import (
     resolve_anchor_with_drift,
     resolve_graded_comparison,
 )
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
+from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
@@ -4097,7 +4097,9 @@ class IntegratePatchExecutor:
                 declared = None
             if declared:
                 return str(declared).strip().lower()
-        return str(params.get("framework") or os.environ.get("FRAMEWORK") or "vllm").strip().lower()
+        from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
+
+        return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()
 
     @staticmethod
     def _graded_launch_env(override: Mapping[str, Any] | None, materialized_config: str) -> dict[str, str]:

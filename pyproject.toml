@@ -136,10 +136,6 @@ dev = [
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 hyperloom = "hyperloom.inference_optimizer.setup:main"
-# Console scripts for interactive / manual use; the orchestrator invokes the
-# ``python -m hyperloom.agents.*`` module paths directly instead.
-framework-agent = "hyperloom.agents.framework.runtime.cli:main"
-fa = "hyperloom.agents.framework.runtime.cli:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
@@ -258,12 +254,6 @@ hyperloom = [
     "README.md",
     "actions/*.md",
     "references/*.md",
-]
-"hyperloom.agents.framework" = [
-    "SKILL.md",
-    "README.md",
-    "examples/*.json",
-    "examples/*.py",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",

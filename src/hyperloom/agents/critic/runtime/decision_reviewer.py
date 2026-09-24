@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
@@ -108,15 +109,6 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _is_upstream_pr_prescreen(payload: dict[str, Any] | None) -> bool:
-    """Whether this proposal only decides *whether to spend a bench* on a PR."""
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("patches") or (payload.get("params") or {}).get("patches"):
-        return False
-    return bool(payload.get("framework_agent_candidate_id"))
-
-
 def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     """Whether a patch-landing proposal is a pre-boot enablement patch."""
     if not isinstance(payload, dict):
@@ -124,7 +116,7 @@ def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     params = payload.get("params")
     if not isinstance(params, dict):
         return False
-    return bool(params.get("enablement")) or bool(params.get("framework_agent_authoring"))
+    return bool(params.get("enablement"))
 
 
 def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | None = None) -> str:
@@ -135,7 +127,7 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
     if not name:
         return ACTION_CLASS_EVIDENCE_PRODUCER
     if name in _PATCH_LANDING_ACTIONS:
-        if _is_upstream_pr_prescreen(payload):
+        if is_upstream_pr_prescreen(name, payload):
             return ACTION_CLASS_FRAMEWORK_OP
         if _is_enablement_patch(payload):
             return ACTION_CLASS_ENABLEMENT_LANDING

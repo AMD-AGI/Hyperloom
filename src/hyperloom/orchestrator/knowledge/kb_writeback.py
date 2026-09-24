@@ -9,19 +9,14 @@ import asyncio
 import time
 from pathlib import Path
 
+from hyperloom.agents.framework.kb import LESSONS_FILE, framework_optimization_root
 from hyperloom.common.io import append_jsonl
 
 
 def _default_kb_root() -> Path:
     """Resolve the framework-PR lessons directory."""
-    from hyperloom.agents.framework.kb import framework_optimization_root
-
     return framework_optimization_root()
 
-
-#: Filename for the JSONL append log; stable so the fa CLI can hard-code it
-#: (single POSIX append is atomic).
-LESSONS_FILE: str = "lessons.jsonl"
 
 #: Allowed ``outcome`` values; keep stable (downstream readers match exact strings).
 OUTCOME_INTEGRATED: str = "integrated"

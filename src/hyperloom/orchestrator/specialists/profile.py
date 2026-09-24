@@ -72,12 +72,17 @@ def _infer_scope(p: dict[str, Any]) -> str:
     return SCOPE_FREEFORM
 
 
+def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
+    """True for a FRAMEWORK or ENABLEMENT authoring specialist, which defaults to every GPU on the machine."""
+    p = params or {}
+    return bool(p.get("framework_agent_authoring")) or bool(p.get("enablement"))
+
+
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
-    p = params or {}
-    if bool(p.get("framework_agent_authoring")):
+    if is_authoring_specialist(params):
         return True
-    return resolve_specialist_profile(p).reserves_benchmark_lane
+    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 
 def holds_serving_slot(params: dict[str, Any] | None) -> bool:
@@ -132,6 +137,7 @@ __all__ = [
     "SCOPE_VALUES",
     "SpecialistProfile",
     "holds_serving_slot",
+    "is_authoring_specialist",
     "resolve_specialist_profile",
     "uses_whole_machine_gpu_lane",
 ]

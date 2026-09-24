@@ -12,7 +12,7 @@ import urllib.error
 import pytest
 
 from hyperloom.agents.framework.sources import pr_monitor as pc
-from hyperloom.agents.framework.sources._shared import GitHubPr, _repo_slug
+from hyperloom.agents.framework.sources._shared import GitHubPr
 
 
 class _FakeResp:
@@ -40,27 +40,6 @@ def _install_urlopen(monkeypatch, handler) -> None:
         return handler(req)
 
     monkeypatch.setattr(pc.urllib.request, "urlopen", fake)
-
-
-def test_repo_slug_parses_https_ssh_and_git_suffix() -> None:
-    """_repo_slug handles https/.git/ssh URLs uniformly."""
-    assert _repo_slug("https://github.com/sgl-project/sglang.git") == "sgl-project/sglang"
-    assert _repo_slug("https://github.com/sgl-project/sglang") == "sgl-project/sglang"
-    assert _repo_slug("git@github.com:sgl-project/sglang.git") == "sgl-project/sglang"
-
-
-def test_repo_slug_rejects_malformed() -> None:
-    """Non-GitHub-shaped URLs raise ValueError."""
-    with pytest.raises(ValueError):
-        _repo_slug("not-a-url")
-
-
-def test_repo_slug_rejects_github_substring_in_path() -> None:
-    """URLs that embed github.com in the path must not be accepted."""
-    with pytest.raises(ValueError):
-        _repo_slug("https://evil.com/github.com/owner/repo.git")
-    with pytest.raises(ValueError):
-        _repo_slug("https://github.com.evil.com/owner/repo.git")
 
 
 def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
@@ -173,58 +152,3 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
             "https://github.com/sgl-project/sglang.git",
             base_url="http://x",
         )
-
-
-def test_pr_patches_renders_unified_diff_from_json(monkeypatch) -> None:
-    """pr_patches converts pr-monitor JSON array into a unified diff stream."""
-    payload = [
-        {
-            "file": {"file_path": "a/x.py", "status": "modified"},
-            "patch": "@@ -1 +1 @@\n-old\n+new",
-            "patch_truncated": False,
-        },
-        {
-            "file": {"file_path": "a/y.py", "status": "added"},
-            "patch": "@@ -0,0 +1 @@\n+brand_new",
-            "patch_truncated": False,
-        },
-        {
-            "file": {
-                "file_path": "a/old.py",
-                "previous_path": "a/older.py",
-                "status": "deleted",
-            },
-            "patch": "@@ -1 +0,0 @@\n-dropped",
-        },
-    ]
-    body = json.dumps(payload).encode("utf-8")
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
-    text = pc.pr_patches("o/r", 1, base_url="http://x")
-    assert "diff --git a/a/x.py b/a/x.py" in text
-    assert "--- a/a/x.py" in text
-    assert "+++ b/a/x.py" in text
-    assert "+new" in text
-    assert "--- /dev/null" in text
-    assert "+++ /dev/null" in text
-
-
-def test_pr_patches_handles_empty_list(monkeypatch) -> None:
-    """An empty array yields an empty patch string (no crash)."""
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"[]"))
-    text = pc.pr_patches("o/r", 1, base_url="http://x")
-    assert text == ""
-
-
-def test_pr_files_extracts_list(monkeypatch) -> None:
-    """pr_files unwraps a dict-with-list payload into a clean list of dicts."""
-    body = json.dumps({"files": [{"file_path": "a.py"}, {"file_path": "b.py"}]}).encode()
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
-    out = pc.pr_files("o/r", 1, base_url="http://x")
-    assert out == [{"file_path": "a.py"}, {"file_path": "b.py"}]
-
-
-def test_pr_get_requires_object(monkeypatch) -> None:
-    """pr_get refuses non-object payloads."""
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"[]"))
-    with pytest.raises(pc.PRMonitorError, match="did not return an object"):
-        pc.pr_get("o/r", 1, base_url="http://x")

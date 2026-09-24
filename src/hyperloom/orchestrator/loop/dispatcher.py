@@ -18,6 +18,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -38,7 +39,6 @@ from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    patch_verdict_subject,
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
@@ -494,7 +494,7 @@ class DispatcherCollaborator:
             if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
                 continue
             params = dict(task.params or {})
-            sid = patch_verdict_subject(params)
+            sid = verdict_subject(params)
             if not sid:
                 continue
             verdict = str(get_verdict(sid) or "").strip().lower()
@@ -684,14 +684,14 @@ class DispatcherCollaborator:
                     # specialist leases from ``gpu_specialist_pool``.
                     from ..specialists.profile import (
                         holds_serving_slot,
+                        is_authoring_specialist,
                         uses_whole_machine_gpu_lane,
                     )
 
                     whole_machine_lane = uses_whole_machine_gpu_lane(params)
-                    is_framework_authoring = bool(params.get("framework_agent_authoring"))
                     if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
-                        if is_framework_authoring:
+                        if is_authoring_specialist(params):
                             # Default to the whole machine; explicit gpu_count wins.
                             default_gpu_count = gpu_pool.capacity or 1
                         else:
@@ -1259,39 +1259,13 @@ class DispatcherCollaborator:
                         source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
                         run_error=str(result.error or ""),
                     )
-                    # FRAMEWORK authoring bridge for an EMPTY deliverable: a
-                    # specialist that authored no patch never spawns an
-                    # integrate_patch; stamp the terminal progress row here to
-                    # avoid a pump livelock.
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=task,
-                        done_payload=done_payload,
-                        run_error=str(result.error or ""),
-                    )
-                    # Harvest a discovery specialist's candidates into the
-                    # source arm's batch.
-                    self._ingest_candidate_discovery(
-                        task=task,
-                        done_payload=done_payload,
-                        run_error=str(result.error or ""),
-                    )
+                    self.phase_framework.on_specialist_settled(task, done_payload, run_error=str(result.error or ""))
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
                 self._record_intervention_for_task(task, result.result)
             # integrate_patch completion handling.
             if task.kind == "integrate_patch" and result.state != "cancelled":
-                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
-                if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
-                    self._record_framework_agent_authored_outcome(
-                        task=task,
-                        result=result,
-                    )
-                # Unified rearm: handles enablement and apply_failed perf-lane
-                # results (schedules retry or stamps terminal).
-                res_dict = getattr(result, "result", None)
-                await self._maybe_rearm_authored_lane(res_dict)
-                # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
-                await self._drain_apply_fail_retry_pending()
+                await self.phase_framework.on_integrate_patch_settled(task, result)
             # Auto-promote succeeded results into CORE_STATE_FIELDS
             # (Coordinator-only writer).  Warm replay is deliberately routed
             # through its promote handler even when dispatch itself failed:

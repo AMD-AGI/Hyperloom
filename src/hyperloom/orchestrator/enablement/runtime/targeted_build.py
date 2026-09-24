@@ -328,18 +328,11 @@ def run_aiter_build(
             prepare_candidate_workspace,
             prepare_repo_cache,
         )
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="aiter",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
@@ -565,18 +558,11 @@ def run_sgl_kernel_build(
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="sglang",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
@@ -803,18 +789,11 @@ def run_vllm_source_build(
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate
 
-        req = ExploreRequest(
-            framework="vllm",
-            repo_url=repo_url,
-            work_dir=root,
-            baseline=Baseline(throughput=0.0),
-            prepare_candidate_env=True,
-        )
-        prepare_repo_cache(req)
+        prepare_repo_cache(repo_url, root)
         candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")

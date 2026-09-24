@@ -5,19 +5,19 @@
 
 from __future__ import annotations
 
-import os
+import logging
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.env import env_float
 from hyperloom.common.git_safety import safe_directory_args
 
-from .logging_setup import get_logger
-from .models import Candidate, ExploreRequest
+from .models import Candidate
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 _DISK_MIN_GB_ENV = "FRAMEWORK_EXPLORER_DISK_MIN_GB"
@@ -53,33 +53,14 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 180
 
 
 # Disk preflight
-def _resolve_min_free_gb(explicit: float | None) -> float:
-    """Pick the threshold (explicit > env > default 20 GB)."""
-    if explicit is not None:
-        return float(explicit)
-    raw = os.environ.get(_DISK_MIN_GB_ENV)
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            log.warning(
-                "%s=%r is not a number; falling back to default %.1f GB",
-                _DISK_MIN_GB_ENV,
-                raw,
-                _DEFAULT_DISK_MIN_GB,
-            )
-    return _DEFAULT_DISK_MIN_GB
-
-
 def disk_preflight(
     work_dir: Path,
     n_candidates: int,
     *,
-    min_free_gb: float | None = None,
     per_candidate_gb: float = PER_CANDIDATE_GB,
 ) -> None:
     """Refuse to start if the work_dir mount lacks enough free space."""
-    floor_gb = _resolve_min_free_gb(min_free_gb)
+    floor_gb = env_float(_DISK_MIN_GB_ENV, _DEFAULT_DISK_MIN_GB)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
     work_dir.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(str(work_dir))
@@ -105,40 +86,35 @@ def disk_preflight(
 
 
 # Repo cache (mirror clone)
-def _repo_cache_dir(req: ExploreRequest) -> Path:
+def _repo_cache_dir(repo_url: str, work_dir: Path) -> Path:
     """Stable per-repo cache directory under work_dir/_repos."""
-    safe = "".join(ch if ch.isalnum() else "-" for ch in req.repo_url.lower()).strip("-")
-    return req.work_dir / "_repos" / (safe or "repo")
+    safe = "".join(ch if ch.isalnum() else "-" for ch in repo_url.lower()).strip("-")
+    return work_dir / "_repos" / (safe or "repo")
 
 
-def prepare_repo_cache(req: ExploreRequest) -> Path:
+def prepare_repo_cache(repo_url: str, work_dir: Path) -> Path:
     """Mirror-clone the repo into the cache dir; fetch when already present."""
-    repo_dir = _repo_cache_dir(req)
+    repo_dir = _repo_cache_dir(repo_url, work_dir)
     if repo_dir.exists():
         log.debug("prepare_repo_cache: fetching existing mirror at %s", repo_dir)
         _run_git(["git", "fetch", "--all", "--tags", "--prune"], cwd=repo_dir)
         return repo_dir
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
-    log.info("prepare_repo_cache: cloning --mirror %s -> %s", req.repo_url, repo_dir)
-    _run_git(["git", "clone", "--mirror", req.repo_url, str(repo_dir)])
+    log.info("prepare_repo_cache: cloning --mirror %s -> %s", repo_url, repo_dir)
+    _run_git(["git", "clone", "--mirror", repo_url, str(repo_dir)])
     return repo_dir
 
 
 def _worktree_ref(candidate: Candidate) -> str:
     """Choose the ref to materialise in a detached worktree."""
-    if candidate.head_sha:
-        return candidate.head_sha
     if candidate.ref.startswith("PR:"):
         number = candidate.ref.split(":", 1)[1]
         return f"refs/pull/{number}/head"
     return candidate.ref
 
 
-def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
-    """Pre-fetch the candidate's ref into the cache mirror."""
-    if candidate.head_sha:
-        _run_git(["git", "fetch", "origin", candidate.head_sha], cwd=repo_dir)
-        return
+def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
+    """Pre-fetch a PR candidate's head into the cache mirror."""
     if not candidate.ref.startswith("PR:"):
         return
     number = candidate.ref.split(":", 1)[1]
@@ -155,28 +131,20 @@ def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
 
 # Per-candidate workspace lifecycle
 def prepare_candidate_workspace(
-    req: ExploreRequest,
     candidate: Candidate,
     *,
+    repo_url: str,
+    work_dir: Path,
     index: int,
-    execute: bool,
 ) -> WorkspacePaths:
-    """Materialise ``candidate_dir`` + (when execute) worktree + venv."""
-    candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
+    """Materialise ``candidate_dir`` + worktree + venv for a candidate."""
+    candidate_dir = work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
     venv_dir = candidate_dir / "venv"
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
-    if not execute or not req.prepare_candidate_env:
-        log.debug(
-            "prepare_candidate_workspace[%02d] %s: plan mode (no worktree/venv)",
-            index,
-            candidate.ref,
-        )
-        return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
-
-    repo_dir = prepare_repo_cache(req)
-    fetch_candidate_ref(repo_dir, candidate)
+    repo_dir = prepare_repo_cache(repo_url, work_dir)
+    _fetch_candidate_ref(repo_dir, candidate)
     if worktree_dir.exists():
         shutil.rmtree(worktree_dir)
     log.info(
@@ -212,45 +180,11 @@ def prepare_candidate_workspace(
     return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
 
-def cleanup_workspace(
-    workspace: WorkspacePaths,
-    *,
-    is_winner: bool,
-    keep_winner_only: bool,
-    repo_dir: Path | None = None,
-) -> None:
-    """Drop worktree + venv from disk when policy says so."""
-    if not keep_winner_only or is_winner:
-        return
-    if repo_dir is not None:
-        # Detach the worktree from the mirror before removing it.
-        try:
-            _run_git(
-                ["git", "worktree", "remove", "--force", str(workspace.worktree_dir)],
-                cwd=repo_dir,
-                timeout_sec=60,
-            )
-        except Exception:
-            log.debug(
-                "cleanup_workspace: git worktree remove failed; falling back to rmtree",
-                exc_info=True,
-            )
-    for path in (workspace.worktree_dir, workspace.venv_dir):
-        try:
-            if path.exists():
-                shutil.rmtree(path)
-                log.info("cleanup_workspace: removed %s", path)
-        except OSError as exc:
-            log.warning("cleanup_workspace: failed to remove %s: %s", path, exc)
-
-
 __all__ = [
     "DiskPreflightError",
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
-    "cleanup_workspace",
     "disk_preflight",
-    "fetch_candidate_ref",
     "prepare_candidate_workspace",
     "prepare_repo_cache",
 ]

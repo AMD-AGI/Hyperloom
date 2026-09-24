@@ -16,6 +16,7 @@ from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskNotFound
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 from ._optimize_fixtures import FakeCoordinator, optimize_state
 
@@ -502,7 +503,7 @@ def test_the_arms_deliverable_decides_its_lever():
     A config proposal and a diff are both valid returns from the same dispatch,
     and a row left with an empty lever is invisible to the dryness judgment.
     """
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    from hyperloom.orchestrator.lever import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
     )
@@ -529,8 +530,7 @@ def test_the_arms_deliverable_decides_its_lever():
 
 def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
     """The ledger row sits behind the same gate as the progress row, so retries are not evidence the lever is dry."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
     from .test_framework_agent_authoring import _Stub
 
@@ -545,7 +545,7 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
                 "lever_kind": LEVER_UPSTREAM_PR,
             },
         )
-        Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
+        FrameworkPhase._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
             stub,
             task=task,
             result=result,

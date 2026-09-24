@@ -16,7 +16,7 @@ from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict
 from functools import partial
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -503,9 +503,8 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
     dispatcher = _dispatcher(tmp_path)
     dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
     dispatcher._record_specialist_result = AsyncMock()
-    dispatcher._record_framework_agent_authoring_empty_outcome = lambda **_kwargs: None
-    dispatcher._ingest_candidate_discovery = lambda **_kwargs: None
     dispatcher._handle_unpromotable_result = AsyncMock()
+    dispatcher._coord.phase_framework = SimpleNamespace(on_specialist_settled=Mock())
 
     async def run():
         dispatcher.sub.register_executor("specialist", AsyncMock(side_effect=FuturesCancelledError("stop")))
@@ -521,6 +520,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert len(events) == 1 and events[0].payload["state"] == "cancelled"
         assert dispatcher._maybe_auto_retry_specialist.await_count == 0
         assert dispatcher._record_specialist_result.await_count == 1
+        assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
         assert dispatcher._promote_to_shared_state.await_count == 0
         assert dispatcher._fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions

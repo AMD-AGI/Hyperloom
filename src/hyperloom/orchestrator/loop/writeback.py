@@ -23,7 +23,7 @@ from hyperloom.common.launch_log_evidence import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
 from ..enablement.recipe.section import recipe_for
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
     LEVER_KERNEL,
@@ -54,6 +54,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGH
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, record_lifecycle_event
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..framework.artifacts import candidate_key
 from ..state.attempt_ledger import record_config_attempt
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState, resolve_graded_comparison, stack_base_params
@@ -329,8 +330,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     that measured nothing still lands, which is the case
     :func:`_record_config_attempts` never sees.
     """
-    getter = getattr(coord, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    recorder = coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.common.timeutil import now_iso
@@ -371,8 +371,7 @@ def _record_config_attempts(
     unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
     ``KILLED_OVERTIME`` into a plain revert.
     """
-    getter = getattr(coord, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    recorder = coord.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
@@ -1408,19 +1407,7 @@ class WritebackCollaborator:
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
-        if task.kind == "integrate_patch" and (task.params or {}).get("framework_agent_candidate_id"):
-            cand = (task.params or {}).get("candidate")
-            cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
-            if cand_id:
-                self._stamp_framework_progress(
-                    candidate_id=cand_id,
-                    batch_id=str((task.params or {}).get("batch_id") or ""),
-                    status="no_result_failed",
-                    kept=False,
-                    rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
-                    provenance="executor",
-                    extra={"status": str(result_payload.get("status") or "")},
-                )
+        self.phase_framework.record_unpromoted_candidate(task, result_payload)
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.
@@ -2827,7 +2814,7 @@ class WritebackCollaborator:
             "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
-        recorder = getattr(self, "_framework_timeline_recorder", None)
+        recorder = self.phase_framework.timeline()
         if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
             recorder.record_run(str(task.task_id or ""), **product)
             return
@@ -5839,7 +5826,7 @@ class WritebackCollaborator:
                     # by the canonical candidate key, so reconcile on both.
                     stack_action = _FRAMEWORK_STACK_ACTION
                     cand = res.get("candidate")
-                    variant = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
+                    variant = candidate_key(cand if isinstance(cand, dict) else None)
                 elif kind == "explore":
                     bv = res.get("best_variant") or {}
                     variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")

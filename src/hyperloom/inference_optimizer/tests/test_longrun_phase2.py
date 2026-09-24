@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 

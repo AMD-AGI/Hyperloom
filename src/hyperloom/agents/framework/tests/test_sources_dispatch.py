@@ -8,20 +8,21 @@ from __future__ import annotations
 import pytest
 
 import hyperloom.agents.framework.sources as src
-from hyperloom.agents.framework.models import ExploreRequest
+from hyperloom.agents.framework.keywords import extract_keywords
+from hyperloom.agents.framework.models import CandidateSearchRequest, PRMonitorConfig
 from hyperloom.agents.framework.sources._shared import GitHubPr
 
+_PR_MONITOR = PRMonitorConfig(base_url="http://x")
 
-def _minimal_request(**overrides) -> ExploreRequest:
-    """Build a minimal valid ExploreRequest for dispatch tests."""
-    base = {
-        "framework": "sglang",
-        "repo_url": "https://github.com/sgl-project/sglang.git",
-        "work_dir": "/tmp/x",
-        "baseline": {"throughput": 1.0},
-    }
-    base.update(overrides)
-    return ExploreRequest.from_dict(base)
+
+def _minimal_request(**overrides) -> CandidateSearchRequest:
+    """Build a minimal CandidateSearchRequest for dispatch tests."""
+    return CandidateSearchRequest(**{"repo_url": "https://github.com/sgl-project/sglang.git", **overrides})
+
+
+def _gap_keywords(gap: str) -> tuple[str, ...]:
+    """Keywords the way the enablement mandate derives them from a gap."""
+    return tuple(extract_keywords(gap))
 
 
 # Per-framework repo URLs to parametrise dispatch tests over every framework.
@@ -32,32 +33,19 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
 }
 
 
-def test_dispatch_explicit_refs_only() -> None:
-    """Without search_perf_prs, only explicit candidate_refs are returned."""
-    req = _minimal_request(candidate_refs=["main", "PR:1"], search_perf_prs=False)
-    out = src.enumerate_candidates(req)
-    refs = [c.ref for c in out]
-    sources = {c.source for c in out}
-    assert refs == ["main", "PR:1"]
-    assert sources == {"explicit"}
-
-
 def test_pr_states_defaults_to_open() -> None:
     req = _minimal_request()
     assert req.pr_states == ("open",)
 
 
-def test_pr_states_parsed_and_validated() -> None:
-    req = _minimal_request(pr_states=["all"])
-    assert req.pr_states == ("all",)
-    with pytest.raises(ValueError):
-        _minimal_request(pr_states=["bogus"])
+def test_dispatch_unknown_search_mode_raises() -> None:
+    """A search mode with no backend is a configuration error, not an empty result."""
+    with pytest.raises(src.SourceConfigError, match="unknown search_mode"):
+        src.enumerate_candidates(_minimal_request(search_modes=("gbrain_pr_kb",)))
 
 
 def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
     """pr_states=all -> pr_monitor search queried with state='all'."""
-    from hyperloom.agents.framework.models import PRMonitorConfig
-
     captured: dict[str, str] = {}
 
     def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
@@ -66,11 +54,10 @@ def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
 
     monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
     req = _minimal_request(
-        gap_description="speed up decode",
-        pr_states=["all"],
-        pr_monitor={"base_url": "http://pr_monitor.local"},
+        keywords=_gap_keywords("speed up decode"),
+        pr_states=("all",),
+        pr_monitor=PRMonitorConfig(base_url="http://pr_monitor.local"),
     )
-    assert isinstance(req.pr_monitor, PRMonitorConfig)
     out = src._run_pr_monitor(req)
     assert captured["state"] == "all"
     assert out and out[0].source == "pr_monitor"
@@ -86,42 +73,26 @@ def test_pr_monitor_search_state_open_only_default(monkeypatch) -> None:
     monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **k: [])
     req = _minimal_request(
-        gap_description="speed up decode",
-        pr_monitor={"base_url": "http://pr_monitor.local"},
+        keywords=_gap_keywords("speed up decode"),
+        pr_monitor=PRMonitorConfig(base_url="http://pr_monitor.local"),
     )
     src._run_pr_monitor(req)
     assert captured["state"] == "open"
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
-def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
-    """Explicit candidate_refs come out untouched for every framework (no framework-specific filtering at the dispatch layer)."""
-    req = _minimal_request(
-        framework=framework,
-        repo_url=_FRAMEWORK_TO_REPO_URL[framework],
-        candidate_refs=["main", "PR:1"],
-        search_perf_prs=False,
-    )
-    out = src.enumerate_candidates(req)
-    assert [c.ref for c in out] == ["main", "PR:1"]
-    assert {c.source for c in out} == {"explicit"}
-
-
-@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -> None:
     """PR-search backends are framework-agnostic; the framework only determines which repo gets queried."""
     req = _minimal_request(
-        framework=framework,
         repo_url=_FRAMEWORK_TO_REPO_URL[framework],
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=2,
-        pr_monitor={"base_url": "http://x"},
+        pr_monitor=_PR_MONITOR,
     )
 
     seen_repo_urls: list[str] = []
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_pr_monitor(repo_url, *, base_url, limit, timeout_sec, state=None):
         seen_repo_urls.append(repo_url)
         return [
             GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
@@ -134,14 +105,9 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
     assert any(c.source == "pr_monitor" for c in out)
 
 
-def test_dispatch_pr_monitor_missing_remote_config_raises(monkeypatch) -> None:
-    """Remote Recipe mode does not synthesize a missing KB Service URL."""
-    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    monkeypatch.delenv("KB_STORE_URL", raising=False)
-    req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
-    )
+def test_dispatch_pr_monitor_without_config_raises() -> None:
+    """Asking for pr_monitor without its config is a configuration error, not an empty result."""
+    req = _minimal_request(search_modes=("pr_monitor",))
     with pytest.raises(src.SourceConfigError, match="pr_monitor"):
         src.enumerate_candidates(req)
 
@@ -149,20 +115,18 @@ def test_dispatch_pr_monitor_missing_remote_config_raises(monkeypatch) -> None:
 def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
     """Both backends contribute; duplicates de-duped by ref."""
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor", "github"],
+        search_modes=("pr_monitor", "github"),
         max_search_candidates=3,
-        pr_monitor={"base_url": "http://x"},
-        candidate_refs=["main"],
+        pr_monitor=_PR_MONITOR,
     )
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_pr_monitor(repo_url, *, base_url, limit, timeout_sec, state=None):
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit, states=("open",)):
+    def fake_github(repo_url, *, limit, states=("open",)):
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -173,15 +137,15 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
 
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
-    # explicit first, then pr_monitor, then github (dedup keeps first occurrence)
-    assert refs == ["main", "PR:1", "PR:2", "PR:3"]
+    # pr_monitor first, then github (dedup keeps first occurrence)
+    assert refs == ["PR:1", "PR:2", "PR:3"]
     by_ref = {c.ref: c.source for c in out}
     assert by_ref["PR:2"] == "pr_monitor"
     assert by_ref["PR:3"] == "github"
 
 
-def test_pr_monitor_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
-    """When gap_description yields keywords, dispatcher uses /v1/search/prs."""
+def test_pr_monitor_uses_search_endpoint_when_keywords_present(monkeypatch) -> None:
+    """When the request carries keywords, dispatcher uses /v1/search/prs."""
     captured: dict[str, object] = {}
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
@@ -202,11 +166,10 @@ def test_pr_monitor_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=2,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang fp8 MoE on MI300X",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve sglang fp8 MoE on MI300X"),
     )
     out = src.enumerate_candidates(req)
     assert captured["called"] == "search", "search endpoint must be preferred when keywords present"
@@ -227,7 +190,7 @@ def test_pr_monitor_falls_back_to_list_when_search_returns_empty(monkeypatch) ->
         calls.append("search")
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
         calls.append("list")
         return [
             GitHubPr(number=40, title="NPU Ascend backend", html_url="u40"),
@@ -238,11 +201,10 @@ def test_pr_monitor_falls_back_to_list_when_search_returns_empty(monkeypatch) ->
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=1,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang fp8 MoE on MI300X throughput",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve sglang fp8 MoE on MI300X throughput"),
     )
     out = src.enumerate_candidates(req)
     assert calls == ["search", "list"], "must try search first, then fall back to list"
@@ -257,7 +219,7 @@ def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> N
     def fake_search(*_a, **_kw):
         raise src.PRMonitorError("404 Not Found at /v1/search/prs")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -269,11 +231,10 @@ def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> N
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=2,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang fp8 MoE on MI300X",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve sglang fp8 MoE on MI300X"),
     )
     out = src.enumerate_candidates(req)
     assert captured["called"] == "list", "must fall back to list_perf_prs when search fails"
@@ -283,15 +244,15 @@ def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> N
     assert refs[0] == "PR:21"
 
 
-def test_pr_monitor_no_gap_uses_label_only_path(monkeypatch) -> None:
-    """When gap_description is empty, dispatcher uses the cheap label-only listing."""
+def test_pr_monitor_no_keywords_uses_list_only_path(monkeypatch) -> None:
+    """Without keywords, dispatcher uses the cheap listing endpoint."""
     captured: dict[str, object] = {}
 
     def fake_search(*_a, **_kw):
         captured["called"] = "search"
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -302,15 +263,13 @@ def test_pr_monitor_no_gap_uses_label_only_path(monkeypatch) -> None:
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=1,
-        pr_monitor={"base_url": "http://x"},
-        # gap_description omitted (defaults to empty)
+        pr_monitor=_PR_MONITOR,
     )
     out = src.enumerate_candidates(req)
     assert captured["called"] == "list"
-    # No over-fetch when gap is empty
+    # No over-fetch without keywords
     assert captured["limit"] == 1
     assert [c.ref for c in out] == ["PR:30"]
 
@@ -326,39 +285,19 @@ def test_rank_by_keyword_overlap_preserves_ties() -> None:
     assert [pr.number for pr in out] == [1, 2, 3]
 
 
-def test_resolve_keywords_explicit_overrides_gap() -> None:
-    """request.keywords (non-empty) wins over extract_keywords(gap_description)."""
-    req = _minimal_request(
-        gap_description="improve sglang fp8 MoE on MI300X",  # auto would yield ['fp8','moe','sglang']
-        keywords=["mi300x"],  # but explicit wins
-    )
-    assert src._resolve_keywords(req) == ["mi300x"]
-
-
-def test_resolve_keywords_fallback_to_gap_extract() -> None:
-    """Empty request.keywords + non-empty gap -> auto-extract."""
-    req = _minimal_request(
-        gap_description="improve sglang fp8 MoE",
-        keywords=[],
-    )
-    out = src._resolve_keywords(req)
-    assert "fp8" in out and "moe" in out and "sglang" in out
-
-
-def test_resolve_keywords_both_empty_returns_empty() -> None:
-    """Neither keywords nor gap -> empty list (cheapest path)."""
-    req = _minimal_request(keywords=[], gap_description="")
-    assert src._resolve_keywords(req) == []
+def test_resolve_keywords_empty_returns_empty() -> None:
+    """No keywords -> empty list (cheapest path)."""
+    assert src._resolve_keywords(_minimal_request(keywords=())) == []
 
 
 def test_resolve_keywords_lowercases_explicit() -> None:
-    """Explicit override is lowercased to match service token shape."""
-    req = _minimal_request(keywords=["MI300X", "FP8"])
+    """Keywords are lowercased to match service token shape."""
+    req = _minimal_request(keywords=("MI300X", "FP8"))
     assert src._resolve_keywords(req) == ["mi300x", "fp8"]
 
 
 def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
-    """End-to-end: --framework-keywords sent as PR Monitor query verbatim, bypassing the gap_description auto-extract."""
+    """End-to-end: request keywords are sent as the PR Monitor query verbatim."""
     captured: dict[str, object] = {}
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
@@ -373,12 +312,10 @@ def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=1,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang fp8 MoE",  # auto would be 'fp8 moe sglang'
-        keywords=["mi300x"],  # but explicit wins
+        pr_monitor=_PR_MONITOR,
+        keywords=("mi300x",),
     )
     out = src.enumerate_candidates(req)
     assert captured["query"] == "mi300x", "service query must be the explicit keyword"
@@ -417,11 +354,10 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=2,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang bf16 dense throughput on mi300x",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve sglang bf16 dense throughput on mi300x"),
     )
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
@@ -446,11 +382,10 @@ def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> Non
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=3,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve sglang bf16 dense throughput on mi300x",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve sglang bf16 dense throughput on mi300x"),
     )
     out = src.enumerate_candidates(req)
     scores = [(c.ref, c.score) for c in out]
@@ -463,24 +398,22 @@ def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> Non
     assert scores == sorted(scores, key=lambda x: -x[1])
 
 
-def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> None:
-    """Empty gap/keywords -> label-only cheap path; Candidate.score defaults to 0.0 (no gap-driven ranking happened)."""
+def test_candidate_score_defaults_to_zero_for_list_only_path(monkeypatch) -> None:
+    """No keywords -> cheap listing path; Candidate.score defaults to 0.0 (no ranking happened)."""
 
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):
+    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
         return [GitHubPr(number=30, title="generic PR", html_url="u30")]
 
     monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=1,
-        pr_monitor={"base_url": "http://x"},
-        # gap_description omitted; keywords too
+        pr_monitor=_PR_MONITOR,
     )
     out = src.enumerate_candidates(req)
     assert len(out) == 1
@@ -503,11 +436,10 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
 
     # Gap with NO anti-trigger; extract_keywords -> ['attention', 'fp8'].
     req = _minimal_request(
-        search_perf_prs=True,
-        search_modes=["pr_monitor"],
+        search_modes=("pr_monitor",),
         max_search_candidates=3,
-        pr_monitor={"base_url": "http://x"},
-        gap_description="improve fp8 attention",
+        pr_monitor=_PR_MONITOR,
+        keywords=_gap_keywords("improve fp8 attention"),
     )
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]

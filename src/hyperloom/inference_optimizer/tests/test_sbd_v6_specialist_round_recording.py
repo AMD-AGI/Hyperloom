@@ -12,6 +12,7 @@ routes, and that the merge lands on the dispatch rather than appending a row.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -154,7 +155,7 @@ class _Seam:
 
     def __init__(self, *, phase: str, framework_recorder: Any = None) -> None:
         self.shared_state = _StubState(phase)
-        self._framework_timeline_recorder = framework_recorder
+        self.phase_framework = SimpleNamespace(timeline=lambda: framework_recorder)
 
 
 def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> None:
