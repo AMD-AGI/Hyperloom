@@ -13,13 +13,12 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
-from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
 
-class MachinePhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class MachinePhase:
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     _kernel_entry_task: "asyncio.Task[Any] | None" = None
 

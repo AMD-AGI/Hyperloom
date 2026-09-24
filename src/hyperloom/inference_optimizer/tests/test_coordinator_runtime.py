@@ -1770,7 +1770,7 @@ async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(ses
         st.enablement.revalidation_task_id = task.task_id
 
         report: dict[str, Any] = {"fixes": []}
-        await c.writeback._resume_recover_pending_revalidation(report)
+        await c._resume_recover_pending_revalidation(report)
 
         assert st.enablement.validation_pending is False
         assert st.enablement.revalidation_task_id == ""
@@ -2412,7 +2412,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
-    c.phase_machine._advance_phase_if_needed = _boom  # type: ignore[assignment]
+    c._advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
         reason = await c.run(max_ticks=5)
@@ -2476,7 +2476,7 @@ async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "sweep_failed"
@@ -2502,7 +2502,7 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
     async def _ladder_stays_queued(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
     try:
         await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert c.shared_state.target_reached_at
@@ -2526,7 +2526,7 @@ async def test_target_reached_routes_through_sweep_then_close(session_dir):
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "target_reached"
@@ -2559,8 +2559,8 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     async def _ladder_already_settled(**_kwargs):
         return None
 
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
-    c.phase_close._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
+    c._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
+    c._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
         assert reason == "target_reached"

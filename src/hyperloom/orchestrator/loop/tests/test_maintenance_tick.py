@@ -322,9 +322,3 @@ class TestTheTickItself:
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
         assert got["events_pruned"] == 5
-
-    def test_unknown_attributes_fall_through_to_the_coordinator(self, tmp_path):
-        coord = _coordinator(tmp_path)
-        coord.some_coordinator_only_thing = "reachable"
-
-        assert MaintenanceCollaborator(coord).some_coordinator_only_thing == "reachable"

@@ -49,10 +49,10 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
     state.geak_pending["revalidation_task_id"] = task.task_id
 
     monkeypatch.setattr(coord, "_on_enter_sweep", AsyncMock())
-    await coord.phase_machine._on_phase_entered(
+    await coord._on_phase_entered(
         from_phase=PHASE_KERNEL_AGENT, to_phase=PHASE_SWEEP, reason="geak_revalidation_queued"
     )
-    assert coord.phase_kernel._kernel_timeline() is None
+    assert coord._kernel_timeline() is None
     before = next(event for event in read_timeline_events(coord.session_dir) if event["id"] == recorder.event_id)
     assert _integrated(before["ext"]) == 1
     header_before = kernel_event.event_parts((kernel_event.SECTION_EVENT,), event=recorder.event_id)
@@ -67,7 +67,7 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
         coord.session_dir = old_coord.session_dir
         coord.bus = old_coord.bus
         coord.shared_state = state = SharedState.load_or_init(coord.session_dir)
-        assert coord.phase_kernel._kernel_timeline() is None
+        assert coord._kernel_timeline() is None
 
     later = None
     later_before = None
@@ -77,7 +77,7 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
         assert later is not None
         later.begin(tput_before=110.0)
         later.record_geak_attempts(raw_journey)
-        coord.phase_kernel._kernel_timeline_recorder = later
+        coord._kernel_timeline_recorder = later
         later_before = kernel_event.event_parts((kernel_event.SECTION_GEAK_ATTEMPT,), event=later.event_id)
 
     native_result = {
@@ -111,7 +111,7 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
     assert e2e["e2e_gain_pct"] is None
     assert e2e["self_reported_e2e_gain_pct"] == 50.0
 
-    coord.phase_kernel._reject_geak_kernel_journey(
+    coord._reject_geak_kernel_journey(
         state.geak_result,
         measured_tput=120.0,
         current_best_tput=110.0,

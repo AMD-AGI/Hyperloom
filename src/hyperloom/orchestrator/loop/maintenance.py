@@ -63,13 +63,7 @@ async def run_lease_and_db_reclaim(
 
 
 class MaintenanceCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _run_maintenance(
         self,

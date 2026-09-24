@@ -14,7 +14,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -168,7 +167,7 @@ class _ReapStub:
 @pytest.mark.asyncio
 async def test_reap_skips_failure_accounting_already_charged():
     stub = _ReapStub()
-    disp = DispatcherCollaborator(stub)
+    disp = stub
     task = SimpleNamespace(task_id="t-dead", kind="baseline", params={})
     result = SubAgentResult(task_id=task.task_id, state="failed", result={"status": "failed"})
 

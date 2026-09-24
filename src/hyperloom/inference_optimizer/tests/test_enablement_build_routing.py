@@ -14,7 +14,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
-from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
 from hyperloom.orchestrator.enablement.build import (
@@ -62,7 +61,7 @@ def coord(build_coord):
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
     )
-    build_coord._bl = BuildLifecycleCollaborator(build_coord)
+    build_coord._bl = build_coord
     return build_coord
 
 

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator_helpers import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor
 from .params import _enablement_carrier_params
@@ -31,7 +30,7 @@ class _RowAlreadyLive(Exception):
     """The generation's key already names a live row, so no round is taken."""
 
 
-class EnablementRevalidation(CoordinatorCollaborator):
+class EnablementRevalidation:
     """Re-measures a kept enablement round against a real baseline."""
 
     async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:

@@ -65,7 +65,6 @@ from ..loop.coordinator_helpers import (
     _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
-from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
@@ -192,8 +191,8 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
-class KernelPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class KernelPhase:
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:

@@ -12,13 +12,12 @@ from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import Task
-from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
 
-class KernelStackPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class KernelStackPhase:
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
@@ -563,7 +562,7 @@ class KernelStackPhase(PhaseHandler):
 
         # Per-kernel in-flight guard, keyed on recorded integrate-attempt count.
         if not hasattr(self, "_auto_integrate_attempt_marks"):
-            self._coord._auto_integrate_attempt_marks: dict[str, int] = {}
+            self._auto_integrate_attempt_marks: dict[str, int] = {}
 
         for pending in pending_records:
             kid = str(pending.get("kernel_id") or "")

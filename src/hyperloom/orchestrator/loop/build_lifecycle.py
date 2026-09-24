@@ -29,13 +29,7 @@ def _novelty_idempotency_key(action: TargetedBuildAction) -> str:
 
 
 class BuildLifecycleCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
         """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""

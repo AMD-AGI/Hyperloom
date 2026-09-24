@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 from ..state.task_registry import Task
-from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
@@ -26,8 +25,8 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
 
 
-class SweepPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class SweepPhase:
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""

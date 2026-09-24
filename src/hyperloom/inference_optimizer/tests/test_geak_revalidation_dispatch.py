@@ -245,7 +245,7 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
         raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     summary = await c._enqueue_internal_stack_rebench(reason="unit")
     assert summary["fallback"] == "geak_harness"
     await c._run_geak_kernel_phase(from_phase="KERNEL")
@@ -301,7 +301,7 @@ async def test_agentx_predispatch_refusal_is_reused_until_overlay_recovers(
 
     monkeypatch.setattr(c, "_enqueue_internal_stack_rebench", dispatch)
     monkeypatch.setattr(c, "_validate_geak_via_geak_harness", fallback)
-    monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
+    monkeypatch.setattr(c, "_record_geak_kernel_journey", lambda _result: None)
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner unavailable")),
@@ -1062,7 +1062,7 @@ async def test_settle_preserves_candidate_audit_fields(coordinator) -> None:
     st = c.shared_state
     st.baseline_tput = 100.0
     st.geak_result = {"status": "ok"}
-    c.phase_kernel._record_geak_candidate(
+    c._record_geak_candidate(
         {
             "status": "ok",
             "final_throughput_tok_s": 116.0,
@@ -1276,7 +1276,7 @@ async def test_duplicate_enqueue_skips_while_rebench_in_flight(coordinator, tmp_
     )
 
     coord = c
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
@@ -1310,7 +1310,7 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
     st.geak_result = {**result, "revalidation_status": "no_promote"}
     st.geak_pending = {}
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
@@ -1381,7 +1381,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     geak_dir.mkdir(exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
 
     async def _kernel_entry_without_runner() -> None:
         monkeypatch = pytest.MonkeyPatch()
@@ -1427,7 +1427,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
         "revalidation_error": "geak_harness_unsupported_canonical_workload",
     }
     st.geak_pending = {}
-    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coordinator._record_geak_kernel_journey = lambda _result: None
     return settled
 
 
@@ -1548,7 +1548,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     st.geak_result = {**_SETTLED_GEAK_RESULT, "returncode": 0, "revalidation_status": "no_promote"}
     st.geak_pending = {}
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
@@ -1589,7 +1589,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     }
     st.geak_pending = {}
 
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
@@ -1621,7 +1621,7 @@ async def test_geak_revalidation_collision_with_succeeded_task_reported_honestly
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     st.geak_result = {}
     st.geak_pending = {}
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
 
     async def _fake_enqueue(*, reason: str) -> dict:
         return {
@@ -1655,7 +1655,7 @@ async def test_geak_revalidation_cancelled_task_reports_cancelled_before_complet
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     st.geak_result = {}
     st.geak_pending = {}
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
 
     async def _fake_enqueue(*, reason: str) -> dict:
         return {
@@ -1698,7 +1698,7 @@ async def test_geak_revalidation_collision_replays_persisted_succeeded_result(co
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     st.geak_result = {}
     st.geak_pending = {}
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    c._record_geak_kernel_journey = lambda _result: None
 
     task = await c.tasks.create(
         kind="explore",

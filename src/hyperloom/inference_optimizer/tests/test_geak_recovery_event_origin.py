@@ -65,7 +65,7 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
 
     monkeypatch.setattr("hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path", no_runner)
     with session_scope(coord.session_dir):
-        coord.phase_kernel._open_kernel_timeline(
+        coord._open_kernel_timeline(
             route=kernel_event.ROUTE_GEAK, route_reason="kernel_optimizer=geak", from_phase="FRAMEWORK_AGENT"
         )
         await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
@@ -73,10 +73,8 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
         task = await coord.tasks.get(state.geak_pending["revalidation_task_id"])
         assert task.params["geak_fallback"] is True
         assert task.idempotency_key == "geak-revalidate-c0"
-        await coord.phase_machine._on_phase_entered(
-            from_phase=PHASE_KERNEL_AGENT, to_phase=PHASE_SWEEP, reason="kernel_budget_cap"
-        )
-        assert coord.phase_kernel._kernel_timeline() is None
+        await coord._on_phase_entered(from_phase=PHASE_KERNEL_AGENT, to_phase=PHASE_SWEEP, reason="kernel_budget_cap")
+        assert coord._kernel_timeline() is None
         original = next(event for event in read_timeline_events(coord.session_dir) if event["id"] == origin)
         assert integrated_count(original["ext"]) == 1
         state.save(coord.session_dir)
@@ -99,7 +97,7 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
             )
             result_path.write_text(json.dumps(raw))
 
-        resumed.phase_kernel._open_kernel_timeline(
+        resumed._open_kernel_timeline(
             route=kernel_event.ROUTE_GEAK, route_reason="kernel_optimizer=geak", from_phase="FRAMEWORK_AGENT"
         )
         await resumed._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
@@ -112,10 +110,8 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
             assert tracked_task.task_id == task.task_id
             assert len(await resumed.tasks.queued()) == 1
         resumed._on_enter_sweep = AsyncMock()
-        await resumed.phase_machine._on_phase_entered(
-            from_phase=PHASE_KERNEL_AGENT, to_phase=PHASE_SWEEP, reason="kernel_budget_cap"
-        )
-        assert resumed.phase_kernel._kernel_timeline() is None
+        await resumed._on_phase_entered(from_phase=PHASE_KERNEL_AGENT, to_phase=PHASE_SWEEP, reason="kernel_budget_cap")
+        assert resumed._kernel_timeline() is None
         for path in result_path.parent.glob("e2e_cycle*/kernel_journey.json"):
             path.unlink()
         await resumed.tasks.transition(tracked_task.task_id, "running")

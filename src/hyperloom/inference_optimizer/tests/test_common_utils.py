@@ -1444,14 +1444,13 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
     coord = SimpleNamespace(
         action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
         sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
         _INLINE_ACTION_DENY=frozenset({"report"}),
     )
-    disp = DispatcherCollaborator(coord)
+    disp = coord
     monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
     # report is denied, missing has no executor, lane_action holds a lane.
     assert disp._inline_action_whitelist() == frozenset({"ok_action"})
@@ -1462,7 +1461,6 @@ def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holdin
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
     coord = SimpleNamespace(
         _inline_fast_actions_enabled=True,
@@ -1471,7 +1469,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyP
         action_registry=None,
         sub=SimpleNamespace(executor_registry={}),
     )
-    disp = DispatcherCollaborator(coord)
+    disp = coord
     assert "action_name required" in disp._run_action_now_sync("  ", {})
 
     monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))

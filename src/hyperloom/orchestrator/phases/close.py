@@ -18,7 +18,6 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
-from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
@@ -61,8 +60,8 @@ def _task_is_dead(task: Task | None) -> bool:
     return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
 
 
-class ClosePhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class ClosePhase:
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _derive_close_stop_reason(self) -> str:
         """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""

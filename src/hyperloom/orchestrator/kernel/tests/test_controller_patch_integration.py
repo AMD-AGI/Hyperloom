@@ -213,7 +213,7 @@ async def _integrate(
         patches_root=patches_root,
         session_dir=session_dir,
         shared_state=shared_state,
-        record_keep=coordinator.writeback._record_integrate_keep,
+        record_keep=coordinator._record_integrate_keep,
         validator=validator,
     )
 
@@ -1193,7 +1193,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     session_dir.mkdir()
     coordinator = _coordinator(session_dir, repo)
     coordinator.shared_state.benchmark_mode = mode
-    phase = coordinator.phase_kernel
+    phase = coordinator
     monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", lambda **kwargs: {"patch_count": 1})
     monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
@@ -1271,7 +1271,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             patches_root=patches,
             session_dir=session_dir,
             shared_state=state,
-            record_keep=coordinator.writeback._record_integrate_keep,
+            record_keep=coordinator._record_integrate_keep,
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(

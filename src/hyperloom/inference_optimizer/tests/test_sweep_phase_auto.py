@@ -152,7 +152,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._drain_pending_keep_integrates()
 
@@ -632,8 +632,8 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     async def _noop_roofline(*, reason: str):
         return None
 
-    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._maybe_validate_positive_needs_review_stack()
 
@@ -713,8 +713,8 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     async def _noop_roofline(*, reason: str):
         return None
 
-    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _should_not_run
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c._run_kernel_stack_validation_e2e = _should_not_run
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._recover_interrupted_stack_validation()
 
@@ -808,8 +808,8 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     async def _noop_roofline(*, reason: str):
         return None
 
-    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._on_enter_sweep(from_phase="KERNEL")
 
@@ -862,7 +862,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
         "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._drain_pending_keep_integrates()
 
@@ -948,7 +948,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
 
-    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
+    monkeypatch.setattr(coord, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -987,7 +987,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
     # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
     coord.shared_state.remaining_minutes = lambda: 1.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord._enqueue_internal_conc_sweep_task(reason="phase_entry")
 
     assert task is None
     assert coord.tasks._tasks == {}
@@ -1003,7 +1003,7 @@ async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 0
     coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord._enqueue_internal_conc_sweep_task(reason="phase_entry")
 
     expected_budget = 300 * 60 - 120
     assert task.params["total_budget_sec"] == expected_budget
@@ -1018,7 +1018,7 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord._enqueue_internal_conc_sweep_task(reason="phase_entry")
 
     assert task.params["total_budget_sec"] is None
     assert coord.tasks.last_lease_ttl_sec == 0
@@ -1032,7 +1032,7 @@ async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
     ]
     coord.shared_state.conc_sweep_total_budget_sec = 0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord._enqueue_internal_conc_sweep_task(reason="phase_entry")
 
     assert task is not None
     assert task.params["total_budget_sec"] is None
@@ -1047,7 +1047,7 @@ async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     coord.shared_state.conc_sweep_total_budget_sec = 9000
     coord.shared_state.remaining_minutes = lambda: 5.0
 
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    task = await coord._enqueue_internal_conc_sweep_task(reason="phase_entry")
 
     assert task is not None
     assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve

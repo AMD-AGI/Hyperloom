@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 
-from ..collaborator import CoordinatorCollaborator
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..state.orchestration_memory import MEMORY_REQUEST_PROMPT, build_memory_record, parse_memory_reply
 
@@ -17,7 +16,7 @@ log = _logging.getLogger(__name__)
 __all__ = ["CycleMemoryCollaborator"]
 
 
-class CycleMemoryCollaborator(CoordinatorCollaborator):
+class CycleMemoryCollaborator:
     """Orchestration-memory capture, directive fallback, and cycle prompt reseeding."""
 
     async def _capture_cycle_memory(self) -> bool:

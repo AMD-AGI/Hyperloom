@@ -222,9 +222,8 @@ def build_coord(tmp_path):
 @pytest.fixture
 def build_lifecycle(build_coord):
     """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
-    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 
-    return BuildLifecycleCollaborator(build_coord)
+    return build_coord
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:

@@ -538,17 +538,17 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "bench_result": bench,
     }
     candidates = []
-    real_lift = coord.writeback._lift_to_current_best
+    real_lift = coord._lift_to_current_best
 
     def capture_lift(action, tput, variant, **kwargs):
         candidates.append((tput, variant))
         return real_lift(action, tput, variant, **kwargs)
 
-    monkeypatch.setattr(coord.writeback, "_lift_to_current_best", capture_lift)
+    monkeypatch.setattr(coord, "_lift_to_current_best", capture_lift)
     if lane == "fusion":
-        await coord.writeback._record_integrate_keep(result)
+        await coord._record_integrate_keep(result)
     else:
-        await coord.writeback._promote_integrate_patch(result, _task("integrate_patch"), wb._PromoteOutcome())
+        await coord._promote_integrate_patch(result, _task("integrate_patch"), wb._PromoteOutcome())
 
     if vetoed:
         assert s.current_best == anchor
@@ -642,7 +642,7 @@ async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {
             "status": "kept",
             "output_throughput": 140.0,
@@ -655,7 +655,7 @@ async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     )
 
     assert s.optimization_stack[0]["action"] == "integrate"
-    journal = coord.writeback._ensure_journal()
+    journal = coord._ensure_journal()
     matches = [e for e in journal.entries if e.task_id == "int-forge-1"]
     assert len(matches) == 1
     entry = matches[0]
@@ -673,7 +673,7 @@ async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {
             "status": "kept",
             "output_throughput": 120.0,
@@ -686,7 +686,7 @@ async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
     )
 
     assert s.optimization_stack[0]["action"] == "fusion"
-    journal = coord.writeback._ensure_journal()
+    journal = coord._ensure_journal()
     matches = [e for e in journal.entries if e.task_id == "int-fusion-1"]
     assert len(matches) == 1
     assert matches[0].variant_name == "fuse-rmsnorm-silu"
@@ -842,8 +842,8 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     s.pending_integrate = {"task_id": "t-enable"}
     validate = Mock()
     watermark = AsyncMock()
-    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", validate)
-    monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
+    monkeypatch.setattr(coord, "_update_cumulative_gain_validated", validate)
+    monkeypatch.setattr(coord, "_maybe_enqueue_watermark_roofline", watermark)
 
     await coord._promote_to_shared_state(
         "integrate_patch",
@@ -1157,7 +1157,7 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_
 
     monkeypatch.setattr(coord.shared_state, "save", _save)
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "_stage_agent_keep",
         lambda **_kwargs: events.append("stage") or True,
     )
@@ -1194,12 +1194,12 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     }
     coord.shared_state.kb_stage_outbox = [row]
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "_stage_agent_keep",
         lambda **_kwargs: False,
     )
 
-    coord.writeback._drain_agent_keep_outbox()
+    coord._drain_agent_keep_outbox()
 
     assert coord.shared_state.kb_stage_outbox == [row]
 
@@ -1224,7 +1224,7 @@ def test_outbox_dead_letters_missing_patch_without_blocking_close(
     }
     coord.shared_state.kb_stage_outbox = [row]
 
-    coord.writeback._drain_agent_keep_outbox()
+    coord._drain_agent_keep_outbox()
 
     assert coord.shared_state.kb_stage_outbox == []
     assert coord.shared_state.kb_stage_dead_letter[0]["id"] == row["id"]
@@ -1277,7 +1277,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
         "_resume_recover_orphaned_keeps",
         "_record_observation",
     ):
-        monkeypatch.setattr(coord.writeback, name, _noop)
+        monkeypatch.setattr(coord, name, _noop)
 
     events: list[str] = []
     staged: list[dict] = []
@@ -1291,9 +1291,9 @@ async def test_resume_settles_state_before_draining_kb_outbox(
         return True
 
     monkeypatch.setattr(coord.shared_state, "save", _save)
-    monkeypatch.setattr(coord.writeback, "_stage_agent_keep", _stage)
+    monkeypatch.setattr(coord, "_stage_agent_keep", _stage)
 
-    await coord.writeback._resume_consistency_pass()
+    await coord._resume_consistency_pass()
 
     assert events.index("save") < events.index("stage")
     assert staged[0]["extra_server_args"] == "--new"
@@ -1317,13 +1317,13 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
 
     # _promote_warm_replay lives on the writeback collaborator; also stub the deferred PRELUDE analysis enqueue so the
     # test stays hermetic.
-    monkeypatch.setattr(coord.writeback, "_promote_warm_replay", _spy_warm)
+    monkeypatch.setattr(coord, "_promote_warm_replay", _spy_warm)
 
     async def _noop_prelude(*a, **k):
         return None
 
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "_maybe_enqueue_prelude_initial_analysis_after_baseline",
         _noop_prelude,
     )
@@ -1923,7 +1923,7 @@ class TestWritebackRequiredAxes:
         state.cumulative_gain_validated = 20.0
         state.cumulative_gain_validated_ts = "2026-01-01T00:00:00+00:00"
         state.cumulative_gain_validated_stack_len = 1
-        coord.writeback._stamp_current_best_measurement(
+        coord._stamp_current_best_measurement(
             {
                 "workspace": "/prior/benchmark",
                 "launch_evidence": {
@@ -1981,7 +1981,7 @@ class TestWritebackRequiredAxes:
         before = state.to_dict()
         original_candidate = deepcopy(candidate)
 
-        lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+        lifted = coord._lift_to_current_best("explore", 150.0, candidate)
 
         assert lifted is False
         assert state.to_dict() == before
@@ -1996,7 +1996,7 @@ class TestWritebackRequiredAxes:
         before = state.to_dict()
         original_candidate = deepcopy(candidate)
 
-        lifted = coord.writeback._lift_to_current_best("integrate_patch", 150.0, candidate)
+        lifted = coord._lift_to_current_best("integrate_patch", 150.0, candidate)
 
         assert lifted is False
         assert state.to_dict() == before
@@ -2019,7 +2019,7 @@ class TestWritebackRequiredAxes:
         record = Mock()
         monkeypatch.setattr(stack_event, "record_validation", record)
 
-        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+        coord._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
 
         assert state.to_dict() == before
         record.assert_not_called()
@@ -2040,11 +2040,11 @@ class TestWritebackRequiredAxes:
         record = Mock()
         watermark = AsyncMock()
         monkeypatch.setattr(stack_event, "record_validation", record)
-        monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
+        monkeypatch.setattr(coord, "_maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
         outcome = wb._PromoteOutcome()
         if lane == "integrate":
-            await coord.writeback._record_integrate_keep(
+            await coord._record_integrate_keep(
                 {
                     "decision": "KEEP",
                     "new_tput": 150.0,
@@ -2055,7 +2055,7 @@ class TestWritebackRequiredAxes:
                 }
             )
         elif lane == "integrate_patch":
-            await coord.writeback._promote_integrate_patch(
+            await coord._promote_integrate_patch(
                 {
                     "status": "kept",
                     "output_throughput": 150.0,
@@ -2068,7 +2068,7 @@ class TestWritebackRequiredAxes:
                 outcome,
             )
         else:
-            await coord.writeback._promote_explore(
+            await coord._promote_explore(
                 {
                     "winners": [candidate],
                     "best_variant": candidate,
@@ -2117,7 +2117,7 @@ class TestWritebackRequiredAxes:
         record = Mock()
         monkeypatch.setattr(stack_event, "record_validation", record)
 
-        await coord.writeback._promote_explore(
+        await coord._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
             _task("explore", params={"source": "resume_stack_revalidate"}),
             wb._PromoteOutcome(),
@@ -2149,8 +2149,8 @@ class TestWritebackRequiredAxes:
                 "total_throughput": total,
                 "e2e_norm_intvty_p90": intvty,
             }
-            assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
-            assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
+            assert coord._lift_to_current_best("explore", 150.0, candidate)
+            assert coord._update_cumulative_gain_validated(150.0, candidate)
             assert state.cumulative_gain_validated == pytest.approx(intvty - 100.0)
             assert not state.optimization_stack_has_unvalidated_keeps()
         assert total < state.baseline_perf["total_throughput"] * 0.95
@@ -2168,8 +2168,8 @@ class TestWritebackRequiredAxes:
         record = Mock()
         monkeypatch.setattr(stack_event, "record_validation", record)
 
-        lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
-        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+        lifted = coord._lift_to_current_best("explore", 150.0, candidate)
+        coord._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
 
         assert lifted is True
         assert state.current_best["tput"] == 150.0
@@ -2325,13 +2325,13 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "server_log_path": "/last/server.log",
     }
     updates = []
-    real_update = coord.writeback._update_cumulative_gain_validated
+    real_update = coord._update_cumulative_gain_validated
 
     def capture_update(new_tput, measurement, **kwargs):
         updates.append((new_tput, dict(measurement), kwargs.get("measurement_basis")))
         return real_update(new_tput, measurement, **kwargs)
 
-    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", capture_update)
+    monkeypatch.setattr(coord, "_update_cumulative_gain_validated", capture_update)
     await coord._promote_to_shared_state(
         "explore",
         {
@@ -2434,7 +2434,7 @@ async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
         "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
     }
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {"new_tput": 1200.0, "kernel_id": "k001", "integration_id": "i1"},
     )
 
@@ -2449,7 +2449,7 @@ async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
     s.baseline_tput = 1000.0
     s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {"KEEP_ME": "1", "TUNED": "old"}}
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {"new_tput": 1200.0, "kernel_id": "k002", "extra_envs": {"TUNED": "new"}},
     )
 
@@ -2463,7 +2463,7 @@ async def test_fusion_origin_integrate_keep_lifts_as_fusion(session_dir):
     s.baseline_tput = 1000.0
     s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {}}
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {
             "new_tput": 1300.0,
             "kernel_id": "fuse_a",
@@ -2494,7 +2494,7 @@ async def test_fusion_integrate_refused_lift_does_not_mark_keep(session_dir):
     s.baseline_tput = 1000.0
     s.current_best = {"action": "explore", "tput": 1500.0}
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {
             "new_tput": 1300.0,
             "kernel_id": "refused-fusion",
@@ -2516,7 +2516,7 @@ async def test_a_plain_integrate_keep_is_not_relabelled_fusion(session_dir):
     s.baseline_tput = 1000.0
     s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {}}
 
-    await coord.writeback._record_integrate_keep(
+    await coord._record_integrate_keep(
         {"new_tput": 1200.0, "kernel_id": "k003", "integration_id": "i3"},
     )
 

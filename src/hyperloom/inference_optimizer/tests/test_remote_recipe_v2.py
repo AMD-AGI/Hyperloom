@@ -1189,7 +1189,7 @@ def test_degraded_kb_skips_remote_close_writer(
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
     )
 
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = coordinator.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "degraded_kb",
@@ -1225,7 +1225,7 @@ def test_local_close_ignores_ambient_kb_store(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = coordinator.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "no_recipe_backend",
@@ -1283,7 +1283,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "from_env",
         classmethod(lambda cls: _Facade()),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = coordinator.finalize_recipe_and_journal()
     assert outcome == {
         "status": "written",
         "reason": "",
@@ -1340,7 +1340,7 @@ def test_remote_close_transport_failure_is_nonfatal(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = coordinator.finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
         "reason": "OSError",
@@ -1391,7 +1391,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
     )
 
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = coordinator.finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert outcome["result_type"] == "unvalidated_recipe"

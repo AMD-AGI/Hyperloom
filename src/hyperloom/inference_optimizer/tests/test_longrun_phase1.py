@@ -475,7 +475,7 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(c, "_on_phase_entered", _entered)
     await c._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_CLOSE

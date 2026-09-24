@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator_shared import (
     FORCE_STALLED_KEEP_ROUNDS,
     FORCE_STALLED_SPECIALIST_ROUNDS,
@@ -38,7 +37,7 @@ __all__ = ["SpecialistDispatchCollaborator"]
 _SOURCE_PATCH_FAMILY = "source_patch"
 
 
-class SpecialistDispatchCollaborator(CoordinatorCollaborator):
+class SpecialistDispatchCollaborator:
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:

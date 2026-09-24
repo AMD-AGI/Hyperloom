@@ -147,13 +147,7 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
 
 
 class ProposalsCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
@@ -197,7 +191,7 @@ class ProposalsCollaborator:
             )
         except Exception:  # noqa: BLE001 - the recipe store may be remote
             row = {}
-        self._coord._local_recipe_cache = (tick, row)
+        self._local_recipe_cache = (tick, row)
         return row
 
     @staticmethod
@@ -400,7 +394,7 @@ class ProposalsCollaborator:
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
-            self._coord._local_recipe_cache = None
+            self._local_recipe_cache = None
         except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",

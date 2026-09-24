@@ -550,7 +550,7 @@ async def test_current_recipe_patch_skips_when_an_overlay_records_no_root(
         prepared += 1
         return {"status": "prepared"}
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+    coord._prepare_warm_kernel_kb = _prepare
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -567,7 +567,7 @@ def test_current_recipe_patch_refs_must_be_unique(tmp_path, monkeypatch):
     coord = _make_coord(tmp_path)
 
     with pytest.raises(ValueError, match="duplicate"):
-        coord.phase_prelude._read_current_recipe_replay()
+        coord._read_current_recipe_replay()
 
 
 def test_current_recipe_fails_when_a_patch_artifact_is_unavailable(tmp_path, monkeypatch):
@@ -593,7 +593,7 @@ def test_current_recipe_fails_when_a_patch_artifact_is_unavailable(tmp_path, mon
     )
 
     with pytest.raises(ValueError, match="artifact is unavailable"):
-        coord.phase_prelude._read_current_recipe_replay()
+        coord._read_current_recipe_replay()
 
 
 @pytest.mark.asyncio
@@ -633,7 +633,7 @@ async def test_current_kernel_conflict_fails_before_preparation(
         prepared += 1
         return {"status": "prepared"}
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+    coord._prepare_warm_kernel_kb = _prepare
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -665,7 +665,7 @@ async def test_current_history_only_view_never_auto_replays(tmp_path):
         prepared += 1
         return {"status": "prepared"}
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+    coord._prepare_warm_kernel_kb = _prepare
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -1037,7 +1037,7 @@ def test_all_revert_branches_retain_pending_on_rollback_failure(
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
     coord.shared_state.warm_replay_outcome = {"status": "in_flight"}
-    coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
+    coord._rollback_combined_warm = (  # type: ignore[method-assign]
         lambda *_args: {"ok": False, "errors": ["restore failed"]}
     )
     task = _StubTask(
@@ -1255,7 +1255,7 @@ def test_multi_file_kernel_targets_share_one_framework_root(
         encoding="utf-8",
     )
 
-    targets = coord.phase_prelude._resolve_kernel_target_paths(
+    targets = coord._resolve_kernel_target_paths(
         {
             "patch_path": str(patch),
             "apply_root": str(framework_root),
@@ -1294,7 +1294,7 @@ def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monk
         "resolution_reason": "kernel_apply_root_missing",
     }
 
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [str(recorded_target)]
+    assert coord._resolve_kernel_target_paths(entry) == [str(recorded_target)]
     assert "resolution_error" not in entry
     assert "resolution_reason" not in entry
 
@@ -1310,7 +1310,7 @@ def test_kernel_item_recording_no_root_is_refused(tmp_path):
 
     entry = {"patch_path": str(patch)}
 
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert coord._resolve_kernel_target_paths(entry) == []
     assert entry["resolution_reason"] == "kernel_apply_root_missing"
 
 
@@ -1325,7 +1325,7 @@ def test_kernel_recorded_root_absent_on_this_host_is_refused(tmp_path):
 
     entry = {"patch_path": str(patch), "apply_root": str(tmp_path / "never-checked-out")}
 
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert coord._resolve_kernel_target_paths(entry) == []
     assert entry["resolution_reason"] == "kernel_apply_root_absent"
 
 
@@ -1342,7 +1342,7 @@ def test_restored_kernel_plan_rechecks_the_recorded_root(tmp_path):
         }
     ]
 
-    assert coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state) is None
+    assert coord._warm_replay_kernel_root_block_reason(coord.shared_state) is None
 
 
 def test_kernel_plan_blocks_when_a_recorded_root_is_gone(tmp_path):
@@ -1356,7 +1356,7 @@ def test_kernel_plan_blocks_when_a_recorded_root_is_gone(tmp_path):
         }
     ]
 
-    outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state)
+    outcome = coord._warm_replay_kernel_root_block_reason(coord.shared_state)
 
     assert outcome is not None
     assert outcome["reason"] == "kernel_apply_root_absent"
@@ -1368,7 +1368,7 @@ def test_kernel_plan_blocks_when_an_item_records_no_root(tmp_path):
     coord = _make_coord(tmp_path)
     coord.shared_state.warm_kernel_kb_plan = [{"column": "fusion", "patch_path": str(tmp_path / "fusion.patch")}]
 
-    outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state)
+    outcome = coord._warm_replay_kernel_root_block_reason(coord.shared_state)
 
     assert outcome is not None
     assert outcome["reason"] == "kernel_apply_root_missing"
@@ -1381,13 +1381,13 @@ def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
     existing.parent.mkdir(parents=True)
     existing.write_text("original\n", encoding="utf-8")
     snapshots = [
-        coord.phase_prelude._snapshot_warm_kernel_target(str(existing), 0),
-        coord.phase_prelude._snapshot_warm_kernel_target(str(created), 1),
+        coord._snapshot_warm_kernel_target(str(existing), 0),
+        coord._snapshot_warm_kernel_target(str(created), 1),
     ]
     existing.write_text("patched\n", encoding="utf-8")
     created.write_text("new\n", encoding="utf-8")
 
-    result = coord.phase_prelude._restore_warm_kernel_snapshots(snapshots)
+    result = coord._restore_warm_kernel_snapshots(snapshots)
 
     assert result == {"ok": True, "errors": []}
     assert existing.read_text(encoding="utf-8") == "original\n"
@@ -1426,14 +1426,13 @@ async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
 @pytest.mark.asyncio
 async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
     """A dispatch-time policy failure must restore the live framework target."""
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
     from hyperloom.orchestrator.phases.machine_state import (
         warm_replay_in_flight,
     )
 
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    dispatcher = DispatcherCollaborator(coord)
+    dispatcher = coord
 
     class _Bus:
         async def append_and_seq(self, _message):
@@ -1844,7 +1843,7 @@ async def test_combined_replay_prepares_kernel_without_separate_validation(
             "extra_server_args": "--kernel",
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -1869,7 +1868,7 @@ async def test_dirty_kernel_preparation_stops_recipe_enqueue(tmp_path):
             "rollback": {"ok": False, "errors": ["restore failed"]},
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -1901,8 +1900,8 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
         raise RuntimeError("registry unavailable")
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda got_applied, got_snapshots=None: (
             rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
         )
@@ -1938,8 +1937,8 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
     async def _raise(**_kwargs):
         raise RuntimeError("registry unavailable")
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda *_args: {"ok": False, "errors": ["restore failed"]}
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
@@ -1968,7 +1967,7 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
     )
     coord.shared_state.warm_replay_pending = {
@@ -2013,7 +2012,7 @@ async def test_kernel_only_replay_enqueues_without_recipe(tmp_path):
             "extra_server_args": "",
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
     assert task is not None
@@ -2035,7 +2034,7 @@ async def test_no_recipe_after_loaded_kernel_clears_stale_pending(tmp_path):
             "snapshots": [],
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
 
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
@@ -2056,7 +2055,7 @@ async def test_combined_threshold_uses_decaying_curve(tmp_path):
             "extra_server_args": "",
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
     # macro_cycle=0 → decaying curve yields 1.0%.
@@ -2083,7 +2082,7 @@ async def test_low_confidence_recipe_does_not_suppress_kernel(tmp_path):
             "extra_server_args": "--kernel",
         }
 
-    coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
+    coord._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
     assert task is not None
@@ -2224,7 +2223,7 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
     )
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
@@ -2285,7 +2284,7 @@ def test_every_patched_tree_is_promoted(tmp_path):
         }
     )
 
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    ok, promotion = coord._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
@@ -2305,7 +2304,7 @@ def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
-    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+    coord._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
         lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
     )
     task = _StubTask(
@@ -2346,7 +2345,7 @@ def test_a_nogit_tree_promotes_on_the_backups_that_restore_it(tmp_path):
         }
     )
 
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    ok, promotion = coord._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {
@@ -2374,7 +2373,7 @@ def test_a_tree_that_names_no_checkout_is_still_refused(tmp_path):
         }
     )
 
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    ok, promotion = coord._resolve_promoted_recipe_checkout(
         {"warm_patch_trees": [{"root": "", "pre_sha": "", "snapshot_manifest": None, "nogit_backups": []}]},
         task,
     )
@@ -2397,7 +2396,7 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
         }
     )
 
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    ok, promotion = coord._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
@@ -2425,12 +2424,12 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
         ),
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: {"ok": True, "errors": []}
     )
     backups = [{"target": "vllm/fp8.py", "backup": "/tmp/0000.bin"}]
 
-    outcome = coord.phase_prelude._rollback_combined_warm(
+    outcome = coord._rollback_combined_warm(
         {
             "warm_patch_trees": [
                 {
@@ -2452,11 +2451,11 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
 def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path):
     """An overlay already present is applied as a no-op, so there is nothing to undo."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: {"ok": True, "errors": []}
     )
 
-    outcome = coord.phase_prelude._rollback_combined_warm(
+    outcome = coord._rollback_combined_warm(
         {
             "warm_patch_trees": [
                 {
@@ -2487,7 +2486,7 @@ def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_p
         }
     )
 
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    ok, promotion = coord._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {
@@ -2517,11 +2516,11 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    coord._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: {"ok": True, "errors": []}
     )
 
-    outcome = coord.phase_prelude._rollback_combined_warm(
+    outcome = coord._rollback_combined_warm(
         {
             "warm_patch_trees": [
                 {"root": "/sglang", "pre_sha": "abc", "snapshot_manifest": {"repo_path": "/sglang"}},
@@ -2544,10 +2543,10 @@ def test_checkout_promotion_failure_retains_pending_when_rollback_fails(tmp_path
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
-    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+    coord._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
         lambda *_args: (False, {"failure": "persist failed"})
     )
-    coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
+    coord._rollback_combined_warm = (  # type: ignore[method-assign]
         lambda *_args: {"ok": False, "errors": ["restore failed"]}
     )
     task = _StubTask(
@@ -2725,7 +2724,7 @@ def test_each_overlay_carries_the_checkout_it_was_applied_into(tmp_path, monkeyp
     )
     coord = _make_coord(tmp_path)
 
-    replay = coord.phase_prelude._read_current_recipe_replay()
+    replay = coord._read_current_recipe_replay()
 
     assert [patch["framework_root"] for patch in replay["patches"]] == [
         "/sglang",
@@ -2743,7 +2742,7 @@ def test_an_overlay_with_no_recorded_root_is_left_for_local_resolution(tmp_path,
     )
     coord = _make_coord(tmp_path)
 
-    replay = coord.phase_prelude._read_current_recipe_replay()
+    replay = coord._read_current_recipe_replay()
 
     assert all("framework_root" not in patch for patch in replay["patches"])
 
@@ -2965,7 +2964,7 @@ def test_the_kernel_plan_is_on_the_event_before_the_ruling_prunes_it(tmp_path):
         {"column": "rewrite", "patch_path": "/kb/never-reached.patch"},
     ]
     with session_scope(tmp_path):
-        coord.phase_prelude._open_warm_replay_timeline(task=_replay_task(), session_baseline_tput=600.0)
+        coord._open_warm_replay_timeline(task=_replay_task(), session_baseline_tput=600.0)
         finalize_events(tmp_path)
         items = _replay_ext(tmp_path)["applied"]["items"]
 

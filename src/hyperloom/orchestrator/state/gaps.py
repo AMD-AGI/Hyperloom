@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Any
 
-from ..collaborator import CoordinatorCollaborator
 from ._shared_state.phase_state import _shared_state_module
 
 log = _logging.getLogger(__name__)
@@ -107,7 +106,7 @@ class GapsStateMixin:
         return gap
 
 
-class GapRefreshCollaborator(CoordinatorCollaborator):
+class GapRefreshCollaborator:
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
     async def _refresh_gaps(self, *, reason: str) -> None:

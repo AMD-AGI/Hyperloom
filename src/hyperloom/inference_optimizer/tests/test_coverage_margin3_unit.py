@@ -187,7 +187,6 @@ def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
     coord = SimpleNamespace(
         _inline_fast_actions_enabled=True,
@@ -196,7 +195,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
         action_registry={},
         sub=SimpleNamespace(executor_registry={}),
     )
-    disp = DispatcherCollaborator(coord)
+    disp = coord
     assert "action_name required" in disp._run_action_now_sync("  ", {})
 
     monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))

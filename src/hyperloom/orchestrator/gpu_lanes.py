@@ -10,12 +10,11 @@ from typing import Any
 
 from hyperloom.common.env import is_truthy
 
-from .collaborator import CoordinatorCollaborator
 
 log = logging.getLogger(__name__)
 
 
-class GpuLanes(CoordinatorCollaborator):
+class GpuLanes:
     """Resolves GPU params and lane leases for Coordinator-internal dispatches."""
 
     def _framework_gpu_params(self) -> dict[str, Any]:

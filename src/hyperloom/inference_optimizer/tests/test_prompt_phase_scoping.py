@@ -295,7 +295,6 @@ def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
     """Build a MachinePhase over a minimal coordinator stub."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.phases.machine import MachinePhase
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="t", macro_cycle=3)
@@ -313,7 +312,7 @@ def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
     )
-    return MachinePhase(coord), coord, rebuild_calls
+    return coord, coord, rebuild_calls
 
 
 def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path):
@@ -376,14 +375,6 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
 
     assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
     assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
-
-
-def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
-    """The collaborator method must be routed, or the seam hook is a no-op."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
-    assert "phase_machine" in Coordinator._COLLAB_MODULES
 
 
 # Snapshot paths: one artefact per scope the model ran under

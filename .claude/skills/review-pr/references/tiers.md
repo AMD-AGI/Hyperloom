@@ -6,7 +6,7 @@ a failure surfaces, not by file size or churn.
 | Tier | File | Blast radius / failure mode |
 |---|---|---|
 | 1 | `inference_optimizer/cli/__init__.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
-| 1 | `orchestrator/loop/coordinator.py` | Holds `_COLLAB_MODULES`, the name map for 21 collaborators. A bad entry is an `AttributeError` hours in, not at import |
+| 1 | `orchestrator/loop/coordinator.py` | Inherits its 24 collaborator mixins and builds the state they share. A name two mixins define resolves silently by MRO order; `loop/tests/test_coordinator_composition.py` catches it |
 | 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json`, enforces `CORE_STATE_FIELDS`. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
 | 1 | `orchestrator/loop/writeback.py` | The one path turning a measurement into KEEP/REVERT + KB record. A win recorded as a regression, or nothing persisted and no error |
 | 1 | `orchestrator/phases/machine_state.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
@@ -38,9 +38,9 @@ Q1 — If this file raises at import time, does `inference_optimizer optimize`
      that chain.)                                     → NO  → Tier 1
 
 Q1b — Is it reached not by import but by NAME at runtime — an entry in
-     Coordinator._COLLAB_MODULES, KERNEL_REQUEST_HANDLERS, or the
-     action catalogue? Name-resolved wiring fails mid-session, not at
-     startup, so it is Tier 1 even though nothing imports it.
+     KERNEL_REQUEST_HANDLERS or the action catalogue? Name-resolved
+     wiring fails mid-session, not at startup, so it is Tier 1 even
+     though nothing imports it.
                                                       → YES → Tier 1
 
 Q2 — Does it decide, persist, or read the number a KEEP/REVERT is made
@@ -66,6 +66,6 @@ Otherwise → Tier 3 (one phase handler, one executor helper, one agent
 tool, one KB view).
 ```
 
-Q1b is the one that bites here. `Coordinator` resolves its 21 collaborators by string through a
-metaclass `__getattr__`, so a rename passes every import check, passes lint, passes collection, and
-fails only hours into a session when that phase is entered. Grep the string, not the symbol.
+Q1b is the one that bites here. `KERNEL_REQUEST_HANDLERS` and the action catalogue route by string,
+so a renamed kind or action passes every import check, passes lint, passes collection, and fails only
+hours into a session when that request arrives. Grep the string, not the symbol.

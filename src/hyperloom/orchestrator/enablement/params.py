@@ -13,7 +13,6 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
-from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
 
@@ -112,7 +111,7 @@ def _maybe_build_localization_candidate(
         return None
 
 
-class EnablementParams(CoordinatorCollaborator):
+class EnablementParams:
     """Builds the enablement authoring specialist's parameters."""
 
     def _build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
