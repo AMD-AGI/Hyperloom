@@ -852,13 +852,23 @@ def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
     return {p: (p.read_bytes() if p.is_file() else None) for p in paths}
 
 
-def _restore(snapshot: dict[Path, bytes | None]) -> None:
-    """Restore snapshotted paths: rewrite originals, delete ones that were absent."""
+def _restore(snapshot: dict[Path, bytes | None]) -> set[Path]:
+    """Restore snapshotted paths — rewrite originals, delete ones that were absent — and report what it could not.
+
+    Every entry is attempted: one path the filesystem will not give back must not cost the rest of the
+    protected source its restoration. The paths returned are still carrying whatever the agent left there,
+    so the caller owes the operator their names.
+    """
+    unrestored: set[Path] = set()
     for p, original in snapshot.items():
-        if original is None:
-            p.unlink(missing_ok=True)
-        else:
-            p.write_bytes(original)
+        try:
+            if original is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.write_bytes(original)
+        except OSError:
+            unrestored.add(p)
+    return unrestored
 
 
 def _abs(workspace: Path, path_like: str) -> Path:
@@ -1729,8 +1739,22 @@ async def prepare_task(
     # resetting the whole tree to HEAD.
     pre_diff = _git_diff_patch(workspace, prep_base_sha)
 
+    # Protected paths the rollback could not put back. Preparation cannot be declared successful while the
+    # caller's own source still carries the prep agent's edits, so this outranks any verdict on the driver.
+    unrestored_sources: set[Path] = set()
+
+    def _restore_protected() -> None:
+        unrestored_sources.update(_restore(src_snapshot))
+
+    def _unrestored_message() -> str:
+        named = ", ".join(p.as_posix() for p in sorted(unrestored_sources))
+        return (
+            f"could not restore the protected source after preparation: {named}; the workspace still holds "
+            "the prep agent's edits to it, so the task was not prepared"
+        )
+
     def _restore_sources() -> None:
-        _restore(src_snapshot)
+        _restore_protected()
         if prep_base_sha:
             _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
 
@@ -1743,7 +1767,7 @@ async def prepare_task(
             _git(workspace, "checkout", "--", ".")
             _remove_new_untracked(workspace, pre_untracked)
             _git_apply_patch(workspace, pre_diff)
-        _restore(src_snapshot)
+        _restore_protected()
 
     def _rollback() -> None:
         _restore_kernel_workspace()
@@ -1880,20 +1904,34 @@ async def prepare_task(
         pf: PreflightResult,
         attempt_count: int,
     ) -> PrepareResult:
-        # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not import
-        # it.
-        if provided_harness and not driver_external:
+        if driver_external:
+            # Publish the complete validated driver/helper change set from the isolated staging tree.
+            _restore_kernel_workspace()
+            assert external_transaction is not None
+            external_transaction.restore_passthroughs()
+        elif provided_harness:
+            # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not
+            # import it.
             try:
                 uses_harness = "graph_harness" in driver_path.read_text()
             except OSError:
                 uses_harness = True
             if not uses_harness:
                 _safe_unlink(harness_path)
+        if unrestored_sources:
+            # Signing off here would carry the agent's edit of the source under optimization into the pristine
+            # commit, and every measurement after it would judge a kernel the caller never wrote.
+            return PrepareResult(
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=False,
+                final_preflight=pf,
+                message=_unrestored_message(),
+                audit_dir=audit_dir_str,
+            )
         if driver_external:
-            # Publish the complete validated driver/helper change set from the isolated staging tree.
-            _restore_kernel_workspace()
-            assert external_transaction is not None
-            external_transaction.restore_passthroughs()
             try:
                 changes = external_transaction.publish()
             except ExternalArtifactError as exc:
@@ -2237,7 +2275,21 @@ async def prepare_task(
     # (3) Failure: roll the workspace back to its exact pre-prep state (tracked files reset to HEAD, caller's
     # uncommitted mods re-applied, prep-created untracked removed, protected source restored).
     _rollback()
-    rolled_back = not external_rollback_error
+    rolled_back = not external_rollback_error and not unrestored_sources
+    if unrestored_sources:
+        # Lead with it: the operator has a file on disk that is not theirs any more, which they have to deal
+        # with before any reason the driver was refused.
+        log.error("%s", _unrestored_message())
+        return PrepareResult(
+            ok=False,
+            attempts=attempts,
+            wrote_files=[],
+            created_files=[],
+            rolled_back=rolled_back,
+            final_preflight=last_pf,
+            message=_unrestored_message(),
+            audit_dir=audit_dir_str,
+        )
     if scaffold_error:
         # Lead with it: the preflight reasons describe a driver judged in a state that was never valid, so quoting
         # them first would send the operator after the driver.
