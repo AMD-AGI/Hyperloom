@@ -58,9 +58,7 @@ from .coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 
-from .coordinator import (
-    _format_inbox_event,
-)
+from .coordinator_shared import _format_inbox_event
 import logging as _logging
 
 log = _logging.getLogger(__name__)

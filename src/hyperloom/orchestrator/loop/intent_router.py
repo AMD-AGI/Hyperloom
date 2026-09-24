@@ -532,7 +532,7 @@ class IntentRouter:
             {**payload, "needs_review": True},
         )
         await self.bus.append_and_seq(msg)
-        from .coordinator import PendingProposal
+        from .coordinator_shared import PendingProposal
 
         pending = PendingProposal(
             proposal_msg_id=msg.msg_id,

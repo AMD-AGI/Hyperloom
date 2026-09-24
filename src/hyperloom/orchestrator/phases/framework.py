@@ -21,11 +21,7 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_o
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
-from ..loop.coordinator import (
-    PendingProposal,
-    _AUTHORED_LANE_MAX_ATTEMPTS,
-    _framework_config_levers_from_done,
-)
+from ..loop.coordinator_shared import PendingProposal, _AUTHORED_LANE_MAX_ATTEMPTS, _framework_config_levers_from_done
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..actions.executors._grid_server_args import merge_server_args
 from ..actions.executors._grid_base import is_kept as _is_kept

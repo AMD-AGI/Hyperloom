@@ -13,11 +13,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    CoordinatorState,
-    PendingProposal,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorState
+from hyperloom.orchestrator.loop.coordinator_shared import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -455,7 +452,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.coordinator_shared import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
@@ -511,7 +508,7 @@ async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.coordinator_shared import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(

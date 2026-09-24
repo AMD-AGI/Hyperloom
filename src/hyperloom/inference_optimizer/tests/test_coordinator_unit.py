@@ -6,12 +6,8 @@
 from __future__ import annotations
 
 
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _first_present,
-    _format_inbox_event,
-    _lifecycle_paths,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator, _lifecycle_paths
+from hyperloom.orchestrator.loop.coordinator_shared import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 

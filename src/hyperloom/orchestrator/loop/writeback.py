@@ -94,7 +94,7 @@ from ..actions.executors._accuracy_gate import (
 )
 from ..knowledge.agent_kb import PatchKB
 
-from .coordinator import (
+from .coordinator_shared import (
     _BASELINE_MAX_TOTAL_FAILURES,
     _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
     _SEVERITY_CRASH,

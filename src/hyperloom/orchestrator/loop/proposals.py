@@ -20,9 +20,7 @@ from ..state.task_registry import TERMINAL_STATES
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
-from .coordinator import (
-    PendingProposal,
-)
+from .coordinator_shared import PendingProposal
 import logging as _logging
 
 log = _logging.getLogger(__name__)

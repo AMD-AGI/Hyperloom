@@ -14,7 +14,7 @@ from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator import (
+from ..loop.coordinator_shared import (
     FORCE_STALLED_KEEP_ROUNDS,
     FORCE_STALLED_SPECIALIST_ROUNDS,
     SPECIALIST_AUTO_RETRY_MAX,

@@ -37,9 +37,7 @@ from ..state.optimization_journal import (
 )
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
-from ..loop.coordinator import (
-    _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
-)
+from ..loop.coordinator_shared import _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE
 from ..loop.coordinator_helpers import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,

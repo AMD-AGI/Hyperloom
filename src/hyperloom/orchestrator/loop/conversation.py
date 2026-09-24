@@ -12,9 +12,7 @@ from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
-from .coordinator import (
-    _format_inbox_event,
-)
+from .coordinator_shared import _format_inbox_event
 from .coordinator_helpers import _parse_iso_unix
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
