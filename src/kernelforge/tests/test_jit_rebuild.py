@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.llm.git import GitError
 from kernelforge.loop.jit_rebuild import (
     force_jit_rebuild,
     force_jit_rebuild_for_changes,
@@ -77,6 +78,49 @@ def test_various_cpp_extensions_detected(tmp_path, monkeypatch):
         force_jit_rebuild([f"/work/aiter/csrc/kernel{ext}"])
         assert "sources" in os.environ.get("AITER_ROOT_DIR", ""), ext
         assert "AITER_REBUILD" not in os.environ
+
+
+def test_a_failed_rebuild_stops_the_caller(monkeypatch):
+    """The next thing the caller does is benchmark; a silent skip measures the stale binary."""
+    monkeypatch.delenv("AITER_REBUILD", raising=False)
+
+    class Boom:
+        def __bool__(self):
+            raise TypeError("boom")
+
+    with pytest.raises(TypeError, match="boom"):
+        force_jit_rebuild([Boom()])
+
+
+def test_an_unreadable_source_is_not_keyed_to_the_stale_shard(tmp_path, monkeypatch):
+    """Two different contents behind one unreadable path must not select the same compiled artifacts."""
+    source = tmp_path / "aiter" / "csrc" / "kernel.cu"
+    source.parent.mkdir(parents=True)
+    source.write_text("kernel", encoding="utf-8")
+    monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(f"cannot read {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    with pytest.raises(PermissionError):
+        force_jit_rebuild([str(source)])
+
+
+def test_a_source_that_no_longer_exists_still_selects_a_shard(tmp_path, monkeypatch):
+    """A declared path the working tree does not carry is a state the digest can express."""
+    monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
+
+    force_jit_rebuild([str(tmp_path / "aiter" / "csrc" / "deleted.cu")])
+
+    assert "sources" in os.environ["AITER_ROOT_DIR"]
+
+
+def test_a_broken_workspace_does_not_read_as_no_source_changes(tmp_path):
+    """ "git could not be asked" and "nothing changed" send the rebuild to opposite conclusions."""
+    with pytest.raises(GitError):
+        tracked_source_changes(tmp_path)
 
 
 def test_tracked_source_changes_include_undeclared_edits(tmp_path: Path):

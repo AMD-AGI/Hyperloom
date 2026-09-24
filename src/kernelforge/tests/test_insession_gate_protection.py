@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import subprocess
 from pathlib import Path
 
 import kernelforge.loop.insession_gate as gate_module
@@ -20,6 +21,14 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     (scripts / "task_runner.py").write_text("print('runner')\n")
     kernel = source / "kernel.cu"
     kernel.write_text("__global__ void kernel() {}\n")
+    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
 
     gate = InSessionGate(
         driver_script=str(workspace / "forge_driver.py"),

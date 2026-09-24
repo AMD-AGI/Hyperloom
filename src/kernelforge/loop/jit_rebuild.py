@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Iterable
 
 from kernelforge.llm.git import git
 from kernelforge.loop.aiter_cache import activate_aiter_cache_for_sources
-
-log = logging.getLogger(__name__)
 
 _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")
 
@@ -38,31 +35,15 @@ def tracked_source_changes(workspace: str | Path) -> list[str]:
     """Return existing tracked files changed from HEAD, as absolute paths."""
 
     root = Path(workspace).expanduser().resolve()
-    try:
-        result = git(
-            "diff",
-            "--name-only",
-            "-z",
-            "HEAD",
-            "--",
-            ".",
-            cwd=root,
-            check=False,
-            text=False,
-        )
-        if result.returncode != 0:
-            return []
-        changed: list[str] = []
-        for encoded in result.stdout.split(b"\0"):
-            if not encoded:
-                continue
-            path = (root / encoded.decode(errors="surrogateescape")).resolve()
-            if path.is_file() and str(path) not in changed:
-                changed.append(str(path))
-        return changed
-    except Exception as exc:  # noqa: BLE001 - best-effort safety net
-        log.debug("tracked source change discovery skipped: %r", exc)
-        return []
+    result = git("diff", "--name-only", "-z", "HEAD", "--", ".", cwd=root, text=False)
+    changed: list[str] = []
+    for encoded in result.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        path = (root / encoded.decode(errors="surrogateescape")).resolve()
+        if path.is_file() and str(path) not in changed:
+            changed.append(str(path))
+    return changed
 
 
 def force_jit_rebuild_for_changes(
