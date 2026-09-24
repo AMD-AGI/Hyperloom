@@ -105,14 +105,16 @@ When the user asks to start:
 2. Call `list_scope_verified_experiences`. Zero results are allowed only after
    the user explicitly chooses to continue without prior Experience.
 3. Invoke the Slack runtime's existing Worker execution mechanism.
-4. Follow the installed `hyperloom-fleet-worker-run` Skill in that Worker
+4. Follow the Hyperloom workload Skill selected by the user's run request.
+5. Apply the installed `hyperloom-fleet-worker-run` overlay in that same Worker
    execution.
-5. Inject the same `scope_id` as `HYPERLOOM_FLEET_KB_SCOPE_ID`, along with the
+6. Inject the same `scope_id` as `HYPERLOOM_FLEET_KB_SCOPE_ID`, along with the
    Worker token from the secret store. Never send the Bot token.
 
-The Worker-run Skill owns branch installation, Fleet environment, cold start,
-the recommended example config, `optimize`, monitoring, and write validation.
-This toolbox owns the conversation and tool calls only.
+The workload Skill and Hyperloom CLI own all model, workload, launch, budget,
+and monitoring behavior. The Worker overlay adds only Fleet branch/SDK,
+environment, cold-start, launch flag, and read/write acceptance. This toolbox
+owns the conversation and tool calls only.
 
 ## Report
 
