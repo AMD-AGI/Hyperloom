@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.report import TuneReport, build_report, write_report
-from kernelforge.gemm_tune.tuners.base import BaseTuner, TuneContext, TuneResult
+from kernelforge.gemm_tune.tuners.base import BaseTuner, TuneContext, TuneResult, micro_metrics
 
 
 def _profile():
@@ -79,6 +81,37 @@ def test_tune_result_to_dict_full():
     assert d["artifact"] == "/a" and d["env_var"] == "V"
     assert d["shape_results"] == [{"M": 4, "speedup": 1.2}]
     assert d["error"] == "e" and d["skip_reason"] == "sr"
+
+
+def test_tune_result_to_dict_leaves_unmeasured_metrics_null():
+    # Shapes were tuned but never timed against a baseline: "no gain" and "no measurement" are different claims.
+    d = TuneResult("t", "ok", total_shapes=3, unverified_shapes=3).to_dict()
+    assert d["total_shapes"] == 3
+    assert d["improved_shapes"] is None
+    assert d["best_micro_speedup"] is None and d["avg_micro_speedup"] is None
+
+
+# ── micro_metrics: the three figures describe one set of shapes ──────────────
+def test_every_shape_timed_and_none_won_publishes_a_zero_beside_the_speedups_it_measured():
+    # The inverse of the unmeasured case: these shapes were timed, so nulling best/avg would report the run as having
+    # measured nothing while the count of winners says it measured and found none.
+    m = micro_metrics(
+        [{"M": 64, "speedup": 0.9524, "improved": False}, {"M": 128, "speedup": 0.995, "improved": False}]
+    )
+    assert m.improved == 0
+    assert m.best == 0.995
+    assert m.avg == pytest.approx(0.9737)
+
+
+def test_no_shape_timed_publishes_nothing():
+    m = micro_metrics([{"M": 64, "speedup": None, "tuned_unverified": True}])
+    assert m == (None, None, None)
+
+
+def test_the_mean_spans_every_timed_shape_not_only_the_winners():
+    m = micro_metrics([{"speedup": 1.5, "improved": True}, {"speedup": 0.9, "improved": False}])
+    assert m.improved == 1 and m.best == 1.5
+    assert m.avg == pytest.approx(1.2)
 
 
 def test_has_improvement_variants():
