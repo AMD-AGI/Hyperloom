@@ -532,14 +532,8 @@ class VllmMoeTritonTuner(BaseTuner):
         elif "mi355" in gpu_name.lower():
             gpu_name = "AMD_Instinct_MI355X"
 
-        # Determine dtype string
-        dtype_str = "bfloat16"
-        if self.ctx.precision == "fp8":
-            dtype_str = "fp8_w8a8"
-        elif "awq" in self.ctx.quant_type or "gptq" in self.ctx.quant_type:
-            dtype_str = "int8_w8a16"
-
-        config_filename = f"E={E},N={N},device_name={gpu_name},dtype={dtype_str}.json"
+        # The dtype in the name is what vLLM matches against, so it states the dtype the sweep benchmarked.
+        config_filename = f"E={E},N={N},device_name={gpu_name},dtype=bfloat16.json"
         config_path = tuned_configs_dir / config_filename
         config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
 
