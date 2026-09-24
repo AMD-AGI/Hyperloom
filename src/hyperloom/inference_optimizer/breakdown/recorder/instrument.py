@@ -11,24 +11,22 @@ What lives here: the Coordinator's state snapshots, the backend build
 provenance carried by a kernel-agent result (which reaches the optimizer
 through nothing else).
 
-Every helper is best-effort: all failures are swallowed (logged at debug).
+Every helper is best-effort: spool failures degrade the section and never
+propagate into the run they are describing.
 Payloads are shaped to the matching ``schema.py`` TypedDict.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
 
-from .session_metadata import snapshot_metadata
 from . import tool_versions
+from .session_metadata import snapshot_metadata
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
@@ -53,15 +51,8 @@ def snapshot_state_sections(
         return
     rec = _recorder(session_dir, producer)
 
-    for name, fn in (
-        ("session", _snapshot_session),
-        ("metadata", snapshot_metadata),
-    ):
-        try:
-            fn(rec, state)
-        except Exception as exc:
-            log.debug("snapshot section %s failed", name, exc_info=True)
-            trace_skip(reason="writer raised", section=name, error=exc)
+    _snapshot_session(rec, state)
+    snapshot_metadata(rec, state)
 
 
 def _unset_or_int(st: Any, attr: str) -> int | None:
@@ -250,44 +241,40 @@ def record_backend_versions_and_timeline(
             section="versions",
         )
         return
-    try:
-        result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        attempts = result.get("attempts")
-        attempts = attempts if isinstance(attempts, list) else []
-        recorded: set[str] = set()
-        for att in attempts:
-            if not isinstance(att, dict):
-                continue
-            backend = str(att.get("backend") or "").lower()
-            if not backend or backend in recorded:
-                continue
-            recorded.add(backend)
-            att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+    result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    attempts = result.get("attempts")
+    attempts = attempts if isinstance(attempts, list) else []
+    recorded: set[str] = set()
+    for att in attempts:
+        if not isinstance(att, dict):
+            continue
+        backend = str(att.get("backend") or "").lower()
+        if not backend or backend in recorded:
+            continue
+        recorded.add(backend)
+        att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+        tool_versions.record_tool_version(
+            session_dir,
+            tool=backend,
+            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
+            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+            producer=producer,
+        )
+    # No attempts means the run failed before any backend launched. The
+    # backend the result names is still the one whose build was in play --
+    # unless it names none, which is the pre-dispatch gating case that
+    # never resolved a build to report.
+    if not recorded:
+        backend = str(result.get("backend") or "").lower()
+        if backend:
             tool_versions.record_tool_version(
                 session_dir,
                 tool=backend,
-                root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-                version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+                root=str(result_meta.get("root_dir") or "") or None,
+                version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-        # No attempts means the run failed before any backend launched. The
-        # backend the result names is still the one whose build was in play --
-        # unless it names none, which is the pre-dispatch gating case that
-        # never resolved a build to report.
-        if not recorded:
-            backend = str(result.get("backend") or "").lower()
-            if backend:
-                tool_versions.record_tool_version(
-                    session_dir,
-                    tool=backend,
-                    root=str(result_meta.get("root_dir") or "") or None,
-                    version=str(result_meta.get("version") or "") or None,
-                    producer=producer,
-                )
-        _mirror_backend_attempts_to_kernel_timeline(result)
-    except Exception as exc:
-        log.debug("record_backend_versions_and_timeline failed", exc_info=True)
-        trace_skip(reason="writer raised", section="versions", error=exc)
+    _mirror_backend_attempts_to_kernel_timeline(result)
 
 
 __all__ = [

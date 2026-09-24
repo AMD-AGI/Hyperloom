@@ -108,12 +108,13 @@ def render_session_report(
         except Exception as exc:  # noqa: BLE001
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
+    used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")
     md = _stitch(
         sections=sections,
         global_facts=global_facts,
         llm_exec_summary=exec_summary_llm,
         llm_narratives=narratives,
-        used_llm=llm_client is not None and not llm_raw.startswith("<llm_error"),
+        used_llm=used_llm,
         breakdown=breakdown,
     )
     return ComposeResult(
@@ -122,7 +123,7 @@ def render_session_report(
         global_facts=global_facts,
         llm_user_prompt=user_prompt,
         llm_raw_response=llm_raw,
-        used_llm=llm_client is not None,
+        used_llm=used_llm,
     )
 
 

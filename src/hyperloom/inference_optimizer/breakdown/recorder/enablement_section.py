@@ -236,19 +236,13 @@ def _collect_recipe(
     ):
         if value:
             out[key] = value
+    # Tri-state observations: ``None`` (could not be read) and ``[]`` (clean)
+    # mean opposite things, so they are copied through a sentinel rather than
+    # dropped when falsy. A session that predates the field stays absent.
     for _tri in ("build_extensions_not_carried", "levers_without_readers"):
         _val = _eg(state, _tri, _ABSENT)
         if _val is not _ABSENT:
             out[_tri] = _val
-    _carry = _eg(state, "build_extensions_not_carried", _ABSENT)
-    if _carry is not _ABSENT:
-        # Assigned outside the loop above, which drops anything falsy: this
-        # observation is a tri-state where ``None`` (the build's outputs could
-        # not be read) and ``[]`` (they were all carried) mean opposite things,
-        # and dropping either would read as the safe one. Read through a
-        # sentinel default so a session that predates the observation stays
-        # absent instead of arriving as an unreadable build.
-        out["build_extensions_not_carried"] = _carry
     decision = evaluate_replay_sufficiency(
         enablement,
         steps=steps,

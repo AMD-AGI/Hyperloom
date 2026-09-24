@@ -4814,8 +4814,8 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         item["patch_strategy"] = "vendor_playbook"
         item["vendor_operator_playbook"] = playbook
         item["vendor_playbook_role"] = playbook.get("role", "")
-        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
-        # source_file before it will dispatch to any backend; a vendor
+        # Coordinator kernel handlers gate dispatch on a non-empty, path-shaped
+        # source_file before they will send work to any backend; a vendor
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").

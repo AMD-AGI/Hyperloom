@@ -382,6 +382,8 @@ class IntentRouter(CoordinatorCollaborator):
             params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
+            from ..specialists.profile import MODE_PATCH, resolve_specialist_profile
+
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
             # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
@@ -390,7 +392,12 @@ class IntentRouter(CoordinatorCollaborator):
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
                 owner = "EXPLORE"
-            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+            # A patch-mode dispatch with no layer names no phase of its own, and integrate_patch is
+            # booked to the framework agent, so that is the owner its patch would be attributed to.
+            elif resolve_specialist_profile(params).mode == MODE_PATCH or active_phase in {
+                "FRAMEWORK",
+                "FRAMEWORK_AGENT",
+            }:
                 owner = "FRAMEWORK_AGENT"
         if owner:
             params["source_phase"] = owner
