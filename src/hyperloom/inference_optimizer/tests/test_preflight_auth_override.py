@@ -1071,6 +1071,13 @@ def test_an_unreadable_custom_model_switch_is_not_read_as_permission(monkeypatch
         cli._custom_orch_model_allowed()
 
 
+def test_a_blank_custom_model_switch_denies_like_every_other_blank_boolean(monkeypatch):
+    """Blank is a false token in the module's vocabulary, so this variable reads it the way the other booleans do."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "  ")
+
+    assert cli._custom_orch_model_allowed() is False
+
+
 def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monkeypatch, capsys):
     """Explicit opt-out disable: custom model is rejected by the static gate."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
