@@ -12,12 +12,12 @@ from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class KernelStackPhase(PhaseHandler):
+class KernelStackPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _drain_pending_keep_integrates(self) -> None:

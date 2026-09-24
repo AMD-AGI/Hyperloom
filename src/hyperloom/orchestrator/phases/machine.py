@@ -14,12 +14,12 @@ from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class MachinePhase(PhaseHandler):
+class MachinePhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _ensure_phase_initialised(self) -> None:
