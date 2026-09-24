@@ -31,38 +31,6 @@ The bridge uses Fleet `correlation.thread_id` as `thread_ts`, sends
 Do not put full prompt context, Experience reasoning, patches, or credentials
 in chat. Link to an access-controlled detail view when needed.
 
-## Human conversation flow
-
-The central Slack bot owns language understanding; Fleet KB exposes explicit,
-auditable tools.
-
-1. After the user provides Run parameters, call
-   `FleetBotClient.list_catalog()` and page through all `unverified` records.
-2. Show bounded cards for every page. An optional natural-language relevance
-   question may additionally call `discover()`, but discovery must not hide the
-   complete Catalog review.
-3. Do not verify anything from an ambiguous acknowledgement.
-4. When the user explicitly chooses Experiences, call
-   `FleetBotClient.verify_for_run()` with the displayed IDs, Slack user ID,
-   reason, thread ID, and exact target `scope_id`.
-5. Confirm each ID as `verified_for_scope`. The Catalog record remains
-   `unverified`; another scope cannot inherit the verification.
-6. Launch Hyperloom with `HYPERLOOM_FLEET_KB_SCOPE_ID` equal to that same
-   target scope.
-
-The reference tool is `scripts/fleet_conversation.py`:
-
-```bash
-python3 scripts/fleet_conversation.py catalog \
-  --scope-id "$SLACK_JOB_ID" --limit 100
-
-python3 scripts/fleet_conversation.py verify \
-  --scope-id "$SLACK_JOB_ID" --actor-id "$SLACK_USER_ID" \
-  --thread-id "$SLACK_THREAD_ID" \
-  --experience-id "$EXP_1" --experience-id "$EXP_2" \
-  --reason "$USER_MESSAGE"
-```
-
 ## Read message
 
 For `kb.read.completed`, render:
