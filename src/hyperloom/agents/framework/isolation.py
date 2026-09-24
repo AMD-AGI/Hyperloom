@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.env import env_float
 from hyperloom.common.git_safety import safe_directory_args
 
 from .models import Candidate
@@ -53,33 +53,14 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 180
 
 
 # Disk preflight
-def _resolve_min_free_gb(explicit: float | None) -> float:
-    """Pick the threshold (explicit > env > default 20 GB)."""
-    if explicit is not None:
-        return float(explicit)
-    raw = os.environ.get(_DISK_MIN_GB_ENV)
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            log.warning(
-                "%s=%r is not a number; falling back to default %.1f GB",
-                _DISK_MIN_GB_ENV,
-                raw,
-                _DEFAULT_DISK_MIN_GB,
-            )
-    return _DEFAULT_DISK_MIN_GB
-
-
 def disk_preflight(
     work_dir: Path,
     n_candidates: int,
     *,
-    min_free_gb: float | None = None,
     per_candidate_gb: float = PER_CANDIDATE_GB,
 ) -> None:
     """Refuse to start if the work_dir mount lacks enough free space."""
-    floor_gb = _resolve_min_free_gb(min_free_gb)
+    floor_gb = env_float(_DISK_MIN_GB_ENV, _DEFAULT_DISK_MIN_GB)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
     work_dir.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(str(work_dir))
