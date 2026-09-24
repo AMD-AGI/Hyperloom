@@ -256,7 +256,7 @@ def baseline_launch(monkeypatch, tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     monkeypatch.setattr(_aiter_jit, "_resolve_lock_sweep_dirs", lambda *_args: [jit_dir])
-    monkeypatch.setattr(baseline.BaselineExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(baseline.BenchmarkRunExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
     monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
 
     async def no_restart(**kwargs):
