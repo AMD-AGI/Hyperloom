@@ -341,10 +341,10 @@ def build_agentx_workload_spec(
     env: Mapping[str, str] | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe the AgentX trace-replay workload for downstream consumers.
+    """Describe the AgentX workload for downstream consumers.
 
     Written into the materialized recipe and forwarded in the GEAK handoff so
-    GEAK can select the aiperf client and refuse to treat the CLI's synthetic
+    GEAK can select the AgentX client and refuse to treat the CLI's synthetic
     ``isl``/``osl`` placeholders as the served load. Omitted entirely on non-AgentX
     runs, so the fixed-ISL/OSL path stays byte-identical.
 
@@ -359,6 +359,13 @@ def build_agentx_workload_spec(
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
+    from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend
+    from hyperloom.inference_optimizer.agentx.mapping import (
+        CANONICAL_MLPERF_CORPUS_LOADER,
+        CANONICAL_MLPERF_CORPUS_ENTRIES,
+        CANONICAL_MLPERF_SMOKE_ENTRIES,
+    )
+
     proc_env: Mapping[str, str] = os.environ if env is None else env
 
     def client_knob(key: str, default: Any) -> str:
@@ -382,6 +389,44 @@ def build_agentx_workload_spec(
         return str(proc_env.get(key) or envs.get(key) or default)
 
     default_isl, default_osl, default_conc = cli_workload_defaults()
+    conc = int(served_knob("CONC", default_conc))
+    metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
+    intvty_p90_veto_pct = (
+        float(grading["noise_pct"])
+        if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
+        else parse_intvty_noise_pct()
+    )
+    isl_osl_placeholder = {
+        "isl": int(served_knob("ISL", default_isl)),
+        "osl": int(served_knob("OSL", default_osl)),
+        "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
+    }
+    if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
+        flow = client_knob("MLPERF_AGENTIC_FLOW", "smoke_test").strip() or "smoke_test"
+        num_entries = (
+            CANONICAL_MLPERF_SMOKE_ENTRIES
+            if flow == "smoke_test"
+            else int(client_knob("AGENTIC_NUM_TRAJECTORIES", CANONICAL_MLPERF_CORPUS_ENTRIES))
+        )
+        return {
+            "kind": "agentx_mlperf_agentic",
+            "client": "mlperf",
+            "scenario": "mlperf-agentic-v6",
+            "corpus": CANONICAL_MLPERF_CORPUS_LOADER,
+            "canonical_corpus": CANONICAL_MLPERF_CORPUS_LOADER,
+            "num_entries": num_entries,
+            "duration_s": 0,
+            "geak_loop_duration_s": 0,
+            "concurrency": conc,
+            "metric_basis": metric_basis,
+            "intvty_p90_veto_pct": intvty_p90_veto_pct,
+            "metric_window_s": 0.0,
+            "flow": flow,
+            "port": int(client_knob("PORT", 30000) or 30000),
+            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+            "isl_osl_placeholder": isl_osl_placeholder,
+        }
+
     model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
     canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
     corpus = str(
@@ -393,7 +438,6 @@ def build_agentx_workload_spec(
     ).strip()
     duration = int(client_knob("AGENTX_DURATION", 3600))
     num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
-    conc = int(served_knob("CONC", default_conc))
     return {
         "kind": "agentx_trace_replay",
         "client": "aiperf",
@@ -412,12 +456,8 @@ def build_agentx_workload_spec(
         # HYPERLOOM_PERF_METRIC at seed, so honouring the override again here
         # would let a subprocess that lost the variable -- or gained a different
         # one -- publish an axis the session never graded on.
-        "metric_basis": geak_metric_axis(benchmark_mode="agentx", grading=grading)[1],
-        "intvty_p90_veto_pct": (
-            float(grading["noise_pct"])
-            if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
-            else parse_intvty_noise_pct()
-        ),
+        "metric_basis": metric_basis,
+        "intvty_p90_veto_pct": intvty_p90_veto_pct,
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
@@ -427,11 +467,7 @@ def build_agentx_workload_spec(
         # bounded by the scaled number, so the handoff must publish that one.
         "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
         "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-        "isl_osl_placeholder": {
-            "isl": int(served_knob("ISL", default_isl)),
-            "osl": int(served_knob("OSL", default_osl)),
-            "note": "CLI defaults only; trace replay ignores fixed ISL/OSL",
-        },
+        "isl_osl_placeholder": isl_osl_placeholder,
     }
 
 
@@ -464,10 +500,11 @@ def apply_agentx_switch(
     if not framework or framework_registry.is_scriptable(framework):
         return
     envs = bench.setdefault("envs", {})
-    bench["benchmark_script"] = "aiperf_client.sh"
+    from hyperloom.inference_optimizer.agentx.deploy import agentx_client_script, is_mlperf_backend
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
+    bench["benchmark_script"] = agentx_client_script(_agentx_env)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -479,6 +516,21 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
+        if is_mlperf_backend(_agentx_env) and (
+            key.startswith(("MLPERF_", "AGENTIC_")) or key == "HYPERLOOM_AGENTIC_BACKEND"
+        ):
+            envs[key] = value
+    if is_mlperf_backend(_agentx_env):
+        envs["HYPERLOOM_AGENTIC_BACKEND"] = "mlperf"
+        envs["PORT"] = str(os.environ.get("PORT") or envs.get("PORT") or "30000")
+        envs.setdefault("MLPERF_AGENTIC_FLOW", os.environ.get("MLPERF_AGENTIC_FLOW") or "smoke_test")
+        envs.setdefault(
+            "MLPERF_ENDPOINTS_DIR",
+            os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints",
+        )
+        envs.setdefault("AGENTIC_CONCURRENCY", str(conc or os.environ.get("CONC") or "16"))
+        envs.setdefault("MLPERF_AGENTIC_MODEL", os.environ.get("MLPERF_AGENTIC_MODEL") or "kimi-k3")
+        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
@@ -523,9 +575,10 @@ def prepare_agentx_runtime(
             try:
                 materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
                 benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = (
-                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
-                )
+                active = isinstance(benchmark, dict) and Path(str(benchmark.get("benchmark_script") or "")).name in {
+                    "aiperf_client.sh",
+                    "mlperf_agentic_client.sh",
+                }
             except (OSError, ValueError, TypeError):
                 active = False
     if not active:

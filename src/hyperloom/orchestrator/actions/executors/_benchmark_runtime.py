@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
@@ -22,7 +23,10 @@ def apply_runtime_benchmark_overrides(
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
+    if agentx_mode is None and Path(str(bench.get("benchmark_script") or "")).name in {
+        "aiperf_client.sh",
+        "mlperf_agentic_client.sh",
+    }:
         agentx_mode = True
 
     if model_path:

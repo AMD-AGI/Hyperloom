@@ -58,7 +58,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 1
+AGENTX_MEASUREMENT_EPOCH = 2
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -111,6 +111,7 @@ def agentx_state_is_stale(state: Any) -> str:
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -118,7 +119,27 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_ISL,
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
+        CANONICAL_MLPERF_CORPUS_DURATION_S,
+        CANONICAL_MLPERF_CORPUS_ENTRIES,
+        CANONICAL_MLPERF_CORPUS_LOADER,
+        CANONICAL_MLPERF_ISL,
+        CANONICAL_MLPERF_OSL,
+        CANONICAL_MLPERF_PREFIX_CACHE_HIT,
+        CANONICAL_MLPERF_SMOKE_ENTRIES,
     )
+
+    if is_mlperf_backend():
+        flow = str(os.environ.get("MLPERF_AGENTIC_FLOW") or "smoke_test").strip()
+        entries = CANONICAL_MLPERF_SMOKE_ENTRIES if flow == "smoke_test" else CANONICAL_MLPERF_CORPUS_ENTRIES
+        return {
+            "corpus_loader": CANONICAL_MLPERF_CORPUS_LOADER,
+            "corpus_entries": entries,
+            "duration_s": float(CANONICAL_MLPERF_CORPUS_DURATION_S),
+            "isl": dict(CANONICAL_MLPERF_ISL),
+            "osl": dict(CANONICAL_MLPERF_OSL),
+            "prefix_cache_hit": CANONICAL_MLPERF_PREFIX_CACHE_HIT,
+            "source": "canonical_mlperf",
+        }
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,

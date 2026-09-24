@@ -24,6 +24,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    VERDICT_KEEP,
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
@@ -92,6 +93,11 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
+)
+from ._mlperf_keep import (
+    clone_variant_for_mlperf_full,
+    mlperf_full_keep_block,
+    should_validate_mlperf_full,
 )
 
 
@@ -1155,6 +1161,73 @@ class ExploreExecutor:
                             reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
                         else:
                             outcome = "KEEP"
+
+                    if outcome == "KEEP" and should_validate_mlperf_full():
+                        full_gv = clone_variant_for_mlperf_full(decision_gv)
+                        full_slot = Path(str(slot)) / "mlperf_full_keep"
+                        full_slot.mkdir(parents=True, exist_ok=True)
+                        full_results = await run_grid(
+                            base_yaml_path=config_path,
+                            base_extra_args=stack_extra_args,
+                            grid=[full_gv],
+                            output_root=full_slot,
+                            model_path=resolved_model,
+                            gpu_type=resolved_gpu,
+                            benchmark_script=override_script,
+                            result_dir=override_result_dir,
+                            server_lifecycle=variant_lifecycle,
+                            base_args_mode=stack_base_args_mode,
+                            base_extra_envs=dict(stack_extra_envs),
+                            base_remove_args=list(stack_remove_args),
+                            base_unset_envs=list(stack_unset_envs),
+                            preclean_before_run=not use_warm_decision,
+                            server_already_ready=use_warm_decision,
+                            serving_lease=variant_lease,
+                            session_deadline_sec=session_deadline_sec,
+                            variant_expected_sec=decision_expected_sec,
+                        )
+                        full_r = full_results[0] if full_results else None
+                        if full_r is not None and _stopped_by_the_run(
+                            full_r, variant=full_gv, idx=idx, round_label="mlperf_full_keep"
+                        ):
+                            break
+                        block = mlperf_full_keep_block(
+                            getattr(full_r, "workspace", None) if full_r is not None else None,
+                            status=getattr(full_r, "status", None) if full_r is not None else "failed",
+                        )
+                        if not block and full_r is not None:
+                            full_meas = {
+                                GRADED_OUTPUT: full_r.output_throughput,
+                                "input_throughput": full_r.input_throughput,
+                                "total_throughput": full_r.total_token_throughput,
+                                GRADED_INTVTY: full_r.intvty_p90,
+                                "tpot_p90_ms": full_r.tpot_p90_ms,
+                            }
+                            full_graded = resolve_graded_comparison(
+                                ss,
+                                full_meas,
+                                keep_threshold_pct=keep_threshold_pct,
+                                anchor_perf=running_base_perf,
+                                anchor_tput=running_base_tput,
+                            )
+                            if full_graded.verdict != VERDICT_KEEP:
+                                block = f"mlperf_full_{full_graded.verdict.lower()}"
+                        if block:
+                            outcome = "REVERT"
+                            reason = block
+                            log.info("explore: MLPerf full KEEP gate refused %r (%s)", gv.name, block)
+                        else:
+                            r = full_r
+                            gain = gain_pct(r.intvty_p90 or r.output_throughput, running_base_tput)
+                        decision_gates.append(
+                            {
+                                "gate": "mlperf_full_613",
+                                "passed": not block,
+                                "observed": None if full_r is None else (full_r.intvty_p90 or full_r.output_throughput),
+                                "threshold": 613,
+                                "reason": block,
+                            }
+                        )
 
                     decision_tput = r.output_throughput
                     tested_update[fp] = {
