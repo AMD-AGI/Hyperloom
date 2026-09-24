@@ -49,7 +49,7 @@ def test_a_refused_connection_reports_the_connection_not_the_handler(monkeypatch
         # was never bound because the POST failed before a response was parsed.
         try:
             raise ConnectionRefusedError("connect refused")
-        except Exception:
+        except ConnectionRefusedError:
             raise UnboundLocalError("cannot access local variable 'outputs'") from None
 
     api = _run_block(monkeypatch, amodel_call)
@@ -102,7 +102,7 @@ def test_when_eval_probe_ran_first_the_guard_still_wraps_amodel_call(monkeypatch
         # mirrors pre-fix ``TemplateAPI.amodel_call`` logging ``{outputs}`` on failure
         try:
             raise ConnectionRefusedError("connect refused")
-        except Exception:
+        except ConnectionRefusedError:
             raise UnboundLocalError("cannot access local variable 'outputs'") from None
 
     api = _install_stub_lm_eval(monkeypatch, upstream)
