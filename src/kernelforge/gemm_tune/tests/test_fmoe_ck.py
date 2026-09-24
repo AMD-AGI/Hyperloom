@@ -133,12 +133,25 @@ def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path)
         fm.FmoeCKTuner(_moe_ctx(tmp_path))._resolve_untuned_csv()
 
 
-def test_dense_untuned_csv_is_not_consumed_as_moe_shapes(tmp_path):
-    """The dense field carries an M,N,K table and is already set in production."""
+def _write_dense_csv(tmp_path) -> Path:
+    """The dense field's M,N,K table: a different key space, and set in production."""
     dense = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
     dense.write_text("M,N,K\n256,1536,4096\n", encoding="utf-8")
+    return dense
+
+
+def test_dense_untuned_csv_alone_is_not_consumed_as_moe_shapes(tmp_path):
+    """A dense M,N,K table is never MoE evidence: it must not satisfy the refusal."""
+    ctx = _moe_ctx(tmp_path, untuned_csv=_write_dense_csv(tmp_path))
+
+    with pytest.raises(ValueError, match="no runtime-observed MoE miss"):
+        fm.FmoeCKTuner(ctx)._resolve_untuned_csv()
+
+
+def test_dense_untuned_csv_does_not_displace_the_runtime_observed_csv(tmp_path):
+    """Both fields are set in production; only the MoE one may decide the key."""
     external = _write_runtime_csv(tmp_path)
-    ctx = _moe_ctx(tmp_path, untuned_csv=dense, moe_untuned_csv=external)
+    ctx = _moe_ctx(tmp_path, untuned_csv=_write_dense_csv(tmp_path), moe_untuned_csv=external)
 
     assert fm.FmoeCKTuner(ctx)._resolve_untuned_csv()[0] == external
 
