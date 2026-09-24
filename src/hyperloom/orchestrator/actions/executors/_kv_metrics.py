@@ -683,9 +683,10 @@ def port_from_workspace(workspace: Any) -> int | None:
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
-    The server binds whatever ``benchmark.envs.PORT`` the materialized YAML pins -- an ephemeral port assigned per
-    session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
-    paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
+    A ``PORT`` in the caller's env, then in the ambient env, is an operator pin and wins. Otherwise the round's
+    materialized ``benchmark.envs.PORT`` -- an ephemeral port assigned per session, never exported into the
+    subprocess env -- then the port the server logged at bind. The default is a last resort that is only ever right by
+    coincidence.
     """
     for source in (config_envs or {}, os.environ):
         port = _port_value(source.get("PORT"))
