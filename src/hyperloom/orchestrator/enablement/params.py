@@ -304,8 +304,6 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            # Enablement tag routes the integrate gate to runnable_decision.
-            "framework_agent_authoring": True,
             "enablement": True,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,

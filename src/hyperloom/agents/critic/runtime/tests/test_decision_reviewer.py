@@ -229,13 +229,14 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
     # Plain integrate_patch (no enablement marker) stays strict.
     assert classify_proposal_action("integrate_patch", {"params": {}}) == ACTION_CLASS_PATCH_LANDING
     assert classify_proposal_action("integrate_patch", None) == ACTION_CLASS_PATCH_LANDING
-    # enablement=True or framework_agent_authoring=True downgrades the class.
+    # Only enablement=True downgrades the class; framework_agent_authoring alone does not.
     assert (
         classify_proposal_action("integrate_patch", {"params": {"enablement": True}}) == ACTION_CLASS_ENABLEMENT_LANDING
     )
+    # FRAMEWORK authoring patches (no enablement key) stay in the strict PATCH_LANDING class.
     assert (
-        classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})
-        == ACTION_CLASS_ENABLEMENT_LANDING
+        classify_proposal_action("integrate_patch", {"params": {"framework_agent_authoring": True}})
+        == ACTION_CLASS_PATCH_LANDING
     )
     # The lighter bar excludes the pre-boot-impossible production evidence and the redundant rollback restatement.
     reqs = _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_ENABLEMENT_LANDING]
@@ -255,7 +256,7 @@ def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
         "=== Inbox for critic ===\n"
         "  seq=1 msg_id=enA from=orchestration topic=proposal payload="
         "{'action_name': 'integrate_patch', 'provenance': 'specialist', "
-        "'params': {'enablement': True, 'framework_agent_authoring': True}}\n"
+        "'params': {'enablement': True}}\n"
     )
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_enable"))
     constraints = bundle.review_constraints
