@@ -4097,7 +4097,9 @@ class IntegratePatchExecutor:
                 declared = None
             if declared:
                 return str(declared).strip().lower()
-        return str(params.get("framework") or os.environ.get("FRAMEWORK") or "vllm").strip().lower()
+        from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
+
+        return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()
 
     @staticmethod
     def _graded_launch_env(override: Mapping[str, Any] | None, materialized_config: str) -> dict[str, str]:
