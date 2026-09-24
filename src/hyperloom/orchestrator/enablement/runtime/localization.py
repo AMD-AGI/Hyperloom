@@ -173,10 +173,10 @@ def build_localization_diff(
 def _repo_slug_safe(repo_url: str) -> str:
     """Best-effort ``owner/name`` slug from a git URL; ``""`` when unparseable."""
     try:
-        from hyperloom.agents.framework.sources._shared import _repo_slug
+        from hyperloom.common.github_urls import repo_slug
 
-        return _repo_slug(repo_url)
-    except Exception:  # noqa: BLE001
+        return repo_slug(repo_url)
+    except ValueError:
         return ""
 
 
