@@ -12,10 +12,12 @@ name: AMD Skills Checks
 # .github/federation.json, and the nightly importer raises on a path that is
 # no longer there.
 #
-# ``paths`` matches the parent directory rather than the skill itself, so a
-# rename still triggers: git reports both the old and the new path as changed.
-# Nothing else can break this skill -- skillscope is pinned below -- so any
-# other change has nothing here to check.
+# ``paths`` covers the skill's parent directory, so a rename still triggers:
+# git reports both the old and the new path as changed. It also covers
+# ``examples/README.md``, because structural resolves the links a skill makes
+# and SKILL.md points there -- leave it out and a pull request that moves that
+# file merges green, then reddens this gate on the next unrelated change under
+# ``examples/skills/``. Any new link out of the skill belongs in this list too.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
@@ -23,10 +25,12 @@ on:
     branches: [main]
     paths:
       - "examples/skills/**"
+      - "examples/README.md"
       - ".github/workflows/amd-skills-evals.yml"
   pull_request:
     paths:
       - "examples/skills/**"
+      - "examples/README.md"
       - ".github/workflows/amd-skills-evals.yml"
   workflow_dispatch:
     inputs:
