@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from kernelforge.fusion import campaign as campaign_module
 from kernelforge.fusion.campaign import (
     build_campaign_program_md,
     build_forge_loop_command,
+    committed_tree_id,
     fused_module_path,
     run_recipe_campaign,
 )
@@ -37,6 +39,31 @@ def _recipe(**over) -> Recipe:
     )
     base.update(over)
     return Recipe(**base)
+
+
+def _git_commit(tmp_path: Path, message: str) -> str:
+    """Commit every tracked modification the way the loop's keep does, and name it."""
+    run = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*run, "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*run, "commit", "-q", "-m", message, "--no-gpg-sign"], check=True, capture_output=True)
+    return subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _committed_candidate(tmp_path: Path) -> tuple[Recipe, str]:
+    """A workspace whose HEAD holds one candidate's tracked tree."""
+    source = tmp_path / "models" / "lfm2.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("def forward(x):\n    return fused(x)\n", encoding="utf-8")
+    recipe = _recipe(source_file=str(source))
+    fused = Path(fused_module_path(recipe))
+    fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
+    # Tracked but named by no recipe: the loop stages it into the same commit.
+    (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16,)\n", encoding="utf-8")
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True, capture_output=True)
+    return recipe, _git_commit(tmp_path, "candidate")
 
 
 def _framework_tree(tmp_path: Path) -> tuple[Path, Path]:
@@ -421,8 +448,6 @@ class TestDriverShim:
             ),
             encoding="utf-8",
         )
-        import sys
-
         return subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
 
     def test_parity_and_timing_become_the_loop_contract(self, tmp_path):
@@ -678,8 +703,9 @@ class TestCampaignCommand:
         assert outcome.result.kept is False
         assert "CAMPAIGN FAILED" in outcome.result.note
 
-    def _campaign_with_result(self, tmp_path, monkeypatch, payload, reports=()):
+    def _campaign_with_result(self, tmp_path, monkeypatch, payload, reports=(), *, recipe=None):
         """Run a campaign whose forge-loop writes ``payload`` to --result-json."""
+        recipe = recipe or _recipe()
         result_json = tmp_path / "forge_loop_residual_add_rmsnorm.json"
         report_log = tmp_path / "harness_reports_residual_add_rmsnorm.jsonl"
 
@@ -690,20 +716,27 @@ class TestCampaignCommand:
             def wait(self, timeout=None):
                 return 0
 
-        def fake_popen(*_a, **_k):
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, *a, **k):
+            # Only the forge-loop is stubbed; the campaign's own git plumbing has to really run.
+            if cmd and cmd[0] == "git":
+                return real_popen(cmd, *a, **k)
             result_json.write_text(json.dumps(payload), encoding="utf-8")
             report_log.write_text("".join(json.dumps(r) + "\n" for r in reports), encoding="utf-8")
             return _Proc()
 
         monkeypatch.setattr(campaign_module.subprocess, "Popen", fake_popen)
         return run_recipe_campaign(
-            _recipe(),
+            recipe,
             workspace=str(tmp_path),
             harness_path=str(tmp_path / "kernel_harness.py"),
             output_dir=str(tmp_path),
+            fused_module=fused_module_path(recipe),
         )
 
     def test_a_campaign_that_beat_the_bar_is_kept(self, tmp_path, monkeypatch):
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -714,14 +747,26 @@ class TestCampaignCommand:
                 "best_ms": 82.6,
                 "improved": True,
                 "best_iteration": 3,
-                "best_commit": "c0ffee1",
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 96.0,
+                    "parity": [{"snr_db": 51.0, "max_abs_err": 2e-05, "label": "T16"}],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                }
+            ],
+            recipe=recipe,
         )
 
         assert outcome.result.kept is True
         assert outcome.result.correctness_passed is True
         assert outcome.result.kernel_speedup == 1.21
+        assert outcome.result.max_abs_err == 2e-05
         assert outcome.experiment_id == "exp-1"
 
     def test_the_loops_pre_iteration_anchor_is_not_a_validated_candidate(self, tmp_path, monkeypatch):
@@ -782,6 +827,7 @@ class TestCampaignCommand:
 
     def test_parity_and_timings_come_from_the_report_behind_the_kept_candidate(self, tmp_path, monkeypatch):
         """The loop's result carries a speedup and nothing else."""
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -791,32 +837,36 @@ class TestCampaignCommand:
                 "best_ms": 0.096,
                 "improved": True,
                 "best_iteration": 3,
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
             reports=[
-                # An earlier, slower candidate the loop did not settle on.
-                {
-                    "compiled": True,
-                    "skipped": False,
-                    "eager_us": 120.0,
-                    "fused_us": 111.0,
-                    "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}],
-                },
+                # Another attempt's sources, whose timings happen to sit closer to best_ms.
                 {
                     "compiled": True,
                     "skipped": False,
                     "eager_us": 120.0,
                     "fused_us": 96.0,
+                    "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}],
+                    "tracked_tree": "0" * 40,
+                },
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
                     "parity": [
                         {"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
                         {"snr_db": 38.0, "max_abs_err": 4e-04, "label": "b"},
                     ],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
                 },
             ],
+            recipe=recipe,
         )
 
         assert outcome.result.eager_us == 120.0
-        assert outcome.result.fused_us == 96.0
+        assert outcome.result.fused_us == 99.0
         # The WORST shape decided correctness, so it is the one recorded.
         assert outcome.result.max_abs_err == 4e-04
         # Provenance differs on purpose: the speedup is the loop's mean over repeated benchmarks, not
@@ -848,7 +898,9 @@ class TestCampaignCommand:
         assert "exited 1" in outcome.result.note
         assert not stale.exists(), "the stale result must be gone before the run"
 
-    def test_a_missing_report_log_degrades_rather_than_failing_the_recipe(self, tmp_path, monkeypatch):
+    def test_a_commit_no_report_measured_is_not_a_verified_recipe(self, tmp_path, monkeypatch):
+        """The manifest this feeds is the authoritative record, so an unmeasured commit says so."""
+        recipe, commit = _committed_candidate(tmp_path)
         outcome = self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -858,12 +910,159 @@ class TestCampaignCommand:
                 "best_ms": 0.099,
                 "improved": True,
                 "best_iteration": 2,
-                "best_commit": "c0ffee1",
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
+            recipe=recipe,
         )
 
-        assert outcome.result.kept is True
-        assert outcome.result.kernel_speedup == 1.21
+        assert outcome.result.correctness_passed is False
+        assert outcome.result.kept is False
         assert outcome.result.eager_us is None
         assert outcome.result.max_abs_err is None
+        assert "no harness report benchmarked that tree" in outcome.result.note
+        # The loop's own number survives; it is the parity claim that is missing.
+        assert outcome.result.kernel_speedup == 1.21
+
+    def test_a_commit_only_a_compile_failure_reported_is_not_a_verified_recipe(self, tmp_path, monkeypatch):
+        """A record that compiled nothing cannot stand in for the kept candidate."""
+        recipe, commit = _committed_candidate(tmp_path)
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "baseline_ms": 0.120,
+                "best_ms": 0.099,
+                "improved": True,
+                "best_iteration": 2,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                },
+                # The loop runs to its hour budget, so an iteration AFTER the keep appends here too.
+                {
+                    "compiled": False,
+                    "skipped": False,
+                    "eager_us": None,
+                    "fused_us": None,
+                    "parity": [],
+                    "error": "undefined symbol",
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                },
+            ],
+            recipe=recipe,
+        )
+
+        assert outcome.result.correctness_passed is True
+        assert outcome.result.fused_us == 99.0
+        assert outcome.result.max_abs_err == 1e-06
+
+    def test_two_attempts_differing_outside_the_recipes_files_are_not_confusable(self, tmp_path, monkeypatch):
+        """The loop commits every tracked edit, so every tracked edit is part of the identity."""
+        recipe, commit = _committed_candidate(tmp_path)
+        kept_tree = committed_tree_id(str(tmp_path), commit)
+        # A later attempt that left the recipe's source file and fused module byte-identical.
+        (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16, 32)\n", encoding="utf-8")
+        later_tree = committed_tree_id(str(tmp_path), _git_commit(tmp_path, "later attempt"))
+
+        assert later_tree != kept_tree
+
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "baseline_ms": 0.120,
+                "best_ms": 0.099,
+                "improved": True,
+                "best_iteration": 2,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 99.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "tracked_tree": kept_tree,
+                },
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 240.0,
+                    "parity": [{"snr_db": 12.0, "max_abs_err": 9e-01, "label": "a"}],
+                    "tracked_tree": later_tree,
+                },
+            ],
+            recipe=recipe,
+        )
+
+        assert outcome.result.fused_us == 99.0
+        assert outcome.result.max_abs_err == 1e-06
+
+    def test_the_driver_stamps_the_identity_the_campaign_matches_on(self, tmp_path):
+        """One tree id, named from the worktree by one side and from the commit by the other."""
+        recipe, commit = _committed_candidate(tmp_path)
+        harness = tmp_path / "kernel_harness.py"
+        harness.write_text(
+            "import json\nprint(json.dumps({'compiled': True, 'parity': [{'snr_db': 44.0}], 'fused_us': 90.0}))\n",
+            encoding="utf-8",
+        )
+        report_log = tmp_path / "reports.jsonl"
+        driver = tmp_path / "driver.py"
+        driver.write_text(
+            render_driver(
+                str(harness),
+                (),
+                report_log=str(report_log),
+                case_id="decode",
+                fused_module=fused_module_path(recipe),
+                workspace=str(tmp_path),
+            ),
+            encoding="utf-8",
+        )
+        proc = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        recorded = json.loads(report_log.read_text(encoding="utf-8").splitlines()[-1])
+        assert recorded["tracked_tree"] == committed_tree_id(str(tmp_path), commit)
+
+    def test_an_edit_the_recipe_never_named_is_a_different_attempt(self, tmp_path):
+        """Identity is the measured tree, so a tracked edit outside the recipe's files moves it."""
+        recipe, commit = _committed_candidate(tmp_path)
+        harness = tmp_path / "kernel_harness.py"
+        harness.write_text(
+            "import json\nprint(json.dumps({'compiled': True, 'parity': [{'snr_db': 44.0}], 'fused_us': 90.0}))\n",
+            encoding="utf-8",
+        )
+        report_log = tmp_path / "reports.jsonl"
+        driver = tmp_path / "driver.py"
+        driver.write_text(
+            render_driver(
+                str(harness),
+                (),
+                report_log=str(report_log),
+                case_id="decode",
+                fused_module=fused_module_path(recipe),
+                workspace=str(tmp_path),
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "models" / "bench_notes.py").write_text("SHAPES = (16, 32)\n", encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        recorded = json.loads(report_log.read_text(encoding="utf-8").splitlines()[-1])
+        assert recorded["tracked_tree"] != committed_tree_id(str(tmp_path), commit)
