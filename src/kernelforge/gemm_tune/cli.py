@@ -59,16 +59,12 @@ def _safe_is_file(value: str) -> bool:
 
 def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     """Parse a serving log into a demand file, or \"\" when it carries no demand."""
-    try:
-        from .evidence import moe_dispatch_keys, parse_log_file, write_demand
+    from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        # Hyperloom sets this for serving runs, making zero hits conclusive.
-        # Operator logs without it remain inconclusive.
-        hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
-        report = parse_log_file(server_log, hit_logging=hit_logging or None)
-    except Exception:
-        log.debug("could not parse %s for demand", server_log, exc_info=True)
-        return ""
+    # Hyperloom sets this for serving runs, making zero hits conclusive.
+    # Operator logs without it remain inconclusive.
+    hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
+    report = parse_log_file(server_log, hit_logging=hit_logging or None)
 
     demands = report.get("demands") or []
     # The dense misses are not the only demand the log carries.

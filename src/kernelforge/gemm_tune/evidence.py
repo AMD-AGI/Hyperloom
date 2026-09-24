@@ -142,7 +142,12 @@ DEFAULT_MAX_KEYS_PER_TABLE = 50_000
 
 
 def _env_positive_int(name: str, default: int) -> int:
-    """Read a positive cap; a non-positive one would silently disable the cap."""
+    """Read a bound on one parse; zero or less is a configuration error, not a request for the default.
+
+    Every truncation this bound causes is logged as "raise <name>", so quietly
+    substituting a number the operator did not write sends them back to a
+    variable that is not the one in force.
+    """
     value = env_int(name, default)
     if value <= 0:
         raise EnvValueError(f"{name}={value} must be positive")

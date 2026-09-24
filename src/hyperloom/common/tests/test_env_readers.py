@@ -72,6 +72,16 @@ def test_env_bool_reads_and_names_the_variable(monkeypatch: pytest.MonkeyPatch) 
         env_bool("HL_TEST_BOOL", default=True)
 
 
+def test_env_bool_applies_the_same_rule_to_a_supplied_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A grid variant's environment is a mapping before it is a process, and it gets the same vocabulary."""
+    monkeypatch.setenv("HL_TEST_BOOL", "1")
+    assert env_bool("HL_TEST_BOOL", env={}) is False
+    assert env_bool("HL_TEST_BOOL", default=True, env={}) is True
+    assert env_bool("HL_TEST_BOOL", env={"HL_TEST_BOOL": "on"}) is True
+    with pytest.raises(EnvValueError, match="HL_TEST_BOOL"):
+        env_bool("HL_TEST_BOOL", env={"HL_TEST_BOOL": "ture"})
+
+
 def test_env_int_unset_or_blank_takes_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HL_TEST_INT", raising=False)
     assert env_int("HL_TEST_INT", 5) == 5

@@ -9,6 +9,7 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     INTVTY_V1,
+    agentx_enabled,
     intvty_grading_enabled,
     intvty_of,
     intvty_serving_grading_enabled,
@@ -169,10 +170,17 @@ def test_default_band_matches_upstream_measured_noise(monkeypatch):
     assert parse_intvty_noise_pct() == pytest.approx(5.0)
 
 
-@pytest.mark.parametrize("raw,expected", [("2.5", 2.5), ("0", 0.0), ("", 5.0), ("nonsense", 5.0)])
+@pytest.mark.parametrize("raw,expected", [("2.5", 2.5), ("0", 0.0), ("", 5.0)])
 def test_band_env_override(monkeypatch, raw, expected):
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", raw)
     assert parse_intvty_noise_pct() == pytest.approx(expected)
+
+
+def test_a_band_with_a_unit_on_it_does_not_grade_against_the_default(monkeypatch):
+    """The band decides KEEP vs REVERT, so a value nobody can read must not become 5%."""
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5%")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_PERF_NOISE_PCT"):
+        parse_intvty_noise_pct()
 
 
 def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
@@ -214,6 +222,23 @@ def test_an_unreadable_agentx_value_is_not_silently_off(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
     with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
         intvty_grading_enabled()
+
+
+def test_the_wrapper_reader_answers_by_the_same_rule_as_the_grader(monkeypatch):
+    """One variable, one vocabulary: this is the reader the workload and server-args paths ask."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "off")
+    assert agentx_enabled() is False
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        agentx_enabled()
+
+
+def test_a_grid_variant_env_is_read_by_the_same_rule(monkeypatch):
+    """A variant's environment is built before it exists as a process, so it arrives as a mapping."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert agentx_enabled({"HYPERLOOM_AGENTX": "1"}) is True
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        agentx_enabled({"HYPERLOOM_AGENTX": "ture"})
 
 
 # --- the persisted marker ---

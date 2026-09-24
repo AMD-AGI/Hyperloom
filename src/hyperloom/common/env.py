@@ -22,6 +22,7 @@ run. :func:`env_flag` is the opt-in lenient variant its callers already chose.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 # Canonical "off" vocabulary. The empty string is an explicit off token: a
@@ -60,12 +61,15 @@ def is_truthy(value: object, *, default: bool = False) -> bool:
     return default if parsed is None else parsed
 
 
-def env_bool(name: str, default: bool = False) -> bool:
+def env_bool(name: str, default: bool = False, *, env: Mapping[str, str] | None = None) -> bool:
     """Read a boolean env var.
 
     Args:
         name: Environment variable to read.
         default: Returned when the variable is unset.
+        env: Environment to read from; ``os.environ`` when omitted. A grid
+            variant builds the environment it is about to run under before that
+            environment exists as a process.
 
     Returns:
         The boolean the variable spells.
@@ -73,7 +77,7 @@ def env_bool(name: str, default: bool = False) -> bool:
     Raises:
         EnvValueError: The variable is set to an unrecognised token.
     """
-    raw = os.environ.get(name)
+    raw = (os.environ if env is None else env).get(name)
     if raw is None:
         return default
     parsed = _parse_bool(raw)

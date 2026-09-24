@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.common.llm_config import deepseek_compat_env
 from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
@@ -1061,6 +1062,13 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
     assert args.claude_model == "deepseek-v4-pro"
     assert "deepseek-v4-pro" in catalog
     assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
+def test_an_unreadable_custom_model_switch_is_not_read_as_permission(monkeypatch):
+    """A gate on which model orchestrates the run must not be opened by a token nobody can read."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "ture")
+    with pytest.raises(EnvValueError, match="INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL"):
+        cli._custom_orch_model_allowed()
 
 
 def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monkeypatch, capsys):
