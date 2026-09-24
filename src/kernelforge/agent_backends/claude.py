@@ -29,8 +29,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from hyperloom.common.llm_headers import format_custom_headers
 from kernelforge.llm import (
-    format_custom_headers,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
