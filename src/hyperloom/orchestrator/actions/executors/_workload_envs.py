@@ -254,6 +254,58 @@ AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kim
 AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
 AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
 
+# Replay inputs belong to the operator; candidates may tune the serving engine.
+# Capture IDs, trace destinations and profiling windows are runtime controls.
+_AGENTX_WORKLOAD_ENV_NAMES = frozenset(
+    {
+        "AGENTX_CANONICAL_DATASET",
+        "AGENTX_DATASET",
+        "WEKA_LOADER_OVERRIDE",
+        "AGENTX_NUM_ENTRIES",
+        "AGENTX_DURATION",
+        "AGENTX_WARMUP_REQUESTS_PER_LANE",
+        "AGENTX_WARMUP_GRACE_PERIOD",
+        "AGENTX_WARMUP_GRACE_CONC",
+        "AGENTX_FAILED_REQUEST_THRESHOLD",
+        "AGENTX_UNSAFE_OVERRIDE",
+        "AGENTX_LIVE_ASSISTANT",
+        "AGENTX_MAX_CTX",
+        "AGENTX_TRACE_IDLE_GAP_CAP_SECONDS",
+        "AGENTX_DATASET_CONFIG_TIMEOUT",
+        "AGENTX_HTTP_TCP_USER_TIMEOUT",
+        "AGENTX_HTTP_KEEP_ALIVE_S",
+        "AGENTX_REALTIME_METRICS",
+        "AGENTX_SERVER_METRICS_INTERVAL_S",
+        "AGENTX_MMAP_CACHE_DIR",
+        "AGENTX_SERVER_SCRIPT",
+        "AIPERF_BIN",
+    }
+)
+
+
+def validate_agentx_workload_overrides(
+    bench: Mapping[str, Any],
+    extra_envs: Mapping[str, Any] | None = None,
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+) -> None:
+    """Reject candidate changes to the resolved operator replay protocol.
+
+    Call after the AgentX switch resolves operator inputs and before merging
+    candidate environments. An inherited identical value is harmless; removing
+    an explicit pin or introducing an unpinned replay input is not.
+    """
+    if (bench.get("workload_spec") or {}).get("kind") != "agentx_trace_replay":
+        return
+    envs = bench.get("envs") or {}
+    changed = {
+        key
+        for key, value in (extra_envs or {}).items()
+        if key in _AGENTX_WORKLOAD_ENV_NAMES and (key not in envs or str(value) != str(envs[key]))
+    }
+    changed.update(key for key in to_str_list(unset_envs) if key in _AGENTX_WORKLOAD_ENV_NAMES and key in envs)
+    if changed:
+        raise ValueError("Candidate changes frozen AgentX workload controls: " + ", ".join(sorted(changed)))
+
 
 def _agentx_model_family(model: str) -> str:
     """Normalize a model path/name to the family slug ``aiperf_client.sh`` uses.
@@ -467,7 +519,10 @@ def apply_agentx_switch(
     bench["benchmark_script"] = "aiperf_client.sh"
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
-    _agentx_env = agentx_env_for_conc(conc)
+    _agentx_env = {
+        **agentx_env_for_conc(conc),
+        **{key: value for key, value in _operator_extra_env().items() if key in _AGENTX_WORKLOAD_ENV_NAMES},
+    }
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -476,12 +531,12 @@ def apply_agentx_switch(
     # documents it as a supported knob; without forwarding it only works when
     # the benchmark process happens to inherit the full parent environment,
     # which is exactly the kind of silent difference this path exists to remove.
-    for key, value in os.environ.items():
+    for key, value in _agentx_env.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
-    _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
+    _raw_grace = (_agentx_env.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
     if bench.get("timeout_seconds") is not None:
         envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
@@ -1298,7 +1353,7 @@ def materialize_config_with_envs(
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
     into the framework env; ``--extra-env`` is copied into ``benchmark.envs``
     so Magpie forwards it to vLLM/sglang workers; ``extra_envs`` overrides any
-    of the above.
+    of the above, except for the operator's frozen AgentX replay controls.
     The session's ``--reference-script`` recipe is read from SharedState here
     rather than passed in, so it seeds a lowest-priority base (below the YAML
     base and ``extra_server_args``) for every caller.
@@ -1342,6 +1397,7 @@ def materialize_config_with_envs(
     Raises:
         FrameworkScriptMismatchError: If ``benchmark_script`` targets a
             different known framework than the run's framework.
+        ValueError: If a candidate changes or removes an AgentX replay control.
     """
     server_args = (extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
@@ -1376,6 +1432,7 @@ def materialize_config_with_envs(
         explicit_benchmark_script=bool(benchmark_script),
     )
     apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
+    validate_agentx_workload_overrides(bench, extra_envs, unset_envs)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -1807,6 +1864,9 @@ def materialize_config_with_envs(
     # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
     # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
+    if (bench.get("workload_spec") or {}).get("kind") == "agentx_trace_replay":
+        # The switch already resolved these, including concurrency-scaled grace.
+        combined_extra = {key: value for key, value in combined_extra.items() if key not in _AGENTX_WORKLOAD_ENV_NAMES}
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(

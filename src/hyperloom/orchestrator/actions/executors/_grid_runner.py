@@ -428,6 +428,10 @@ def _build_variant_yaml(
         benchmark_script=benchmark_script,
         conc=variant_conc(variant),
     )
+    from ._workload_envs import validate_agentx_workload_overrides
+
+    validate_agentx_workload_overrides(bench, base_extra_envs, base_unset_envs)
+    validate_agentx_workload_overrides(bench, variant.extra_envs, variant.unset_envs)
     extra_args_env = server_args_env_name(bench.get("framework"))
 
     replacing = str(base_args_mode).strip().lower() == "replace"
