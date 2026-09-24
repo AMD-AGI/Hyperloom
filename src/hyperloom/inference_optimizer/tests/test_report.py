@@ -12,10 +12,10 @@ import pytest
 
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
+    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     INTVTY_V1,
     VERDICT_KEEP,
-    VERDICT_RECORDED,
     VERDICT_REVERT,
 )
 from hyperloom.orchestrator.actions.executors import report as rp
@@ -178,7 +178,14 @@ def report_performance_state(monkeypatch):
     state.framework = "vllm"
     state.benchmark_mode = "agentx"
     state.baseline_tput = 100.0
-    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, GRADED_INTVTY: 100.0}
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        GRADED_INTVTY: 100.0,
+        GRADED_INTVTY_P50: 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     state.current_best = {
         "action": "integrate",
         "tput": 150.0,
@@ -187,6 +194,9 @@ def report_performance_state(monkeypatch):
         # The graded axis moves by the same 20% as the guard axis, so a degrade to the output axis is visible as a
         # different figure (50%) rather than hiding behind a coincidence.
         GRADED_INTVTY: 120.0,
+        GRADED_INTVTY_P50: 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "extra_envs": {"RECIPE": "measured"},
     }
     state.optimization_stack = [{"action": "integrate"}]
@@ -221,7 +231,7 @@ def test_report_performance_comparison_snapshots_effective_axes(
     record = summary["performance_comparison"]
 
     expected = {
-        "objective": GRADED_INTVTY if graded else GRADED_OUTPUT,
+        "objective": GRADED_INTVTY_P50 if graded else GRADED_OUTPUT,
         "reference": 100.0,
         "candidate": 120.0 if graded else 150.0,
         "gain_pct": pytest.approx(20.0 if graded else 50.0),
@@ -312,8 +322,8 @@ def test_report_performance_without_validation_stamp_is_diagnostic_only(report_p
     "intvty,total,verdict,gain",
     [
         pytest.param(120.0, 1200.0, VERDICT_KEEP, 20.0, id="keep"),
-        # Neither axis dominates: interactivity is flat but inside the band, so the point is stored, not promoted.
-        pytest.param(100.0, 1200.0, VERDICT_RECORDED, 0.0, id="recorded"),
+        # Flat interactivity clears no threshold, so it reverts even with the guard inside the band.
+        pytest.param(100.0, 1200.0, VERDICT_REVERT, 0.0, id="flat"),
         pytest.param(90.0, 800.0, VERDICT_REVERT, -10.0, id="revert"),
     ],
 )
@@ -321,6 +331,7 @@ def test_report_performance_comparison_records_two_dimensional_verdict(
     report_performance_state, intvty, total, verdict, gain
 ):
     report_performance_state.current_best[GRADED_INTVTY] = intvty
+    report_performance_state.current_best[GRADED_INTVTY_P50] = intvty
     report_performance_state.current_best["total_throughput"] = total
     record = rp._build_summary_dict(report_performance_state, {}, [])["performance_comparison"]
 
@@ -611,3 +622,29 @@ def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
         )
         == "kv_cache_oom"
     )
+
+
+@pytest.mark.parametrize("objective", [GRADED_INTVTY_P50, GRADED_INTVTY])
+def test_composite_section_names_the_interactivity_mode_for_either_percentile(objective):
+    """The renderer reads the family: the graded axis is the median, the session marker still names the tail."""
+    lines: list[str] = []
+    rp._append_composite_perf_section(
+        lines,
+        {
+            "performance_comparison": {
+                "objective": objective,
+                "reference": 100.0,
+                "candidate": 120.0,
+                "gain_pct": 20.0,
+                "comparable": True,
+                "degrade_reason": "",
+                "verdict": VERDICT_KEEP,
+                "tput_reference": 1000.0,
+                "tput_candidate": 1200.0,
+            }
+        },
+    )
+    body = "\n".join(lines)
+    assert "- grading mode        : `intvty_v1`" in body
+    assert "- reference tput      : `1000.0` tok/s (total, diagnostic)" in body
+    assert "- candidate tput      : `1200.0` tok/s (total, diagnostic)" in body

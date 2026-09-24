@@ -360,11 +360,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
     comparison = summary.get("performance_comparison")
     if comparison is not None:
-        from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, INTVTY_V1
+        from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
 
-        # The objective is the interactivity axis; total throughput is the guard the verdict also consulted, so it is
-        # rendered as a second axis rather than as the figure the session was scored on.
-        graded_on_intvty = comparison["objective"] == GRADED_INTVTY
+        # Read the family, not one percentile: the graded axis is the median while the session marker still names
+        # the tail, and pinning either one here prints the wrong mode for the other.
+        graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
         lines.extend(["## Performance comparison", ""])
         lines.append(f"- objective           : `{comparison['objective']}`")
         lines.append(f"- reference           : `{comparison['reference']:.1f}`")
@@ -378,8 +378,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append(f"- verdict             : `{comparison['verdict']}`")
         lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
         if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
+            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
         return
 
     from hyperloom.common.gain_math import gain_pct
@@ -409,7 +409,7 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
             lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (diagnostic, neither objective nor guard)")
     grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
     objective = str(grading.get("objective") or "").strip()
     if objective == GRADED_INTVTY:
@@ -444,8 +444,7 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     comparison = summary["performance_comparison"]
     if not comparison["comparable"] or comparison["gain_pct"] is None:
         return "unavailable"
-    # Anything short of KEEP -- a REVERT, or a RECORDED point the frontier neither promotes nor discards -- disagrees
-    # with a stamp claiming the stack's gain was validated.
+    # Anything short of KEEP disagrees with a stamp claiming the stack's gain was validated.
     if comparison["verdict"] != VERDICT_KEEP or not math.isclose(
         summary["cumulative_gain_validated"], comparison["gain_pct"], abs_tol=1e-9
     ):
@@ -496,8 +495,8 @@ def _build_summary_dict(
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,
-            # The guard axis is snapshotted alongside the objective so a re-rendered report can say what the 2-D
-            # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
+            # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
+            # actually measured, instead of a ``current_best`` that has since moved on.
             "tput_reference": graded.tput_reference,
             "tput_candidate": graded.tput_candidate,
         },

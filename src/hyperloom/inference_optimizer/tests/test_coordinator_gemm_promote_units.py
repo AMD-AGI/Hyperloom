@@ -1536,11 +1536,20 @@ class TestKernelE2EMeasurementPromotion:
             framework="sglang",
             benchmark_mode="agentx",
             baseline_tput=100.0,
-            baseline_perf={"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
+            baseline_perf={
+                "total_throughput": 1000.0,
+                "e2e_norm_intvty_p90": 100.0,
+                "e2e_norm_intvty_p50": 100.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
+            },
             current_best={
                 "tput": 100.0,
                 "total_throughput": 1000.0,
                 "e2e_norm_intvty_p90": 100.0,
+                "e2e_norm_intvty_p50": 100.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
                 "extra_envs": {"BASE_ENV": "1"},
             },
         )
@@ -1548,13 +1557,16 @@ class TestKernelE2EMeasurementPromotion:
         return coord
 
     @staticmethod
-    def _bench(output=90.0, total=1200.0, *, name="first", intvty=120.0):
+    def _bench(output=98.0, total=1200.0, *, name="first", intvty=120.0):
         return {
             "status": "succeeded",
             "output_throughput": output,
             "total_token_throughput": total,
             "input_throughput": total - output,
             "e2e_norm_intvty_p90": intvty,
+            "e2e_norm_intvty_p50": intvty,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "intvty_p90": 100.0,
             "tpot_p90_ms": 10.0,
             "ttft_mean_ms": 12.0,
@@ -1601,8 +1613,8 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("outer_output", [90.0, 9000.0])
-    async def test_gemm_nested_intvty_keep_can_lower_output(self, coord, monkeypatch, outer_output):
-        bench = self._bench(total=1080.0)
+    async def test_gemm_nested_measurement_owns_the_verdict(self, coord, monkeypatch, outer_output):
+        bench = self._bench(output=98.0, total=1080.0)
         fake = _make_integrate(
             [{"decision": "KEEP", "new_tput": outer_output, "gain_pct": 20.0, "bench_result": bench}]
         )
@@ -1624,12 +1636,12 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(20.0)
         assert coord.shared_state.cumulative_gain_validated_stack_len == 1
         assert coord.shared_state.current_best["total_throughput"] == 1080.0
-        assert coord.shared_state.current_best["input_throughput"] == 990.0
+        assert coord.shared_state.current_best["input_throughput"] == 982.0
         assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == 120.0
         assert coord.shared_state.current_best["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
         assert coord.shared_state.current_best["extra_server_args"] == ""
         assert result["tuned_file"] == "/candidate.csv"
-        assert result["e2e_results"]["kept"][0]["tput"] == 90.0
+        assert result["e2e_results"]["kept"][0]["tput"] == 98.0
         assert coord.shared_state.optimization_stack[0]["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv"}
         assert "source_snapshot" not in coord.shared_state.optimization_stack[0]
         self._assert_measurement(coord, bench)
@@ -1681,7 +1693,7 @@ class TestKernelE2EMeasurementPromotion:
         # The gain is graded on the session's own axis, and the run says which
         # one, so an interactivity gain is never read back as an output gain.
         [run] = [row for row in ext["attempts"] if row["source_kind"] == SOURCE_GEMM_TUNING]
-        assert run["detail"]["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
+        assert run["detail"]["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p50")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):
@@ -1818,6 +1830,9 @@ class TestKernelE2EMeasurementPromotion:
             tput=110.0,
             total_throughput=1100.0,
             e2e_norm_intvty_p90=110.0,
+            e2e_norm_intvty_p50=110.0,
+            duration_seconds=900.0,
+            request_error_rate=0.0,
             extra_server_args="--page-size 16",
             extra_envs=dict(entry_envs),
             final_overlay="/prior/overlay",

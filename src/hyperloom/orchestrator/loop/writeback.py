@@ -3511,6 +3511,9 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
+        from hyperloom.common.perf_metric import stamp_output_per_gpu
+
+        stamp_output_per_gpu(result, getattr(self.shared_state, "tp", None))
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -3703,13 +3706,23 @@ class WritebackCollaborator:
                 "total_throughput": result.get("total_token_throughput"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
                 "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
+                "e2e_norm_intvty_p50": result.get("e2e_norm_intvty_p50"),
+                "duration_seconds": result.get("duration_seconds"),
+                "request_error_rate": result.get("request_error_rate"),
+                "output_tput_per_gpu": result.get("output_tput_per_gpu"),
                 "workspace": result.get("workspace"),
             }
             snap = self.shared_state.baseline_perf
             if snap:
                 current_best["total_throughput"] = snap["total_throughput"]
                 current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
-                for _axis in ("input_throughput", "tpot_p90_ms"):
+                for _axis in (
+                    "input_throughput",
+                    "tpot_p90_ms",
+                    "e2e_norm_intvty_p50",
+                    "duration_seconds",
+                    "request_error_rate",
+                ):
                     if snap.get(_axis) is not None:
                         current_best[_axis] = snap[_axis]
             # The measured corpus shape replaces the canonical seed. Only an
