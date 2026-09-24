@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import TargetAnalysisExecutor
 from hyperloom.orchestrator.actions.executors import target_analysis as ta
 from hyperloom.orchestrator.state.task_registry import Task
@@ -501,18 +502,17 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
 # env helpers
 
 
-class TestEnvHelpers:
-    def test_env_int_uses_default_when_missing(self, monkeypatch):
-        monkeypatch.delenv("TARGET_INT_TEST", raising=False)
-        assert ta._env_int("TARGET_INT_TEST", default=7) == 7
+class TestRequestShapeFromEnv:
+    """``ISL`` / ``OSL`` reach the analysis through the canonical reader."""
 
-    def test_env_int_parses_valid(self, monkeypatch):
-        monkeypatch.setenv("TARGET_INT_TEST", "42")
-        assert ta._env_int("TARGET_INT_TEST") == 42
-
-    def test_env_int_falls_back_on_invalid(self, monkeypatch):
-        monkeypatch.setenv("TARGET_INT_TEST", "garbage")
-        assert ta._env_int("TARGET_INT_TEST", default=3) == 3
+    @pytest.mark.parametrize("name", ["ISL", "OSL"])
+    async def test_an_unreadable_request_shape_does_not_analyse_the_wrong_workload(
+        self, monkeypatch, session_dir, name
+    ):
+        """It used to become 0, which is a shape no benchmark was ever run at."""
+        monkeypatch.setenv(name, "30s")
+        with pytest.raises(EnvValueError, match=name):
+            await TargetAnalysisExecutor(compare_against_gpu="b300")(_ctx(session_dir, {"model_path": "GLM-5.2"}))
 
 
 # session_dir resolution

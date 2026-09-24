@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
@@ -219,7 +219,7 @@ def build_manifest(
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
     # are inert. The Critic reads this block, so it carries the distribution.
-    _agentx_on = is_truthy(os.environ.get("HYPERLOOM_AGENTX"))
+    _agentx_on = env_bool("HYPERLOOM_AGENTX")
     if _agentx_on:
         from hyperloom.inference_optimizer.agentx.mapping import (
             CANONICAL_CORPUS_DURATION_S,

@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool, env_str, is_truthy
+from hyperloom.common.env import env_bool, env_float, env_str
 
 INTVTY_V1 = "intvty_v1"
 
@@ -48,8 +47,7 @@ VERDICT_RECORDED = "RECORDED"
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    raw = (env or os.environ).get(_AGENTX_ENV, "")
-    return is_truthy(raw)
+    return env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
@@ -88,13 +86,7 @@ def graded_metric_key(*, benchmark_mode: str = "") -> str:
 
 def parse_intvty_noise_pct() -> float:
     """Noise band in percent from ``HYPERLOOM_PERF_NOISE_PCT``."""
-    raw = env_str("HYPERLOOM_PERF_NOISE_PCT").strip()
-    if not raw:
-        return _DEFAULT_INTVTY_NOISE_PCT
-    try:
-        return float(raw)
-    except ValueError:
-        return _DEFAULT_INTVTY_NOISE_PCT
+    return env_float("HYPERLOOM_PERF_NOISE_PCT", _DEFAULT_INTVTY_NOISE_PCT)
 
 
 def _positive(value: Any) -> float | None:
