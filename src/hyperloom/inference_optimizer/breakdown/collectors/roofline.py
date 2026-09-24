@@ -283,6 +283,17 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "bound_type": str(raw.get("bound_type") or ""),
         "arithmetic_intensity": _to_float(raw.get("arithmetic_intensity")) or 0.0,
         "flops_per_byte": _to_float(raw.get("flops_per_byte")) or 0.0,
+        # Analytical magnitude columns (CSV-sourced when an external author / MAIDAS supplies them):
+        # preserve None when absent so the breakdown never fabricates a 0-flops/0-byte kernel.
+        "flops": _to_float(raw.get("flops")),
+        "bytes_moved": _to_float(raw.get("bytes_moved")),
+        "ideal_us": _to_float(raw.get("ideal_us")),
+        "compute_us": _to_float(raw.get("compute_us")),
+        "read_us": _to_float(raw.get("read_us")),
+        "write_us": _to_float(raw.get("write_us")),
+        "peak_tflops": _to_float(raw.get("peak_tflops")),
+        "hbm_bw_gbps": _to_float(raw.get("hbm_bw_gbps")),
+        "precision": (str(raw["precision"]) if raw.get("precision") else None),
         "efficiency_percent": _to_float(raw.get("efficiency_percent")) or 0.0,
         "gpu_pct": _to_float(raw.get("gpu_pct")) or 0.0,
         "call_count": _to_int(raw.get("call_count")) or 0,

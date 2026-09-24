@@ -16,7 +16,9 @@ from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
 from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.load_model_meta"
+# conc_sweep now sources ModelMeta through the CSV-aware resolve_model_meta (external reads
+# model_roofline_meta.csv; native builds from HF + writes it). Tests patch that entry point.
+_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.resolve_model_meta"
 
 
 def _make_state(

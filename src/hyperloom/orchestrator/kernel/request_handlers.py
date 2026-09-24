@@ -5182,6 +5182,28 @@ def _build_trace_analyze_cmd(
         cmd += ["--roofline-output-name", roofline_output_name]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
+    # Roofline CSV interface: hand the tool its write/read dirs so its analytical
+    # producers (kernel_roofline.csv / gpu_arch_peaks.csv) publish there and its
+    # analytical consumers read them back. Native: write==read==<session>/roofline_csv;
+    # external: write is None (external author writes), read is the external dir; disabled:
+    # both None.
+    if hasattr(state, "roofline_csv_write_dir"):
+        if not is_bypass:
+            # tracelens_analysis.py: full read + write round-trip (native + external).
+            csv_write_dir = state.roofline_csv_write_dir()
+            if csv_write_dir is not None:
+                cmd += ["--roofline-csv-dir", str(csv_write_dir)]
+            csv_read_dir = state.roofline_csv_read_dir()
+            if csv_read_dir is not None:
+                cmd += ["--roofline-csv-read-dir", str(csv_read_dir)]
+        elif getattr(state, "roofline_csv_dir", ""):
+            # bypass_trace_analysis.py: EXTERNAL-mode arch-peak swap only — the per-kernel bypass
+            # roofline reads authoritative peaks from the external gpu_arch_peaks.csv. Native keeps
+            # the hardcoded _HW_SPECS tables (mirrors _arch_peak_resolver's external-only gating), so
+            # the bypass tool gets ONLY the external read dir, never a write dir.
+            csv_read_dir = state.roofline_csv_read_dir()
+            if csv_read_dir is not None:
+                cmd += ["--roofline-csv-read-dir", str(csv_read_dir)]
     return cmd, steady_state_mode
 
 

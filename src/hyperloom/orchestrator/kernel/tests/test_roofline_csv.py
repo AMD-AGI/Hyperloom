@@ -106,7 +106,7 @@ def test_canonical_key_shape_aware_distinguishes_gemms() -> None:
 
 def test_canonical_key_default_matches_roofline_match_key() -> None:
     # Join correctness: the default key must equal the authoritative roofline_match_key
-    # for a representative set of names (else HL-native and MAIDAS CSVs won't join).
+    # for a representative set of names (else HL-native and external CSVs won't join).
     # tracelens_analysis uses bare-name sibling imports, so its tools dir must be on
     # sys.path to import it (the §4 import-resolution caveat, test-only shim).
     import sys
@@ -171,13 +171,16 @@ def test_ceiling_upsert_accumulates(tmp_path: Path) -> None:
     rc.write_ceiling(
         [{"row_type": "arm", "arm": "current_best", "peak_tok_per_sec": 641.30, "bound_kind": "memory"}], path
     )
-    # Producer C writes an L2 op row.
-    rc.write_ceiling([{"row_type": "op", "op_name": "moe_experts", "flops": 1.16e11, "bound_kind": "compute"}], path)
+    # Producer C writes an L2 op row (scoped to its arm's config key).
+    rc.write_ceiling(
+        [{"row_type": "op", "arm": "current_best", "op_name": "moe_experts", "flops": 1.16e11, "bound_kind": "compute"}],
+        path,
+    )
 
     out = rc.read_ceiling(path)
     assert out["baseline"]["peak_tok_per_sec"] == 626.96
     assert out["current_best"]["peak_tok_per_sec"] == 641.30
-    assert out[("op", "moe_experts")]["bound_kind"] == "compute"
+    assert out[("op", "current_best", "moe_experts")]["bound_kind"] == "compute"
     # baseline bound_kind normalized
     assert out["baseline"]["bound_kind"] == "memory"
 
@@ -203,7 +206,7 @@ def test_arch_peak_resolver_synonyms_and_int8_blank(tmp_path: Path) -> None:
                 "matrix_bf16_tflops": 1445.0,
                 "matrix_fp8_tflops": 3028.0,
                 "matrix_mx4_tflops": 4630.0,
-                "matrix_int8_tflops": "",  # blank -> None (not producible by MAIDAS)
+                "matrix_int8_tflops": "",  # blank -> None (not producible by external)
             }
         ],
         tmp_path / "gpu_arch_peaks.csv",
@@ -242,3 +245,80 @@ def test_resolver_none_dir_is_inert() -> None:
     assert r.kernel("x") is None
     assert r.ceiling("baseline") is None
     assert r.arch_peak("mi350x", "bf16") is None
+
+
+# --------------------------------------------------------------------------- #
+# Projection helpers wired into the analytical producers (A / K).
+# --------------------------------------------------------------------------- #
+
+
+def test_arch_row_from_spec_maps_and_renames_fp4() -> None:
+    spec = {
+        "name": "MI355X",
+        "mem_bw_gbps": 8000.0,
+        "max_achievable_tflops": {
+            "matrix_bf16": 1686.0,
+            "matrix_fp4": 5663.0,  # TraceLens fp4 -> schema mx4
+            "matrix_int8": 0,  # non-positive -> dropped (blank)
+        },
+    }
+    row = rc.arch_row_from_spec(spec)
+    assert row["name"] == "MI355X"
+    assert row["mem_bw_gbps"] == 8000.0
+    assert row["matrix_bf16_tflops"] == 1686.0
+    assert row["matrix_mx4_tflops"] == 5663.0  # renamed from fp4
+    assert "matrix_int8_tflops" not in row  # 0 dropped
+    # Round-trips through the arch-peaks CSV columns.
+    out = tmp_arch_roundtrip(row)
+    assert out["MI355X"]["matrix_mx4_tflops"] == 5663.0
+
+
+def tmp_arch_roundtrip(row: dict) -> dict:
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as d:
+        p = _P(d) / "gpu_arch_peaks.csv"
+        rc.write_arch_peaks([row], p)
+        return rc.read_arch_peaks(p)
+
+
+def test_arch_row_from_spec_nameless_is_none() -> None:
+    assert rc.arch_row_from_spec({"mem_bw_gbps": 8000.0}) is None
+
+
+def test_kernel_row_from_view_keeps_only_analytical() -> None:
+    view = {
+        "name": "triton_gemm",
+        "kernel_id": "k1",
+        "source_file": "m.py",
+        "reusable_native_kernel": True,
+        "kernel_category": "gemm",
+        "bound_type": "compute_bound",
+        "arithmetic_intensity": 42.0,
+        "flops_per_byte": 42.0,
+        "roofline_source": "analytical",
+        # MEASURED / DERIVED — must NOT appear on the CSV row:
+        "duration_us": 10.0,
+        "gpu_pct": 5.0,
+        "call_count": 3,
+        "efficiency_percent": 88.0,
+        "compute_utilization_pct": 70.0,
+    }
+    row = rc.kernel_row_from_view(view)
+    assert row["name"] == "triton_gemm"
+    assert row["bound_type"] == "compute"  # normalized
+    assert row["arithmetic_intensity"] == 42.0
+    assert row["kernel_category"] == "gemm"
+    for measured_or_derived in ("duration_us", "gpu_pct", "call_count", "efficiency_percent", "compute_utilization_pct"):
+        assert measured_or_derived not in row
+
+
+def test_kernel_row_from_view_bottleneck_fallback() -> None:
+    # bound_type absent -> falls back to bottleneck.
+    row = rc.kernel_row_from_view({"name": "k", "bottleneck": "memory_bound"})
+    assert row["bound_type"] == "memory"
+
+
+def test_kernel_row_from_view_nameless_is_none() -> None:
+    assert rc.kernel_row_from_view({"bound_type": "compute"}) is None

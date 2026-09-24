@@ -167,31 +167,23 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         from .roofline_ceiling import (
             apply_runtime_dtype,
             compute_roofline_from_perfmodel,
-            load_model_meta,
+            read_ceiling_perfmodel,
             resolve_compute_peak_provenance,
+            resolve_model_meta,
             resolve_runtime_dtype,
             resolve_runtime_workload,
+            write_ceiling_perfmodel,
         )
 
         runtime = resolve_runtime_workload(state, arm=arm)
-        meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+        meta = resolve_model_meta(state, runtime.model_path, precision_hint=runtime.precision)
         if meta is None:
             return
         rt = resolve_runtime_dtype(state, meta, arm=arm)
         meta = apply_runtime_dtype(meta, rt)
         compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            gpu_type=runtime.gpu_type,
-            concurrency=runtime.concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=runtime.tp,
-            precision_tag=compute_precision_tag,
-        )
-        snapshot["roofline_provenance"] = {
-            "formula": "perfmodel" if pm_bd is not None else "legacy",
-            **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+        # Runtime provenance is always resolved locally (dtype/tp/isl/osl are not in the ceiling CSV).
+        runtime_prov = {
             "runtime_weight_dtype": rt.weight_dtype_tag,
             "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
             "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
@@ -203,6 +195,33 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
             "runtime_osl": runtime.osl,
             "runtime_precision": runtime.precision,
             "runtime_framework": runtime.framework,
+        }
+
+        # external-CSV mode: SOURCE the per-op breakdown + compute-peak provenance from the CSV
+        # (MAIDAS / external author) instead of recomputing the PerfModel.
+        csv_read = read_ceiling_perfmodel(state, arm)
+        if csv_read is not None:
+            peak_prov, perfmodel = csv_read
+            snapshot["roofline_provenance"] = {"formula": "external-csv", **peak_prov, **runtime_prov}
+            snapshot["perfmodel_breakdown"] = perfmodel
+            return
+
+        # Native mode: compute the PerfModel, serialize it, and WRITE the op-rows + arm-extras to CSV
+        # (so they round-trip and are available to a downstream CSV consumer).
+        pm_bd = compute_roofline_from_perfmodel(
+            meta=meta,
+            gpu_type=runtime.gpu_type,
+            concurrency=runtime.concurrency,
+            isl=runtime.isl,
+            osl=runtime.osl,
+            num_gpus=runtime.tp,
+            precision_tag=compute_precision_tag,
+        )
+        peak_prov = resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag)
+        snapshot["roofline_provenance"] = {
+            "formula": "perfmodel" if pm_bd is not None else "legacy",
+            **peak_prov,
+            **runtime_prov,
         }
         if pm_bd is not None:
             snapshot["perfmodel_breakdown"] = {
@@ -226,6 +245,7 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
                     for op in pm_bd.ops
                 ],
             }
+            write_ceiling_perfmodel(state, arm, pm_bd, peak_prov)
     except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
         pass
 

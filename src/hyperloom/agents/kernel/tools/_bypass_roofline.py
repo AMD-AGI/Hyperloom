@@ -212,8 +212,16 @@ def compute_roofline(
     call_count: int = 1,
     gpu_type: str = "",
     dtype: str = "",
+    resolver: Any = None,
 ) -> dict[str, Any] | None:
-    """Analytical roofline for one kernel aggregate, or ``None`` when unestimable."""
+    """Analytical roofline for one kernel aggregate, or ``None`` when unestimable.
+
+    ``resolver`` (an optional ``roofline_csv.RooflineResolver`` over an EXTERNAL
+    ``gpu_arch_peaks.csv``): when supplied and it carries the peak for this device/dtype, the
+    per-kernel roofline peak-swaps to those authoritative (MAIDAS-authored) peaks; otherwise the
+    hardcoded ``_HW_SPECS`` tables are used. Only wired in external-CSV mode (native keeps the
+    tables), mirroring ``roofline_ceiling._arch_peak_resolver``.
+    """
     operands = _parse_operands(shape_str)
     if not operands:
         return None
@@ -228,8 +236,19 @@ def compute_roofline(
 
     spec = _HW_SPECS.get((gpu_type or "").strip().lower()) or _HW_SPECS[_DEFAULT_GPU]
     peak_tflops = spec["peak_tflops"].get(op_dtype, spec["peak_tflops"].get("bf16", 0.0))
+    hbm_bw_gbps = spec["hbm_bw_gbps"]
+    if resolver is not None:
+        try:
+            ext_peak = resolver.arch_peak(gpu_type, op_dtype)
+            if isinstance(ext_peak, (int, float)) and ext_peak > 0:
+                peak_tflops = float(ext_peak)
+            ext_bw = resolver.mem_bw(gpu_type)
+            if isinstance(ext_bw, (int, float)) and ext_bw > 0:
+                hbm_bw_gbps = float(ext_bw)
+        except Exception:  # noqa: BLE001 — a resolver failure must never break the bypass roofline
+            pass
     peak_flops = peak_tflops * 1e12
-    peak_bw = spec["hbm_bw_gbps"] * 1e9
+    peak_bw = hbm_bw_gbps * 1e9
 
     ai = flops / nbytes  # FLOPs/byte
     machine_balance = (peak_flops / peak_bw) if peak_bw > 0 else 0.0
@@ -242,6 +261,22 @@ def compute_roofline(
         "roofline_source": _RL_ANALYTICAL,
         **est_meta,
     }
+    # Analytical roofline magnitudes (the same columns an external author / MAIDAS can supply):
+    # raw flops/bytes, the peaks used, and the roofline ideal-time split. read_us/write_us are left
+    # unset here because the estimator returns only TOTAL bytes, not a read/write split — an external
+    # author supplies that; ideal_us captures the binding side regardless.
+    compute_us = (flops / peak_flops * 1e6) if peak_flops > 0 else None
+    mem_us = (nbytes / peak_bw * 1e6) if peak_bw > 0 else None
+    out["flops"] = flops
+    out["bytes_moved"] = nbytes
+    out["precision"] = op_dtype
+    if peak_tflops > 0:
+        out["peak_tflops"] = peak_tflops
+    out["hbm_bw_gbps"] = hbm_bw_gbps
+    if compute_us is not None:
+        out["compute_us"] = round(compute_us, 4)
+    if compute_us is not None or mem_us is not None:
+        out["ideal_us"] = round(max(compute_us or 0.0, mem_us or 0.0), 4)
     # Per-call achieved throughput from measured time -> efficiency.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0

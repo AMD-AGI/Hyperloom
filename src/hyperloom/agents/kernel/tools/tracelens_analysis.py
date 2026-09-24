@@ -5842,34 +5842,220 @@ def roofline_match_key(name: str) -> str:
     return lower[:80]
 
 
-def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
-    """Load roofline results JSON keyed by normalized kernel match key.
+def _import_roofline_csv() -> "Any | None":
+    """Import the leaf ``roofline_csv`` module, or ``None`` if hyperloom is unavailable.
+
+    The tool runs as a subprocess under whatever interpreter the kernel-agent launches. In
+    an env where hyperloom is pip-installed the plain import works; when it is not on
+    ``sys.path`` (e.g. a bare interpreter) we add the in-repo ``src`` root deterministically
+    from this file's location (tools -> kernel -> agents -> hyperloom -> src) so the CSV
+    interface never silently no-ops for a path reason. ``roofline_csv`` is a stdlib-only
+    leaf, so importing it is cheap and safe.
+    """
+    try:
+        from hyperloom.orchestrator.kernel import roofline_csv as _rc
+
+        return _rc
+    except ImportError:
+        src_root = str(Path(__file__).resolve().parents[4])
+        if src_root not in sys.path:
+            sys.path.insert(0, src_root)
+        try:
+            from hyperloom.orchestrator.kernel import roofline_csv as _rc
+
+            return _rc
+        except ImportError:
+            log.warning("roofline-csv: hyperloom not importable; CSV interface disabled in this tool run")
+            return None
+
+
+def _csv_log(log_path: "Path | None", msg: str) -> None:
+    """Emit a roofline-csv PRODUCE/CONSUME line to the tool run log AND the module logger.
+
+    The tool has no logging config, so ``append_log`` (its own per-run file) is the reliable
+    observable; the ``log.debug`` mirror is there for a DEBUG-configured host. Every producer
+    and consumer logs on BOTH its active and no-op branches so a run shows each path was
+    reached and what it did (e.g. K correctly writing/consuming nothing under --no-kernel).
+    """
+    if log_path is not None:
+        append_log(log_path, msg)
+    log.debug(msg)
+
+
+def _roofline_csv_write_dir(args: Any) -> "Path | None":
+    """Native-mode WRITE dir for the roofline CSV interface, or ``None``."""
+    raw = str(getattr(args, "roofline_csv_dir", "") or "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _roofline_csv_read_dir(args: Any) -> "Path | None":
+    """READ dir for the roofline CSV interface (falls back to the write dir), or ``None``."""
+    raw = str(getattr(args, "roofline_csv_read_dir", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _roofline_csv_write_dir(args)
+
+
+def publish_kernel_roofline_csv(
+    csv_dir: "Path | None", payload: dict[str, Any], log_path: "Path | None" = None
+) -> None:
+    """PRODUCE K: project ``kernel_roofline.json`` per-kernel rows -> ``kernel_roofline.csv``.
+
+    Native-mode producer of the per-kernel ANALYTICAL roofline (``bound_type``/``ai``/
+    ``flops_per_byte``/``kernel_category``). No-op when the CSV interface is off (no dir)
+    or the payload has no kernels. MEASURED/DERIVED columns are intentionally dropped by
+    :func:`roofline_csv.kernel_row_from_view`.
+    """
+    if csv_dir is None:
+        _csv_log(log_path, "[roofline-csv] PRODUCE K skip: external/disabled mode (tool writes no CSV)")
+        return
+    _rc = _import_roofline_csv()
+    if _rc is None:
+        _csv_log(log_path, "[roofline-csv] PRODUCE K skip: roofline_csv module unavailable")
+        return
+    kernels = payload.get("kernels") if isinstance(payload, dict) else None
+    rows = [r for r in (_rc.kernel_row_from_view(k) for k in (kernels or []) if isinstance(k, dict)) if r]
+    if not rows:
+        # Reached but nothing to write — expected in --no-kernel (agent route computes no
+        # per-kernel analytical). Logged so the run shows the producer was exercised.
+        _csv_log(log_path, "[roofline-csv] PRODUCE K skip: no per-kernel analytical rows this cycle (0 kernels)")
+        return
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    path = csv_dir / "kernel_roofline.csv"
+    _rc.write_kernel_roofline(rows, path)
+    _csv_log(log_path, f"[roofline-csv] PRODUCE K kernel_roofline.csv WROTE rows={len(rows)} -> {path}")
+
+
+def publish_arch_peaks_csv(
+    csv_dir: "Path | None", gpu_arch_path: "Path | str | None", log_path: "Path | None" = None
+) -> None:
+    """PRODUCE A: project the resolved GPU arch spec -> ``gpu_arch_peaks.csv``.
+
+    Native-mode producer of the per-device peaks (``mem_bw_gbps`` + ``matrix_*_tflops``,
+    ``matrix_fp4``->``matrix_mx4``). No-op when the CSV interface is off or the spec is
+    absent/unreadable.
+    """
+    if csv_dir is None:
+        _csv_log(log_path, "[roofline-csv] PRODUCE A skip: external/disabled mode (tool writes no CSV)")
+        return
+    if not gpu_arch_path:
+        _csv_log(log_path, "[roofline-csv] PRODUCE A skip: no resolved GPU arch spec this run")
+        return
+    _rc = _import_roofline_csv()
+    if _rc is None:
+        _csv_log(log_path, "[roofline-csv] PRODUCE A skip: roofline_csv module unavailable")
+        return
+    try:
+        spec = json.loads(Path(gpu_arch_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _csv_log(log_path, f"[roofline-csv] PRODUCE A skip: arch spec unreadable at {gpu_arch_path}")
+        return
+    row = _rc.arch_row_from_spec(spec) if isinstance(spec, dict) else None
+    if row is None:
+        _csv_log(log_path, "[roofline-csv] PRODUCE A skip: arch spec had no device name")
+        return
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    path = csv_dir / "gpu_arch_peaks.csv"
+    _rc.write_arch_peaks([row], path)
+    _csv_log(log_path, f"[roofline-csv] PRODUCE A gpu_arch_peaks.csv WROTE name={row.get('name')} -> {path}")
+
+
+def _overlay_kernel_roofline_csv(
+    out: dict[str, dict[str, Any]], read_dir: "Path | None", log_path: "Path | None" = None
+) -> dict[str, dict[str, Any]]:
+    """CONSUME K: overlay per-kernel ANALYTICAL columns from ``kernel_roofline.csv``.
+
+    Native mode: the CSV was just written this cycle from the same PerfModel rows (the
+    round-trip in :func:`load_roofline_results`), so this reads back what merge is about to
+    consume — the analytical is CSV-sourced, not a direct in-memory bypass. external-CSV mode: the
+    external author's ``bound_type``/``arithmetic_intensity`` replace the PerfModel values.
+    MEASURED/DERIVED columns are never sourced here. No-op when the CSV is absent.
+    """
+    if read_dir is None:
+        _csv_log(log_path, "[roofline-csv] CONSUME K skip: CSV interface off (no read dir)")
+        return out
+    _rc = _import_roofline_csv()
+    if _rc is None:
+        _csv_log(log_path, "[roofline-csv] CONSUME K skip: roofline_csv module unavailable")
+        return out
+    path = read_dir / "kernel_roofline.csv"
+    csv_rows = _rc.read_kernel_roofline(path)
+    if not csv_rows:
+        # Reached but no CSV/rows to consume — expected in --no-kernel. This clean, error-free
+        # no-op is the evidence that --no-kernel does not use kernel_roofline.csv data.
+        _csv_log(log_path, f"[roofline-csv] CONSUME K skip: no rows in {path} (nothing to consume)")
+        return out
+    overlaid = 0
+    for key, crow in csv_rows.items():
+        dst = out.get(key)
+        if dst is None:
+            dst = {"name": crow.get("name")}
+            out[key] = dst
+        bound = crow.get("bound_type")
+        if bound is not None:
+            dst["bottleneck"] = bound
+        ai = crow.get("arithmetic_intensity")
+        if ai is not None:
+            dst["arithmetic_intensity"] = ai
+        fpb = crow.get("flops_per_byte")
+        if fpb is not None:
+            dst["flops_per_byte"] = fpb
+        # Analytical magnitude columns (flops/bytes/roofline times/peaks/precision): overlay when the
+        # CSV supplies them (external author / MAIDAS, or the native round-trip). A blank cell reads
+        # back as None for numeric columns and "" for the string column (precision) — treat BOTH as
+        # absent so a partially-filled external CSV never clobbers an in-memory value.
+        for _field in ("flops", "bytes_moved", "ideal_us", "compute_us", "read_us", "write_us",
+                       "peak_tflops", "hbm_bw_gbps", "precision"):
+            _val = crow.get(_field)
+            if _val is not None and _val != "":
+                dst[_field] = _val
+        overlaid += 1
+    _csv_log(log_path, f"[roofline-csv] CONSUME K kernel_roofline.csv READ rows={overlaid} <- {path}")
+    return out
+
+
+def load_roofline_results(
+    path: str | None,
+    write_dir: "Path | None" = None,
+    read_dir: "Path | None" = None,
+    log_path: "Path | None" = None,
+) -> dict[str, dict[str, Any]]:
+    """Load the per-kernel analytical roofline, CSV-sourced, keyed by match key.
+
+    Intra-cycle ROUND-TRIP (mirrors the ceiling seam): load the PerfModel
+    ``--roofline-json`` rows, PRODUCE them to ``kernel_roofline.csv`` (native ``write_dir``),
+    then CONSUME the analytical back from the CSV (``read_dir``) so ``merge_roofline_into_candidates``
+    reads the CSV, not the in-memory JSON — no direct analytical producer->consumer bypass,
+    even on the first native cycle. external-CSV mode: ``write_dir`` is None (external author wrote
+    the CSV) and ``read_dir`` is the external dir, so the consumer reads the external analytical.
 
     Args:
-        path (str | None): Path to a roofline results JSON file (a list of
-            rows or a dict with a ``results`` list); may be empty/``None``.
+        path: PerfModel roofline results JSON (list of rows or ``{"results": [...]}``).
+        write_dir: Native WRITE dir — the loaded per-kernel analytical is published here.
+        read_dir: READ dir — analytical is read back from ``kernel_roofline.csv`` here.
+        log_path: Optional tool log path for the PRODUCE/CONSUME debug lines.
 
     Returns:
-        dict[str, dict[str, Any]]: Map of :func:`roofline_match_key` to row;
-            empty when the path is missing or unparseable.
+        Map of :func:`roofline_match_key` to row; empty when the path is missing/unparseable
+        and no CSV supplies rows.
     """
-    if not path:
-        return {}
-    p = Path(path).expanduser()
-    if not p.exists():
-        return {}
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    rows = payload.get("results") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return {}
     out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if isinstance(row, dict) and row.get("name"):
-            out[roofline_match_key(str(row["name"]))] = row
-    return out
+    if path:
+        p = Path(path).expanduser()
+        if p.exists():
+            try:
+                payload = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = None
+            rows = payload.get("results") if isinstance(payload, dict) else payload
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict) and row.get("name"):
+                        out[roofline_match_key(str(row["name"]))] = row
+    # PRODUCE K (native round-trip): publish the loaded per-kernel analytical so the consumer
+    # below reads it back from the CSV this same cycle. No-op in external/disabled (write_dir None).
+    publish_kernel_roofline_csv(write_dir, {"kernels": list(out.values())}, log_path)
+    return _overlay_kernel_roofline_csv(out, read_dir, log_path)
 
 
 def merge_roofline_into_candidates(
@@ -5894,6 +6080,18 @@ def merge_roofline_into_candidates(
         if roofline:
             item["bottleneck"] = roofline.get("bottleneck", "unknown")
             item["arithmetic_intensity"] = roofline.get("arithmetic_intensity")
+            # flops_per_byte is analytical: propagate the CSV-sourced value so downstream
+            # consumers (collect_kernel_roofline / _build_hot_kernel_summaries) read it from CSV.
+            if roofline.get("flops_per_byte") is not None:
+                item["flops_per_byte"] = roofline.get("flops_per_byte")
+            # Analytical magnitude columns: propagate the CSV-sourced value (external author / MAIDAS,
+            # or the native round-trip) when present. Blank reads back as None (numeric) or "" (the
+            # string column precision) — treat BOTH as absent so a blank cell never clobbers.
+            for _field in ("flops", "bytes_moved", "ideal_us", "compute_us", "read_us", "write_us",
+                           "peak_tflops", "hbm_bw_gbps", "precision"):
+                _rv = roofline.get(_field)
+                if _rv is not None and _rv != "":
+                    item[_field] = _rv
             item["compute_utilization_pct"] = roofline.get("compute_utilization_pct", 0.0)
             item["bandwidth_utilization_pct"] = roofline.get("bandwidth_utilization_pct", 0.0)
             item["suggestion"] = roofline.get("suggestion", "")
@@ -5902,6 +6100,7 @@ def merge_roofline_into_candidates(
         else:
             item.setdefault("bottleneck", "unknown")
             item.setdefault("arithmetic_intensity", None)
+            item.setdefault("flops_per_byte", None)
             item.setdefault("compute_utilization_pct", None)
             item.setdefault("bandwidth_utilization_pct", None)
             item.setdefault("recommended_actions", [])
@@ -5951,6 +6150,17 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "bound_type": candidate.get("bound_type"),
         "arithmetic_intensity": arithmetic_intensity,
         "flops_per_byte": candidate.get("flops_per_byte"),
+        # Analytical magnitude columns (from the bypass estimator / external author); pass through
+        # so kernel_row_from_view can project them into kernel_roofline.csv. None when unavailable.
+        "flops": candidate.get("flops"),
+        "bytes_moved": candidate.get("bytes_moved"),
+        "ideal_us": candidate.get("ideal_us"),
+        "compute_us": candidate.get("compute_us"),
+        "read_us": candidate.get("read_us"),
+        "write_us": candidate.get("write_us"),
+        "peak_tflops": candidate.get("peak_tflops"),
+        "hbm_bw_gbps": candidate.get("hbm_bw_gbps"),
+        "precision": candidate.get("precision"),
         "efficiency_percent": candidate.get("efficiency_percent"),
         "compute_utilization_pct": candidate.get("compute_utilization_pct"),
         "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
@@ -6836,6 +7046,27 @@ def main() -> int:
     )
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
+        "--roofline-csv-dir",
+        default=os.environ.get("HYPERLOOM_ROOFLINE_CSV_DIR", ""),
+        help=(
+            "WRITE dir for the roofline CSV interface (kernel_roofline.csv / "
+            "gpu_arch_peaks.csv). Set only in native mode: the analytical producers here "
+            "publish these CSVs to it. Empty (external/disabled) means this tool writes no "
+            "CSV. Env: HYPERLOOM_ROOFLINE_CSV_DIR."
+        ),
+    )
+    parser.add_argument(
+        "--roofline-csv-read-dir",
+        default=os.environ.get("HYPERLOOM_ROOFLINE_CSV_READ_DIR", ""),
+        help=(
+            "READ dir for the roofline CSV interface. Native mode: the same "
+            "<session>/roofline_csv folder (a prior cycle's published CSVs). external-CSV mode: "
+            "the external author's dir, from which the analytical consumers overlay "
+            "kernel analytical + peak-swap arch peaks. Empty disables CSV reads. "
+            "Env: HYPERLOOM_ROOFLINE_CSV_READ_DIR."
+        ),
+    )
+    parser.add_argument(
         "--num-denoise-steps",
         type=int,
         default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
@@ -7363,6 +7594,8 @@ def main() -> int:
             )
             if gpu_arch_path is not None:
                 artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
+                # PRODUCE A: publish the resolved GPU arch peaks to the CSV interface (native).
+                publish_arch_peaks_csv(_roofline_csv_write_dir(args), gpu_arch_path, log_path)
 
             # Split the full-window filtered trace into steady-state chunks via
             # TraceLens's own splitter, since the perf report expects a single
@@ -7985,7 +8218,12 @@ def main() -> int:
                     "truth. Inspect the TraceLens skill log and report "
                     "upstream if reproducible."
                 )
-        roofline_by_name = load_roofline_results(args.roofline_json)
+        roofline_by_name = load_roofline_results(
+            args.roofline_json,
+            write_dir=_roofline_csv_write_dir(args),
+            read_dir=_roofline_csv_read_dir(args),
+            log_path=log_path,
+        )
         if roofline_by_name:
             append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
         merge_roofline_into_candidates(candidates, roofline_by_name)

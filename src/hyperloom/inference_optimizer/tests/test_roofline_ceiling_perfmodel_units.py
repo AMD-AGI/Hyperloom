@@ -770,7 +770,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
     # Patch vendor to a *different* positive value (500.0) so swapping the operands of `achievable or vendor` would
     # change the result.
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag, _resolver=None: 100.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
 
     active = 1_000_000_000
@@ -800,7 +800,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     assert fallback > 0.0
 
     # Vendor-peak fallback: achievable absent (0.0), vendor-peak covers it.
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag, _resolver=None: 0.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 200.0)
     vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
         gpu_type="mi300x",
@@ -813,7 +813,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     assert vendor_fallback == pytest.approx((200.0 * 1e12) / (2.0 * active / 2.0))
     assert vendor_fallback > 0.0
 
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag, _resolver=None: 0.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
@@ -826,7 +826,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
         )
         == 0.0
     )
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag, _resolver=None: 100.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
             gpu_type="mi300x",

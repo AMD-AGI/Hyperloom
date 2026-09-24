@@ -654,7 +654,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory of externally-authored analytical roofline CSVs "
         "(kernel_roofline.csv / roofline_ceiling.csv / gpu_arch_peaks.csv). "
         "When set, Hyperloom READS the analytical roofline from these files and "
-        "writes none (MAIDAS mode: an external MAIDAS program authors them). "
+        "writes none (external-CSV mode: an external program authors them). "
         "Unset: native mode writes them under reports/ and reads them back. "
         "Measured (trace) and derived fields are always computed by Hyperloom.",
     )
@@ -662,7 +662,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--roofline-csv-strict",
         action="store_true",
         default=False,
-        help="In --roofline-csv-dir (MAIDAS) mode, fail instead of falling back "
+        help="In --roofline-csv-dir (external) mode, fail instead of falling back "
         "to native compute when an expected external roofline CSV is missing.",
     )
     opt.add_argument(
