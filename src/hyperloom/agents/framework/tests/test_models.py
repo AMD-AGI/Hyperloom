@@ -10,42 +10,10 @@ from pathlib import Path
 import pytest
 
 from hyperloom.agents.framework.models import (
-    Baseline,
     Candidate,
-    CommandSpec,
     ExploreRequest,
-    PrFilter,
     PRMonitorConfig,
-    Thresholds,
 )
-
-
-# Baseline ---------------------------------------------------------------
-
-
-def test_baseline_requires_positive_throughput() -> None:
-    """Baseline.from_dict rejects zero/negative throughput."""
-    with pytest.raises(ValueError, match="throughput"):
-        Baseline.from_dict({"throughput": 0})
-    with pytest.raises(ValueError, match="throughput"):
-        Baseline.from_dict({"throughput": -1})
-
-
-def test_baseline_accepts_throughput_alias() -> None:
-    """Baseline.from_dict accepts 'output_throughput' as a fallback key."""
-    b = Baseline.from_dict({"output_throughput": 12.5})
-    assert b.throughput == 12.5
-    assert b.accuracy is None
-
-
-# Thresholds -------------------------------------------------------------
-
-
-def test_thresholds_defaults() -> None:
-    """Thresholds.from_dict defaults when block missing/empty."""
-    t = Thresholds.from_dict(None)
-    assert t.min_throughput_ratio == 1.05
-    assert t.max_accuracy_drop == 0.05
 
 
 # Candidate.slug / pr_number --------------------------------------------
@@ -73,30 +41,6 @@ def test_pr_monitor_config_requires_base_url() -> None:
     """PRMonitorConfig.from_dict rejects empty/missing base_url."""
     with pytest.raises(ValueError, match="base_url"):
         PRMonitorConfig.from_dict({})
-
-
-# CommandSpec ------------------------------------------------------------
-
-
-def test_command_spec_rejects_empty_command() -> None:
-    """CommandSpec.from_dict rejects an empty 'command' field."""
-    with pytest.raises(ValueError, match="command"):
-        CommandSpec.from_dict({"command": ""})
-
-
-# PrFilter ---------------------------------------------------------------
-
-
-def test_pr_filter_defaults_are_empty() -> None:
-    """PrFilter.from_dict(None) yields a no-op filter."""
-    f = PrFilter.from_dict(None)
-    assert f.is_empty
-
-
-def test_pr_filter_coerces_string_to_tuple() -> None:
-    """PrFilter accepts a single string for list-typed fields."""
-    f = PrFilter.from_dict({"include_paths": "python/"})
-    assert f.include_paths == ("python/",)
 
 
 # ExploreRequest ---------------------------------------------------------

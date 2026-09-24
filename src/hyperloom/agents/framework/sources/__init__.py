@@ -85,7 +85,6 @@ class BackendSpec:
 
 # Registry of PR-source backends keyed by ``search_mode``.
 _SEARCH_BACKENDS: dict[str, BackendSpec] = {
-    "gbrain_pr_kb": BackendSpec("gbrain_pr_kb", lambda req: _run_pr_kb(req), _BEST_EFFORT),
     "pr_monitor": BackendSpec("pr_monitor", lambda req: _run_pr_monitor(req), _HARD_FAIL),
     "github": BackendSpec("github", lambda req: _run_github(req), _BEST_EFFORT),
 }
@@ -125,13 +124,6 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         len(out) - len(request.candidate_refs),
     )
     return deduped
-
-
-def _run_pr_kb(request: ExploreRequest) -> list[Candidate]:
-    """Query the gbrain PR KB; best-effort - empty list on any failure."""
-    from .pr_kb import enumerate_pr_kb
-
-    return enumerate_pr_kb(request)
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:

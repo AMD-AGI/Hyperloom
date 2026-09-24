@@ -134,10 +134,9 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
-# package tree in both source and pip-installed layouts. A missing pyproject at
-# REPO_ROOT means setup is running from a pip --target workspace rather than a
-# source checkout, so the editable self-install step below is skipped.
+# kernel-agent and other sub-agents live under the hyperloom package tree.
+# A missing pyproject at REPO_ROOT means setup is running from a pip --target
+# workspace rather than a source checkout, so the editable self-install step below is skipped.
 _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
 HYPERLOOM_PACKAGED_INSTALL=0
 if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
@@ -258,9 +257,7 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI is provided by this same editable install; framework-agent
-    lives in src/hyperloom/agents/framework/ and has no separate
-    installer/venv to chain to.
+  - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install
@@ -2223,10 +2220,6 @@ persist_vllm_image_source_env
 # Unconditional (not gated on the backend): the default-geak install a later
 # forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
-# tree-reform.MD P2.5: framework-agent was promoted into
-# src/hyperloom/agents/framework/ (single hyperloom distribution), so the
-# `fa` CLI is already installed by ensure_inference_optimizer() above; no
-# more separate chain_framework_agent() delegation to a standalone installer.
 
 _write_specialist_secret_env_opt_in() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then

@@ -8,18 +8,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-
 import pytest
 
 from hyperloom.agents.framework.kb import (
-    _build_llm_prompt,
-    _iter_message_text,
     read_pr_ledger,
 )
 from hyperloom.agents.framework.models import (
     Candidate,
     ExploreRequest,
-    Finding,
     _parse_keywords,
     _parse_pr_states,
     _parse_search_modes,
@@ -110,24 +106,6 @@ def test_legacy_kb_dirname_agrees_with_the_recipe_side(monkeypatch, tmp_path: Pa
     assert _legacy_recipe_root(os.environ).name == fa_kb._LEGACY_WORKSPACE_KB_DIRNAME
 
 
-def test_iter_message_text_handles_all_shapes() -> None:
-    assert list(_iter_message_text("hello")) == ["hello"]
-    assert list(_iter_message_text(SimpleNamespace(text="t"))) == ["t"]
-    msg = SimpleNamespace(
-        content=[
-            SimpleNamespace(text="b1"),
-            SimpleNamespace(text="b2"),
-            SimpleNamespace(other=1),  # no .text -> skipped
-        ]
-    )
-    assert list(_iter_message_text(msg)) == ["b1", "b2"]
-
-
-def test_build_llm_prompt_embeds_domain_and_findings() -> None:
-    prompt = _build_llm_prompt("kernel_agent", [Finding(title="Speedup", body="2x")])
-    assert "kernel_agent" in prompt
-    assert "curator" in prompt
-    assert "Speedup" in prompt
 
 
 # models.py

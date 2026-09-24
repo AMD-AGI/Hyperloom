@@ -801,65 +801,6 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
     assert '"resumed": true' in out
 
 
-def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.framework import gbrain_page_client as gbrain
-    from hyperloom.common import jsonio
-
-    assert list(jsonio.iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
-        {"id": "1", "result": {"ok": True}}
-    ]
-    assert gbrain._select_mcp_response('data: {"id":"0","result":{"fallback":true}}\n\n', want_id="missing") == {
-        "id": "0",
-        "result": {"fallback": True},
-    }
-    assert gbrain._as_hit_list({"pages": [{"slug": "a"}, "bad"]}) == [{"slug": "a"}]
-    assert gbrain._as_hit_list("bad") == []
-
-    class _Resp:
-        headers = {"Content-Type": "application/json", "Content-Length": "10"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self, *_args):
-            payload = {"result": {"content": [{"text": json.dumps({"slug": "page-1"})}]}}
-            return json.dumps(payload).encode()
-
-    captured = {}
-
-    def _urlopen(req, timeout):
-        captured["url"] = req.full_url
-        captured["timeout"] = timeout
-        captured["auth"] = req.headers.get("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", _urlopen)
-    client = gbrain.GbrainPageClient("https://gbrain.example/", "tok", timeout_sec=0.1)
-    assert client.call("get_page", {"slug": "page-1"}) == {"slug": "page-1"}
-    assert captured["url"] == "https://gbrain.example/mcp"
-    assert captured["auth"] == "Bearer tok"
-    assert client.get_page("page-1") == {"slug": "page-1"}
-
-    class _ErrorResp(_Resp):
-        def read(self, *_args):
-            return b'{"error":{"message":"nope"}}'
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _ErrorResp())
-    with pytest.raises(gbrain.GbrainPageError, match="JSON-RPC error"):
-        client.call("search", {"query": "x"})
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
-    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
-        client.call("search", {"query": "x"})
-
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
-    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
-    monkeypatch.setenv("GBRAIN_HTTP_TIMEOUT_SEC", "not-a-number")
-    assert isinstance(gbrain.build_gbrain_page_client_from_env(), gbrain.GbrainPageClient)
-
 
 def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
