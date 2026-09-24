@@ -7,6 +7,50 @@ description: Integrates Fleet KB reads into a Hyperloom-style optimization workf
 
 Use this checklist when wiring Fleet KB into an optimization workflow.
 
+## Worker setup
+
+Use matching demo branches:
+
+```bash
+git switch demo/fleet-kb-integration
+python3 -m pip install -e .
+python3 -m pip install \
+  "git+https://github.com/zili-amd/Hyperloom-KB.git@demo/fleet-kb-service"
+```
+
+Have the Slack launcher set these values in the process/container that runs
+Hyperloom:
+
+```bash
+export HYPERLOOM_KB_ENABLE=true
+export HYPERLOOM_KB_DECL="$REPO_ROOT/examples/hyperloom-kb-inference.yaml"
+export HYPERLOOM_FLEET_KB_URL=https://slack-central.example/fleet-kb
+export HYPERLOOM_FLEET_KB_WORKER_TOKEN=...
+export HYPERLOOM_FLEET_KB_ID=customer-demo
+export HYPERLOOM_FLEET_KB_WORKER_ID="$(hostname)"
+export HYPERLOOM_FLEET_KB_SCOPE_ID="$SLACK_JOB_ID"
+export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
+export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
+export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH:?}/fleet-kb-spool/$SLACK_JOB_ID"
+```
+
+Every Run needs a fresh scope. For Run B, the scope must be the same one the
+Slack Bot populated through human selection before launch.
+
+After the normal Hyperloom runtime install, verify the exact worker process
+environment:
+
+```bash
+python3 -m hyperloom.inference_optimizer.tools.cold_start_check \
+  --model "$MODEL_PATH" \
+  --framework "$FRAMEWORK" \
+  --require-experience-kb \
+  --output "$HYPERLOOM_FLEET_KB_SPOOL/cold-start.json"
+```
+
+Require `cold_start_ready=true`. Do not launch a long run from a successful
+central-service health check alone.
+
 ## 1. Find the real decision boundary
 
 Locate the last point before the decision-making LLM proposes the next measured
