@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import BaseTuner, TuneResult, measured_improvements
+from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import TUNER_ENV_VARS, run_subprocess
 from ..shapes import compute_vllm_moe_batch_sizes
 
@@ -545,7 +545,7 @@ class VllmMoeTritonTuner(BaseTuner):
         best_speedup = script_result.get("best_speedup")
         avg_speedup = script_result.get("avg_speedup")
         min_pct = self.ctx.min_improvement_pct / 100.0 if self.ctx.min_improvement_pct else 0.0
-        improved_count = measured_improvements(shape_details, lambda d: d["speedup"] > 1.0 + min_pct)
+        improved_count = micro_metrics(shape_details, lambda d: d["speedup"] > 1.0 + min_pct).improved
 
         n_tuned = len(sweep_data)
         return TuneResult(

@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..model_analyzer import ModelProfile
 
@@ -20,20 +20,30 @@ def published_metric(value: float | None) -> float | None:
     return None if value is None else round(value, 4)
 
 
-def measured_improvements(
+class MicroMetrics(NamedTuple):
+    """The micro figures a tuner publishes: winners, best and mean speedup."""
+
+    improved: int | None
+    best: float | None
+    avg: float | None
+
+
+def micro_metrics(
     shape_results: Iterable[Mapping[str, Any]],
     won: Callable[[Mapping[str, Any]], bool] = lambda row: bool(row.get("improved")),
-) -> int | None:
-    """Shapes that beat their untuned baseline, or None when no shape was timed against one.
+) -> MicroMetrics:
+    """The three micro figures over the shapes that were timed against an untuned baseline.
 
-    A row carries a numeric ``speedup`` exactly when the tuner had a baseline for that shape, which is the same fact
-    ``best_micro_speedup`` and ``avg_micro_speedup`` are derived from. All three therefore go null together: a run
-    that measured nothing must not publish a count of zero, which reads as a measurement that found no gain.
+    A row carries a numeric ``speedup`` exactly when the tuner had a baseline for that shape, so all three figures
+    describe that one set of shapes and go null together. A run that measured nothing must not publish a count of
+    zero, which reads as a measurement that found no gain; a run that timed every shape and won none must publish
+    that zero beside the speedups it did measure, not the nulls of a run that measured nothing.
     """
     measured = [row for row in shape_results if isinstance(row.get("speedup"), (int, float))]
     if not measured:
-        return None
-    return sum(1 for row in measured if won(row))
+        return MicroMetrics(None, None, None)
+    speedups = [row["speedup"] for row in measured]
+    return MicroMetrics(sum(1 for row in measured if won(row)), max(speedups), sum(speedups) / len(speedups))
 
 
 @dataclass

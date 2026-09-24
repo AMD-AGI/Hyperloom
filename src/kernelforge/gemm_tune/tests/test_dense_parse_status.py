@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from kernelforge.gemm_tune.report import build_report
 from kernelforge.gemm_tune.tuners.base import TuneResult
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (
@@ -119,6 +121,17 @@ class TestSummarize:
         rows = [{"M": 1, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.0, "speedup": 1.0, "improved": False}]
         s = _summarize_shape_results(rows)
         assert s["status"] == "no_improvement" and s["total"] == 1
+
+    def test_every_shape_timed_and_none_won_reports_what_it_measured(self):
+        rows = [
+            {"M": 1, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.5, "speedup": 0.9524, "improved": False},
+            {"M": 4, "N": 2, "K": 3, "default_us": 10.0, "tuned_us": 10.05, "speedup": 0.995, "improved": False},
+        ]
+        s = _summarize_shape_results(rows)
+        assert s["status"] == "no_improvement" and s["n_improved"] == 0
+        # Both shapes were timed, so the run publishes the speedups it measured rather than the nulls of a run that
+        # measured nothing.
+        assert s["best"] == 0.995 and s["avg"] == pytest.approx(0.9737)
 
 
 class TestCandidateCsvFallback:

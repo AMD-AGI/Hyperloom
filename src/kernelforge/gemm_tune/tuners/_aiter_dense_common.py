@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .base import TuneContext, TuneResult, measured_improvements
+from .base import TuneContext, TuneResult, micro_metrics
 from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
@@ -843,18 +843,14 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
     improved = [r for r in shape_results if r.get("improved")]
     # Tuned, but with nothing to compare against (new shape, or the candidate-CSV fallback).
     unverified = [r for r in shape_results if r.get("is_new") or r.get("tuned_unverified")]
-    # A speedup may be None in the candidate-CSV fallback path (no comparable default is available), so guard the
-    # numeric comparison.
-    speedups = [
-        r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
-    ]
+    metrics = micro_metrics(shape_results)
     return {
         "status": "ok" if (improved or unverified) else "no_improvement",
         "total": total,
-        "n_improved": measured_improvements(shape_results),
+        "n_improved": metrics.improved,
         "n_unverified": len(unverified),
-        "best": max(speedups) if speedups else None,
-        "avg": sum(speedups) / len(speedups) if speedups else None,
+        "best": metrics.best,
+        "avg": metrics.avg,
     }
 
 
