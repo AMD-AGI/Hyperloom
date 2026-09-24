@@ -545,10 +545,10 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
     """Every rollback attempts the whole snapshot, so the latest one is the answer, not the union of all of them."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _init_repo(workspace)
     kernel = workspace / "kernel.py"
     original = "def hipb_mm(a, b):\n    return a @ b\n"
     kernel.write_text(original, encoding="utf-8")
+    _init_repo(workspace)
     driver = workspace / "driver.py"
 
     real_write_bytes = Path.write_bytes
