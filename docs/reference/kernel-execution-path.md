@@ -39,7 +39,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or kernelforge gemm-tune |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
@@ -47,24 +46,30 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 Any kind outside this table, including the action-name `kernel_opt`, yields an
 immediate `unknown_kernel_kind` rejection.
 
-Registration is not permission. `run_gemm_tuning` is a Coordinator-owned lane:
-PolicyGate rejects an orchestration-issued REQUEST for it
+`run_gemm_tuning_handler` and `run_fusion_handler` are absent from the table on
+purpose: `KernelPhase` awaits them directly. Both are Coordinator-owned lanes,
+and PolicyGate rejects an orchestration-issued REQUEST for either
 (`COORDINATOR_OWNED_KERNEL_REQUEST_KINDS` in
 `inference_optimizer/protocol/action_surfaces.py`, raised as
-`rule="phase_incompatible"`) because it is dispatched once at phase entry from
-a lane budget, and a per-tick re-issue would spend time the allocation never
-granted. PolicyGate validates the REQUEST payload from orchestration
+`rule="phase_incompatible"`) because they run once at phase entry from a lane
+budget. PolicyGate validates the REQUEST payload from orchestration
 (path-sandbox, phase-action gate) but never sees the RESPONSE.
 
-`run_fusion_handler` is absent from the table on purpose: `KernelPhase` awaits
-it directly, so no request ever carries that kind.
+A request whose kind maps to a catalogued action runs under that action's
+lanes: `integrate` takes `server_lifecycle`, `workspace_mutation` and
+`benchmark_lane`, and is answered `deferred` (not failed) while another holder,
+typically the `kernel_agent` task, has them.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
 When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
-it calls the handlers directly in Python — not through the REQUEST bus. Which
-calls it makes depends on the backend: the entry hook branches before any lane
-runs.
+it opens the kernel timeline and enqueues one `kernel_agent` task. The
+dispatcher admits it under `server_lifecycle`, `workspace_mutation` and
+`benchmark_lane` without joining it, so ticks keep running while it works. Its
+executor, `_run_kernel_agent`, calls the handlers directly in Python — not
+through the REQUEST bus — and every step it runs (reprofile, GEMM tuning,
+fusion, the rewrite controller, GEAK and its revalidation) is covered by those
+lanes. Which calls it makes depends on the backend:
 
 ```python
 # 1. GEAK branch — the documented default. One whole-pipeline e2e run, then
@@ -97,7 +102,7 @@ async def _finish_kernel_entry(self) -> None:
 **The rewrite controller is not downstream of GEMM tuning.** Tuning GEMM shape
 tables and rewriting kernel source are unrelated jobs, so each stage in the
 shared tail consults only its own switch and each skip is a return inside its
-own helper rather than out of the entry hook.
+own helper rather than out of `_run_kernel_agent`.
 `INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the rewrite controller
 alone.
 
@@ -121,7 +126,7 @@ The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
 framework in `{sglang, vllm, vllm-aiter}`, a `last_profile_trace` to discover
 from, and no `last_fusion` whose status is already `ok` / `complete` / `kept`
 (idempotent re-entry). It is forge-only — under the default `geak` backend
-`_on_enter_kernel` returns before the lane is reached.
+`_run_kernel_agent` returns before the lane is reached.
 
 A fusion result is written to the `last_fusion` SharedState field and posted as
 a `run_fusion_done` response with `source="kernel_entry_auto"`. A result that is
@@ -160,12 +165,9 @@ The per-kernel Forge backend is an opt-in:
   other value (including `--backends` CLI flags, payload `backends` hints, or
   `GEMM_TUNING_BACKEND`) doesn't enable Forge.
 
-`run_gemm_tuning_handler` also defaults to GEAK unless
-`KERNEL_OPT_BACKEND_ORDER=forge` is set. That default applies to an
-LLM-issued `run_gemm_tuning` REQUEST, which is dispatched inline whatever the
-backend. The KERNEL-**entry** GEMM tuning is a different matter: under the
-default `geak` backend it never fires at all, because `_on_enter_kernel` hands
-the phase to `_run_geak_kernel_phase` and returns before reaching it.
+Under the default `geak` backend the KERNEL-entry GEMM tuning never fires,
+because `_run_kernel_agent` hands the phase to `_run_geak_kernel_phase` and
+returns before reaching it.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 

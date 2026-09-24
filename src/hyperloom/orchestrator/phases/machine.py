@@ -201,24 +201,20 @@ class MachinePhase(PhaseHandler):
             return  # already there
         prior = state.phase
         barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
-        # GPU barrier: cancel all queued tasks and all inflight actions, then confirm silence.
-        allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
+        # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
+        # registry confirms none is left running. Queued work the next phase does not admit is dropped here too.
         cancelled = await self.tasks.cancel_queued(
-            allowed_kinds=allowed_kinds,
+            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
         )
-        await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
-        running = list(await self.tasks.running())
-        if running:
-            log.debug(
-                "phase_machine: waiting for %d task(s) to stop before committing %s -> %s",
-                len(running),
-                prior or "<unset>",
-                target,
+        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        if cancelled or stopped:
+            log.info(
+                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
+                barrier_reason,
+                len(cancelled),
+                len(stopped),
             )
-            return
-        if cancelled:
-            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -228,9 +224,13 @@ class MachinePhase(PhaseHandler):
                     "target_phase": target,
                     "reason": reason,
                     "cancelled_task_ids": cancelled,
-                    "count": len(cancelled),
+                    "stopped_task_ids": stopped,
                 },
             )
+        running = await self.tasks.running()
+        if running:
+            log.info("phase_machine: holding %s until %d running task(s) stop", barrier_reason, len(running))
+            return
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()

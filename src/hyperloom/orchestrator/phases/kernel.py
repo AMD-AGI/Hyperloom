@@ -14,6 +14,8 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
+from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -45,7 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
 )
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES, TaskNotFound
+from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
@@ -147,6 +149,11 @@ def _paired_measurement_basis(verdict: Any) -> str:
     if getattr(verdict, "candidate_wins", False):
         return "e2e_paired_entry_reference_to_tuned"
     return f"e2e_paired_entry_reference_to_tuned_{getattr(verdict, 'reason', 'unknown')}"
+
+
+def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
+    """An unpersisted task for a step run under the ``kernel_agent`` task's lanes."""
+    return Task(task_id=uuid.uuid4().hex, kind=kind, state="running", params=params, idempotency_key=idempotency_key)
 
 
 def _geak_decline_status(decline_reason: Any) -> str:
@@ -294,42 +301,24 @@ class KernelPhase(PhaseHandler):
         profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
         task_kind = self._internal_analysis_kind()
-        try:
-            # The re-profile is this entry's own sub-step, not an action of its own: it exists to decide whether the
-            # analysis the lanes will target is stale, and it is never dispatched by anything else.
-            reprofile_task = await self._enqueue_internal_analysis_task(
-                reason=idempotency_reason,
-                inline_event=recorder.event_id if recorder is not None else "",
+        params = self._internal_analysis_params(
+            reason=idempotency_reason,
+            inline_event=recorder.event_id if recorder is not None else "",
+        )
+        if params is None:
+            _note_reprofile(
+                ran=False,
+                task_kind=task_kind,
+                trigger=trigger,
+                skipped_reason="gpu_trace_unsupported",
+                idempotency_reason=idempotency_reason,
+                snapshot_id_before=snapshot_id_before,
             )
-            if reprofile_task is None:
-                _note_reprofile(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="gpu_trace_unsupported",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-                return
-            # An idempotent reuse can return a task that already reached a terminal state (its snapshot from a prior
-            # cycle is still valid). execute_covered would then attempt succeeded->running -> IllegalTransition, so
-            # reuse the existing snapshot instead of re-running.
-            if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
-                log.info(
-                    "kernel-entry reprofile reuses terminal analysis task (state=%s); the phase targets the existing snapshot",
-                    reprofile_task.state,
-                )
-                _note_reprofile(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="terminal_task_reused",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-                return
-            # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile runs under
-            # that task's lease instead of taking its own.
+            return
+        # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
+        # that task rather than a task of its own.
+        reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
+        try:
             await self.sub.execute_covered(reprofile_task)
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
@@ -1524,7 +1513,6 @@ class KernelPhase(PhaseHandler):
                     kill_timeout_s=kill_timeout,
                 ):
                     return
-                # Rebench-first: run the 2b revalidation synchronously under the current task's lanes.
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
                 return
             _finish_skip(
@@ -1624,8 +1612,7 @@ class KernelPhase(PhaseHandler):
             state.save(self.session_dir)
             return
         self._record_geak_kernel_journey(result)
-        # Enqueue the same-harness config-identity rebench — the ONLY path that
-        # writes the headline. Until it lands the candidate stays pending.
+        # The same-harness rebench is the only path that writes the headline.
         if str(result.get("status") or "") == "ok":
             await self._revalidate_geak_candidate(reason="geak_e2e_win")
         elif _geak_has_accepted_kernel(result):
@@ -1661,98 +1648,73 @@ class KernelPhase(PhaseHandler):
         state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
-    async def _revalidate_geak_candidate(self, *, reason: str) -> bool:
-        """Run the GEAK 2b same-harness revalidation synchronously under the current task's lanes.
+    async def _revalidate_geak_candidate(self, *, reason: str) -> None:
+        """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
 
-        Builds explore params from the current ``geak_result``, runs the executor
-        via :meth:`~hyperloom.orchestrator.loop.sub_agent_runner.SubAgentRunner.execute_covered`
-        (no second lane claim), and promotes the result in-place. Returns ``True``
-        when the slot is settled (win recorded or terminal rejection), ``False``
-        when the candidate stays pending or is ineligible.
+        The 2b rebench runs as a step of the ``kernel_agent`` task, under the
+        lanes it holds, and its result goes through the same promotion a
+        dispatched explore would. A candidate the grid cannot carry goes to the
+        GEAK-harness replay (2a) instead.
         """
         state = self.shared_state
-        summary = self._geak_rebench_params(reason=reason)
-
-        if isinstance(summary, dict) and summary.get("reason") == "geak_invalid_config":
-            return False
-        if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
+        params = self._geak_rebench_params(reason=reason)
+        skip_reason = params.get("reason") if params.get("skipped") else None
+        if skip_reason == "geak_invalid_config":
+            return
+        if skip_reason == "geak_no_material":
             state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
             state.geak_pending = {}
             state.resume_pending_revalidation = False
             state.save(self.session_dir)
-            return False
-
-        if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
-            log.warning(
-                "geak: 2b declined (%s); validating through the GEAK harness instead",
-                summary.get("reason"),
-            )
-            try:
-                fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
-            except Exception as exc:
-                log.exception("geak: GEAK-harness validation failed")
-                fb = {"validated": False, "reason": repr(exc)}
-            if bool(fb.get("validated")):
-                return True
-            if fb.get("status") == "no_promote":
-                return False
-            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            pending["status"] = _geak_decline_status((summary or {}).get("reason"))
-            pending.pop("revalidation_task_id", None)
-            pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
-            state.geak_pending = pending
-            agentx = not _geak_rebench.geak_harness_replays_workload(state)
-            if agentx and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION:
-                verdict = dict(state.geak_result)
-                verdict["revalidation_status"] = "fallback_failed"
-                verdict["revalidation_error_class"] = _geak_rebench.INCOMPARABLE_REVALIDATION
-                verdict["revalidation_error"] = pending["revalidation_error"]
-                verdict["revalidation_blocked_overlay"] = str(verdict.get("final_overlay") or "")
-                state.geak_result = verdict
-            state.save(self.session_dir)
-            return False
-
-        if isinstance(summary, dict) and summary.get("skipped"):
-            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            pending["status"] = "rebench_unavailable"
-            pending["revalidation_error"] = str(summary.get("reason") or "params_unavailable")[:500]
-            pending.pop("revalidation_task_id", None)
-            state.geak_pending = pending
-            state.save(self.session_dir)
-            log.warning("geak: 2b revalidation unavailable (%s)", pending["revalidation_error"])
-            return False
-
-        # summary is the params dict — create a row and run it under the current task's lanes.
-        params_ps = summary
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        idempotency_key = f"geak-revalidate-c{cycle}"
-        lanes, ttl = self._registry_lanes_ttl("explore")
-        task, existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=params_ps,
-            idempotency_key=idempotency_key,
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
+            return
+        if skip_reason is not None:
+            await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
+            return
+        task = _covered_step(
+            "explore", params, idempotency_key=f"geak-revalidate-c{int(getattr(state, 'macro_cycle', 0) or 0)}"
         )
-        if existing and str(getattr(task, "state", "")) in {"succeeded"}:
-            # A prior run in this cycle already settled the slot.
-            if self._geak_win_already_recorded():
-                state.geak_pending = {}
-                state.save(self.session_dir)
-                return True
         try:
             result = await self.sub.execute_covered(task)
-        except Exception as exc:
-            log.exception("geak: 2b execute_covered failed")
-            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-            pending["status"] = "rebench_unavailable"
-            pending["revalidation_error"] = repr(exc)[:500]
-            pending.pop("revalidation_task_id", None)
-            state.geak_pending = pending
+        except FuturesCancelledError as exc:
+            state.geak_pending = {
+                **(state.geak_pending or {}),
+                "status": "rebench_cancelled",
+                "revalidation_error": str(exc)[:500],
+            }
             state.save(self.session_dir)
-            return False
-        await self._promote_to_shared_state("explore", result, task=task)
-        return True
+            raise
+        if self._is_promotable_result("explore", result):
+            await self._promote_to_shared_state("explore", result, task=task)
+        else:
+            await self._handle_unpromotable_result(task, result)
+
+    async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
+        """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
+        state = self.shared_state
+        log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
+        fb = await self._validate_geak_via_geak_harness(reason=decline_reason)
+        # Both are verdicts 2a has already recorded.
+        if fb.get("validated") or fb.get("status") == "no_promote":
+            return
+        error = str(fb.get("reason") or decline_reason)[:500]
+        state.geak_pending = {
+            **(state.geak_pending or {}),
+            "status": _geak_decline_status(decline_reason),
+            "revalidation_error": error,
+        }
+        if (
+            not _geak_rebench.geak_harness_replays_workload(state)
+            and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION
+        ):
+            state.geak_result = {
+                **state.geak_result,
+                "revalidation_status": "fallback_failed",
+                "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
+                "revalidation_error": error,
+                # This refusal is reusable only while its overlay remains unloadable.
+                "revalidation_blocked_overlay": str(state.geak_result.get("final_overlay") or ""),
+            }
+        state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state."""

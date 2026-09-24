@@ -456,47 +456,21 @@ class SubAgentRunner:
         return RunnerContext(task=task, lease=lease, extra=extra)
 
     async def execute_covered(self, task: Task) -> dict:
-        """Run a queued row as a step of the task that is running this call.
+        """Run ``task``'s executor as a step of the task running this call.
 
-        The calling task's lease and cancel scope cover this work, so no lane is
-        taken or released here: acquiring its own would conflict with the lanes
-        the caller already holds. Only the row's lifecycle is recorded.
+        The caller's lease, cancel scope and progress sink cover the step.
+        ``task`` is never written to the registry: a queued row would be visible
+        to the pump in the await gaps, and a lane claim of its own would
+        conflict with the lanes the caller already holds.
 
         Args:
-            task: A queued row whose executor is registered.
+            task: An unpersisted task naming the executor and its params.
 
         Returns:
             The executor's result payload.
-
-        Raises:
-            LookupError: No executor is registered for ``task.kind``.
-            IllegalTransition: The row is no longer queued.
         """
-        runner = self.executor_registry.get(task.kind)
-        if runner is None:
-            raise LookupError(f"no runner registered for kind={task.kind!r}")
-        await self.tasks.transition(task.task_id, "running")
-        try:
-            ctx = self._context_for(task, lease=None, extra_context=None)
-            with progress_scope(self._progress_reporter(task.task_id)):
-                result = await runner(ctx)
-        except FuturesCancelledError as exc:
-            await self._write_terminal(
-                task.task_id, "cancelled", evidence={"reason": str(exc)}, context="covered_cancelled"
-            )
-            raise
-        except Exception as exc:
-            await self._write_terminal(
-                task.task_id, "failed", evidence={"error": repr(exc)}, context="covered_exception"
-            )
-            raise
-        await self._write_terminal(
-            task.task_id,
-            "succeeded",
-            evidence={"result_keys": sorted(result.keys())},
-            context="covered_success",
-        )
-        return result
+        ctx = self._context_for(task, lease=None, extra_context=None)
+        return await self.executor_registry[task.kind](ctx)
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

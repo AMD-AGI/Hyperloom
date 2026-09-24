@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
@@ -1198,31 +1199,20 @@ class IntentRouter:
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
-                    # Acquire the catalogue lanes for the action this request maps to; defer if they're busy.
-                    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-                        REQUEST_KIND_TO_OWNED_ACTION,
-                        ACTION_CATALOGUE,
-                    )
-
-                    _action_name = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
-                    _meta = ACTION_CATALOGUE.get(_action_name)
-                    _req_lanes = list(_meta.requires_lanes) if _meta and _meta.requires_lanes else []
-                    _handler_lease = None
-                    if _req_lanes:
-                        _handler_lease = await self.locks.try_acquire_many(
-                            _req_lanes,
+                    # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
+                    # kernel_agent task instead of sharing the GPUs with it.
+                    action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+                    lanes, ttl = self._registry_lanes_ttl(action)
+                    handler_lease = None
+                    if lanes:
+                        handler_lease = await self.locks.try_acquire_many(
+                            lanes,
                             holder_id=request_msg.msg_id,
                             task_id=request_msg.msg_id,
-                            action=_action_name,
-                            ttl_sec=int((_meta.lease_ttl_sec or 0) if _meta else 0) or 60,
+                            action=action,
+                            ttl_sec=ttl or 60,
                         )
-                        if _handler_lease is None:
-                            result = {
-                                "status": "deferred",
-                                "reason": "lanes_busy",
-                                "lanes": _req_lanes,
-                            }
-                            # Skip the handler entirely; record and reply below without marking as failure.
+                        if handler_lease is None:
                             await self.bus.append_and_seq(
                                 Message.new(
                                     "kernel_agent",
@@ -1232,7 +1222,7 @@ class IntentRouter:
                                         "in_reply_to": request_msg.msg_id,
                                         "kind": f"{kind}_done",
                                         "status": "deferred",
-                                        "result": result,
+                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
                                         "source": "lanes_busy",
                                     },
                                     in_reply_to=request_msg.msg_id,
@@ -1268,8 +1258,8 @@ class IntentRouter:
                             "error": repr(exc),
                         }
                     finally:
-                        if _handler_lease is not None:
-                            await self.locks.release(_handler_lease)
+                        if handler_lease is not None:
+                            await self.locks.release(handler_lease)
                     _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                     _lc_detail = " ".join(
                         str(p)

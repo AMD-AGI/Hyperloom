@@ -289,11 +289,8 @@ def _register_executors(
         TargetedBuildExecutor(),
     )
 
-    # kernel_agent: the KERNEL_AGENT phase's pipeline, enqueued at phase entry and run under its lanes.
-    coordinator.sub.register_executor(
-        "kernel_agent",
-        lambda ctx: coordinator._run_kernel_agent(ctx),
-    )
+    # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
+    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator._run_kernel_agent(ctx))
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

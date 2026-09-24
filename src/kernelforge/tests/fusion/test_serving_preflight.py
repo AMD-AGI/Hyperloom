@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.fusion import validate
 from kernelforge.fusion.validate import _free_vram_fraction, gpu_is_free_enough
 
 BUSY = """
@@ -59,5 +58,3 @@ def test_a_probe_that_raises_reads_as_unknown() -> None:
         raise OSError("rocm-smi not found")
 
     assert _free_vram_fraction("0", _run=boom) is None
-
-

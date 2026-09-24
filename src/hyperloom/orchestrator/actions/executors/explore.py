@@ -444,10 +444,6 @@ class ExploreExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
-        return await self._run_explore(ctx)
-
-    async def _run_explore(self, ctx) -> dict[str, Any]:
-        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())

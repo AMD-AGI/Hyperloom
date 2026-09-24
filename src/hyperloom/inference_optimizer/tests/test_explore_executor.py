@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -2526,5 +2525,3 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert fp_failed in tested
     # The latest result for fp_failed overwrites the FAILED entry.
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
-
-

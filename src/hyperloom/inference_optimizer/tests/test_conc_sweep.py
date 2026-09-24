@@ -2454,4 +2454,3 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     assert all(p["status"] == "skipped" for p in all_points)
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
-

@@ -3441,7 +3441,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round."""
+        """Remove the pid/json files a previous round left for this framework and port."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -3450,8 +3450,6 @@ class BaselineExecutor:
                     p.unlink()
             except OSError:
                 pass
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
 
     def _teardown_lifecycle_server(
         self,

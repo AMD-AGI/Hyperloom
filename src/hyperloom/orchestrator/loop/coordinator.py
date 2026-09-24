@@ -372,6 +372,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
+        "_internal_analysis_params": "phase_prelude",
         "_on_enter_sweep": "phase_sweep",
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_record_session_budget_conc_sweep_skip": "phase_sweep",

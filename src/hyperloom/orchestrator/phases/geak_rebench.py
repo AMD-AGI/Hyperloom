@@ -9,9 +9,6 @@ from typing import Any
 
 INCOMPARABLE_REVALIDATION = "incomparable"
 
-# Fresh keys a single macro-cycle may mint; used only for timeline recording.
-MAX_REBENCH_ATTEMPTS_PER_CYCLE = 4
-
 # Verdict annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
@@ -111,7 +108,6 @@ def _geak_candidate_identity(result: Any, stamped: frozenset[str]) -> dict[str, 
 
 __all__ = [
     "INCOMPARABLE_REVALIDATION",
-    "MAX_REBENCH_ATTEMPTS_PER_CYCLE",
     "geak_candidate_is_adjudicated",
     "geak_candidate_matches",
     "geak_harness_replays_workload",

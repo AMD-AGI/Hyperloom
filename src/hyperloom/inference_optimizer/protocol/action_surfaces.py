@@ -19,8 +19,7 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Kernel-owned action name -> the request ``kind`` its handler is registered under in
-# ``request_handlers.KERNEL_REQUEST_HANDLERS``.
+# Kernel-owned action name -> the request ``kind`` that names it.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "gemm_tuning": "run_gemm_tuning",

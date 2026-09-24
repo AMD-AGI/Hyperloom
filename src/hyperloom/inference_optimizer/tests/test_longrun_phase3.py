@@ -80,23 +80,11 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -129,22 +117,10 @@ async def test_soft_restart_can_be_disabled(cyclic_coordinator, monkeypatch):
     c._cycle_soft_restart = False
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan2",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -201,7 +177,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
-async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordinator):
+async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
@@ -214,9 +190,11 @@ async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordi
     await c.tasks.transition(running.task_id, "running")
 
     await c._advance_phase_if_needed()
+    assert c.shared_state.phase == ps.PHASE_FRAMEWORK_AGENT
 
+    await c.tasks.transition(running.task_id, "cancelled", evidence={"reason": "stopped"})
+    await c._advance_phase_if_needed()
     assert c.shared_state.phase == ps.PHASE_SWEEP
-    assert (await c.tasks.get(running.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
