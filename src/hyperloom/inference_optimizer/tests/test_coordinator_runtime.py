@@ -1094,11 +1094,11 @@ async def test_promote_baseline_keeps_higher_anchor(session_dir):
 
 
 def test_inject_explore_runtime_params_includes_baseline_accuracy():
-    class DummyCoordinator:
+    class DummyCoordinator(ProposalsCollaborator):
         shared_state = SharedState(baseline_accuracy=0.81)
 
     params: dict[str, Any] = {}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
+    DummyCoordinator()._inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
@@ -2250,7 +2250,9 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
         requires_lanes=["profile_lane"],
         lease_ttl_sec=600,
     )
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
 
     assert await disp.run_task_registered(task) is None
 
@@ -2266,7 +2268,9 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
     registered: list[str] = []
 
     async def runner(ctx):
@@ -2293,7 +2297,9 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
-    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    disp = DispatcherCollaborator()
+    vars(disp).update(locks=locks, sub=sub)
+    disp._init_dispatch_state()
     seen: list[str] = []
 
     async def runner(ctx):

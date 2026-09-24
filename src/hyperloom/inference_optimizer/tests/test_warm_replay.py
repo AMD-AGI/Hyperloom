@@ -1432,13 +1432,12 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
     )
 
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    dispatcher = coord
 
     class _Bus:
         async def append_and_seq(self, _message):
             return 1
 
-    dispatcher.bus = _Bus()
+    coord.bus = _Bus()
     coord.shared_state.baseline_tput = 600.0
     target = tmp_path / "site-packages/vllm/prefix_prefill.py"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1474,7 +1473,7 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
         },
     )
 
-    await dispatcher._reap_dispatched_task(
+    await coord._reap_dispatched_task(
         task,
         SubAgentResult(
             task_id=task.task_id,

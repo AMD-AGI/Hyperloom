@@ -84,6 +84,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c._run_deadline = None
     c._run_started_monotonic = None
     c._phase_budget_pct = {}
+    c._init_dispatch_state()
 
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     async def _skip_controller(
@@ -496,9 +497,8 @@ def _recorded_under(state, *, server_args: str, envs: dict) -> None:
 
 def _reprofiles(coord: Coordinator) -> bool:
     """Whether the two staleness checks together call for a re-profile."""
-    phase = coord
-    signature = phase._current_profile_config_signature()
-    return phase._profile_config_changed(signature) or phase._profile_workload_changed()
+    signature = coord._current_profile_config_signature()
+    return coord._profile_config_changed(signature) or coord._profile_workload_changed()
 
 
 _BASE_ARGS = "--block-size 128 --enable-expert-parallel"

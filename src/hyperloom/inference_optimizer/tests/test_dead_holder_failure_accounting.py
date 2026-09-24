@@ -14,6 +14,7 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -140,10 +141,11 @@ async def test_accounting_is_idempotent_per_task(session_dir):
         await c.stop()
 
 
-class _ReapStub:
+class _ReapStub(DispatcherCollaborator):
     """Minimal coordinator shell for the reap-path double-count guard."""
 
     def __init__(self) -> None:
+        self._init_dispatch_state()
         self.unpromotable: list[str] = []
         self.gpu_specialist_pool = SimpleNamespace(release=self._noop_async)
         self.bus = SimpleNamespace(append_and_seq=self._noop_async)
@@ -167,13 +169,12 @@ class _ReapStub:
 @pytest.mark.asyncio
 async def test_reap_skips_failure_accounting_already_charged():
     stub = _ReapStub()
-    disp = stub
     task = SimpleNamespace(task_id="t-dead", kind="baseline", params={})
     result = SubAgentResult(task_id=task.task_id, state="failed", result={"status": "failed"})
 
-    await disp._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result, None)
     assert stub.unpromotable == ["t-dead"]
 
-    disp._dead_holder_accounted.add(task.task_id)
-    await disp._reap_dispatched_task(task, result, None)
+    stub._dead_holder_accounted.add(task.task_id)
+    await stub._reap_dispatched_task(task, result, None)
     assert stub.unpromotable == ["t-dead"]

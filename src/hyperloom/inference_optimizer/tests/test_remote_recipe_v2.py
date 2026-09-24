@@ -1169,16 +1169,12 @@ def test_degraded_kb_skips_remote_close_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
-    coordinator = SimpleNamespace(
+    coordinator = WritebackCollaborator()
+    vars(coordinator).update(
         shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
-        _ensure_journal=lambda: _Journal(),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1202,16 +1198,12 @@ def test_local_close_ignores_ambient_kb_store(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
-    coordinator = SimpleNamespace(
+    coordinator = WritebackCollaborator()
+    vars(coordinator).update(
         shared_state=SimpleNamespace(current_best={}),
         session_dir=tmp_path,
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
@@ -1239,10 +1231,6 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
     class _LegacyRecipe:
         def get_authoritative_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE read legacy RecipeKB")
@@ -1250,14 +1238,14 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         def put_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
-    coordinator = SimpleNamespace(
+    coordinator = WritebackCollaborator()
+    vars(coordinator).update(
         shared_state=SimpleNamespace(
             current_best={"tput": 10.0},
         ),
         session_dir=tmp_path,
         recipe_kb=_LegacyRecipe(),
         knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
@@ -1318,16 +1306,12 @@ def test_remote_close_transport_failure_is_nonfatal(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
-    coordinator = SimpleNamespace(
+    coordinator = WritebackCollaborator()
+    vars(coordinator).update(
         shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1374,7 +1358,8 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         working_recipe_generation=2,
         validated_recipe_generation=1,
     )
-    coordinator = SimpleNamespace(
+    coordinator = WritebackCollaborator()
+    vars(coordinator).update(
         shared_state=state,
         session_dir=tmp_path,
         recipe_kb=None,
@@ -1399,19 +1384,18 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
 
 def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    collaborator = WritebackCollaborator(
-        SimpleNamespace(
-            shared_state=SimpleNamespace(
-                current_best={"tput": 2200.0},
-                cumulative_gain_validated=20.0,
-                kernel_optimizer="forge",
-                tp=8,
-                conc=64,
-                isl=1024,
-                osl=256,
-            ),
-            session_dir=tmp_path,
-        )
+    collaborator = WritebackCollaborator()
+    vars(collaborator).update(
+        shared_state=SimpleNamespace(
+            current_best={"tput": 2200.0},
+            cumulative_gain_validated=20.0,
+            kernel_optimizer="forge",
+            tp=8,
+            conc=64,
+            isl=1024,
+            osl=256,
+        ),
+        session_dir=tmp_path,
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",

@@ -293,8 +293,7 @@ def test_phase_argument_is_case_insensitive(registry):
 # Coordinator re-scopes the override at the phase seam
 def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
     """Build a MachinePhase over a minimal coordinator stub."""
-    from types import SimpleNamespace
-
+    from hyperloom.orchestrator.phases.machine import MachinePhase
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="t", macro_cycle=3)
@@ -305,21 +304,22 @@ def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
         rebuild_calls.append(kwargs)
         return f"PROMPT[phase={kwargs.get('phase')}]"
 
-    coord = SimpleNamespace(
+    handler = MachinePhase()
+    vars(handler).update(
         shared_state=state,
         session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
     )
-    return coord, coord, rebuild_calls
+    return handler, rebuild_calls
 
 
 def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    handler, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
+    assert handler.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
     assert calls == [
         {
             "macro_cycle": 3,
@@ -330,24 +330,24 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
 
 
 def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
+    handler, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert handler.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
 def test_phase_seam_ignores_a_blank_phase(tmp_path):
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    handler, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert handler.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
 def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
     """Each scope the model actually ran under must leave its own artefact."""
-    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
@@ -360,7 +360,7 @@ def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
     boot = tmp_path / "agents" / "orchestration" / "system_prompt.snapshot.md"
     boot.parent.mkdir(parents=True, exist_ok=True)
     boot.write_text("BOOT", encoding="utf-8")
-    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     handler._reseed_orch_prompt_for_phase("CLOSE")
 
@@ -371,10 +371,10 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     """A failed snapshot must not abort the phase transition."""
     blocker = tmp_path / "agents"
     blocker.write_text("not a directory", encoding="utf-8")
-    handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
+    handler, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
+    assert handler.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
 # Snapshot paths: one artefact per scope the model ran under

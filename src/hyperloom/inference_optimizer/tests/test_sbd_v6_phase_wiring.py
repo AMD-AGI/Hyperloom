@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_eve
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -176,14 +177,16 @@ class _Sub:
 
 def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
     """A DispatcherCollaborator with only what ``run_task_registered`` touches."""
-    fake = types.SimpleNamespace(
+    dispatcher = DispatcherCollaborator()
+    vars(dispatcher).update(
         shared_state=state,
         sub=sub,
         session_dir=tmp_path,
         locks=None,
         gpu_specialist_pool=None,
     )
-    return fake
+    dispatcher._init_dispatch_state()
+    return dispatcher
 
 
 def _task(kind: str, task_id: str) -> Any:

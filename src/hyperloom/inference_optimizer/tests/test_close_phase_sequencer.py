@@ -171,6 +171,7 @@ class _StubSubAgentRunner:
 def coord(tmp_path: Path):
     """Lean Coordinator stub for hook unit tests."""
     c = Coordinator.__new__(Coordinator)
+    c._init_dispatch_state()
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()

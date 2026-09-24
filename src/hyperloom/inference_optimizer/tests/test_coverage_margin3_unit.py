@@ -187,21 +187,22 @@ def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
 
 def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
-    coord = SimpleNamespace(
+    disp = DispatcherCollaborator()
+    vars(disp).update(
         _inline_fast_actions_enabled=True,
         _coordinator_loop=None,
         _INLINE_ACTION_DENY=frozenset(),
         action_registry={},
         sub=SimpleNamespace(executor_registry={}),
     )
-    disp = coord
     assert "action_name required" in disp._run_action_now_sync("  ", {})
 
     monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
     assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
 
-    coord._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
+    disp._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
     monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
 

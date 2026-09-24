@@ -26,6 +26,7 @@ from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
@@ -35,7 +36,8 @@ def _dispatcher(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tasks = TaskRegistry(db)
     state = SimpleNamespace(phase="PRELUDE", macro_cycle=0, tick=0, session_budget_usable_sec=lambda: None)
-    coord = SimpleNamespace(
+    dispatcher = DispatcherCollaborator()
+    vars(dispatcher).update(
         db=db,
         locks=locks,
         tasks=tasks,
@@ -49,7 +51,7 @@ def _dispatcher(tmp_path):
         _fact_write_hook=AsyncMock(),
         _is_promotable_result=lambda *_args: True,
     )
-    dispatcher = coord
+    dispatcher._init_dispatch_state()
     dispatcher._cancel_queued_task_over_budget = AsyncMock(return_value=False)
     return dispatcher
 
