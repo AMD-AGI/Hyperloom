@@ -20,7 +20,17 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
-Nothing yet.
+- **Optional Kernel Trust Harness qualification of Controller patches.** With
+  `HYPERLOOM_KTH_ENABLE=1`, each applied Controller patch is qualified by an
+  independent `kth-qualify` subprocess before it is benchmarked. Only a
+  validated `Eligible for performance evaluation` attestation, bound to the
+  exact bytes the KEEP would commit, reaches the E2E validator; `Blocked`,
+  `Inconclusive`, timeouts, provider failures and any attestation that does
+  not match the candidate revert the patch as `reverted_kth_blocked`,
+  `reverted_kth_inconclusive` or `reverted_kth_failed`. Evidence lands under
+  `<session>/kth_qualification/`. With the variable unset, nothing changes
+  except an empty `kth` field in each integration result. See
+  [Kernel Trust Harness qualification](reference/kth-qualification.md).
 
 ## Hyperloom 1.1.2 release
 

@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import subprocess
-from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+import tempfile
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,8 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
+from .kth_contract import sha256_digest
+from .kth_qualification import KthQualificationProvider, KthQualificationResult
 from .patch_conflict_merge import apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
@@ -52,6 +56,8 @@ class PatchIntegrationResult:
     #: How the patch reached the worktree; anything but ``strict`` was rebuilt
     #: against the KEEPs that landed ahead of it.
     merge_strategy: str = ""
+    #: The validated KTH qualification, empty when the gate is off.
+    kth: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -154,6 +160,59 @@ def _revert_note(repo: Path, patch_path: Path) -> str:
     return f" (revert: {note})" if note else ""
 
 
+def _applied_candidate(repo: Path, touched: Sequence[str]) -> bytes:
+    """The change the worktree carries on ``touched``, as a binary diff against HEAD.
+
+    A three-way or reconstructed merge lands different bytes than the published
+    ``change.patch``, so this -- not the publication -- is the artifact a KEEP
+    would commit. A throwaway index lets files the patch created appear in the
+    diff without staging anything in the real one.
+    """
+    with tempfile.TemporaryDirectory(prefix="hyperloom-kth-index-") as scratch:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+
+        def git(*args: str) -> bytes:
+            return subprocess.run(
+                ["git", "-C", str(repo), *args], env=env, capture_output=True, timeout=60, check=True
+            ).stdout
+
+        git("read-tree", "HEAD")
+        git("add", "--force", "--", *touched)
+        return git("diff", "--cached", "--binary", "--full-index", "--no-color", "--no-renames", "HEAD", "--", *touched)
+
+
+def _qualify_applied(
+    provider: KthQualificationProvider,
+    publication: ControllerPatchPublication,
+    *,
+    repo: Path,
+    head: str,
+    touched: Sequence[str],
+    session_dir: Path,
+) -> KthQualificationResult:
+    """Ask KTH about exactly what is applied; a candidate that cannot be read or sent is not eligible."""
+    try:
+        patch = _applied_candidate(repo, touched)
+        return provider.qualify(
+            publication,
+            base_commit=head,
+            patch=patch,
+            changed_paths=tuple(sorted(touched)),
+            artifacts_root=session_dir / "kth_qualification",
+            session_id=session_dir.name,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return KthQualificationResult(status="failed", reason=f"could not qualify the applied candidate: {error}")
+
+
+def _still_qualified(repo: Path, touched: Sequence[str], qualified: KthQualificationResult) -> bool:
+    """Whether the worktree still carries the bytes KTH qualified."""
+    try:
+        return sha256_digest(_applied_candidate(repo, touched)) == qualified.patch_digest
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _settle_apply_manifest(validation: dict[str, Any], *, kept: bool) -> str:
     """Release the apply's backups now that the KEEP's fate is settled.
 
@@ -236,6 +295,7 @@ async def integrate_controller_patches(
     shared_state: Any,
     record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
+    kth_provider: KthQualificationProvider | None = None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate complete Controller patches in task-priority order.
 
@@ -247,6 +307,9 @@ async def integrate_controller_patches(
             so a promotion also lands on the stack ledger.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
+        kth_provider: When set, every applied patch must hold a validated KTH
+            ``Eligible`` attestation before the validator runs, and must still
+            be those exact bytes when its KEEP is committed.
     """
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
@@ -382,6 +445,40 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
+        qualified: KthQualificationResult | None = None
+        if kth_provider is not None:
+            qualified = _qualify_applied(
+                kth_provider,
+                publication,
+                repo=repo,
+                head=head_before,
+                touched=touched,
+                session_dir=Path(session_dir),
+            )
+            if qualified.eligible:
+                try:
+                    qualified = kth_provider.mark_performance_admitted(qualified)
+                except OSError as error:
+                    qualified = replace(
+                        qualified, status="failed", reason=f"could not record KTH admission to performance: {error}"
+                    )
+            if not qualified.eligible:
+                result = PatchIntegrationResult(
+                    operator_id=publication.operator_id,
+                    status=f"reverted_kth_{qualified.status}",
+                    reason=f"KTH {qualified.status}: {qualified.reason}" + _revert_note(repo, publication.patch_path),
+                    base_commit=publication.base_commit,
+                    best_commit=publication.best_commit,
+                    repo_root=str(repo),
+                    integration_head_before=head_before,
+                    merge_strategy=merge.strategy,
+                    kth=asdict(qualified),
+                )
+                results.append(result)
+                _write_result(results_dir, index, result)
+                continue
+        kth_record = asdict(qualified) if qualified is not None else {}
+
         try:
             validation = await validate(publication)
         except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
@@ -393,6 +490,7 @@ async def integrate_controller_patches(
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
                 integration_head_before=head_before,
+                kth=kth_record,
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -413,6 +511,27 @@ async def integrate_controller_patches(
                 integration_head_before=head_before,
                 new_tput=float(validation.get("new_tput") or 0.0),
                 gain_pct=float(validation.get("gain_pct") or 0.0),
+                kth=kth_record,
+            )
+            results.append(result)
+            _write_result(results_dir, index, result)
+            continue
+
+        if qualified is not None and not _still_qualified(repo, touched, qualified):
+            settle_note = _settle_apply_manifest(validation, kept=False)
+            result = PatchIntegrationResult(
+                operator_id=publication.operator_id,
+                status="reverted_kth_failed",
+                reason="KTH failed: the candidate changed after it was qualified"
+                + settle_note
+                + _revert_note(repo, publication.patch_path),
+                base_commit=publication.base_commit,
+                best_commit=publication.best_commit,
+                repo_root=str(repo),
+                integration_head_before=head_before,
+                new_tput=float(validation.get("new_tput") or 0.0),
+                gain_pct=float(validation.get("gain_pct") or 0.0),
+                kth=kth_record,
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -439,6 +558,7 @@ async def integrate_controller_patches(
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
                 integration_head_before=head_before,
+                kth=kth_record,
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -465,6 +585,7 @@ async def integrate_controller_patches(
             keep_commit=keep_commit,
             new_tput=float(validation.get("new_tput") or 0.0),
             gain_pct=float(validation.get("gain_pct") or 0.0),
+            kth=kth_record,
         )
         results.append(result)
         _write_result(results_dir, index, result)

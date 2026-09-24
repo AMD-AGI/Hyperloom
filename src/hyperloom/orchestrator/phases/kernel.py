@@ -3806,12 +3806,14 @@ class KernelPhase(PhaseHandler):
                 from ..kernel.controller_patch_integration import (
                     integrate_controller_patches,
                 )
+                from ..kernel.kth_qualification import KthQualificationProvider
 
                 integration = await integrate_controller_patches(
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
                     record_keep=self._record_integrate_keep,
+                    kth_provider=KthQualificationProvider.from_env(),
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:
