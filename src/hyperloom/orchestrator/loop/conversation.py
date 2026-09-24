@@ -714,8 +714,8 @@ class ConversationCollaborator:
         The recorder is reached through ``getattr`` because tests borrow this
         method onto lightweight stand-ins that carry no phase-handler machinery.
         """
-        getter = getattr(self, "_framework_timeline", None)
-        recorder = getter() if callable(getter) else None
+        ph = getattr(self, "phase_framework", None)
+        recorder = ph.timeline() if ph is not None else None
         if recorder is None:
             return
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (

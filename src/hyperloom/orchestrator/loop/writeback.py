@@ -329,8 +329,8 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     that measured nothing still lands, which is the case
     :func:`_record_config_attempts` never sees.
     """
-    getter = getattr(coord, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    ph = getattr(coord, "phase_framework", None)
+    recorder = ph.timeline() if ph is not None else None
     if recorder is None:
         return
     from hyperloom.common.timeutil import now_iso
@@ -371,8 +371,8 @@ def _record_config_attempts(
     unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
     ``KILLED_OVERTIME`` into a plain revert.
     """
-    getter = getattr(coord, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    ph = getattr(coord, "phase_framework", None)
+    recorder = ph.timeline() if ph is not None else None
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
@@ -1409,18 +1409,9 @@ class WritebackCollaborator:
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
         if task.kind == "integrate_patch" and (task.params or {}).get("framework_agent_candidate_id"):
-            cand = (task.params or {}).get("candidate")
-            cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
-            if cand_id:
-                self._stamp_framework_progress(
-                    candidate_id=cand_id,
-                    batch_id=str((task.params or {}).get("batch_id") or ""),
-                    status="no_result_failed",
-                    kept=False,
-                    rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
-                    provenance="executor",
-                    extra={"status": str(result_payload.get("status") or "")},
-                )
+            ph = getattr(self, "phase_framework", None)
+            if ph is not None:
+                ph.record_settled_candidate(task, result_payload)
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.
@@ -2950,15 +2941,9 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        await self._maybe_materialize_mn_explore(
-            task=task,
-            domain=domain,
-            proposals=proposals,
-        )
+        ph = getattr(self, "phase_framework", None)
+        if ph is not None:
+            await ph.on_specialist_settled(task, done_payload)
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
@@ -2993,18 +2978,6 @@ class WritebackCollaborator:
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
-        # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        await self._maybe_autosubmit_specialist_patches(
-            task=task,
-            done_payload=done_payload,
-        )
-        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
-        # but a proposal_set of serving flags / env vars) is routed through the
-        # same integrate_patch gate via its config_changes channel.
-        await self._maybe_autosubmit_framework_config(
-            task=task,
-            done_payload=done_payload,
-        )
 
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
         """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the

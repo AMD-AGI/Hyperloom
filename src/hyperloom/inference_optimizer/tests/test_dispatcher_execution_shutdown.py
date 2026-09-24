@@ -503,9 +503,14 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
     dispatcher = _dispatcher(tmp_path)
     dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
     dispatcher._record_specialist_result = AsyncMock()
-    dispatcher._record_framework_agent_authoring_empty_outcome = lambda **_kwargs: None
-    dispatcher._ingest_candidate_discovery = lambda **_kwargs: None
     dispatcher._handle_unpromotable_result = AsyncMock()
+    # phase_framework stub so on_task_settled / on_specialist_settled resolve
+    from types import SimpleNamespace
+    dispatcher._coord.phase_framework = SimpleNamespace(
+        on_task_settled=AsyncMock(),
+        on_specialist_settled=AsyncMock(),
+        record_settled_candidate=lambda task, result: None,
+    )
 
     async def run():
         dispatcher.sub.register_executor("specialist", AsyncMock(side_effect=FuturesCancelledError("stop")))

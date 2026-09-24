@@ -1026,7 +1026,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 )
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self._pump_framework_agent_phase_safely(caller="tick")
+            ph = getattr(self, "phase_framework", None)
+            if ph is not None:
+                await ph.pump(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
@@ -1077,7 +1079,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
 
-        for recorder in (active_kernel_recorder(), self._framework_timeline()):
+        ph_fw = getattr(self, 'phase_framework', None)
+        for recorder in (active_kernel_recorder(), ph_fw.timeline() if ph_fw is not None else None):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
@@ -1248,7 +1251,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        await self._pump_framework_agent_phase_safely(caller="run")
+                        ph = getattr(self, 'phase_framework', None)
+                        if ph is not None:
+                            await ph.pump(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.

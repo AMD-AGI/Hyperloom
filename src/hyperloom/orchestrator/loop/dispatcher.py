@@ -1259,33 +1259,17 @@ class DispatcherCollaborator:
                         source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
                         run_error=str(result.error or ""),
                     )
-                    # FRAMEWORK authoring bridge for an EMPTY deliverable: a
-                    # specialist that authored no patch never spawns an
-                    # integrate_patch; stamp the terminal progress row here to
-                    # avoid a pump livelock.
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=task,
-                        done_payload=done_payload,
-                        run_error=str(result.error or ""),
-                    )
-                    # Harvest a discovery specialist's candidates into the
-                    # source arm's batch.
-                    self._ingest_candidate_discovery(
-                        task=task,
-                        done_payload=done_payload,
-                        run_error=str(result.error or ""),
-                    )
+                    ph = getattr(self, 'phase_framework', None)
+                    if ph is not None:
+                        await ph.on_task_settled(task, result)
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
                 self._record_intervention_for_task(task, result.result)
             # integrate_patch completion handling.
             if task.kind == "integrate_patch" and result.state != "cancelled":
-                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
-                if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
-                    self._record_framework_agent_authored_outcome(
-                        task=task,
-                        result=result,
-                    )
+                ph = getattr(self, 'phase_framework', None)
+                if ph is not None:
+                    await ph.on_task_settled(task, result)
                 # Unified rearm: handles enablement and apply_failed perf-lane
                 # results (schedules retry or stamps terminal).
                 res_dict = getattr(result, "result", None)

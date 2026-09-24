@@ -496,6 +496,80 @@ class FrameworkPhase(PhaseHandler):
     # Multi-node: cap on specialist proposal_set entries materialised per round.
     _MN_AUTO_EXPLORE_GRID_CAP: int = 6
 
+    # ------------------------------------------------------------------
+    # Public hook interface — loop modules call these instead of private names
+    # ------------------------------------------------------------------
+
+    def timeline(self):
+        """Return the open FrameworkEventRecorder, or None."""
+        return self._framework_timeline()
+
+    async def pump(self, *, caller: str = "") -> None:
+        """Run one framework pump pass (called every tick and run)."""
+        await self._pump_framework_agent_phase_safely(caller=caller)
+
+    async def on_task_settled(self, task: "Task", result: Any) -> None:
+        """Notify the framework arm that a task has settled."""
+        params = getattr(task, "params", None) or {}
+        kind = str(params.get("task_kind") or "").strip()
+        if task.kind == "specialist":
+            if kind == "candidate_discovery":
+                done_payload = (result.result if isinstance(result.result, dict) else None) or {}
+                err = result.error if hasattr(result, "error") else None
+                await self._ingest_candidate_discovery(task=task, done_payload=done_payload, run_error=err)
+            elif bool(params.get("framework_agent_authoring")):
+                await self._record_framework_agent_authoring_empty_outcome(
+                    task=task,
+                    done_payload=(result.result if isinstance(result.result, dict) else None) or {},
+                    run_error=getattr(result, "error", None),
+                )
+        elif task.kind == "integrate_patch" and bool(params.get("framework_agent_authoring")):
+            self._record_framework_agent_authored_outcome(task=task, result=result)
+
+    async def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any]) -> None:
+        """Called when any specialist settles with a deliverable."""
+        await self._maybe_materialize_mn_explore(
+            task=task,
+            domain=str((getattr(task, "params", None) or {}).get("domain") or ""),
+            proposals=(done_payload.get("proposal_set") or []) if isinstance(done_payload, dict) else [],
+        )
+        await self._maybe_autosubmit_specialist_patches(task=task, done_payload=done_payload)
+        await self._maybe_autosubmit_framework_config(task=task, done_payload=done_payload)
+
+    async def on_verdict(self, pending: Any, *, verdict: str, reasoning: str = "", advisory: Any = None) -> None:
+        """Route a Critic verdict for a framework-arm proposal."""
+        if verdict == "reject":
+            await self._record_framework_agent_critic_denied(pending, reasoning)
+        elif verdict == "needs_review":
+            await self._maybe_reauthor_from_critic_feedback(pending, advisory)
+
+    async def on_proposal_approved(self, pending: Any) -> bool:
+        """Materialise an approved upstream-PR pre-screen proposal.
+
+        Returns True when this was a framework pre-screen (and was handled),
+        False when the caller should continue with the normal materialisation.
+        """
+        from hyperloom.common.framework_arm import is_upstream_pr_prescreen
+
+        if not is_upstream_pr_prescreen(pending.action_name, pending.payload or {}):
+            return False
+        await self._materialize_framework_agent_candidate(pending)
+        return True
+
+    def record_settled_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
+        """Stamp a no_result_failed progress row for a settled authored task."""
+        params = getattr(task, "params", None) or {}
+        cand_key = self._framework_candidate_key(params)
+        if not cand_key:
+            return
+        self._stamp_framework_progress(
+            candidate_id=cand_key,
+            batch_id=str(params.get("framework_batch_id") or ""),
+            status="no_result_failed",
+            kept=False,
+            rationale="task completed with no result",
+        )
+
     def _framework_timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
 

@@ -357,7 +357,7 @@ async def test_a_raising_pump_is_named_on_the_event(session_dir: Path, monkeypat
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
 
-    await coord._pump_framework_agent_phase_safely(caller="tick")
+    await coord.phase_framework.pump(caller="tick")
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     event = _events(session_dir)[0]
