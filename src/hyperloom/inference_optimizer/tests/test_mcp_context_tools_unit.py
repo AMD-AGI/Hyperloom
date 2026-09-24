@@ -592,7 +592,7 @@ async def test_sdk_advertises_dispatcher_inline_actions_and_rejects_baseline(inl
     server = mct.build_context_tools_server(providers[0], sdk_module=sdk)["instance"]
     listed = await _sdk_request(server, types.ListToolsRequest(method="tools/list"))
     action = next(tool for tool in listed.tools if tool.name == "run_action_now")
-    choices = action.inputSchema["properties"]["action_name"]["enum"]
+    choices = action.model_dump(by_alias=True)["inputSchema"]["properties"]["action_name"]["enum"]
     assert choices == sorted(coord._inline_action_whitelist())
     assert "target_analysis" in choices
     assert "baseline" not in choices
