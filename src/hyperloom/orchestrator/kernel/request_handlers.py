@@ -5290,7 +5290,7 @@ async def integrate_handler(
 # Kernel-agent programmatic dispatch table.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
-    "run_gemm_tuning": run_gemm_tuning_handler,
+    # No run_gemm_tuning entry: KernelPhase runs it directly, not through the intent_router request channel.
     # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
