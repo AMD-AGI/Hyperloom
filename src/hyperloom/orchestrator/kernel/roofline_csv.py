@@ -402,12 +402,23 @@ def write_ceiling(rows: Iterable[dict], path: Path | str) -> None:
     rows by ``_ceiling_row_key`` (last write wins per key), and atomically rewrites.
     """
     path = Path(path)
+    rows = list(rows)
     merged: dict[tuple, dict] = {}
     for existing in _read_rows(path):
         merged[_ceiling_row_key(existing)] = existing
+    prior_keys = set(merged)
     for row in rows:
         merged[_ceiling_row_key(row)] = dict(row)
     _atomic_write_rows(path, CEILING_COLUMNS, merged.values())
+    # Observability for the content-key migration: how many rows are NEW config keys (history
+    # preserved) vs overwrote a same-config row (idempotent) — a genuine cross-config overwrite
+    # would show as a new key replacing a distinct value, which this makes visible in the run log.
+    written = [_ceiling_row_key(r) for r in rows]
+    added = sum(1 for k in written if k not in prior_keys)
+    log.info(
+        "[roofline-csv] ceiling UPSERT %s: wrote %d rows (%d new config keys, %d overwrote same key) -> %d total",
+        path.name, len(written), added, len(written) - added, len(merged),
+    )
 
 
 # --------------------------------------------------------------------------- #
