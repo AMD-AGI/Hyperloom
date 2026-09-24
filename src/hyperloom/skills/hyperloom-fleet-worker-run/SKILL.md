@@ -39,7 +39,7 @@ These values are a starting template, not Fleet KB protocol:
 model      = Qwen/Qwen3-8B local checkpoint
 framework  = vllm
 image      = docker.io/vllm/vllm-openai-rocm:v0.29.0
-gpu        = MI300X
+gpu        = MI325X
 precision  = bf16
 tp         = 1
 conc       = 64
@@ -87,6 +87,7 @@ Set these in the actual Hyperloom process environment:
 : "${FLEET_KB_ID:?Fleet ID is required}"
 : "${MODEL_PATH:?Model path is required}"
 export FRAMEWORK="${FRAMEWORK:-vllm}"
+export TARGET_GPU_TYPE="${GPU_TYPE_HINT:-mi325x}"
 
 export REPO_ROOT="$HYPERLOOM_REPO_ROOT"
 export HYPERLOOM_KB_ENABLE=true
@@ -101,6 +102,12 @@ export HYPERLOOM_FLEET_KB_JOB_ID="$SLACK_JOB_ID"
 export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
 export HYPERLOOM_FLEET_KB_SPOOL="${USER_DATA_PATH:?}/fleet-kb-spool/$SLACK_JOB_ID"
 ```
+
+Do not set `GPU_TYPE` from the example. `TARGET_GPU_TYPE` is the real board
+identity hint; the hardware probe wins when it can identify the product.
+Hyperloom may later set `GPU_TYPE=mi300x` as the Magpie runner label for an
+MI325X. That is expected because both use gfx942, while the persisted
+Experience identity must remain `mi325x`.
 
 Validate:
 
