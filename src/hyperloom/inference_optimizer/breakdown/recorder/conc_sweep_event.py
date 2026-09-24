@@ -989,25 +989,15 @@ def make_conc_sweep_recorder(
     reason: str = "",
     params: Mapping[str, Any] | None = None,
 ) -> ConcSweepEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed. Sweep
-    behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", as does the absent sink a caller with no session
-    bound has."""
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    try:
-        recorder = ConcSweepEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            params=params,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
-        log.warning(
-            "conc_sweep timeline: recorder construction failed; this sweep's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
+    recorder = ConcSweepEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        params=params,
+    )
     recorder.begin()
     return recorder

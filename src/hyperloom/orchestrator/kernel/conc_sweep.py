@@ -473,7 +473,7 @@ def _build_arm_grid(
     return out
 
 
-async def _sweep_one_arm_single_server(  # noqa: PLR0913
+async def _sweep_one_arm_single_server(
     arm_name: str,
     concs_desc: list[int],
     *,
@@ -569,7 +569,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
         lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
         if recorder is not None:
             # Named per arm: both arms resolve, and two faults reading alike
@@ -809,12 +809,12 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 failed_concs=[variant_conc(fb) for fb in failed_boots],
             )
         # Incremental flush after boot point.
-        _maybe_flush(
+        _flush_partial_conc_sweep_report(
             state=state,
             session_dir=session_dir,
             json_path=json_path,
             csv_path=csv_path,
-            all_results=_all_results_ref,
+            results=list(_all_results_ref),
             concs=list(concs_desc),
             isl=isl,
             osl=osl,
@@ -953,12 +953,12 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     ),
                 )
             # Incremental flush after each reuse point.
-            _maybe_flush(
+            _flush_partial_conc_sweep_report(
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,
                 csv_path=csv_path,
-                all_results=_all_results_ref,
+                results=list(_all_results_ref),
                 concs=list(concs_desc),
                 isl=isl,
                 osl=osl,
@@ -980,7 +980,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Safety teardown — idempotent, no-op if already torn down.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # The last word on this arm's server: a teardown that failed here
             # leaves it alive past the arm that owned it.
             log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
@@ -993,7 +993,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     return arm_results
 
 
-async def _sweep_arm_option_b(  # noqa: PLR0913
+async def _sweep_arm_option_b(
     arm_name: str,
     grid: list[GridVariant],
     *,
@@ -1095,12 +1095,12 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         _concs = [int(v.extra_envs["CONC"]) for v in grid if v.extra_envs.get("CONC")]
         _isl = int(next((v.extra_envs["ISL"] for v in grid if v.extra_envs.get("ISL")), "0"))
         _osl = int(next((v.extra_envs["OSL"] for v in grid if v.extra_envs.get("OSL")), "0"))
-        _maybe_flush(
+        _flush_partial_conc_sweep_report(
             state=state,
             session_dir=session_dir,
             json_path=json_path,
             csv_path=csv_path,
-            all_results=_all_results_ref,
+            results=list(_all_results_ref),
             concs=_concs,
             isl=_isl,
             osl=_osl,
@@ -1116,54 +1116,6 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             recorder=recorder,
         )
     return arm_results
-
-
-def _maybe_flush(  # noqa: PLR0913
-    *,
-    state: SharedState,
-    session_dir: Path,
-    json_path: Path,
-    csv_path: Path,
-    all_results: list[VariantResult],
-    concs: list[int],
-    isl: int,
-    osl: int,
-    opt_args: str,
-    opt_envs: dict[str, str],
-    workspace: Path,
-    started_at: float,
-    total_budget_sec: int | None,
-    has_budget: bool,
-    budget_exhausted: bool,
-    budget_skip_reason: str,
-    budget_remaining_sec: float | None,
-    recorder: Any = None,
-) -> None:
-    """Build a partial payload from *all_results* and flush it via :func:`_flush_partial_conc_sweep_report`.
-
-    A thin convenience wrapper that avoids repeating the argument list at every
-    call site.
-    """
-    _flush_partial_conc_sweep_report(
-        results=list(all_results),
-        state=state,
-        session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=concs,
-        isl=isl,
-        osl=osl,
-        opt_args=opt_args,
-        opt_envs=opt_envs,
-        workspace=workspace,
-        started_at=started_at,
-        total_budget_sec=total_budget_sec,
-        has_budget=has_budget,
-        budget_exhausted=budget_exhausted,
-        budget_skip_reason=budget_skip_reason,
-        budget_remaining_sec=budget_remaining_sec,
-        recorder=recorder,
-    )
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
@@ -1185,13 +1137,13 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exce
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
         return exc
     return None
 
 
-def _flush_partial_conc_sweep_report(  # noqa: PLR0913
+def _flush_partial_conc_sweep_report(
     *,
     results: list[VariantResult],
     state: SharedState,
@@ -1224,48 +1176,45 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
     table is recorded on the same beat as this flush, so an event read
     mid-sweep carries the pairs measured so far rather than nothing.
     """
-    try:
-        b_pts: list[dict[str, Any]] = []
-        o_pts: list[dict[str, Any]] = []
-        for v in results:
-            if v.name.startswith("baseline_"):
-                b_pts.append(_point_from_variant(v, arm="baseline"))
-            elif v.name.startswith("optimized_"):
-                o_pts.append(_point_from_variant(v, arm="optimized"))
-        b_pts.sort(key=lambda p: p["conc"])
-        o_pts.sort(key=lambda p: p["conc"])
+    b_pts: list[dict[str, Any]] = []
+    o_pts: list[dict[str, Any]] = []
+    for v in results:
+        if v.name.startswith("baseline_"):
+            b_pts.append(_point_from_variant(v, arm="baseline"))
+        elif v.name.startswith("optimized_"):
+            o_pts.append(_point_from_variant(v, arm="optimized"))
+    b_pts.sort(key=lambda p: p["conc"])
+    o_pts.sort(key=lambda p: p["conc"])
 
-        metric_key, guard_noise_pct = _grading_of(state)
-        comparison, summary = conc_pair_comparison(b_pts, o_pts, metric_key=metric_key, guard_noise_pct=guard_noise_pct)
-        if recorder is not None:
-            recorder.record_progress(comparison=comparison, summary=summary)
-        p: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "status": "in_progress" if partial else "unknown",
-            "session_id": str(getattr(state, "session_id", "") or session_dir.name),
-            "isl": isl,
-            "osl": osl,
-            "tp": int(getattr(state, "tp", 0) or 0),
-            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
-            "concs_requested": concs,
-            "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
-            "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
-            "comparison": comparison,
-            "summary": summary,
-            "workspace": workspace.as_posix(),
-            "elapsed_sec": round(time.time() - started_at, 2),
-            "total_budget_sec": total_budget_sec if has_budget else None,
-            "budget_exhausted": budget_exhausted,
-            "report_json_path": json_path.as_posix(),
-            "report_csv_path": csv_path.as_posix(),
-        }
-        if budget_exhausted:
-            p["budget_skip_reason"] = budget_skip_reason
-            if budget_remaining_sec is not None:
-                p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
-        _flush_conc_sweep_report(p, session_dir)
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep: _flush_partial_conc_sweep_report failed", exc_info=True)
+    metric_key, guard_noise_pct = _grading_of(state)
+    comparison, summary = conc_pair_comparison(b_pts, o_pts, metric_key=metric_key, guard_noise_pct=guard_noise_pct)
+    if recorder is not None:
+        recorder.record_progress(comparison=comparison, summary=summary)
+    p: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "in_progress" if partial else "unknown",
+        "session_id": str(getattr(state, "session_id", "") or session_dir.name),
+        "isl": isl,
+        "osl": osl,
+        "tp": int(getattr(state, "tp", 0) or 0),
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "concs_requested": concs,
+        "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
+        "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
+        "comparison": comparison,
+        "summary": summary,
+        "workspace": workspace.as_posix(),
+        "elapsed_sec": round(time.time() - started_at, 2),
+        "total_budget_sec": total_budget_sec if has_budget else None,
+        "budget_exhausted": budget_exhausted,
+        "report_json_path": json_path.as_posix(),
+        "report_csv_path": csv_path.as_posix(),
+    }
+    if budget_exhausted:
+        p["budget_skip_reason"] = budget_skip_reason
+        if budget_remaining_sec is not None:
+            p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
+    _flush_conc_sweep_report(p, session_dir)
 
 
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:
@@ -1555,7 +1504,7 @@ async def run_conc_sweep(
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 await asyncio.to_thread(_kill_stale_servers)
-            except Exception as exc:  # noqa: BLE001 - best-effort safety net
+            except Exception as exc:
                 # Recorded below rather than here: servers this sweep may have
                 # left alive outlive the sweep, and a log line does not.
                 cleanup_error = exc

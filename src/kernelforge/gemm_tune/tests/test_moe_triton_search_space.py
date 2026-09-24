@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Triton MoE search space."""
+"""Tests for the Triton MoE search space and the precision its written config claims to have tuned."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.tuners import vllm_moe_triton as mt
+from kernelforge.gemm_tune.tuners.base import TuneContext
 
 
 def test_cap_below_the_seed_count_still_keeps_every_seed(monkeypatch):
@@ -75,6 +80,60 @@ class TestBlockSizeK256:
         grid_only = [c for c in mt.build_search_space(True) if tuple(sorted(c.items())) not in seeded]
         assert len(grid_only) > len(mt._SEED_CONFIGS)
         assert any(c["BLOCK_SIZE_K"] == 256 for c in grid_only)
+
+
+def _moe_ctx(tmp_path) -> TuneContext:
+    profile = ModelProfile(
+        model_path="/fake",
+        hidden_size=4096,
+        intermediate_size=14336,
+        moe_intermediate_size=1536,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        is_moe=True,
+        num_experts=128,
+        num_experts_per_tok=8,
+    )
+    return TuneContext(
+        profile=profile,
+        framework="vllm",
+        precision="bf16",
+        quant_type="none",
+        gpu_type="mi355x",
+        tp=1,
+        conc=64,
+        tokens=[16, 64],
+        mp=1,
+        output_dir=tmp_path,
+        iters=5,
+        warmup=2,
+        min_improvement_pct=1.0,
+        timeout_s=60,
+    )
+
+
+class TestTheConfigNameStatesTheMeasuredDtype:
+    """vLLM loads a tuned config by the dtype in its filename, so the name is a claim about the measurement.
+
+    Which precisions may be swept at all is the router's decision (see
+    ``test_router.TestOnlyTheMeasuredPrecisionIsTuned``); the tuner only has to name what it measured.
+    """
+
+    def test_the_written_config_is_named_for_the_dtype_that_was_benchmarked(self, tmp_path, monkeypatch):
+        tuner = mt.VllmMoeTritonTuner(_moe_ctx(tmp_path))
+
+        def fake_sweep(cmd, *, timeout_s, log_file):
+            (tuner.work_dir / "sweep_results.json").write_text(
+                json.dumps({"16": {"BLOCK_SIZE_M": 64}}), encoding="utf-8"
+            )
+            return 0, json.dumps({"status": "ok", "shape_details": [], "best_speedup": 1.2}), ""
+
+        monkeypatch.setattr(mt, "run_subprocess", fake_sweep)
+
+        result = tuner.run()
+
+        written = [p.name for p in Path(result.artifact_path).iterdir()]
+        assert written == ["E=128,N=1536,device_name=AMD_Instinct_MI355X,dtype=bfloat16.json"]
 
 
 class TestCap:

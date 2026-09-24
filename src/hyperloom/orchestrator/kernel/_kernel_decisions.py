@@ -11,8 +11,10 @@ import logging
 import os
 from typing import Any
 
-from hyperloom.common.env import env_bool
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
+
+from hyperloom.common.env import env_flag
 
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
@@ -22,16 +24,15 @@ from .patch_landing import (
     patch_budget,
     record_source_path,
 )
+from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    _now_iso,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
 )
-from ..trace.trace_env import env_flag
 
 
 log = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag."""
-    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
+    return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
 def _stable_kernel_task_key(
@@ -138,7 +139,7 @@ def _queue_kernel_keep(
         and entry.get("last_correctness_passed") is True
         and micro_speedup >= promotion_threshold
     )
-    if decision != VERDICT_KEEP and not promoted_needs_review:
+    if decision != "KEEP" and not promoted_needs_review:
         return None
     artifact_path = str(entry.get("last_artifact_path") or "")
     artifact_bundle = dict(entry.get("last_artifact_bundle") or {})
@@ -261,7 +262,7 @@ def enqueue_nominated_patch(
         "deploy_repo_root": str(getattr(patch, "kernel_repo", "") or ""),
         "base_commit": str(getattr(patch, "base_commit", "") or ""),
         "micro_speedup": micro_speedup,
-        "optimization_decision": VERDICT_KEEP,
+        "optimization_decision": "KEEP",
         "trace_gpu_pct": 0.0,
         "created_at": _now_iso(),
         "status": "pending",
@@ -312,7 +313,7 @@ def enqueue_nominated_patch(
     return queue[integration_id]
 
 
-def _patch_budget_for() -> int:
+def _patch_budget_for(state) -> int:
     """How many sibling patches one round may land, env-overridable."""
     return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
 
@@ -326,7 +327,7 @@ def _ensure_kernel_task_state(state) -> None:
     # The queue's only deletion point.
     state.pending_kernel_integrations = evict_terminal(
         state.pending_kernel_integrations,
-        budget=_patch_budget_for(),
+        budget=_patch_budget_for(state),
     )
     for task_key, stable_entry in state.kernel_opt_task_attempts.items():
         if not isinstance(stable_entry, dict):
@@ -424,7 +425,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         deduped.append(record)
     # Cap how many siblings dispatch this round.
-    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for())
+    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for(state))
     return fit
 
 
@@ -596,7 +597,7 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    if result.get("decision") == VERDICT_KEEP:
+    if result.get("decision") == "KEEP":
         validation_tier = str(result.get("validation_tier") or "")
         integration_status = str(result.get("integration_validation_status") or "")
         if isinstance(pending_record, dict):
@@ -627,13 +628,11 @@ def record_kernel_integrate_result(
         reason = f"fault_attempts_exhausted_{max_fault_attempts}"
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts without a KEEP.
-        should_reject = result.get("decision") == VERDICT_REVERT or verdict_attempt_count >= max_attempts
+        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
         if not should_reject:
             return entry
         reason = (
-            "revert_decision"
-            if result.get("decision") == VERDICT_REVERT
-            else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
         )
     rejected = {
         "key": key,
@@ -706,6 +705,43 @@ def _source_files_in_optimization_stack(state) -> set[str]:
         if src:
             sources.add(src)
     return sources
+
+
+def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
+    """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
+
+    forge-loop / flydsl / fusion land their integrations under this six-dimension recipe id (see
+    ``kernelforge.knowledge.kernel_identity``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
+    dimension is already ``normalize_operator_name``-clean at write time, so it is returned as-is.
+    """
+    parts = str(kernel_id or "").split(":")
+    if len(parts) != 7 or parts[0] != "kernel" or parts[1] not in KERNEL_RECIPE_PRODUCERS:
+        return ""
+    return parts[2]
+
+
+def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, dict[str, Any]]:
+    """Map normalized operator name -> its integrating optimization_stack entry (forge-loop/flydsl/fusion).
+
+    These lanes key their ``optimization_stack`` entries by the long-form recipe id
+    (``kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>``), which never equals a roofline
+    trace's synthetic ``kNNN`` kernel_id even though both name the same kernel. Comparing on the operator name — run
+    through the same ``normalize_operator_name`` the recipe id was built with — is the one identity the two sides
+    share.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for e in state.optimization_stack or []:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
+            continue
+        operator = _canonical_kernel_recipe_operator(str(e.get("kernel_id") or ""))
+        if operator:
+            entries[normalize_operator_name(operator)] = e
+    return entries
+
+
+def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
+    """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
+    return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
 
 
 def _record_matches_task(
@@ -895,6 +931,7 @@ def untried_hot_reusable_kernels(
         for entry in (state.optimization_stack or [])
         if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
+    integrated_operators = _forge_loop_operators_in_optimization_stack(state)
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
@@ -1015,6 +1052,11 @@ def untried_hot_reusable_kernels(
         ):
             continue
         if src and src in integrated_sources:
+            continue
+        # A kernel-recipe lane (forge-loop/flydsl/fusion) landed under its own long-form recipe id, which never
+        # equals this row's synthetic kNNN id or its trace source_file -- see _forge_loop_operators_in_optimization_stack.
+        row_name = str(_identity[1] or "")
+        if row_name and normalize_operator_name(row_name) in integrated_operators:
             continue
         stable_attempt = next(
             (

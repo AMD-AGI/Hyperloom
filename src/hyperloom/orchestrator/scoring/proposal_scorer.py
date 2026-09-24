@@ -358,7 +358,7 @@ class ProposalScorer:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
+        except Exception:
             log.debug(
                 "full-trace: proposal_scorer llm_call append failed for model=%s",
                 model,
@@ -391,7 +391,7 @@ class ProposalScorer:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
+        except Exception:
             log.debug(
                 "full-trace: proposal_scorer llm_call failure append failed for model=%s",
                 model,
@@ -414,26 +414,19 @@ class ProposalScorer:
             return
         if not prompt and not response:
             return
-        try:
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="proposal_scorer",
-                role="proposal_scorer",
-                call_id=call_id,
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                model=str(model),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
-            log.debug(
-                "full-trace: proposal_scorer conversation append failed for model=%s",
-                model,
-                exc_info=True,
-            )
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="proposal_scorer",
+            role="proposal_scorer",
+            call_id=call_id,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+            model=str(model),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     async def score(
         self,

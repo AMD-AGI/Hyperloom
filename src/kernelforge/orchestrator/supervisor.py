@@ -98,7 +98,7 @@ def _persist_interaction(
         else:
             clear_latest_supervisor_ruling(workspace)
         print(f"  [supervisor] saved interaction -> forge_experiments/supervisor/{path.name}", flush=True)
-    except Exception as e:
+    except OSError as e:
         log.debug("supervisor: failed to persist interaction for iter %s: %s", iteration, e)
 
 

@@ -54,12 +54,9 @@ class GbrainPageClient:
     def _read_body(self, resp: Any) -> str:
         """Read an MCP body under a wall-clock deadline (SSE-safe, no hang)."""
         deadline = time.monotonic() + self._timeout
-        try:
-            headers = resp.headers
-            ctype = (headers.get("Content-Type") or "").lower()
-            clen = headers.get("Content-Length")
-        except Exception:  # noqa: BLE001
-            ctype, clen = "", ""
+        headers = resp.headers
+        ctype = (headers.get("Content-Type") or "").lower()
+        clen = headers.get("Content-Length")
         if "text/event-stream" not in ctype and clen:
             return resp.read().decode("utf-8", "replace")
         chunks: list[bytes] = []

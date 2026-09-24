@@ -441,7 +441,7 @@ class ExploreExecutor:
             if not os.environ.get("PYTEST_CURRENT_TEST"):
                 try:
                     await asyncio.to_thread(_kill_stale_servers)
-                except Exception:  # noqa: BLE001 - best-effort safety net
+                except Exception:
                     log.warning(
                         "explore: post-run _kill_stale_servers failed",
                         exc_info=True,

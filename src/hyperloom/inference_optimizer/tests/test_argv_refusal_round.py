@@ -91,8 +91,8 @@ async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str)
 
 @pytest.mark.asyncio
 async def test_a_refused_argv_never_launches_and_never_opens_a_repair_round(
-    round_slot,  # noqa: F811
-    registry,  # noqa: F811
+    round_slot,
+    registry,
     launch_backend,
     refusing_probe,
     monkeypatch,
@@ -135,7 +135,7 @@ async def test_a_refused_argv_never_launches_and_never_opens_a_repair_round(
 
 @pytest.mark.asyncio
 async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
-    round_slot,  # noqa: F811
+    round_slot,
     launch_backend,
     monkeypatch,
 ):
@@ -165,7 +165,7 @@ async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
 
 @pytest.mark.asyncio
 async def test_the_one_allowed_drop_is_written_back_before_the_launch(
-    round_slot,  # noqa: F811
+    round_slot,
     launch_backend,
     monkeypatch,
 ):
@@ -204,7 +204,7 @@ async def test_the_one_allowed_drop_is_written_back_before_the_launch(
 
 @pytest.mark.asyncio
 async def test_an_unavailable_probe_does_not_stop_the_round(
-    round_slot,  # noqa: F811
+    round_slot,
     launch_backend,
     monkeypatch,
 ):

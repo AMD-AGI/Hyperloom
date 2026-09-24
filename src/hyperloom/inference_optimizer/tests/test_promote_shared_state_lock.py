@@ -806,6 +806,69 @@ async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
+    """Reproduces a real session: a forge-loop kernel_rewrite_controller KEEP lands on
+    optimization_stack via _record_integrate_keep, which never went through the generic
+    _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
+    optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
+    naming a KEEP its own entries list never records."""
+    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 140.0,
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "integration_id": "int-forge-1",
+            "gain_pct": 7.72,
+            "backend": "forge",
+            "engine": "kernel_rewrite_controller",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "integrate"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-forge-1"]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry.outcome == OUTCOME_KEEP
+    assert entry.gain_pct == 7.72
+    assert entry.throughput_after == 140.0
+    assert entry.variant_name == "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x"
+    assert entry.lever_kind == "kernel"
+
+
+@pytest.mark.asyncio
+async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
+    """The fusion sibling of the same lane must land a journal entry too."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "kernel_id": "fuse-rmsnorm-silu",
+            "integration_id": "int-fusion-1",
+            "gain_pct": 2.0,
+            "source": "forge_fusion",
+            "action_label": "fusion",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "fusion"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-fusion-1"]
+    assert len(matches) == 1
+    assert matches[0].variant_name == "fuse-rmsnorm-silu"
+
+
+@pytest.mark.asyncio
 async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
     session_dir,
 ):
@@ -2209,6 +2272,8 @@ class TestWritebackRequiredAxes:
             "tp_size": 2,
         }
         assert self._validation_state(state) == prior_validation
+        assert state.working_recipe_generation == state.validated_recipe_generation + 1
+        assert state.optimization_stack_has_unvalidated_keeps()
         record.assert_not_called()
         watermark.assert_not_called()
 
@@ -2241,6 +2306,31 @@ class TestWritebackRequiredAxes:
         assert state.optimization_stack == prior_stack
         record.assert_not_called()
 
+    def test_keeps_whose_throughput_losses_sum_past_the_band_still_validate(self, coord, monkeypatch):
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+        monkeypatch.setattr(stack_event, "record_validation", Mock())
+        state = coord.shared_state
+        state.current_best["total_throughput"] = state.baseline_perf["total_throughput"]
+        total, intvty = state.current_best["total_throughput"], state.current_best["e2e_norm_intvty_p90"]
+        # Each lift trades 4% throughput (inside the 5% band) for interactivity; by the third the
+        # stack sits past the band against baseline, which must not stop the gain from following it.
+        for step in range(3):
+            total *= 0.96
+            intvty *= 1.10
+            candidate = {
+                **self._candidate(),
+                "name": f"step{step}",
+                "extra_server_args": f"--page-size {64 << step}",
+                "total_throughput": total,
+                "e2e_norm_intvty_p90": intvty,
+            }
+            assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+            assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
+            assert state.cumulative_gain_validated == pytest.approx(intvty - 100.0)
+            assert not state.optimization_stack_has_unvalidated_keeps()
+        assert total < state.baseline_perf["total_throughput"] * 0.95
+
     def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
@@ -2262,6 +2352,8 @@ class TestWritebackRequiredAxes:
         assert state.current_best["extra_envs"] == {"NEXT_ENV": "1"}
         assert len(state.optimization_stack) == 2
         assert self._validation_state(state) == (50.0, "2026-01-02T00:00:00+00:00", 2)
+        assert state.validated_recipe_generation == state.working_recipe_generation == 1
+        assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
         assert record.call_args.kwargs["baseline_tput"] == 100.0
         assert record.call_args.kwargs["validated_tput"] == 150.0

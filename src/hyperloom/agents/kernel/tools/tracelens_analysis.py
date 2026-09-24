@@ -22,12 +22,15 @@ import re
 import subprocess
 import sys
 import uuid
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from hyperloom.inference_optimizer import framework_registry
 
 try:
     from hyperloom.orchestrator.framework.paths import (
@@ -67,7 +70,7 @@ from _task_group_contract import _strip_dispatch_decoration
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except Exception:
+except ImportError:
     _aiter_jit_core = None
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
@@ -149,6 +152,13 @@ try:
         _KSC = None  # type: ignore[assignment]
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
+
+try:
+    from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+except ImportError:  # pragma: no cover - standalone invocation
+    # Without the board table there is no arch to name, which is the same
+    # outcome this tool already produces for an unrecognised platform.
+    gfx_arch_for_gpu_type = lambda _gpu_type: None  # noqa: E731
 
 try:
     from hyperloom.common.kernel_shape_contract import (
@@ -1007,6 +1017,10 @@ def open_json(path: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+#: What :func:`open_json` raises on a missing, truncated, or corrupt (possibly gzipped) trace.
+UNREADABLE_TRACE_ERRORS: tuple[type[Exception], ...] = (OSError, EOFError, ValueError, zlib.error)
+
+
 def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> int:
     """Count GPU kernel events in a torch_profiler trace.
 
@@ -1022,7 +1036,7 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     """
     try:
         payload = open_json(trace_file)
-    except Exception:
+    except UNREADABLE_TRACE_ERRORS:
         return 0
     events = payload.get("traceEvents") if isinstance(payload, dict) else None
     if not isinstance(events, list):
@@ -1547,7 +1561,7 @@ def _count_kernels_if_readable(path: Path) -> tuple[bool, int]:
         return True, count
     try:
         payload = open_json(path)
-    except Exception:  # noqa: BLE001 - unreadable is a distinct answer, not a crash
+    except UNREADABLE_TRACE_ERRORS:
         return False, 0
     if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
         return False, 0
@@ -2132,7 +2146,7 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
         if p.stat().st_size > 16 * 1024:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
@@ -2458,7 +2472,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
     ]
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, timeout=15)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         _GREP_CACHE[cache_key] = []
         return []
     if proc.returncode not in (0, 1):
@@ -3313,7 +3327,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                     capture_output=True,
                     timeout=15,
                 )
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 continue
             if proc.returncode not in (0, 1):
                 continue
@@ -3389,7 +3403,7 @@ def _is_pybind_shim(source_file: str) -> bool:
         if p.stat().st_size > 2048:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
@@ -3445,7 +3459,7 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: 
                     if sym in f.read_text(encoding="utf-8", errors="replace"):
                         if f.stat().st_size > 2048:
                             return str(f)
-                except Exception:
+                except OSError:
                     continue
     return source_file
 
@@ -3701,7 +3715,7 @@ def analyze_trace_files(
     for trace_file in trace_files:
         try:
             payload = open_json(trace_file)
-        except Exception:
+        except ValueError:
             continue
 
         if isinstance(payload.get("kernels"), list):
@@ -4807,8 +4821,8 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         item["patch_strategy"] = "vendor_playbook"
         item["vendor_operator_playbook"] = playbook
         item["vendor_playbook_role"] = playbook.get("role", "")
-        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
-        # source_file before it will dispatch to any backend; a vendor
+        # Coordinator kernel handlers gate dispatch on a non-empty, path-shaped
+        # source_file before they will send work to any backend; a vendor
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
@@ -4886,7 +4900,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     if not str(config_path or "").strip():
         return ""
     try:
-        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
+        import yaml  # type: ignore[import-untyped]
 
         payload = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - runtime context is advisory
@@ -5026,7 +5040,7 @@ def _resolve_trace_launchers(
     if not wanted:
         return {}
     try:
-        from _trace_launcher_resolver import resolve_launchers_from_trace  # noqa: PLC0415
+        from _trace_launcher_resolver import resolve_launchers_from_trace
 
         file_errors: list[str] = []
         found = resolve_launchers_from_trace(
@@ -5522,60 +5536,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
-#: Mirrors of the registry, used only when that package is not importable
-#: (standalone invocation). Kept identical to the bypass route's copies; tests
-#: assert every one of them against the registry.
-_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
-_STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
-
-
-def _is_scriptable_framework(framework: str | None) -> bool:
-    """Return whether ``framework`` is a server-less scriptable image framework.
-
-    Scriptable frameworks (e.g. xDiT diffusion) have no LLM decode steady-state
-    phase, so trace analysis uses the plain pytorch perf report + skips the
-    steady-state splitter. Prefers the canonical ``framework_registry``; falls
-    back to a name check so the tool stays usable when run standalone (outside
-    an importable ``inference_optimizer`` package).
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for scriptable image frameworks.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-        return is_scriptable(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
-
-
-def _has_diffusion_ceiling(framework: str | None) -> bool:
-    """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
-
-    Scriptable does not imply diffusion: ``custom`` runs an operator-supplied
-    entrypoint whose model Hyperloom never inspects, so the config-derived
-    geometry the ceiling needs cannot be resolved, and a guessed one is worse
-    than none. Read from the registry rather than matched against a name, so the
-    next framework is classified when it is added rather than when someone
-    remembers this call site.
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for frameworks shipping a readable denoiser config.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import has_denoiser_config
-
-        return has_denoiser_config(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
-
-
 def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
     """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
@@ -5858,7 +5818,7 @@ def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
         return {}
     try:
         payload = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return {}
     rows = payload.get("results") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
@@ -6075,7 +6035,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
         if isinstance(_hit, str):
             candidates.append(Path(_hit))
-    except Exception:
+    except Exception:  # noqa: BLE001 - hub cache probe is optional
         pass
     out: list[Path] = []
     seen: set[str] = set()
@@ -6103,7 +6063,7 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
             continue
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, ValueError):
             continue
         params: dict[str, Any] = {
             "MODEL_CONFIG_PATH": str(config_path),
@@ -6131,12 +6091,6 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
-_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-}
 _FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
 _FLYDSL_BUFFER_LOAD_MARKERS = (
     "make_buffer_tensor",
@@ -6188,9 +6142,7 @@ def _flydsl_kernel_params(
         The FlyDSL kernel-params dict (possibly partial).
     """
     params: dict[str, Any] = {}
-    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
-        (target_platform or "").strip().lower(),
-    )
+    arch = gfx_arch_for_gpu_type(target_platform)
     if arch:
         params["FLYDSL_TARGET_ARCH"] = arch
     cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
@@ -6668,7 +6620,7 @@ def write_reports(
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
     # blocks the per-kernel report.
     diffusion_roofline_path = ""
-    if _is_scriptable_framework(getattr(args, "framework", "")):
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
         try:
             tools_dir = str(Path(__file__).resolve().parent)
             if tools_dir not in sys.path:
@@ -6691,7 +6643,7 @@ def write_reports(
             # giving the workload roofline an absolute ideal-ms floor. Best-effort,
             # and only for frameworks whose denoiser config Hyperloom can read --
             # the trace-derived totals above need no such config and always ship.
-            if _has_diffusion_ceiling(getattr(args, "framework", "")):
+            if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
                 try:
                     _model_dir = str(getattr(args, "model_path", "") or "").strip()
                     if not _model_dir:
@@ -8085,7 +8037,7 @@ def main() -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level barrier; logged and reported
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
         update_status(
             status_path,

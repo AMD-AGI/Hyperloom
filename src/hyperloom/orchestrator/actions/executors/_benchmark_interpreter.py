@@ -48,7 +48,7 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
                 env=probe_env,
             )
             return getattr(proc, "returncode", 1) == 0
-        except Exception:
+        except Exception:  # noqa: BLE001 - probe subprocess; absence answers False
             return False
 
     env_val = resolved_env.get("MAGPIE_PYTHON", "").strip()

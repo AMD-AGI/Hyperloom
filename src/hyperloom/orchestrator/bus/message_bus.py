@@ -63,9 +63,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
 }
 
 
-_now_iso = now_iso
-
-
 @dataclass
 class Message:
     """One bus message persisted in the ``events`` table."""
@@ -76,7 +73,7 @@ class Message:
     topic: str
     payload: dict[str, Any]
     in_reply_to: str | None = None
-    ts: str = field(default_factory=_now_iso)
+    ts: str = field(default_factory=now_iso)
     seq: int | None = None  # DB-assigned on insert
 
     @classmethod

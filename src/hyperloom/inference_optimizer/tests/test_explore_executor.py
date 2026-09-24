@@ -32,14 +32,12 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
-)
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -47,6 +45,10 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+
+def _eval_off(value: object) -> bool:
+    return not is_truthy(value, default=True)
 
 
 @pytest.fixture(autouse=True)
@@ -1367,8 +1369,8 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
     warmup = [ev for slot, ev in seen if "warmup_round" in slot]
     decision = [ev for slot, ev in seen if "warmup_round" not in slot]
-    assert warmup and warmup[0] not in _RUN_EVAL_FALSE
-    assert decision and all(ev in _RUN_EVAL_FALSE for ev in decision)
+    assert warmup and not _eval_off(warmup[0])
+    assert decision and all(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio
@@ -1421,9 +1423,9 @@ async def test_explore_no_eval_disables_magpie_warmup_and_decision(
         await sub.run_task(task)
 
     assert seen
-    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    assert all(_eval_off(ev) for _slot, ev in seen)
     base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
-    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+    assert _eval_off(base_yaml["benchmark"]["envs"].get("RUN_EVAL", ""))
 
 
 @pytest.mark.asyncio
@@ -1475,7 +1477,7 @@ async def test_explore_cold_decision_keeps_eval(
 
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
     decision = [ev for _slot, ev in seen]
-    assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
+    assert decision and not any(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio

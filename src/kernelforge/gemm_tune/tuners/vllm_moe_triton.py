@@ -263,14 +263,8 @@ if VLLM_AVAILABLE:
             USE_CONTEXT_MANAGER = True
             print("API mode: override_config context manager", file=sys.stderr)
         except ImportError:
-            alt_names = ["config", "triton_config", "kernel_config"]
-            for alt in alt_names:
-                if alt in params:
-                    print(f"API mode: alt kwarg '{{alt}}'", file=sys.stderr)
-                    break
-            else:
-                print(f"fused_experts params: {{params}}", file=sys.stderr)
-                VLLM_AVAILABLE = False
+            print(f"fused_experts params: {{params}}", file=sys.stderr)
+            VLLM_AVAILABLE = False
 
 NUM_EXPERTS = _config["num_experts"]
 INTERMEDIATE_SIZE = _config["intermediate_size"]
@@ -313,16 +307,14 @@ def _create_tensors(M, dtype=torch.bfloat16):
 
 
 def benchmark_baseline(M, dtype=torch.bfloat16):
-    """Benchmark with vLLM default config (no override) as baseline."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for vLLM's default config, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts_default(hidden_states, w1, w2, topk_weights, topk_ids)
         except Exception as e:
             print(f"  [baseline warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -332,16 +324,14 @@ def benchmark_baseline(M, dtype=torch.bfloat16):
 
 
 def benchmark_config(M, config, dtype=torch.bfloat16):
-    """Benchmark a single Triton config for fused MoE at batch size M."""
-    if not VLLM_AVAILABLE:
-        return float("inf")
+    """Microseconds for one Triton config at batch size M, or None when it did not run."""
     hidden_states, w1, w2, topk_weights, topk_ids = _create_tensors(M, dtype)
     for _ in range(WARMUP):
         try:
             _call_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, config)
         except Exception as e:
             print(f"  [warmup error M={{M}}] {{type(e).__name__}}: {{e}}", file=sys.stderr)
-            return float("inf")
+            return None
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(ITERS):
@@ -364,24 +354,31 @@ def main():
 
     for M in BATCH_SIZES:
         baseline_time = benchmark_baseline(M)
+        if baseline_time is None:
+            # Without the default config's own time there is nothing to be faster than, and dividing by a stand-in
+            # would report this shape as an unbounded win.
+            errors.append(f"M={{M}}: the default config did not benchmark")
+            print(f"M={{M}}: baseline did not benchmark; no config can be judged", file=sys.stderr)
+            torch.cuda.empty_cache()
+            continue
         print(f"M={{M}}: baseline={{baseline_time:.1f}}us", file=sys.stderr)
 
-        best_time = float("inf")
+        best_time = None
         best_config = None
 
         for config in CONFIGS:
             try:
                 elapsed = benchmark_config(M, config)
-                if elapsed < best_time:
-                    best_time = elapsed
-                    best_config = dict(config)
             except Exception as e:
                 if not errors:
                     errors.append(f"M={{M}}: {{type(e).__name__}}: {{e}}")
                 continue
+            if elapsed is not None and (best_time is None or elapsed < best_time):
+                best_time = elapsed
+                best_config = dict(config)
 
-        if best_config is not None:
-            speedup = baseline_time / best_time if best_time > 0 else 1.0
+        if best_config is not None and best_time > 0:
+            speedup = baseline_time / best_time
             shape_details.append({{
                 "M": M,
                 "baseline_us": round(baseline_time, 2),
@@ -395,7 +392,7 @@ def main():
                 print(f"M={{M}}: best={{best_time:.1f}}us speedup={{speedup:.3f}}x SKIP (not faster than default)", file=sys.stderr)
         else:
             if not errors:
-                errors.append(f"M={{M}}: all configs returned inf")
+                errors.append(f"M={{M}}: no config benchmarked")
 
         torch.cuda.empty_cache()
 
@@ -538,14 +535,8 @@ class VllmMoeTritonTuner(BaseTuner):
         elif "mi355" in gpu_name.lower():
             gpu_name = "AMD_Instinct_MI355X"
 
-        # Determine dtype string
-        dtype_str = "bfloat16"
-        if self.ctx.precision == "fp8":
-            dtype_str = "fp8_w8a8"
-        elif "awq" in self.ctx.quant_type or "gptq" in self.ctx.quant_type:
-            dtype_str = "int8_w8a16"
-
-        config_filename = f"E={E},N={N},device_name={gpu_name},dtype={dtype_str}.json"
+        # The dtype in the name is what vLLM matches against, so it states the dtype the sweep benchmarked.
+        config_filename = f"E={E},N={N},device_name={gpu_name},dtype=bfloat16.json"
         config_path = tuned_configs_dir / config_filename
         config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
 

@@ -35,27 +35,10 @@ def test_reexport_from_patch_snapshot():
     from hyperloom.orchestrator.actions.executors import _patch_snapshot as ps
 
     assert ps._PATCH_DEV_NULL is ng._PATCH_DEV_NULL
-    assert ps._strip_path_prefix is ng._strip_path_prefix
     assert ps._P_LEVELS is ng._P_LEVELS
 
 
-# _strip_path_prefix
-
-
-def test_strip_path_prefix_zero():
-    assert ng._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
-
-
-def test_strip_path_prefix_one():
-    assert ng._strip_path_prefix("a/b/c.py", 1) == "b/c.py"
-
-
-def test_strip_path_prefix_beyond():
-    # More levels than parts -> basename
-    assert ng._strip_path_prefix("a/b.py", 5) == "b.py"
-
-
-def test_strip_path_prefix_p_levels_sane():
+def test_p_levels_sane():
     # _P_LEVELS starts at 1.
     assert ng._P_LEVELS[0] == 1
 
@@ -1160,56 +1143,6 @@ def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is False
     assert "backup of" in err
-
-
-def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """When the real apply fails AND source-context extraction throws, feedback still returns with empty source_context (real-apply exception branch)."""
-
-    target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
-    patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
-
-    real_run = ng.subprocess.run
-
-    def _run(cmd, *a, **k):
-        is_dry = any("--dry-run" in str(c) for c in cmd)
-        if is_dry:
-            return real_run(cmd, *a, **k)
-        return _CP(1, "", "Hunk #1 FAILED")
-
-    def _raise_ctx(*a, **k):
-        raise RuntimeError("ctx boom")
-
-    import unittest.mock as um
-
-    monkeypatch.setattr(af, "read_patch_source_context", _raise_ctx)
-    with um.patch.object(ng.subprocess, "run", _run):
-        result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-
-    ok, _err, _backups, feedback = result
-    if ok:
-        pytest.skip("dry-run failed; cannot reach real-apply branch")
-    assert isinstance(feedback, af.ApplyFeedback)
-    assert feedback.source_context == ""
-
-
-def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """If reading source context throws on total dry-run failure, feedback still returns with an empty source_context (exception branch)."""
-
-    patch_file = tmp_path / "bad.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
-
-    monkeypatch.setattr(ng.subprocess, "run", lambda *a, **k: _CP(1, "", "nope"))
-
-    def _raise_ctx(*a, **k):
-        raise RuntimeError("context read boom")
-
-    monkeypatch.setattr(af, "read_patch_source_context", _raise_ctx)
-    ok, err, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert ok is False
-    assert isinstance(feedback, af.ApplyFeedback)
-    assert feedback.source_context == ""
 
 
 # _sanitize_git_index_lines — placeholder git index headers

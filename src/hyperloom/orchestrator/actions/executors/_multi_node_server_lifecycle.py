@@ -12,13 +12,10 @@ import logging
 import os
 import shlex
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
-
-from hyperloom.inference_optimizer.multi_node._internal.launch_env import LaunchEnv
 
 from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -249,50 +246,6 @@ def _get_restart_lock() -> "asyncio.Lock":
     return _RESTART_LOCK
 
 
-_WorkerResult = TypeVar("_WorkerResult")
-
-
-async def _run_blocking_restart_operation(operation: Callable[..., _WorkerResult], *args, **kwargs) -> _WorkerResult:
-    """Retain caller isolation until its thread finishes, including repeated cancellation."""
-    worker = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    completion = asyncio.gather(worker, return_exceptions=True)
-    cancelled: asyncio.CancelledError | None = None
-    while not completion.done():
-        try:
-            await asyncio.shield(completion)
-        except asyncio.CancelledError as exc:
-            cancelled = cancelled or exc
-    if cancelled is not None:
-        outcome = completion.result()[0]
-        if isinstance(outcome, BaseException):
-            log.warning("cancelled restart operation finished with %s", type(outcome).__name__)
-        raise cancelled
-    return worker.result()
-
-
-def _round_launch_env(
-    source: dict[str, str],
-    *,
-    extra_env: dict[str, str] | None,
-    unset_env: list[str] | tuple[str, ...] | set[str] | None,
-    torch_profiler_dir: str,
-) -> LaunchEnv:
-    """Resolve round-specific inputs locally instead of publishing them to os.environ."""
-    from hyperloom.inference_optimizer.multi_node.cli import _collect_ray_launch_env
-    from hyperloom.inference_optimizer.multi_node.commands.infera import _collect_launch_env
-
-    source = dict(source)
-    source["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
-    source["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(filter_forward_env(extra_env or {}))
-    source["HYPERLOOM_MN_UNSET_FWD_ENV"] = json.dumps(
-        [str(key).strip() for key in (unset_env or ()) if str(key).strip()]
-    )
-    state = _read_state()
-    if state.get("backend") == "infera":
-        return _collect_launch_env(source)
-    return _collect_ray_launch_env(state, source=source)
-
-
 def _uses_aiter(
     extra_server_args: str,
     pd: dict | None,
@@ -392,28 +345,44 @@ async def restart_server_for_round(
         raise ServerRestartFailed(str(exc)) from exc
 
     async with _get_restart_lock():
+        saved_trace_env = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR")
         if torch_profiler_dir:
             try:
                 Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
-        launch_env = _round_launch_env(
-            dict(os.environ), extra_env=extra_env, unset_env=unset_env, torch_profiler_dir=torch_profiler_dir
-        )
+            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
+        else:
+            # No profiler this round — drop stale env so the launcher doesn't reuse a previous round's path.
+            os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
+
+        # Per-variant env overrides → forwarded to the SSH-launched sglang via
+        # ``multi_node/commands/infera.py::_collect_forward_env`` (reads this control env).
+        saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
+        saved_unset_fwd_env = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV")
+        unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
+        if extra_env:
+            safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
+            os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(safe_env)
+        else:
+            os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
+        if unset_keys:
+            os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = json.dumps(unset_keys)
+        else:
+            os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
         # Multi-node TraceLens SGLang patch fan-out (fail-soft).
-        # Function-local import to keep the single-node import path off the patcher.
-        from ._server_patcher import tracelens_patch_attempted
+        from ._server_patcher import resolve_sglang_shape_mode, tracelens_patch_enabled
 
-        if not tracelens_patch_attempted(fw):
+        _tracelens_patch_enabled_fn = tracelens_patch_enabled
+        _sglang_shape_mode_val = resolve_sglang_shape_mode()
+        if _sglang_shape_mode_val == "sitecustomize":
+            # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
             log.info(
-                "restart_server_for_round: TraceLens patch fan-out skipped for "
-                "framework=%s (HYPERLOOM_ENABLE_PATCH kill switch off, or "
-                "SGLang shape mode=sitecustomize where shapes come from "
-                "kernel_shape_tool).",
-                fw,
+                "restart_server_for_round: SGLang shape mode=sitecustomize; "
+                "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."
             )
-        elif os.environ.get("TRACELENS_ROOT", "").strip():
+        elif _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -434,7 +403,7 @@ async def restart_server_for_round(
                         or health_timeout_s
                     ),
                 )
-                patch_rc = await _run_blocking_restart_operation(cmd_apply_tracelens_patch, patch_ns)
+                patch_rc = await asyncio.to_thread(cmd_apply_tracelens_patch, patch_ns)
                 if patch_rc != 0:
                     log.warning(
                         "restart_server_for_round: TraceLens SGLang patch fan-out "
@@ -449,173 +418,191 @@ async def restart_server_for_round(
                     exc,
                 )
 
-        # Local import to keep httpx out of the single-node import path.
-        from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
-
-        poll_timeout_s = int(
-            os.environ.get(
-                "HYPERLOOM_MN_POLL_TIMEOUT_S",
-                str(health_timeout_s),
-            )
-            or health_timeout_s
-        )
-        health_wait_s = int(
-            os.environ.get(
-                "HYPERLOOM_MN_HEALTH_WAIT_S",
-                str(health_timeout_s),
-            )
-            or health_timeout_s
-        )
-        # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
-        poll_timeout_s = max(poll_timeout_s, _resolve_poll_timeout_s())
-
-        # aiter kernels JIT-compile + autotune on first use (server log: "not found tuned config in
-        # /tmp/aiter_configs"); a cold compile can exceed the default 900s gate and false-fail an
-        # otherwise-healthy variant (the doomed attempt then burns a reclaim+retry cycle before the now-warm
-        # relaunch succeeds).
-        if "HYPERLOOM_MN_HEALTH_WAIT_S" not in os.environ and _uses_aiter(extra_server_args, pd, extra_env):
-            _aiter_wait = int(os.environ.get("HYPERLOOM_MN_HEALTH_WAIT_AITER_S", "1800") or 1800)
-            if _aiter_wait > health_wait_s:
-                log.info(
-                    "restart_server_for_round: aiter kernels detected; widening "
-                    "worker /health wait %ds -> %ds for cold JIT/autotune "
-                    "(HYPERLOOM_MN_HEALTH_WAIT_AITER_S)",
-                    health_wait_s,
-                    _aiter_wait,
-                )
-                health_wait_s = _aiter_wait
-                poll_timeout_s = max(poll_timeout_s, _aiter_wait)
-
-        ns = argparse.Namespace(
-            framework=fw,
-            model=mdl,
-            tp=tp_int,
-            ep=ep_int,
-            extra_args=extra_server_args or "",
-            pid_file=None,
-            log_file=None,
-            no_wait_health=False,
-            print_logs=False,
-            poll_interval=poll_interval_s,
-            poll_timeout=poll_timeout_s,
-            # PD knobs; aggregated mode passes only pd_mode.
-            pd_mode=pd.get("pd_mode", "aggregated"),
-            pd_prefill_nodes=pd.get("pd_prefill_nodes", 0),
-            pd_decode_nodes=pd.get("pd_decode_nodes", 0),
-            pd_prefill_tp=pd.get("pd_prefill_tp", 0),
-            pd_decode_tp=pd.get("pd_decode_tp", 0),
-            pd_transfer_backend=pd.get("pd_transfer_backend", ""),
-            pd_ib_device=pd.get("pd_ib_device", ""),
-            # Per-role EP / extra-args (disaggregated only; 0 / "" => fall back to the shared ep / extra_args in
-            # the CLI fan-out).
-            pd_prefill_ep=pd.get("pd_prefill_ep", 0),
-            pd_decode_ep=pd.get("pd_decode_ep", 0),
-            pd_prefill_extra_args=pd.get("pd_prefill_extra_args", ""),
-            pd_decode_extra_args=pd.get("pd_decode_extra_args", ""),
-            pd_bootstrap_port=8998,
-            pd_vllm_router_cmd="",
-        )
-        from ._multi_node_env import log_mn_banner
-
-        log_mn_banner(
-            "server_restart",
-            log,
-            framework=fw,
-            tp=tp_int,
-            ep=ep_int,
-            pd_mode=pd.get("pd_mode"),
-            trace_dir=torch_profiler_dir or "",
-        )
-        log.info(
-            "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
-            "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
-            "extra_args=%r torch_profiler_dir=%r",
-            fw,
-            tp_int,
-            ep_int,
-            pd.get("pd_mode"),
-            pd.get("pd_prefill_nodes", 0),
-            pd.get("pd_prefill_tp", 0),
-            pd.get("pd_decode_nodes", 0),
-            pd.get("pd_decode_tp", 0),
-            pd.get("pd_transfer_backend", ""),
-            pd.get("pd_ib_device", ""),
-            extra_server_args,
-            torch_profiler_dir,
-        )
-
-        # One kill+launch attempt + post-launch /health wait.
-        async def _restart_and_wait(force_full: bool) -> None:
-            """Run one restart attempt and wait for /health readiness."""
-            try:
-                rc = await _run_blocking_restart_operation(
-                    cmd_restart_server, ns, launch_env=launch_env, force_full_restart=force_full
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
-
-            if rc != 0:
-                raise ServerRestartFailed(
-                    f"cmd_restart_server returned non-zero rc={rc} "
-                    f"(framework={fw} tp={tp_int} extra_args={extra_server_args!r})"
-                )
-
-            # cmd_restart_server returns when actors are spawned, but a cold MoE weight-load can need 20-30 min
-            # before /health flips; poll it here so the downstream baseline doesn't fire against a not-yet-ready
-            # server.
-            try:
-                # PD restart: ensure BOTH prefill+decode legs are /health-ready (mooncake init done) before the
-                # frontend completions probe, so its grace does not expire against a half-ready pair.
-                await _wait_for_workers_ready_async(
-                    timeout_s=health_wait_s,
-                    poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
-                )
-                await _wait_for_server_health_async(
-                    timeout_s=health_wait_s,
-                    poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
-                )
-                # The reachable /health above can be a pod-pinned head address; the benchmark dials the published
-                # ClusterIP Service, whose endpoints lag readiness after a restart.
-                await _wait_for_published_service_ready_async(
-                    timeout_s=_published_ready_timeout_s(),
-                    poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
-                )
-            except ServerRestartFailed as exc:
-                _collect_worker_server_logs(_read_state() or {}, str(exc))
-                raise
-            except Exception as exc:  # noqa: BLE001
-                _collect_worker_server_logs(_read_state() or {}, repr(exc))
-                raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
-
         try:
-            await _restart_and_wait(force_full_restart)
-        except ServerRestartFailed as first_exc:
-            # C — multi-node VRAM reclaim before exactly one retry.
-            if os.environ.get(_MN_RESTART_RECLAIM_RETRY_ENV, "1").strip().lower() in {
-                "0",
-                "false",
-                "no",
-                "off",
-            }:
-                raise
-            log.warning(
-                "restart_server_for_round: restart failed (%s); attempting "
-                "best-effort remote kill-inference + one retry",
-                first_exc,
-            )
-            try:
-                from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
+            # Local import to keep httpx out of the single-node import path.
+            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
 
-                await _run_blocking_restart_operation(kill_inference_for_kernel_agent_best_effort)
-            except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
-                log.warning(
-                    "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
-                    reclaim_exc,
+            poll_timeout_s = int(
+                os.environ.get(
+                    "HYPERLOOM_MN_POLL_TIMEOUT_S",
+                    str(health_timeout_s),
                 )
+                or health_timeout_s
+            )
+            health_wait_s = int(
+                os.environ.get(
+                    "HYPERLOOM_MN_HEALTH_WAIT_S",
+                    str(health_timeout_s),
+                )
+                or health_timeout_s
+            )
+            # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
+            poll_timeout_s = max(poll_timeout_s, _resolve_poll_timeout_s())
+
+            # aiter kernels JIT-compile + autotune on first use (server log: "not found tuned config in
+            # /tmp/aiter_configs"); a cold compile can exceed the default 900s gate and false-fail an
+            # otherwise-healthy variant (the doomed attempt then burns a reclaim+retry cycle before the now-warm
+            # relaunch succeeds).
+            if "HYPERLOOM_MN_HEALTH_WAIT_S" not in os.environ and _uses_aiter(extra_server_args, pd, extra_env):
+                _aiter_wait = int(os.environ.get("HYPERLOOM_MN_HEALTH_WAIT_AITER_S", "1800") or 1800)
+                if _aiter_wait > health_wait_s:
+                    log.info(
+                        "restart_server_for_round: aiter kernels detected; widening "
+                        "worker /health wait %ds -> %ds for cold JIT/autotune "
+                        "(HYPERLOOM_MN_HEALTH_WAIT_AITER_S)",
+                        health_wait_s,
+                        _aiter_wait,
+                    )
+                    health_wait_s = _aiter_wait
+                    poll_timeout_s = max(poll_timeout_s, _aiter_wait)
+
+            ns = argparse.Namespace(
+                framework=fw,
+                model=mdl,
+                tp=tp_int,
+                ep=ep_int,
+                extra_args=extra_server_args or "",
+                pid_file=None,
+                log_file=None,
+                no_wait_health=False,
+                print_logs=False,
+                poll_interval=poll_interval_s,
+                poll_timeout=poll_timeout_s,
+                # PD knobs; aggregated mode passes only pd_mode.
+                pd_mode=pd.get("pd_mode", "aggregated"),
+                pd_prefill_nodes=pd.get("pd_prefill_nodes", 0),
+                pd_decode_nodes=pd.get("pd_decode_nodes", 0),
+                pd_prefill_tp=pd.get("pd_prefill_tp", 0),
+                pd_decode_tp=pd.get("pd_decode_tp", 0),
+                pd_transfer_backend=pd.get("pd_transfer_backend", ""),
+                pd_ib_device=pd.get("pd_ib_device", ""),
+                # Per-role EP / extra-args (disaggregated only; 0 / "" => fall back to the shared ep / extra_args in
+                # the CLI fan-out).
+                pd_prefill_ep=pd.get("pd_prefill_ep", 0),
+                pd_decode_ep=pd.get("pd_decode_ep", 0),
+                pd_prefill_extra_args=pd.get("pd_prefill_extra_args", ""),
+                pd_decode_extra_args=pd.get("pd_decode_extra_args", ""),
+                pd_bootstrap_port=8998,
+                pd_vllm_router_cmd="",
+            )
+            from ._multi_node_env import log_mn_banner
+
+            log_mn_banner(
+                "server_restart",
+                log,
+                framework=fw,
+                tp=tp_int,
+                ep=ep_int,
+                pd_mode=pd.get("pd_mode"),
+                trace_dir=torch_profiler_dir or "",
+            )
+            log.info(
+                "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
+                "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
+                "extra_args=%r torch_profiler_dir=%r",
+                fw,
+                tp_int,
+                ep_int,
+                pd.get("pd_mode"),
+                pd.get("pd_prefill_nodes", 0),
+                pd.get("pd_prefill_tp", 0),
+                pd.get("pd_decode_nodes", 0),
+                pd.get("pd_decode_tp", 0),
+                pd.get("pd_transfer_backend", ""),
+                pd.get("pd_ib_device", ""),
+                extra_server_args,
+                torch_profiler_dir,
+            )
+
+            # One kill+launch attempt + post-launch /health wait.
+            async def _restart_and_wait(force_full: bool) -> None:
+                """Run one restart attempt and wait for /health readiness."""
+                prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
+                if force_full:
+                    os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
+                try:
+                    rc = await asyncio.to_thread(cmd_restart_server, ns)
+                except Exception as exc:
+                    raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
+                finally:
+                    if force_full:
+                        if prev_resume is None:
+                            os.environ.pop("MULTI_NODE_RESTART_RESUME_RUNNING", None)
+                        else:
+                            os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = prev_resume
+
+                if rc != 0:
+                    raise ServerRestartFailed(
+                        f"cmd_restart_server returned non-zero rc={rc} "
+                        f"(framework={fw} tp={tp_int} extra_args={extra_server_args!r})"
+                    )
+
+                # cmd_restart_server returns when actors are spawned, but a cold MoE weight-load can need 20-30 min
+                # before /health flips; poll it here so the downstream baseline doesn't fire against a not-yet-ready
+                # server.
+                try:
+                    # PD restart: ensure BOTH prefill+decode legs are /health-ready (mooncake init done) before the
+                    # frontend completions probe, so its grace does not expire against a half-ready pair.
+                    await _wait_for_workers_ready_async(
+                        timeout_s=health_wait_s,
+                        poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
+                    )
+                    await _wait_for_server_health_async(
+                        timeout_s=health_wait_s,
+                        poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
+                    )
+                    # The reachable /health above can be a pod-pinned head address; the benchmark dials the published
+                    # ClusterIP Service, whose endpoints lag readiness after a restart.
+                    await _wait_for_published_service_ready_async(
+                        timeout_s=_published_ready_timeout_s(),
+                        poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
+                    )
+                except ServerRestartFailed as exc:
+                    _collect_worker_server_logs(_read_state() or {}, str(exc))
+                    raise
+                except Exception as exc:
+                    _collect_worker_server_logs(_read_state() or {}, repr(exc))
+                    raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
+
             try:
-                await _restart_and_wait(force_full=True)
-            except ServerRestartFailed as retry_exc:
-                raise retry_exc from first_exc
+                await _restart_and_wait(force_full_restart)
+            except ServerRestartFailed as first_exc:
+                # C — multi-node VRAM reclaim before exactly one retry.
+                if not env_flag(_MN_RESTART_RECLAIM_RETRY_ENV, default=True):
+                    raise
+                log.warning(
+                    "restart_server_for_round: restart failed (%s); attempting "
+                    "best-effort remote kill-inference + one retry",
+                    first_exc,
+                )
+                try:
+                    from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
+
+                    await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
+                except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
+                    log.warning(
+                        "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
+                        reclaim_exc,
+                    )
+                try:
+                    await _restart_and_wait(force_full=True)
+                except ServerRestartFailed as retry_exc:
+                    raise retry_exc from first_exc
+        finally:
+            # Restore env so this round's profiler path doesn't leak forward.
+            if saved_trace_env is None:
+                os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
+            else:
+                os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = saved_trace_env
+            # Symmetric restore for the per-variant env forwarding control var.
+            if saved_fwd_env is None:
+                os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
+            else:
+                os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
+            if saved_unset_fwd_env is None:
+                os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
+            else:
+                os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = saved_unset_fwd_env
 
 
 # Infera frontend profiling API (infera.server --enable-profiling).
@@ -770,13 +757,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     ready: set[str] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     _wedge_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "420") or 420)
-    _wedge_enabled = os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-        "",
-    }
+    _wedge_enabled = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
     # Startup-crash fast-fail: an argparse rejection / fatal exit is terminal, so bail within seconds instead of the
     # full gate.
     _crash_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", "45") or 45)
@@ -885,7 +866,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     ts = _t.strftime("%Y%m%dT%H%M%SZ", _t.gmtime())
     try:
         os.makedirs(out_dir, exist_ok=True)
-    except Exception:
+    except OSError:
         return
     key_path = state.get("ssh_key_path")
     known_hosts = state.get("ssh_known_hosts")
@@ -893,12 +874,9 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     default_port = int(state.get("ssh_port") or 2233)
     ssh_run = None
     if key_path and known_hosts:
-        try:
-            from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
+        from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
 
-            ssh_run = _ssh_run
-        except Exception:
-            ssh_run = None
+        ssh_run = _ssh_run
     for role in ("prefill", "decode", "worker"):
         for pod in state.get(role + "_pods") or []:
             ip = pod.get("podIP")
@@ -928,7 +906,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     if cp.stderr:
                         body += "\n--- ssh stderr ---\n" + cp.stderr
                     source = "ssh:" + str(remote)
-                except Exception:
+                except Exception:  # noqa: BLE001 - one pod's SSH must not stop the sweep
                     continue
             else:
                 continue
@@ -938,7 +916,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     fh.write("# collected on restart failure (" + source + "): " + str(reason) + "\n")
                     fh.write(body)
                 log.info("collected worker server log -> %s", dest)
-            except Exception:
+            except OSError:
                 continue
 
 
@@ -1021,7 +999,7 @@ async def _wait_for_server_health_async(
                         if mresp.status_code == 200:
                             try:
                                 data = mresp.json()
-                            except Exception:
+                            except ValueError:
                                 data = {}
                             models = data.get("data") if isinstance(data, dict) else None
                             if isinstance(models, list) and len(models) > 0:
@@ -1034,11 +1012,7 @@ async def _wait_for_server_health_async(
                                         health_ok_at,
                                     )
                                 # Worker-readiness probe: tiny completion.
-                                model_id = ""
-                                try:
-                                    model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
-                                except Exception:
-                                    model_id = ""
+                                model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
                                 if not model_id:
                                     last_err = "completion_probe: no model id"
                                     consecutive_completion_ok = 0
@@ -1058,7 +1032,7 @@ async def _wait_for_server_health_async(
                                         if cresp.status_code == 200:
                                             try:
                                                 gen_toks = _probe_generated_tokens(cresp.json())
-                                            except Exception:
+                                            except ValueError:
                                                 gen_toks = 0
                                             if gen_toks >= completion_probe_min_tokens:
                                                 consecutive_completion_ok += 1

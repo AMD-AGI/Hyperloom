@@ -8,6 +8,9 @@ import logging as _logging
 import os
 import re
 from typing import Any
+
+from hyperloom.common.env import env_bool
+
 from ..state.task_registry import Task
 from ..collaborator import CoordinatorCollaborator
 
@@ -23,7 +26,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         reason: str,
         round_id: int,
     ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft)."""
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
@@ -80,21 +83,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
                     params["notes"] = "\n".join(f"- {question}" for question in questions)
                 break
         await self._warm_specialist_params(params)
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=["research_lane"],
-                side_effects=["writes_results"],
-                lease_ttl_sec=1800,
-            )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
-            log.exception(
-                "research-scout: enqueue failed (round=%d)",
-                int(round_id),
-            )
-            return None
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idempotency_key,
+            requires_lanes=["research_lane"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=1800,
+        )
         if not was_existing:
             self.shared_state.bump_research_scout_runs()
             self.shared_state.research_scout_last_round = int(round_id)
@@ -114,17 +110,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
             from ..knowledge import research_hints as _research_hints
 
             _research_hints.write_hints_skeleton(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: hints skeleton write failed")
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return
-        try:
-            await self._enqueue_internal_research_scout_task(
-                reason="prelude_initial",
-                round_id=0,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: PRELUDE dispatch failed")
+        await self._enqueue_internal_research_scout_task(
+            reason="prelude_initial",
+            round_id=0,
+        )
 
     async def _maybe_enqueue_explore_research_scout(self) -> None:
         """Re-dispatch the scout every K config-arm rounds (append-only)."""
@@ -137,13 +130,10 @@ class InternalTasksPhase(CoordinatorCollaborator):
             return
         if int(getattr(state, "research_scout_last_round", -1)) == round_id:
             return
-        try:
-            await self._enqueue_internal_research_scout_task(
-                reason="explore_periodic",
-                round_id=round_id,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: re-dispatch failed")
+        await self._enqueue_internal_research_scout_task(
+            reason="explore_periodic",
+            round_id=round_id,
+        )
 
     async def _enqueue_internal_static_recon_task(
         self,
@@ -188,26 +178,22 @@ class InternalTasksPhase(CoordinatorCollaborator):
             _dicts = _src_recon.checklist_as_dicts(_entries)
             if _dicts:
                 params["static_recon_checklist_entries"] = _dicts
-        except Exception:  # noqa: BLE001 — advisory; never block dispatch
+        except Exception:
             log.exception("static-recon: checklist seeding failed")
         await self._warm_specialist_params(params)
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=["research_lane"],
-                side_effects=["writes_results"],
-                lease_ttl_sec=1800,
-            )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
-            log.exception("static-recon: enqueue failed")
-            return None
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idempotency_key,
+            requires_lanes=["research_lane"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=1800,
+        )
         if not was_existing:
             try:
                 state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive bookkeeping
+            except Exception:
                 log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
@@ -220,25 +206,16 @@ class InternalTasksPhase(CoordinatorCollaborator):
         """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
         if not bool(getattr(self.shared_state, "static_recon_enabled", True)):
             return
-        try:
-            await self._enqueue_internal_static_recon_task(
-                reason="prelude_initial",
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("static-recon: PRELUDE dispatch failed")
+        await self._enqueue_internal_static_recon_task(
+            reason="prelude_initial",
+        )
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
         """On a plateau, dispatch a Coordinator-owned readonly specialist seeded with the deterministic trajectory digest to propose fresh directions."""
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW",
-            "1",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", default=True):
             return
         state = self.shared_state
-        try:
-            plateau_active = bool(self._plateau_advisory_block())
-        except Exception:  # noqa: BLE001 — defensive
-            plateau_active = False
+        plateau_active = bool(self._plateau_advisory_block())
         if not plateau_active:
             return
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -274,18 +251,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if digest:
             params["gap_evidence"] = {"trajectory_review": digest}
         await self._warm_specialist_params(params)
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=f"internal-trajectory-review-cycle{cycle}",
-                requires_lanes=["research_lane"],
-                side_effects=["writes_results"],
-                lease_ttl_sec=1800,
-            )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
-            log.exception("trajectory-review: enqueue failed (cycle=%d)", cycle)
-            return
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=f"internal-trajectory-review-cycle{cycle}",
+            requires_lanes=["research_lane"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=1800,
+        )
         if not was_existing:
             log.info(
                 "trajectory-review dispatched: task_id=%s cycle=%d domain=%s",
@@ -295,7 +268,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             )
 
     def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
-        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft)."""
+        """Seed static-recon bridge candidates into gaps[] (idempotent)."""
         block = done_payload.get("recon")
         if not isinstance(block, dict):
             return
@@ -328,24 +301,21 @@ class InternalTasksPhase(CoordinatorCollaborator):
             if bridge_sketch:
                 symptom_parts.append(f"Bridge: {bridge_sketch}")
             symptom = " ".join(symptom_parts)[:1200]
-            try:
-                self.shared_state.upsert_gap(
-                    {
-                        "canonical_id": cid,
-                        "symptom": symptom,
-                        "layer": "static_recon",
-                        "severity": "medium",
-                        "domain_hint": domain_hint,
-                        "source": "static_recon",
-                        "provenance": predicate_file,
-                    }
-                )
-                seeded += 1
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("static-recon: upsert_gap failed for %s", cid)
+            self.shared_state.upsert_gap(
+                {
+                    "canonical_id": cid,
+                    "symptom": symptom,
+                    "layer": "static_recon",
+                    "severity": "medium",
+                    "domain_hint": domain_hint,
+                    "source": "static_recon",
+                    "provenance": predicate_file,
+                }
+            )
+            seeded += 1
         if seeded:
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("static-recon: SharedState.save after seeding failed")
         log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)

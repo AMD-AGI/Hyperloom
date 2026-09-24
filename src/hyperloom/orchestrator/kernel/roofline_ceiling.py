@@ -1094,25 +1094,22 @@ def compute_roofline_breakdown_from_state(
     legacy = RooflineBreakdown(mem, cmp, peak, bound_kind)
 
     # Prefer the bottom-up PerfModel peak; legacy is the fallback.
-    try:
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            gpu_type=gpu_type,
-            concurrency=concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=num_gpus,
-            precision_tag=precision_tag,
+    pm_bd = compute_roofline_from_perfmodel(
+        meta=meta,
+        gpu_type=gpu_type,
+        concurrency=concurrency,
+        isl=runtime.isl,
+        osl=runtime.osl,
+        num_gpus=num_gpus,
+        precision_tag=precision_tag,
+    )
+    if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
+        return RooflineBreakdown(
+            mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
+            cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
+            peak_tok_per_sec=pm_bd.decode_tok_per_s,
+            bound_kind=pm_bd.bound_kind,
         )
-        if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
-            return RooflineBreakdown(
-                mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
-                cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
-                peak_tok_per_sec=pm_bd.decode_tok_per_s,
-                bound_kind=pm_bd.bound_kind,
-            )
-    except Exception:  # noqa: BLE001 — PerfModel is best-effort
-        pass
 
     return legacy
 

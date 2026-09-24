@@ -69,6 +69,14 @@ def _repo_root() -> Path:
 
 def _load_script_module(unique_name: str, script_name: str):
     _install_min_ray_stub()
+    if script_name == "launch_multinode.py":
+        from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+        mod = types.ModuleType(unique_name)
+        sys.modules[unique_name] = mod
+        bundle = mn_cli._read_bundled_pod_python_script(script_name, mn_cli._LAUNCHER_DEPS)
+        exec(compile(bundle, f"{script_name}_bundle.py", "exec"), mod.__dict__)
+        return mod
     path = _repo_root() / "multi_node" / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(unique_name, path)
     if spec is None or spec.loader is None:
@@ -199,17 +207,6 @@ def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tm
 
     assert ext.build_external_state_from_env()["backend"] == "rayjob"
     assert mne.resolve_kb_topology()["backend"] == "rayjob"
-
-
-def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
-    # The pod-side copy must mirror server_args_safety: exempt the flag by name, but still constrain its value.
-    mod = _load_script_module("_ln_mn_specdraft", "launch_multinode.py")
-    assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
-    assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
-    for bad in ("Qwen/draft", "hf://org/draft", "/wekafs/../etc/passwd"):
-        assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
-    assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
-    assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
 
 
 def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = None):

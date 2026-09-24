@@ -10,6 +10,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.timeutil import now_iso
 
 __all__ = [
@@ -75,19 +76,13 @@ def as_list(value: Any) -> list[Any]:
 
 
 def int_or_none(value: Any) -> int | None:
-    """Best-effort int coercion that reports ``None`` instead of raising."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-int coercion; rejects ``bool``, ``None``, non-finite floats."""
+    return to_int(value)
 
 
 def float_or_none(value: Any) -> float | None:
-    """Best-effort float coercion that reports ``None`` instead of raising."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-float coercion; rejects ``bool``, ``None``, ``nan``/``inf``."""
+    return to_float(value)
 
 
 def bool_or_none(value: Any) -> bool | None:

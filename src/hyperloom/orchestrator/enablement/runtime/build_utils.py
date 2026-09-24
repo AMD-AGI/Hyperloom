@@ -213,7 +213,7 @@ def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
     def _key(t: str):
         try:
             return (1, packaging.version.Version(t.lstrip("v")))
-        except Exception:  # noqa: BLE001
+        except packaging.version.InvalidVersion:
             return (0, packaging.version.Version("0"))
 
     return sorted(tags, key=_key, reverse=True)

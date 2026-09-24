@@ -11,13 +11,11 @@ import json
 import os
 import shlex
 import subprocess
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .._internal import infera_support
-from .._internal.env_safety import filter_forward_env, parse_forward_env
-from .._internal.launch_env import LaunchEnv, expand_env_vars
+from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 
@@ -83,19 +81,13 @@ def _infera_require_state() -> dict[str, Any]:
 _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
 
 
-def _collect_forward_env(
-    source: Mapping[str, str] | None = None,
-    *,
-    variant: tuple[dict[str, str], tuple[str, ...]] | None = None,
-) -> dict[str, str]:
-    """Resolve Infera tuning env, optionally from an already captured source."""
-    source = dict(os.environ) if source is None else source
-    extra, unset = parse_forward_env(source) if variant is None else variant
-    fwd = {k: v for k, v in source.items() if k.startswith(_FORWARD_ENV_PREFIXES)}
+def _collect_forward_env() -> dict[str, str]:
+    """Read prompt-provided tuning vars from os.environ for SSH forwarding."""
+    fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
     # Multi-node torch profiler: the infera SSH path (unlike the RayJob path in launch_multinode.py) never pins
     # SGLANG_TORCH_PROFILER_DIR, so sglang writes traces to pod-local /tmp where the sandbox cannot read them ->
     # roofline's profile_no_trace_failed.
-    trace_dir = source.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
     # Forward no-patch shape-discovery config; the pod-side launcher sets
@@ -106,33 +98,46 @@ def _collect_forward_env(
         "HYPERLOOM_SGLANG_SHAPE_MODE",
         "HYPERLOOM_SGLANG_VERSION_PIN",
     ):
-        _shape_val = source.get(_shape_key, "").strip()
+        _shape_val = os.environ.get(_shape_key, "").strip()
         if _shape_val and _shape_key not in fwd:
             fwd[_shape_key] = _shape_val
+    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if unset_fwd:
+        try:
+            parsed_unset = json.loads(unset_fwd)
+            if isinstance(parsed_unset, list):
+                for key in parsed_unset:
+                    fwd.pop(str(key), None)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object; forwarded verbatim
+    # regardless of prefix and take precedence over prefix-matched values for the same key.
+    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if extra_fwd:
+        try:
+            parsed = json.loads(extra_fwd)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    fwd[str(k)] = str(v)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+    # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the SSH-launched sglang on the pod (where
+    # those vars are undefined) writes traces to an absolute shared-FS path, not an unresolved literal.
+    if fwd.get("SGLANG_TORCH_PROFILER_DIR"):
+        fwd["SGLANG_TORCH_PROFILER_DIR"] = os.path.expandvars(fwd["SGLANG_TORCH_PROFILER_DIR"])
     # Forward a shared-FS (WekaFS) server-log dir so the SSH-launched sglang writes server.log to shared storage the
     # client can read, not pod-local /tmp.
-    _slog = expand_env_vars(
-        source.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs", source
+    _slog = os.path.expandvars(
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if _slog.startswith("/") and "$" not in _slog:
         fwd["HYPERLOOM_MN_SERVER_LOG_DIR"] = _slog
     # aiter/cpp_itfs runtime-compiled kernels (GH #458): the integrate re-baseline sets AITER_REBUILD=1 (transiently)
     # so aiter wipes its build dir and recompiles the patched kernel on import.
-    aiter_rebuild = source.get("AITER_REBUILD", "").strip()
+    aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
-    for key in unset:
-        fwd.pop(key, None)
-    fwd.update(extra)
-    if fwd.get("SGLANG_TORCH_PROFILER_DIR"):
-        fwd["SGLANG_TORCH_PROFILER_DIR"] = expand_env_vars(fwd["SGLANG_TORCH_PROFILER_DIR"], source)
     return filter_forward_env(fwd, warn_on_drop=True)
-
-
-def _collect_launch_env(source: Mapping[str, str] | None = None) -> LaunchEnv:
-    source = dict(os.environ) if source is None else source
-    variant = parse_forward_env(source)
-    return _mn_cli._launch_env_snapshot(_collect_forward_env(source, variant=variant), variant[1])
 
 
 def _infera_fanout_launch(
@@ -143,14 +148,12 @@ def _infera_fanout_launch(
     label: str,
     poll_timeout: int,
     print_logs: bool,
-    launch_env: LaunchEnv | None = None,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
-    launch_env = _collect_launch_env() if launch_env is None else launch_env
-    script = _mn_cli._read_pod_script("launch_infera_node.py")
-    forward_env = _mn_cli._launch_env_transport(launch_env)
-    if launch_env.forward_env:
-        info(f"{label}: forwarding {len(launch_env.forward_env)} tuning env vars to SSH child")
+    script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
+    forward_env = _collect_forward_env()
+    if forward_env:
+        info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
     rc_total = 0
     for target in targets:
@@ -167,7 +170,7 @@ def _infera_fanout_launch(
                 "python3",
                 launch_args,
                 timeout=poll_timeout,
-                env=dict(forward_env),
+                env=forward_env,
                 port=port,
             )
         except subprocess.TimeoutExpired:
@@ -296,9 +299,7 @@ def _infera_servers_alive(
     return True
 
 
-def _infera_restart_server(
-    args: argparse.Namespace, *, launch_env: LaunchEnv | None = None, force_full_restart: bool = False
-) -> int:
+def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
     framework = (args.framework or state.get("framework") or "sglang").lower()
@@ -340,21 +341,13 @@ def _infera_restart_server(
     # Resume fast-path (parity with the RayJob path): if this restart's config matches the last successful launch AND
     # every GPU pod's prior server is still alive, skip the SSH kill+relaunch (which re-triggers a multi-minute MoE
     # cold start).
-    resume_enabled = not force_full_restart and os.environ.get(
-        "MULTI_NODE_RESTART_RESUME_RUNNING", "1"
-    ).strip().lower() not in (
+    resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").strip().lower() not in (
         "0",
         "false",
         "no",
         "off",
     )
-    if launch_env is None:
-        launch_env = _collect_launch_env()
-    if (
-        resume_enabled
-        and state.get("last_restart_env_digest") == launch_env.digest
-        and _infera_restart_config_matches(state, args, framework, pd_mode, kv)
-    ):
+    if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode, kv):
         probe_timeout = min(30, max(10, int(poll_timeout)))
         if _infera_servers_alive(state, _infera_all_gpu_targets(state), timeout=probe_timeout):
             info(
@@ -369,9 +362,6 @@ def _infera_restart_server(
             )
             return 0
 
-    # Invalidate the prior identity before any pod is changed, including partial/exceptional fan-outs.
-    state["last_restart_env_digest"] = ""
-    _mn_cli._save_state(state)
     if pd_mode == "disaggregated":
         if framework != "sglang":
             raise _mn_cli.ConfigurationError("PD disaggregation is sglang-only on the Infera backend")
@@ -440,7 +430,6 @@ def _infera_restart_server(
                 label=f"restart-{role}",
                 poll_timeout=poll_timeout,
                 print_logs=print_logs,
-                launch_env=launch_env,
             )
             rc_total = rc_total or rc
             all_results[role] = results
@@ -472,7 +461,6 @@ def _infera_restart_server(
             label="restart",
             poll_timeout=poll_timeout,
             print_logs=print_logs,
-            launch_env=launch_env,
         )
         all_results["worker"] = results
 
@@ -498,7 +486,6 @@ def _infera_restart_server(
         state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
         state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
-    state["last_restart_env_digest"] = launch_env.digest if rc_total == 0 else ""
     _mn_cli._save_state(state)
     print(
         json.dumps(
@@ -555,7 +542,7 @@ def _infera_ssh_node_op(
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = str(target.get("podIP") or "").strip()
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py")
+    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
         cp = _mn_cli._infera_ssh_run_script(
             state,

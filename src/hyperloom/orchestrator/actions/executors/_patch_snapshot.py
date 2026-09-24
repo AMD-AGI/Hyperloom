@@ -9,7 +9,6 @@ import atexit
 import hashlib
 import json
 import os
-import re
 import shutil
 import tempfile
 import subprocess
@@ -17,10 +16,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from hyperloom.common.git_safety import repo_root, safe_directory_args
+from hyperloom.common.unified_diff import strip_path_components
 
 from ...specialists.patch_safety import patch_file_targets
 from ._git import _run_git_cp
-from ._nogit_patch import _P_LEVELS, _PATCH_DEV_NULL, _strip_path_prefix
+from ._nogit_patch import _P_LEVELS, _PATCH_DEV_NULL
 
 
 def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> int:
@@ -33,7 +33,7 @@ def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> i
                 if not raw or raw == _PATCH_DEV_NULL:
                     continue
                 try:
-                    if (framework_root / _strip_path_prefix(raw, lvl)).exists():
+                    if (framework_root / strip_path_components(raw, lvl)).exists():
                         hits += 1
                 except OSError:
                     continue
@@ -56,8 +56,8 @@ def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tup
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
+            rel_new = strip_path_components(new, lvl) if new and new != _PATCH_DEV_NULL else None
+            rel_old = strip_path_components(old, lvl) if old and old != _PATCH_DEV_NULL else None
             try:
                 new_exists = bool(rel_new) and (framework_root / rel_new).exists()
             except OSError:
@@ -115,8 +115,8 @@ def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, s
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
+            rel_new = strip_path_components(new, lvl) if new and new != _PATCH_DEV_NULL else None
+            rel_old = strip_path_components(old, lvl) if old and old != _PATCH_DEV_NULL else None
             if rel_new:
                 ops[rel_new] = "upsert"
                 # A rename declares its source gone; a plain modify has old == new
@@ -126,9 +126,6 @@ def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, s
             elif rel_old:
                 ops[rel_old] = "delete"
     return ops
-
-
-_GIT_DIFF_BLOCK_RE = re.compile(r"^diff --git ", re.MULTILINE)
 
 
 #: Git's own identity for the throwaway replay commits; the source repository's
@@ -745,16 +742,14 @@ def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]
 def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
     """Repo-relative paths a diff's headers may resolve to, before it is applied."""
     paths: list[str] = []
-    for line in patch_content.splitlines():
-        if not line.startswith(("--- ", "+++ ")):
-            continue
-        raw = line[4:].split("\t", 1)[0].strip()
-        if raw in (_PATCH_DEV_NULL, ""):
-            continue
-        for level in _P_LEVELS:
-            path = Path(_strip_path_prefix(raw, level))
-            if not path.is_absolute() and ".." not in path.parts:
-                paths.append(path.as_posix())
+    for pair in patch_file_targets(patch_content):
+        for raw in pair:
+            if raw in (_PATCH_DEV_NULL, ""):
+                continue
+            for level in _P_LEVELS:
+                path = Path(strip_path_components(raw, level))
+                if not path.is_absolute() and ".." not in path.parts:
+                    paths.append(path.as_posix())
     return list(dict.fromkeys(paths))
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _kernel_category as kc  # noqa: E402
+import _kernel_category as kc
 
 
 def test_casing_normalized_across_routes():

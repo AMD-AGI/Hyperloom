@@ -210,11 +210,8 @@ def _json_flag_values(args: str) -> dict[str, list[str]]:
 
 def _warn_on_damaged_json_values(before: str, after: str) -> None:
     """Log loudly when composition turned a parseable JSON flag value unparseable."""
-    try:
-        was = _json_flag_values(before)
-        now = _json_flag_values(after)
-    except Exception:  # never let a diagnostic break composition
-        return
+    was = _json_flag_values(before)
+    now = _json_flag_values(after)
     for flag, values in now.items():
         healthy_before = any(_parses_as_json(v) for v in was.get(flag, []))
         if healthy_before and not any(_parses_as_json(v) for v in values):
@@ -230,7 +227,7 @@ def _warn_on_damaged_json_values(before: str, after: str) -> None:
 def _parses_as_json(value: str) -> bool:
     try:
         json.loads(value)
-    except Exception:
+    except ValueError:
         return False
     return True
 
@@ -256,7 +253,7 @@ def _repair_unquoted_json(blob: str) -> str | None:
     candidate = _UNQUOTED_VALUE_RE.sub(_quote_value, candidate)
     try:
         return json.dumps(json.loads(candidate), separators=(",", ":"))
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -312,7 +309,7 @@ def _reserialize_json_blobs(args: str) -> str:
             rendered: str | None = None
             try:
                 rendered = json.dumps(json.loads(blob), separators=(",", ":"))
-            except Exception:
+            except ValueError:
                 # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
                 # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
                 rendered = _repair_unquoted_json(blob)

@@ -85,11 +85,12 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     # Repo id: reuse the engine's HF hub cache.
     try:
         from huggingface_hub import try_to_load_from_cache
-    except Exception:  # noqa: BLE001 -- optional dep; degrade to no-resolution.
+    except ImportError:
         return None
     try:
         hit = try_to_load_from_cache(repo_id=raw, filename="config.json")
-    except Exception:  # noqa: BLE001 -- cache probe is best-effort.
+    except ValueError:
+        # A filesystem path is not a valid repo id.
         return None
     if isinstance(hit, str) and Path(hit).is_file():
         return Path(hit).parent

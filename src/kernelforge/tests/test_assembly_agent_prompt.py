@@ -77,6 +77,8 @@ def test_gated_implementer_scopes_assembly_to_its_own_campaign(tmp_path, monkeyp
     else:
         assert "Keep the kernel in its original backend/DSL (do not rewrite in another language)" in prompt
         assert "outside the campaign's explicit --commit-new-path allowlist" in prompt
+        assert "carries no `print` and reads no `os.environ` of its own" in prompt
+        assert "before ending the turn, replace each knob with the constant it selected" in prompt
     if kernel_backend == "flydsl":
         assert "forge-loop --kernel-backend assembly" in prompt
         assert "Do not install an assembly replacement" in prompt

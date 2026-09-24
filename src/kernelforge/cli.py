@@ -18,12 +18,10 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
+from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.knowledge.experience_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
@@ -34,6 +32,7 @@ from kernelforge.knowledge.experience_integration import (
 )
 from kernelforge.loop.recovery import (
     atomic_write_json,
+    load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
@@ -196,12 +195,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:
@@ -1565,7 +1559,7 @@ def forge_loop(
                     "  [warm-start] published recoverable best before iteration 1",
                     flush=True,
                 )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - translated into a rollback below
                 try:
                     rollback_unpublished_warm_start(
                         workspace_dir,
@@ -1881,11 +1875,8 @@ def forge_loop(
         best_commit = getattr(state_best, "commit_hash", "")
         # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
-            try:
-                published = json.loads((campaign_root / "best_result.json").read_text())
-            except Exception:
-                published = {}
-            if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
+            published = load_published_best(workspace_dir) or {}
+            if int(published.get("iteration", -1)) == 0:
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
@@ -1949,12 +1940,11 @@ def forge_loop(
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
-                result["iteration_count"] = len(completed_experiment.iterations)
-                result["checkpoint"] = completed_experiment.checkpoint
-            except Exception:
-                # Tracker metadata is optional on incomplete runs; final result emission must remain available so
-                # callers can reject it cleanly.
-                pass
+            except FileNotFoundError:
+                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+                return result
+            result["iteration_count"] = len(completed_experiment.iterations)
+            result["checkpoint"] = completed_experiment.checkpoint
         return result
 
     def _write_result_json(result: dict) -> None:
@@ -2152,14 +2142,14 @@ def forge_loop(
         try:
             if loop_runner.llm_usage.get("calls"):
                 tracker.set_llm_usage(experiment_id, loop_runner.llm_usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
             click.echo(
                 f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
                 err=True,
             )
         try:
             tracker.set_kb_experience(experiment_id, kb_experience)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
             click.echo(
                 f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
                 err=True,
@@ -2415,10 +2405,7 @@ def forge_rewrite(
     rewrite_kb_enabled = bool(rewrite_kb)
     # A disabled KB must not validate ambient remote credentials.
     try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(
-            mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     config = Config.from_env(

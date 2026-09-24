@@ -12,20 +12,6 @@ class _CaptureInvalid(RuntimeError):
     """Raised when a captured graph does not reproduce a correct result."""
 
 
-def _time_eager(step: Callable[[], object], iters: int) -> list[float]:
-    """Per-iteration event timing WITHOUT graph capture (fallback path)."""
-    times: list[float] = []
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    for _ in range(iters):
-        start.record()
-        step()
-        end.record()
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end))
-    return times
-
-
 def _time_graph(
     step: Callable[[], object],
     iters: int,
@@ -71,11 +57,14 @@ def cuda_graph_bench(
     *,
     warmup: int = 10,
     iters: int = 30,
-    capture: bool = True,
     dirty: Callable[[], None] | None = None,
     verify: Callable[[], bool] | None = None,
 ) -> dict:
-    """Benchmark ``step`` under CUDA/HIP graph replay (eager fallback)."""
+    """Benchmark ``step`` under CUDA/HIP graph replay.
+
+    There is no eager mode, and a capture failure raises: preflight counts real replays, so an
+    eager result is rejected anyway, and the capture error is what says how to fix the driver.
+    """
     if not torch.cuda.is_available():
         raise RuntimeError("no GPU available (torch.cuda.is_available() is False)")
 
@@ -89,20 +78,11 @@ def cuda_graph_bench(
     torch.cuda.current_stream().wait_stream(side)
     torch.cuda.synchronize()
 
-    if capture:
-        try:
-            times = _time_graph(step, iters, dirty, verify)
-            mode = "cudagraph"
-        except Exception as e:  # noqa: BLE001 - fall back so a run always measures
-            times = _time_eager(step, iters)
-            mode = f"eager ({type(e).__name__}: {e})"
-    else:
-        times = _time_eager(step, iters)
-        mode = "eager (capture disabled)"
+    times = _time_graph(step, iters, dirty, verify)
 
     times = [t for t in times if t > 0]
     return {
-        "mode": mode,
+        "mode": "cudagraph",
         "times_ms": times,
         "median_ms": statistics.median(times) if times else None,
         "mean_ms": statistics.mean(times) if times else None,

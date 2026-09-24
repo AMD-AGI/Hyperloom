@@ -552,27 +552,42 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_fusion_sentinel("no marker") is None
         assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
 
-    def test_resolve_fusion_decode_trace_prefers_payload_and_newest(self, tmp_path):
+    def test_resolve_fusion_decode_trace_reads_the_file_a_profile_records(self, tmp_path):
+        """A merged or AgentX profile records a single file; it is used verbatim."""
         state = SharedState()
-        state_dir = tmp_path / "state_trace"
-        payload_dir = tmp_path / "payload_trace"
-        state_dir.mkdir()
-        payload_dir.mkdir()
-        state_trace = state_dir / "old.trace.json.gz"
-        payload_old = payload_dir / "old.trace.json.gz"
-        payload_new = payload_dir / "new.trace.json"
+        state_trace = tmp_path / "prelude.trace.json.gz"
         state_trace.write_text("state", encoding="utf-8")
-        payload_old.write_text("old", encoding="utf-8")
-        payload_new.write_text("new", encoding="utf-8")
+        state.last_profile_trace = str(state_trace)
+
+        assert krh._resolve_fusion_decode_trace(state) == str(state_trace)
+
+    def test_resolve_fusion_decode_trace_reads_the_capture_dir_a_profile_records(self, tmp_path):
+        """Non-AgentX profiles record the capture directory (``trace_dir_preferred``)."""
+        state = SharedState()
+        trace_dir = tmp_path / "benchmark_vllm_20260501_001122"
+        trace_dir.mkdir()
+        older = trace_dir / "rank1.177.pt.trace.json.gz"
+        newest = trace_dir / "rank0.177.pt.trace.json.gz"
+        older.write_text("old", encoding="utf-8")
+        newest.write_text("new", encoding="utf-8")
         import os
 
-        os.utime(payload_old, (1, 1))
-        os.utime(payload_new, (10, 10))
-        state.last_profile_trace = str(state_dir)
+        os.utime(older, (1, 1))
+        os.utime(newest, (10, 10))
+        state.last_profile_trace = str(trace_dir)
 
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": str(payload_dir)}) == str(payload_new)
-        assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
+        assert krh._resolve_fusion_decode_trace(state) == str(newest)
+
+    def test_resolve_fusion_decode_trace_reports_no_trace_when_the_run_has_none(self, tmp_path):
+        """Nothing is substituted for a missing trace: discovery is attributed to what it read."""
+        state = SharedState()
+        assert krh._resolve_fusion_decode_trace(state) == ""
+        state.last_profile_trace = str(tmp_path / "deleted.trace.json")
+        assert krh._resolve_fusion_decode_trace(state) == ""
+        empty_dir = tmp_path / "no_captures"
+        empty_dir.mkdir()
+        state.last_profile_trace = str(empty_dir)
+        assert krh._resolve_fusion_decode_trace(state) == ""
 
     def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
         probed: list[str] = []
@@ -1044,6 +1059,7 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(
             framework="sglang",
             model_path="/models/zaya",
+            # The shape a non-AgentX profile records: the capture directory, not a file.
             last_profile_trace=str(trace_dir),
         )
         state.save(tmp_path)

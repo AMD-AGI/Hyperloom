@@ -19,7 +19,7 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -69,6 +69,7 @@ from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
@@ -592,10 +593,7 @@ async def _settled_measurement(
 
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
-    if raw is None and os.environ.get("PYTEST_CURRENT_TEST"):
-        return False
-    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
+    return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:
@@ -822,6 +820,8 @@ def _run_magpie(
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
     probe_root = Path(inferencex_path) if inferencex_path else None
+    # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
+    ensure_eval_unbound_outputs_patched(probe_root)
     if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
         eval_bounds_msg = (
             "eval generation bounds + pathology probe are not installed "
@@ -937,7 +937,7 @@ def _resolve_mn_effective_server_args(
         _variant_envs = _variant_bench.get("envs") or {}
         _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
         return str(_variant_envs.get(_variant_framework_env) or "")
-    except Exception:  # noqa: BLE001 - restart path still reports validation errors
+    except Exception:
         log.debug(
             "grid_runner: failed to read materialized variant args from %s",
             cfg_path,
@@ -1632,35 +1632,28 @@ async def run_grid(
             # The measurement is discarded, but the returncode is not: a warmup the run stopped is the same stop as
             # one in the measured round, and discarding it launches the measured round after the cancel.
             _mn_warm_rc: int | None = None
-            try:
-                _mn_warm_rc, _, _ = await _reported_magpie(
-                    i,
-                    "mn_warmup",
-                    magpie_python=magpie_python,
-                    config_path=cfg_path,
-                    output_dir=_mn_warm_slot,
-                    timeout_sec=benchmark_timeout_sec,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=True,
-                    cwd=cwd,
-                    result_dir=None,
-                    preclean=False,
-                    serving_lease=serving_lease,
-                    session_deadline_sec=session_deadline_sec,
-                )
-                log.info(
-                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
-                    i + 1,
-                    len(grid),
-                    variant.name,
-                    _mn_warm_rc,
-                )
-            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-                log.warning(
-                    "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
-                    variant.name,
-                    exc,
-                )
+            _mn_warm_rc, _, _ = await _reported_magpie(
+                i,
+                "mn_warmup",
+                magpie_python=magpie_python,
+                config_path=cfg_path,
+                output_dir=_mn_warm_slot,
+                timeout_sec=benchmark_timeout_sec,
+                silence_timeout_sec=silence_timeout_sec,
+                server_already_ready=True,
+                cwd=cwd,
+                result_dir=None,
+                preclean=False,
+                serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+            )
+            log.info(
+                "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
+                i + 1,
+                len(grid),
+                variant.name,
+                _mn_warm_rc,
+            )
             _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
             if _mn_warm_stopped is not None:
                 grid_is_over = _record_round_stop(

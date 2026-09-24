@@ -9,18 +9,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import subprocess
 import pathlib
 import sys
 import tempfile
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from server_args_safety import find_denied_flags, find_unsafe_flag_values
+from sglang_shape_gate import activate_kernel_shape_tool
 
 # Inference port.
 _INFERENCE_PORT = 8888
@@ -53,98 +54,6 @@ _PD_DEFAULT_BOOTSTRAP_PORT = 8998
 _NODES_DISCOVERY_TIMEOUT_SEC = int(os.environ.get("RAY_NODES_DISCOVERY_TIMEOUT_SEC", "120"))
 # rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
 _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get("SGLANG_HEALTH_PROBE_TIMEOUT_SEC", "1800"))
-
-# Keep in sync with multi_node/_internal/server_args_safety.py
-_DENIED_SERVER_FLAGS = frozenset(
-    {
-        "--adapter-model-path",
-        "--adapter-path",
-        "--allowed-local-media-path",
-        "--chat-template",
-        "--code-revision",
-        "--config",
-        "--download-dir",
-        "--hf-overrides",
-        "--lora-dirs",
-        "--lora-modules",
-        "--lora-path",
-        "--lora-paths",
-        "--model",
-        "--model-id",
-        "--model-path",
-        "--quantization-param-path",
-        "--revision",
-        "--tokenizer",
-        "--tokenizer-path",
-        "--tokenizer-revision",
-    }
-)
-_DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
-# Tuning knobs exempt from the suffix rule by name only; their values stay constrained by _unsafe_path_value_reason.
-_SUFFIX_EXEMPT_SERVER_FLAGS = frozenset({"--speculative-draft-model-path"})
-
-
-def _is_denied_server_flag(flag: str) -> bool:
-    """Return whether a single ``--flag`` token is denied at the pod boundary."""
-    name = (flag or "").strip()
-    if not name.startswith("--"):
-        return False
-    if name in _DENIED_SERVER_FLAGS:
-        return True
-    if name in _SUFFIX_EXEMPT_SERVER_FLAGS:
-        return False
-    return any(name.endswith(suffix) for suffix in _DENIED_SERVER_FLAG_SUFFIXES)
-
-
-def _unsafe_path_value_reason(value: str | None) -> str:
-    """Return why an exempt flag's path value is unsafe ("" when acceptable)."""
-    val = (value or "").strip()
-    if not val:
-        return "missing value"
-    if not val.startswith("/"):
-        return "must be an absolute path, not a repo id or URI"
-    if ".." in PurePosixPath(val).parts:
-        return "must not traverse with '..'"
-    return ""
-
-
-def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
-    """Return ``(flag, value)`` pairs for both ``--flag=value`` and ``--flag value``."""
-    pairs: list[tuple[str, str | None]] = []
-    for idx, tok in enumerate(tokens):
-        if not tok.startswith("--"):
-            continue
-        if "=" in tok:
-            name, _, val = tok.partition("=")
-            pairs.append((name, val))
-            continue
-        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
-        pairs.append((tok, None if (nxt is None or nxt.startswith("--")) else nxt))
-    return pairs
-
-
-def _denied_extra_args(raw: str) -> list[str]:
-    """Return rejected CLI flags in a pod-side extra-args string."""
-    text = (raw or "").strip()
-    if not text:
-        return []
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        return ["<unparseable>"]
-    out: list[str] = []
-    for flag, value in _flag_value_pairs(tokens):
-        if _is_denied_server_flag(flag):
-            if flag not in out:
-                out.append(flag)
-            continue
-        if flag not in _SUFFIX_EXEMPT_SERVER_FLAGS:
-            continue
-        reason = _unsafe_path_value_reason(value)
-        entry = f"{flag}: {reason}"
-        if reason and entry not in out:
-            out.append(entry)
-    return out
 
 
 def _log(msg: str) -> None:
@@ -311,108 +220,6 @@ def _probe_mec_firmware_lt_177() -> bool:
     return False
 
 
-# SGLang >= 0.5.18 no-patch shape tool; gate mirrored inline (no hyperloom import).
-_KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
-_SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
-
-
-def _sglang_shape_mode(env: dict[str, str] | None = None) -> str:
-    """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
-    env = os.environ if env is None else env
-    override = env.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return "patched"
-    if override == "sitecustomize":
-        return "sitecustomize"
-    version = ""
-    try:
-        import sglang  # type: ignore
-
-        version = (getattr(sglang, "__version__", "") or "").strip()
-    except Exception:  # noqa: BLE001
-        version = env.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
-    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
-    if not m:
-        return "patched"
-    vt = tuple(int(p) for p in m.group(1).split("."))
-    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
-
-
-def _maybe_activate_kernel_shape_tool(sub_env: dict[str, str]) -> None:
-    """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
-    root = sub_env.get("TRACELENS_ROOT", "").strip()
-    if not root or _sglang_shape_mode(sub_env) != "sitecustomize":
-        return
-    tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
-    if not tool.is_dir():
-        sys.stderr.write(f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled\n")
-        return
-    existing = sub_env.get("PYTHONPATH", "").strip()
-    sub_env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)
-    sub_env.setdefault("TRACELENS_SHAPE_DISCOVERY", "1")
-
-
-# Keep the standalone boundary in sync with launch_infera_node.py and the controller env policy.
-_LAUNCH_ENV_CONTROL = "HYPERLOOM_MN_LAUNCH_ENV_CONTROL"
-_PLATFORM_ENV_PREFIXES = ("LWS_", "POD_", "KUBERNETES_")
-_PROTECTED_LAUNCH_ENV = frozenset(
-    {
-        "BASH_ENV",
-        "CDPATH",
-        "ENV",
-        "GCONV_PATH",
-        "GIT_SSH_COMMAND",
-        "IFS",
-        "LD_AUDIT",
-        "LD_LIBRARY_PATH",
-        "LD_PRELOAD",
-        "NODE_OPTIONS",
-        "PATH",
-        "PERL5OPT",
-        "PYTHONHOME",
-        "PYTHONINSPECT",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-        "PYTHONUSERBASE",
-        "SHELLOPTS",
-        "VIRTUAL_ENV",
-        _LAUNCH_ENV_CONTROL,
-    }
-)
-
-
-def _launch_env_overrides(source: dict[str, str]) -> tuple[dict[str, str], tuple[str, ...]]:
-    """Validate the key-only envelope and capture values before environment recovery."""
-    if _LAUNCH_ENV_CONTROL not in source:
-        return {}, ()
-    try:
-        control = json.loads(source[_LAUNCH_ENV_CONTROL])
-    except ValueError:
-        raise ValueError("invalid launch env control JSON") from None
-    if not isinstance(control, dict) or set(control) != {"set", "unset"}:
-        raise ValueError("invalid launch env control fields")
-    for keys in control.values():
-        if not isinstance(keys, list) or any(
-            not isinstance(key, str)
-            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
-            or key in _PROTECTED_LAUNCH_ENV
-            or key.startswith(_PLATFORM_ENV_PREFIXES)
-            for key in keys
-        ):
-            raise ValueError("invalid launch env control keys")
-    if any(key not in source for key in control["set"]):
-        raise ValueError("launch env control set value is missing")
-    return {key: source[key] for key in control["set"]}, tuple(control["unset"])
-
-
-def _apply_launch_env(env: dict[str, str], overrides: tuple[dict[str, str], tuple[str, ...]]) -> None:
-    explicit, unset = overrides
-    env.pop(_LAUNCH_ENV_CONTROL, None)
-    for key in unset:
-        env.pop(key, None)
-    env.update(explicit)
-
-
 def _subprocess_env() -> dict[str, str]:
     """Build the framework launcher subprocess env."""
     env = dict(os.environ)
@@ -425,7 +232,6 @@ def _subprocess_env() -> dict[str, str]:
     env["SGLANG_ROCM_FUSED_DECODE_MLA"] = "0"
     env.setdefault("SGLANG_USE_AITER", "1")
     env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
-    env.setdefault("PYTHONUNBUFFERED", "1")
     if "HSA_NO_SCRATCH_RECLAIM" not in env and _probe_mec_firmware_lt_177():
         env["HSA_NO_SCRATCH_RECLAIM"] = "1"
     venv_bin = "/opt/venv/bin"
@@ -445,6 +251,7 @@ def _detach_framework_launch(
 ) -> int:
     """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init; fails fast with a log tail)."""
     sub_env = dict(sub_env)
+    sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
     inner = " ".join(shlex.quote(c) for c in cmd)
@@ -527,12 +334,10 @@ def _spawn_remote(
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
-    overrides = _launch_env_overrides(dict(os.environ))
     sub_env = _subprocess_env()
-    _apply_launch_env(sub_env, overrides)
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared dir when a reused server skips this
     # launch.
-    tpd = (torch_profiler_dir or "").strip() or sub_env.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:
@@ -548,7 +353,7 @@ def _spawn_remote(
     dist_init_addr = f"{head_ip}:{dist_init_port}"
     fw = framework.lower()
     if fw == "sglang":
-        _maybe_activate_kernel_shape_tool(sub_env)
+        activate_kernel_shape_tool(sub_env)
         cmd = _build_sglang_cmd(
             model=model,
             tp=tp,
@@ -589,7 +394,6 @@ def _spawn_remote(
     else:
         raise RuntimeError(f"unsupported framework: {framework!r}")
 
-    _apply_launch_env(sub_env, overrides)
     sys.stderr.write(f"[rank {node_rank}] launching: {' '.join(cmd)}\n")
     sys.stderr.write(f"[rank {node_rank}] log={log_file} pid={pid_file}\n")
     return _detach_framework_launch(cmd, log_file, pid_file, sub_env, node_rank)
@@ -927,7 +731,7 @@ def main() -> int:
         ib_dev = ""
 
     extra_args = shlex.split(args.extra_args) if args.extra_args else []
-    denied = _denied_extra_args(args.extra_args)
+    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")
         return 2

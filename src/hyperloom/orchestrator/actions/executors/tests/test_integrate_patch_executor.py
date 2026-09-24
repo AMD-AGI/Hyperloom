@@ -2262,7 +2262,7 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
     executor = IntegratePatchExecutor(session_dir=session_dir)
     captured: dict[str, Any] = {}
 
-    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+    async def fake_run_grid(*args, **kwargs):
         captured["serving_lease"] = kwargs.get("serving_lease")
         return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
 

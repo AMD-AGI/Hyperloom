@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
+from hyperloom.common.env import is_truthy
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -598,17 +600,8 @@ def _catalog_probe_has_no_credential() -> bool:
 
 
 def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _custom_orch_model_explicitly_disabled() -> bool:
-    """Whether the operator explicitly requested strict AMD model allowlisting."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
+    return is_truthy(os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "").strip() or None, default=True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
@@ -624,8 +617,6 @@ def _validate_and_resolve_claude_model(
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    if not _custom_orch_model_explicitly_disabled():
-        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -1371,7 +1362,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         with timed_teardown_step(state, "final_json"):
             final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
     if state.close_sequence_done:
         print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
@@ -1382,7 +1373,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "session_breakdown"):
                 breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
@@ -1390,7 +1381,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "final_md"):
                 final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
         from hyperloom.orchestrator.trace.langfuse_emitter import flush_session, record_session_breakdown
@@ -1401,7 +1392,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
             patch_breakdown_langfuse(session_dir)
             record_session_breakdown(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
     # the sequencer; ordered after langfuse so the package carries its patch.
@@ -1412,7 +1403,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("session artifact package failed (non-fatal)")
 
 
@@ -1445,14 +1436,14 @@ def _persist_preflight_failure_artifacts(
             args,
             failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
         )
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
         return None
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None
@@ -1464,7 +1455,7 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:  # noqa: BLE001 — the install event can still stand alone
+            except Exception as write_exc:
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
@@ -1475,7 +1466,7 @@ def _persist_preflight_failure_artifacts(
             from ..breakdown import write_breakdown_json
 
             write_breakdown_json(session_dir)
-        except Exception as write_exc:  # noqa: BLE001 — never replace the original preflight failure
+        except Exception as write_exc:
             log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
             from ..session.sbd_v6 import record_write_warning
 
@@ -1605,10 +1596,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
         resolved_urls = _preflight(args)
-    except Exception as exc:  # noqa: BLE001 — only unexpected defects create diagnostic sessions
+    except Exception as exc:
         try:
             _persist_preflight_failure_artifacts(args, exc)
-        except Exception:  # noqa: BLE001 — preserve the original failure exactly
+        except Exception:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
@@ -2092,7 +2083,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             from hyperloom.orchestrator.trace.langfuse_emitter import record_session_start
 
             record_session_start(session_dir)
-        except Exception:  # noqa: BLE001 — startup marker must never break launch
+        except Exception:
             log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -2417,7 +2408,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist teardown timings (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)

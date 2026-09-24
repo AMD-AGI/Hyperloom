@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.env import is_truthy
+
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
     r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config in (\S+?),",
@@ -388,8 +390,7 @@ def log_has_fused_moe_activity(log_text: str) -> bool:
 
 def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
     """Mirror dense apply verification: dispatch attribution needs the flag."""
-    raw = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
-    return raw not in ("", "0", "false", "no", "off")
+    return is_truthy(envs.get("AITER_LOG_TUNED_CONFIG"), default=True)
 
 
 def _safe_mtime(path: Path) -> float:
