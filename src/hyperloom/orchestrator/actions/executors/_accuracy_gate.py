@@ -325,9 +325,6 @@ def accuracy_keep_block(
     return False, "", True
 
 
-# There is deliberately no "high accuracy risk" predicate here any more.
-
-
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the bench report."""
     workspace = Path(workspace)
