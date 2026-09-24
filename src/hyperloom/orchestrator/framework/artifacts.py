@@ -10,7 +10,7 @@ from typing import Any
 
 # Per-candidate terminal statuses that mean the candidate reached the apply/bench stage (as opposed to being filtered
 # before any source change).
-_TESTED_STATUSES: frozenset[str] = frozenset({"kept", "reverted", "applied_no_bench", "apply_failed", "bench_reverted"})
+_TESTED_STATUSES: frozenset[str] = frozenset({"kept", "reverted", "applied_no_bench", "apply_failed"})
 
 
 def candidate_key(row: dict[str, Any] | None) -> str:
@@ -22,13 +22,9 @@ def candidate_key(row: dict[str, Any] | None) -> str:
 
 def summarize_candidate_outcomes(
     progress: list[dict[str, Any]] | None,
-    *,
-    batch_id: str | None = None,
 ) -> dict[str, Any]:
     """Classify FRAMEWORK progress rows into a phase-outcome summary."""
     rows = [r for r in (progress or []) if isinstance(r, dict)]
-    if batch_id is not None:
-        rows = [r for r in rows if str(r.get("batch_id") or "") == str(batch_id)]
     by_status: dict[str, int] = {}
     keeps = 0
     tested = 0

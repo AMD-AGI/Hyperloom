@@ -144,13 +144,6 @@ if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents
   HYPERLOOM_PACKAGED_INSTALL=1
 fi
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-# tree-reform.MD P2.5: framework-agent was promoted from a sibling
-# ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/framework``); it no longer has its own
-# installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
-# package (still overridable) and the old chain_framework_agent() delegation
-# below is a no-op.
 # Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
 # ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -281,7 +274,7 @@ Options:
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
+  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,

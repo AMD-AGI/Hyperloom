@@ -801,69 +801,6 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
     assert '"resumed": true' in out
 
 
-def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.framework import isolation
-    from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
-
-    req = ExploreRequest(
-        framework="sglang",
-        repo_url="https://github.com/sgl-project/sglang.git",
-        work_dir=tmp_path,
-        baseline=Baseline(throughput=100.0),
-    )
-    candidate = Candidate(ref="PR:42", repo=req.repo_url, head_sha="")
-    assert isolation._repo_cache_dir(req).name == "https---github-com-sgl-project-sglang-git"
-    assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=req.repo_url, head_sha="abc123")) == "abc123"
-
-    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
-    assert isolation._resolve_min_free_gb(None) == pytest.approx(20.0)
-    assert isolation._resolve_min_free_gb(3.5) == pytest.approx(3.5)
-
-    usage = SimpleNamespace(free=2 * 1024**3)
-    monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)
-    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, min_free_gb=1.0, per_candidate_gb=0.5)
-    with pytest.raises(isolation.DiskPreflightError, match="insufficient disk"):
-        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, min_free_gb=1.0, per_candidate_gb=1.0)
-
-    git_calls: list[tuple[list[str], Path | None]] = []
-    monkeypatch.setattr(isolation, "_run_git", lambda args, cwd=None, timeout_sec=1800: git_calls.append((args, cwd)))
-    repo_dir = isolation.prepare_repo_cache(req)
-    assert git_calls[-1][0][:3] == ["git", "clone", "--mirror"]
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    assert isolation.prepare_repo_cache(req) == repo_dir
-    assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-
-    isolation.fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=req.repo_url))
-    assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-    isolation.fetch_candidate_ref(repo_dir, candidate)
-    assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
-
-    plan_req = ExploreRequest(
-        framework="sglang",
-        repo_url=req.repo_url,
-        work_dir=tmp_path / "plan",
-        baseline=Baseline(throughput=100.0),
-        prepare_candidate_env=False,
-    )
-    paths = isolation.prepare_candidate_workspace(plan_req, candidate, index=3, execute=True)
-    assert paths.candidate_dir.name == "03_pr-42"
-    assert not paths.worktree_dir.exists()
-
-    worktree = tmp_path / "cleanup" / "worktree"
-    venv = tmp_path / "cleanup" / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    isolation.cleanup_workspace(
-        isolation.WorkspacePaths(tmp_path / "cleanup", worktree, venv),
-        is_winner=False,
-        keep_winner_only=True,
-        repo_dir=repo_dir,
-    )
-    assert not worktree.exists()
-    assert not venv.exists()
-
-
 def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import gbrain_page_client as gbrain
     from hyperloom.common import jsonio

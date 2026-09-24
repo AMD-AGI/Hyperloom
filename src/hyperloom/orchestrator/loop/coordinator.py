@@ -987,9 +987,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
-    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
-
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
 

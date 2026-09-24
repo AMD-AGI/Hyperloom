@@ -39,12 +39,6 @@ def repo_slug(repo_full_name: str) -> str:
     return _NON_ALNUM.sub("-", lowered).strip("-")
 
 
-def files_slug(repo_full_name: str, pr_number: int | str, *, prefix: str | None = None) -> str:
-    """Return the ``<prefix>-files/<repo-slug>/pr/<n>`` slug."""
-    p = prefix or slug_prefix()
-    return f"{p}-files/{repo_slug(repo_full_name)}/pr/{pr_number}"
-
-
 def index_slug(repo_full_name: str, *, prefix: str | None = None) -> str:
     """Return the ``<prefix>-index/<repo-slug>`` slug."""
     p = prefix or slug_prefix()
@@ -56,6 +50,5 @@ __all__ = [
     "slug_prefix",
     "normalise_repo",
     "repo_slug",
-    "files_slug",
     "index_slug",
 ]

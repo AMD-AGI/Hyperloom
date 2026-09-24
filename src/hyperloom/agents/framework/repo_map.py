@@ -13,10 +13,6 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
 }
 
 
-# Known framework names, derived from the URL dict.
-KNOWN_FRAMEWORKS: frozenset[str] = frozenset(_FRAMEWORK_TO_REPO_URL.keys())
-
-
 # Enablement bridging repos, keyed by ``bridge_layer``.
 _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
     "rocm_hip": (
@@ -38,4 +34,4 @@ def repo_url_for_framework(framework: str) -> str:
     return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
 
 
-__all__ = ["KNOWN_FRAMEWORKS", "bridge_repo_urls", "repo_url_for_framework"]
+__all__ = ["bridge_repo_urls", "repo_url_for_framework"]

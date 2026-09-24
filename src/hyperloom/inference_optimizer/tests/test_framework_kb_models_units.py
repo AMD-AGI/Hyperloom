@@ -66,11 +66,9 @@ def test_lessons_writer_and_reader_resolve_the_same_file(
         monkeypatch.setenv(name, value)
 
     writer = kb_writeback._default_kb_root() / kb_writeback.LESSONS_FILE
-    reader = fa_kb.path_for_framework("") / kb_writeback.LESSONS_FILE
+    reader = fa_kb.framework_optimization_root() / kb_writeback.LESSONS_FILE
 
     assert writer == reader
-    # The packaged seed is a different, read-only tree and must not be the place a live session writes to.
-    assert fa_kb.packaged_kb_root() not in writer.parents
 
 
 def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(

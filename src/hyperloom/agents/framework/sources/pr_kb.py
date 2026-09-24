@@ -11,7 +11,7 @@ from ..gbrain_page_client import GbrainPageError, build_gbrain_page_client_from_
 from ..logging_setup import get_logger
 from ..models import Candidate, ExploreRequest
 from ..pr_kb import index_slug, parse_index_prs
-from ..pr_kb_slug import files_slug, normalise_repo, repo_slug, slug_prefix
+from ..pr_kb_slug import normalise_repo, repo_slug, slug_prefix
 
 _log = get_logger(__name__)
 
@@ -25,7 +25,6 @@ def _candidate(repo_url: str, repo_n: str, number: int, *, title: str = "", labe
         title=title,
         labels=labels,
         html_url=f"https://github.com/{repo_n}/pull/{number}",
-        pr_kb_files_slug=files_slug(repo_n, number),
     )
 
 
