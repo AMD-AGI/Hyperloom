@@ -12,10 +12,12 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common import deepseek_session
 from hyperloom.common.deepseek_session import (
     DeepSeekSession,
     DeepSeekSessionError,
     DeepSeekSessionResult,
+    DeepSeekSessionUnavailableError,
     normalize_run_result,
     usage_from_events,
 )
@@ -175,6 +177,18 @@ async def test_instructions_carry_the_runtime_mapping_the_contract_and_the_syste
     assert "OUTPUT FORMAT" in instructions
 
 
+async def test_instructions_name_every_legal_intent_type_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No schema enum holds the model to the set, so the text has to; a live run emitted 'send_message:kernel'."""
+    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
+    await _backend(tmp_path).run("status?")
+
+    legal = ", ".join(sorted(t.value for t in _ORCHESTRATION_INTENTS))
+    assert f"`intent_type` MUST be exactly one of: {legal}." in captured["instructions"]
+
+
 async def test_every_turn_restates_the_envelope_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +260,92 @@ def test_a_turn_end_error_is_quoted_in_the_result() -> None:
     events = [{"type": "turn/end", "data": {"reason": {"error": {"code": "E_AUTH", "message": "bad key"}}}}]
     result = normalize_run_result(SimpleNamespace(final_response="", finish_reason="error", events=events), "s1")
     assert result.error == "E_AUTH: bad key"
+
+
+# What the runtime is started with.
+
+
+def _pin_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configure exactly one OpenAI-compatible gateway; a session cannot start without one."""
+    for key in _GATEWAY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "gateway-key")
+
+
+def _capture_harness_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace the SDK with one whose harness records its construction kwargs."""
+    captured: dict[str, Any] = {}
+
+    class _Harness:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: SimpleNamespace(DeepSeekHarness=_Harness))
+    return captured
+
+
+async def test_an_unset_effort_starts_the_runtime_at_a_level_it_accepts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness refuses an empty effort at initialization, before any prompt runs."""
+    _pin_gateway(monkeypatch)
+    captured = _capture_harness_kwargs(monkeypatch)
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+
+    assert captured["reasoning_effort"] in {"low", "high", "max"}
+
+
+async def test_an_effort_the_harness_lacks_is_rounded_up_to_one_it_has(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``medium`` is not a harness level; asking for more deliberation must not yield less."""
+    _pin_gateway(monkeypatch)
+    captured = _capture_harness_kwargs(monkeypatch)
+    await DeepSeekSession(
+        cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home", reasoning_effort="medium"
+    ).start()
+
+    assert captured["reasoning_effort"] == "high"
+
+
+_GATEWAY_ENV_KEYS = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "LLM_GATEWAY_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
+)
+
+
+async def test_the_gateway_reaches_the_harness_as_the_credential_its_adapter_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter reads DEEPSEEK_*; the gateway is configured on the OpenAI-compatible line."""
+    _pin_gateway(monkeypatch)
+    captured = _capture_harness_kwargs(monkeypatch)
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+
+    assert captured["env"]["DEEPSEEK_BASE_URL"] == "https://gateway.invalid/v1"
+    assert captured["env"]["DEEPSEEK_API_KEY"] == "gateway-key"
+
+
+async def test_an_unconfigured_gateway_fails_at_start_not_at_the_first_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise every turn completes with MISSING_CREDENTIAL and reads as a model that said nothing."""
+    for key in _GATEWAY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    _capture_harness_kwargs(monkeypatch)
+    with pytest.raises(DeepSeekSessionUnavailableError, match="OPENAI_BASE_URL"):
+        await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
 
 
 # Token accounting.

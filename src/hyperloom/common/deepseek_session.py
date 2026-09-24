@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
+
 #: The route the harness mounts for DeepSeek models in its own default plugin
 #: composition. Naming any other provider needs a composition that mounts an
 #: adapter owning it, which initialization refuses to guess at.
@@ -175,10 +178,30 @@ class DeepSeekSession:
         self.dsh_home = home.resolve()
 
     def _child_environment(self) -> dict[str, str]:
-        """Build the environment the harness runtime subprocess is spawned with."""
+        """Build the environment the harness runtime subprocess is spawned with.
+
+        The harness's DeepSeek adapter authenticates from ``DEEPSEEK_*`` only,
+        while this repository configures the gateway on the OpenAI-compatible
+        line, so the gateway is written onto the adapter's names here, for the
+        subprocess alone.
+        """
         env = os.environ.copy()
         if self.env:
             env.update(self.env)
+        try:
+            gateway = resolve_openai_client_config(env=env)
+        except LLMConfigError as exc:
+            raise DeepSeekSessionUnavailableError(
+                f"the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
+                f"OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
+            ) from exc
+        if not gateway.base_url or not gateway.api_key:
+            raise DeepSeekSessionUnavailableError(
+                "the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
+                "both OPENAI_BASE_URL and OPENAI_API_KEY"
+            )
+        env["DEEPSEEK_BASE_URL"] = gateway.base_url
+        env["DEEPSEEK_API_KEY"] = gateway.api_key
         env["DSH_PERMISSION_MODE"] = self.permission_mode
         # These outrank -C and cwd, so a caller that set them to reach one
         # repository would answer every git command the session runs anywhere.
@@ -197,6 +220,7 @@ class DeepSeekSession:
         except OSError as exc:
             raise DeepSeekSessionUnavailableError(f"cannot prepare the harness home {self.dsh_home}: {exc}") from exc
         workspace = str(self.cwd)
+        child_env = self._child_environment()
         try:
             self._harness = await asyncio.to_thread(
                 sdk.DeepSeekHarness,
@@ -208,8 +232,11 @@ class DeepSeekSession:
                 runtime_cwd=workspace,
                 provider=DEEPSEEK_PROVIDER_ROUTE,
                 model=self.model,
-                reasoning_effort=self.reasoning_effort,
-                env=self._child_environment(),
+                # Initialization refuses an empty or unsupported effort, so an
+                # unset one takes the shared default and an unsupported one is
+                # rounded up to a level the harness has.
+                reasoning_effort=harness_reasoning_effort(self.reasoning_effort or DEFAULT_REASONING_EFFORT),
+                env=child_env,
                 initialize_timeout_seconds=_INITIALIZE_TIMEOUT_SEC,
                 request_timeout_seconds=self.request_timeout_sec,
             )

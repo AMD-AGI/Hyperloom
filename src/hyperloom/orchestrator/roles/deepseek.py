@@ -211,7 +211,7 @@ class DeepSeekBackend:
         if allow_no_intent:
             turn_prompt = f"{_PER_TURN_CONTRACT_OVERRIDE}\n\n{prompt}"
         else:
-            turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER}"
+            turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
@@ -279,6 +279,17 @@ class DeepSeekBackend:
             raise NoIntentEmitted(f"deepseek envelope invalid: {exc}") from exc
         return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
+    def _legal_intent_types(self) -> str:
+        """The one line that stands in for the schema enum this route lacks.
+
+        The shared contract writes each intent as ``name:{required keys}`` and
+        leaves the value set to the enforced schema. Nothing enforces one here,
+        and a live run read that notation as licence to qualify the name
+        (``send_message:kernel``), so the legal values are spelled out.
+        """
+        legal = ", ".join(sorted(intent.value for intent in self.allowed_intents))
+        return f"`intent_type` MUST be exactly one of: {legal}. Never add a suffix or qualifier to it."
+
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Conversation-level instructions implied by one system prompt."""
         return "\n\n".join(
@@ -287,6 +298,7 @@ class DeepSeekBackend:
                 _RUNTIME_MAPPING.strip(),
                 (system_prompt or "").strip(),
                 build_output_instructions(self.allowed_intents),
+                self._legal_intent_types(),
             )
             if part
         )
