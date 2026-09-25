@@ -197,6 +197,39 @@ def test_flush_projects_spans_only_and_resumes_the_shard_cursor(tmp_path, monkey
     assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
 
 
+def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    _write_shard(sd, "1-a.jsonl", [_row(status=tt.STATUS_STARTED)])
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    emitter = lfe.LangfuseEmitter(sd)
+    emitter.flush_session()
+    assert emitter._flushed is True
+    flushed = client.flushed
+
+    _write_shard(
+        sd,
+        "1-a.jsonl",
+        [
+            _row(span_id="close", phase="CLOSE", attributes={"name": "tail"}),
+            _row(status=tt.STATUS_COMPLETED, attributes={"stop_reason": "time_exhausted"}),
+        ],
+    )
+    emitter.flush_session()
+
+    projected = [s for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]
+    assert [s.kwargs["name"] for s in projected] == ["session:tail", "session"]
+    assert client.flushed == flushed + 1
+    assert all(s.ended for s in client.spans)
+    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
+
+    emitter.flush_session()
+    assert len([s for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]) == 2
+    assert client.flushed == flushed + 1
+
+
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 

@@ -544,7 +544,8 @@ class LangfuseEmitter:
             self._write_receipt()
             return
         if self._flushed:
-            log.debug("langfuse: flush_session already ran; skipping re-emit")
+            log.debug("langfuse: flush_session already ran; shipping only the trajectory tail")
+            self._flush_trajectory_tail()
             self._write_receipt()
             return
         # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
@@ -898,6 +899,30 @@ class LangfuseEmitter:
                 if spec is not None:
                     self._emit_trajectory_span(spec)
                 self._trajectory_rows_sent[name] = index + 1
+
+    def _flush_trajectory_tail(self) -> None:
+        """Ship the trajectory rows recorded after the full flush, ending any span opened to parent them.
+
+        The CLOSE phase flushes from inside the run, so the last close work and the session's own terminal row land on
+        the ledger after it; the per-shard cursors make a re-flush send only those rows.
+        """
+        agent_keys, phase_keys, had_root = set(self._agent_spans), set(self._phase_spans), self._root_span is not None
+        sent = self._counts["trajectory_spans_sent"]
+        try:
+            self._flush_trajectory()
+            for key, span in list(self._agent_spans.items()):
+                if key not in agent_keys:
+                    self._safe_end(span)
+            for phase, span in list(self._phase_spans.items()):
+                if phase not in phase_keys:
+                    self._safe_end(span)
+            if not had_root and self._root_span is not None:
+                self._safe_end(self._root_span)
+            if self._counts["trajectory_spans_sent"] != sent:
+                self._flush_client()
+        except Exception:  # noqa: BLE001 — trace must never break shutdown
+            self._counts["errors"] += 1
+            log.debug("langfuse: trajectory tail flush failed", exc_info=True)
 
     def _emit_trajectory_span(self, spec: trajmap.TrajectorySpanSpec) -> None:
         """Create and close one projected trajectory span under its (phase, agent) span."""
