@@ -25,9 +25,8 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
-def _ctx(task_id: str = "t-1"):
-    task = types.SimpleNamespace(task_id=task_id, params={})
-    return types.SimpleNamespace(task=task, extra={})
+def _attempt(task_id: str = "t-1"):
+    return ip.IntegrateAttempt(task_id=task_id)
 
 
 def _candidate(framework: str = "vllm") -> dict:
@@ -81,18 +80,35 @@ def _executor(tmp_path):
 def _neutralize_disk_preflight(monkeypatch):
     """Stop the real disk_preflight from leaking the runner's free-space into these tests."""
     import hyperloom.agents.framework.isolation as iso
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+    from hyperloom.orchestrator.enablement.runtime import adapters
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("runtime acquisition must be stubbed by the test")
 
     monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    real_get_adapter = adapters.get_adapter
+
+    def metadata_adapter(framework, **kwargs):
+        kwargs["run"] = forbidden
+        adapter = real_get_adapter(framework, **kwargs)
+        monkeypatch.setattr(adapter, "provision", forbidden)
+        monkeypatch.setattr(adapter, "probe", forbidden)
+        monkeypatch.setattr(adapter, "editable_refresh_argv", forbidden)
+        return adapter
+
+    monkeypatch.setattr(adapters, "get_adapter", metadata_adapter)
 
 
 # provision stage: no candidate / skip paths
 
 
 async def test_no_candidate_is_noop(_executor):
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {}, "t-1")
     assert out is None
-    assert ctx._ip_provision_result is None
+    assert attempt.provision_result is None
 
 
 async def test_multi_node_skips_provision(_executor, monkeypatch):
@@ -107,8 +123,8 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
         return _FakeAdapter(_ok_result("/x"))
 
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", _get_adapter)
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None
     assert called["n"] == 0  # adapter never consulted in multi-node
 
@@ -116,17 +132,17 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
 # provision ok / fail
 
 
-async def test_provision_ok_sets_ctx(_executor, monkeypatch):
+async def test_provision_ok_sets_attempt(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None
-    assert ctx._ip_provision_result is not None
-    assert ctx._ip_provision_result.ok is True
-    assert ctx._ip_stack_action.attempt_venv_root == venv
-    assert ctx._ip_attempt_venv_root == venv
+    assert attempt.provision_result is not None
+    assert attempt.provision_result.ok is True
+    assert attempt.stack_action.attempt_venv_root == venv
+    assert attempt.attempt_venv_root == venv
 
 
 @pytest.mark.asyncio
@@ -146,8 +162,8 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
 
     adapter.provision = _spy_provision
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None
     assert "ident" in seen
     assert seen["ident"] != loop_ident
@@ -156,8 +172,8 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
 async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
     adapter = _FakeAdapter(ProvisionResult(ok=False, error="pip failed"))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "provision_failed"
@@ -171,8 +187,8 @@ async def test_probe_fail_returns_reverted(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv), probe_ok=False)
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert "probe" in out["error"]
@@ -190,8 +206,8 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
         "hyperloom.orchestrator.enablement.runtime.adapters.get_adapter",
         lambda _fw: called.__setitem__("n", called["n"] + 1),
     )
-    ctx = _ctx()
-    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
     assert out is not None
     assert out["error_class"] == "disk_preflight_failed"
     assert called["n"] == 0  # never reached the adapter
