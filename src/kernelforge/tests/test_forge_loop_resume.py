@@ -138,11 +138,12 @@ def _install_cli_fakes(monkeypatch, tmp_path):
             captured["checkpoints"][experiment_id] = checkpoint
 
     class FakeLoop:
-        def __init__(self, iter_config, tracker, config, resume=False):
+        def __init__(self, iter_config, tracker, config, resume=False, ceiling_estimator=None):
             self.ic = iter_config
             self.tracker = tracker
             self.config = config
             self.resume = resume
+            self.ceiling_estimator = ceiling_estimator
             self.best_wall_ms = 0.8
             self.experiment = SimpleNamespace(
                 experiment_id="segment-2" if resume else "segment-1",

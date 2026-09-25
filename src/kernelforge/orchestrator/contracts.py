@@ -90,6 +90,38 @@ class EvidenceRef:
 
 
 @dataclass(frozen=True)
+class CaseRoofline:
+    """One case's estimated roofline ceiling, and how much of it the incumbent reaches.
+
+    ``attainment`` is ``ceiling_ms / incumbent_ms``. It is absent, with the
+    reason in ``excluded``, when the two cannot be divided into a meaningful
+    figure -- most often a ceiling above the latency already measured, which is
+    the estimate contradicting itself rather than a kernel beyond its limit.
+    """
+
+    ceiling_ms: float
+    incumbent_ms: float | None = None
+    attainment: float | None = None
+    excluded: str = ""
+
+    def __post_init__(self) -> None:
+        if self.ceiling_ms is None:
+            raise ValueError("case.roofline.ceiling_ms is required")
+        _optional_number(self.ceiling_ms, "case.roofline.ceiling_ms", positive=True)
+        _optional_number(self.incumbent_ms, "case.roofline.incumbent_ms", positive=True)
+        _optional_number(self.attainment, "case.roofline.attainment", positive=True)
+        _text(self.excluded, "case.roofline.excluded", allow_empty=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ceiling_ms": self.ceiling_ms,
+            "incumbent_ms": self.incumbent_ms,
+            "attainment": self.attainment,
+            "excluded": self.excluded,
+        }
+
+
+@dataclass(frozen=True)
 class CaseEvidence:
     """Normalized case evidence exposed to read-only planning agents."""
 
@@ -100,6 +132,8 @@ class CaseEvidence:
     bottleneck: str = ""
     profile_summary_path: str = ""
     flags: tuple[str, ...] = ()
+    # Present only when the campaign has a roofline ceiling: an estimate, which decides no KEEP.
+    roofline: CaseRoofline | None = None
 
     def __post_init__(self) -> None:
         _text(self.case_id, "case.case_id")
@@ -114,9 +148,11 @@ class CaseEvidence:
         )
         if len(set(self.flags)) != len(self.flags):
             raise ValueError("case.flags must not contain duplicates")
+        if self.roofline is not None and not isinstance(self.roofline, CaseRoofline):
+            raise ValueError("case.roofline must be a CaseRoofline or absent")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "case_id": self.case_id,
             "shape": self.shape,
             "dtype": self.dtype,
@@ -125,6 +161,10 @@ class CaseEvidence:
             "profile_summary_path": self.profile_summary_path,
             "flags": list(self.flags),
         }
+        # Omitted rather than null, so a campaign without a ceiling plans from exactly the evidence it always did.
+        if self.roofline is not None:
+            payload["roofline"] = self.roofline.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
