@@ -156,9 +156,8 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# Tracks the staging_agent branch head while the analysis.json / resolve_kernel_source
-# interface migration is in flight; re-pin to a SHA once TraceLens cuts the release.
-TRACELENS_REF="staging_agent"
+# TraceLens SHA (staging_agent).
+TRACELENS_REF="cfd70c71ce08940ca7c485a6a1bc4404731823e5"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
