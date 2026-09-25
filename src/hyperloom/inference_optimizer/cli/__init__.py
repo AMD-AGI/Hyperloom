@@ -1284,8 +1284,6 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
         if not expected_source_hash or actual_source_hash != expected_source_hash:
             raise ValueError(f"benchmark config changed after initial validation; refusing the mutable source {path}")
         parsed = yaml.safe_load(source_bytes.decode("utf-8")) or {}
-    except ValueError:
-        raise
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot read benchmark config {path}: {exc}") from exc
     benchmark = parsed.get("benchmark") if isinstance(parsed, Mapping) else None

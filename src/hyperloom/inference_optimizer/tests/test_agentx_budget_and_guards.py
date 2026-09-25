@@ -399,6 +399,25 @@ def test_non_agentx_benchmark_yaml_projects_physical_tp_and_concurrency(
     assert args.conc == 32
 
 
+def test_finalize_benchmark_yaml_preserves_read_and_source_change_errors(monkeypatch, tmp_path):
+    config = tmp_path / "agentx.yaml"
+    config.write_bytes(b"benchmark: \xff")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(config))
+    _pin_source_hash(monkeypatch, config)
+    args = argparse.Namespace(resume_from=None)
+
+    with pytest.raises(ValueError, match="cannot read benchmark config") as invalid_utf8:
+        _finalize_benchmark_config(args)
+    assert str(config) in str(invalid_utf8.value)
+    assert isinstance(invalid_utf8.value.__cause__, UnicodeDecodeError)
+
+    config.write_bytes(b"benchmark: \xfe")
+    with pytest.raises(ValueError, match="benchmark config changed after initial validation") as changed_source:
+        _finalize_benchmark_config(args)
+    assert str(config) in str(changed_source.value)
+    assert changed_source.value.__cause__ is None
+
+
 def test_finalize_benchmark_yaml_projects_resolved_agentx_topology(
     monkeypatch,
     tmp_path,
