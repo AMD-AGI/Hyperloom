@@ -376,47 +376,54 @@ def _is_config_replay_variant(variant: Any) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
-def observed_launch_flags_from_state(state: Any) -> str:
-    """Observed launch flags of the current stack only.
+def observed_launch_from_state(state: Any) -> tuple[str, dict[str, str]]:
+    """Observed flags and env of the current stack: current_best if present, else last_baseline.
 
-    Uses ``current_best_measurement`` when that dict is present, otherwise
-    ``last_baseline``. If the chosen measurement has no observed flags, return
-    empty — do not read a different measurement.
+    Empty if the chosen measurement has no evidence. Never reads a different measurement.
     """
     current_best = getattr(state, "current_best_measurement", None)
     if isinstance(current_best, dict) and current_best:
         measurement = current_best
     else:
         measurement = getattr(state, "last_baseline", None)
-        if not isinstance(measurement, dict) or not measurement:
-            return ""
+    if not isinstance(measurement, dict) or not measurement:
+        return "", {}
     evidence = measurement.get("launch_evidence")
     if not isinstance(evidence, Mapping):
-        return ""
-    return str(evidence.get("observed_server_launch_flags") or "").strip()
+        return "", {}
+    raw = evidence.get("observed_server_env")
+    # Same shape as _config_envs, so the two can be compared directly.
+    env = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, Mapping) else {}
+    return str(evidence.get("observed_server_launch_flags") or "").strip(), env
 
 
 def _seal_raw_argv(text: str, *, framework: str) -> str | None:
     """Seal a raw argv string through the real per-framework sealer, or ``None`` if it refuses."""
-    text = str(text or "").strip()
-    if not text:
-        return ""
-    env_name = server_args_env_name(framework)
     try:
-        return seal_server_argv({env_name: text}, framework).text
+        return seal_server_argv({server_args_env_name(framework): text}, framework).text
     except ValueError:
         return None
 
 
 def _canonical_launch_pairs(argv_text: str) -> list[list[str]]:
     """Strip run-specific/profiling flags, then return sorted last-wins ``[flag, value]`` pairs."""
-    cleaned = split_launch_flags(str(argv_text or "").strip())
-    return _args_pairs(cleaned) if cleaned else []
+    return _args_pairs(split_launch_flags(argv_text))
 
 
-def _variant_touches_env(variant: GridVariant) -> bool:
-    """Whether a variant sets or unsets process env; there is no observed-env signal to compare it against."""
-    return bool(getattr(variant, "extra_envs", None) or getattr(variant, "unset_envs", None))
+def _config_envs(config_path: Path) -> dict[str, str]:
+    """Read ``benchmark.envs`` out of a built config file as a ``str -> str`` dict.
+
+    Drops the framework's server-args key (``EXTRA_SGLANG_ARGS`` and friends),
+    which holds the launch argv rather than an env value. Returns an empty dict
+    when the file carries no ``benchmark.envs`` mapping.
+    """
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
+    envs = bench.get("envs") if isinstance(bench, Mapping) else None
+    if not isinstance(envs, Mapping):
+        return {}
+    args_env = server_args_env_name(str(bench.get("framework") or ""))
+    return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
 
 
 # Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
@@ -445,27 +452,33 @@ def filter_baseline_noop_variants(
     gpu_type: str | None,
     benchmark_script: str | None,
     observed_server_launch_flags: str,
+    observed_server_env: Mapping[str, str] | None = None,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants whose merged launch args already match the observed server launch.
+    """Drop variants that would launch the server the stack is already running.
 
-    Filters only when evidence is present. Computed through the real
-    ``_build_variant_yaml``/``config_server_argv`` merge, not a copy.
+    Each variant is materialized through ``_build_variant_yaml`` into a throwaway
+    config, whose server argv and ``benchmark.envs`` are then compared against the
+    ``observed_server_launch_flags`` and ``observed_server_env`` recorded on the
+    stack's own measurement. A variant is dropped only when both halves match.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    Filters nothing when the stack has no observed launch flags.
     """
     observed = str(observed_server_launch_flags or "").strip()
     if not observed or not grid:
         return list(grid), []
-    fw = str(framework or "").strip().lower()
-    sealed_observed = _seal_raw_argv(observed, framework=fw)
+    sealed_observed = _seal_raw_argv(observed, framework=str(framework or "").strip().lower())
     if sealed_observed is None:
         log.warning("explore: baseline-noop filter could not seal the observed launch flags; filtering nothing")
         return list(grid), []
     observed_pairs = _canonical_launch_pairs(sealed_observed)
+    observed_env = dict(observed_server_env or {})
     kept: list[GridVariant] = []
     dropped: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         for idx, gv in enumerate(grid):
-            if _is_noop_filter_exempt(gv) or _variant_touches_env(gv):
+            if _is_noop_filter_exempt(gv):
                 kept.append(gv)
                 continue
             try:
@@ -483,17 +496,13 @@ def filter_baseline_noop_variants(
                     base_unset_envs=base_unset_envs,
                 )
                 variant_argv = config_server_argv(out_path).text
+                variant_envs = _config_envs(out_path)
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
                 continue
-            if _canonical_launch_pairs(variant_argv) == observed_pairs:
-                dropped.append(
-                    (
-                        str(getattr(gv, "name", "?")),
-                        "merged args already active in the observed server launch (baseline noop)",
-                    )
-                )
+            if _canonical_launch_pairs(variant_argv) == observed_pairs and variant_envs == observed_env:
+                dropped.append((gv.name, "merged launch already active in the observed server (baseline noop)"))
                 continue
             kept.append(gv)
     return kept, dropped
@@ -795,7 +804,7 @@ class ExploreExecutor:
 
         # Drop variants that already match the current stack's observed launch.
         _pre_noop_grid_len = len(grid)
-        _observed_launch_flags = observed_launch_flags_from_state(ss)
+        observed_flags, observed_env = observed_launch_from_state(ss)
         grid, _noop_dropped = filter_baseline_noop_variants(
             grid,
             framework=framework,
@@ -808,7 +817,8 @@ class ExploreExecutor:
             model_path=resolved_model,
             gpu_type=resolved_gpu,
             benchmark_script=override_script,
-            observed_server_launch_flags=_observed_launch_flags,
+            observed_server_launch_flags=observed_flags,
+            observed_server_env=observed_env,
         )
 
         unique_in_round: dict[str, GridVariant] = {}
