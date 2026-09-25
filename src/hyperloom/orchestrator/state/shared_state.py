@@ -108,32 +108,28 @@ def resolve_graded_comparison(
     anchor_tput: float | None = None,
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
-    # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
-    # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
-    # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
-    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
-    # throughput.
-    #
-    # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
-    # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
-    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
+    # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
+    # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
+    # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
+    # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
+    # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
+    # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
+    # with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
-        AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
+        AGENTX_KEEP_P50_THRESHOLD_PCT,
         GRADED_INTVTY,
+        GRADED_INTVTY_P50,
         GRADED_OUTPUT,
         GradedComparison,
         VERDICT_KEEP,
-        VERDICT_RECORDED,
         VERDICT_REVERT,
-        intvty_of,
+        axis_of,
+        holds_within_band,
         output_tput_of,
-        passes_intvty_gate,
-        passes_tput_guard,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
+        rounds_are_comparable,
         total_tput_of,
     )
     from hyperloom.inference_optimizer.grading import resolved_grading
@@ -150,27 +146,23 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if ref_perf and cand_perf:
-            gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
-            threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
-            if threshold > keep_threshold_pct:
-                log.info(
-                    "graded: raising keep_threshold %.2f%% -> %.2f%% (AgentX floor; "
-                    "the slow-tail percentile's own variance is unmeasured)",
-                    keep_threshold_pct,
-                    threshold,
-                )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
-            if gain is not None and gain >= threshold and tput_holds:
-                verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
-                verdict = VERDICT_REVERT
-            else:
-                verdict = VERDICT_RECORDED
+            gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
+            # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
+            # holds identically per GPU.
+            guards_hold = holds_within_band(
+                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
+            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
+            keep = (
+                gain is not None
+                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
+                and guards_hold
+                and rounds_are_comparable(cand_perf, ref_perf)
+            )
             return GradedComparison(
-                objective=GRADED_INTVTY,
-                candidate=intvty_of(cand_perf),
-                reference=intvty_of(ref_perf),
-                verdict=verdict,
+                objective=GRADED_INTVTY_P50,
+                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
+                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
+                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
             )
