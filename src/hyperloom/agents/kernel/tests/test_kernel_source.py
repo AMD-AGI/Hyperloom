@@ -9,11 +9,10 @@
 
 ``_kernel_source`` is the one seam both the compute and bypass routes call.
 :func:`resolve_source_verdict` owns the HL-side Triton-vs-native routing decision
-(the only HL logic; path-finding itself is TraceLens'), and :func:`triton_def_line`
-is the AST reading of a Triton kernel def that ``source_type_for`` relies on. The
-field mapping of TraceLens' ``ResolveResult`` onto candidate keys, and the
-non-patchable-with-source / fail-closed behaviors, are pinned end to end through
-the reader in ``test_analysis_json_reader.py``.
+(the only HL logic; path-finding itself is TraceLens'). The field mapping of
+TraceLens' ``ResolveResult`` onto candidate keys, and the non-patchable-with-source
+/ fail-closed behaviors, are pinned end to end through the reader in
+``test_analysis_json_reader.py``.
 """
 
 from __future__ import annotations
@@ -78,41 +77,3 @@ def test_native_symbol_with_py_launcher_stays_native(monkeypatch):
     ks.resolve_source_verdict("Cijk_Ailk_Bljk", kernel_file="tuned_gemm.py(9): g", library="aiter")
     assert seen["is_triton"] is False
     assert seen["kernel_file"] == ""
-
-
-def test_triton_def_line_single_unambiguous(tmp_path):
-    py = tmp_path / "solo.py"
-    py.write_text("import triton\n@triton.jit\ndef only_kernel(x):\n    return x\n", encoding="utf-8")
-    assert ks.triton_def_line(str(py)) == 3
-
-
-def test_triton_def_line_matches_named_symbol(tmp_path):
-    py = tmp_path / "fused.py"
-    py.write_text(
-        "import triton\n\n@triton.jit\ndef my_fused_kernel(x):\n    return x\n\n@triton.jit\ndef other(x):\n    return x\n",
-        encoding="utf-8",
-    )
-    line = ks.triton_def_line(str(py), symbol="my_fused_kernel")
-    assert py.read_text().splitlines()[line - 1].strip() == "def my_fused_kernel(x):"
-
-
-def test_triton_def_line_require_name_match_skips_single_def_fallback(tmp_path):
-    """require_name_match=True must not claim a file for an unrelated symbol."""
-    py = tmp_path / "helper.py"
-    py.write_text("import triton\n@triton.jit\ndef _helper_kernel(x):\n    return x\n", encoding="utf-8")
-    # Without require_name_match the single-def fallback fires.
-    assert ks.triton_def_line(str(py), symbol="_absent_kernel") == 3
-    # With require_name_match it must return None for an unrelated symbol.
-    assert ks.triton_def_line(str(py), symbol="_absent_kernel", require_name_match=True) is None
-
-
-def test_triton_def_line_ignores_non_jit_defs(tmp_path):
-    py = tmp_path / "mixed.py"
-    py.write_text("def plain(x):\n    return x\n\n@triton.jit\ndef jitted(x):\n    return x\n", encoding="utf-8")
-    assert ks.triton_def_line(str(py)) == 5
-
-
-def test_triton_def_line_unparseable_returns_none(tmp_path):
-    py = tmp_path / "broken.py"
-    py.write_text("def (:::\n", encoding="utf-8")
-    assert ks.triton_def_line(str(py)) is None

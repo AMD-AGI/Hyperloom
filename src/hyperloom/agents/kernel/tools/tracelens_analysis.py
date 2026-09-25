@@ -200,15 +200,11 @@ def _default_top_k() -> int:
     return val if val > 0 else 1_000_000
 
 
-# Owns the only AST reading of what a Triton kernel definition looks like, which
-# source_type_for needs to tell a Triton ``.py`` from any other Python file.
-try:  # package import (TraceLens route / tests)
-    from ._kernel_source import triton_def_line as _triton_def_line
-except ImportError:  # flat import (standalone: tools/ on sys.path)
-    try:
-        from _kernel_source import triton_def_line as _triton_def_line  # type: ignore[no-redef]
-    except ImportError:
-        _triton_def_line = None  # type: ignore[assignment]
+# source_type_for asks TraceLens whether a ``.py`` defines the traced Triton kernel.
+try:
+    from TraceLens.TraceUtils.kernel_source.triton_pin import triton_def_line as _triton_def_line
+except ImportError:
+    _triton_def_line = None  # type: ignore[assignment]
 
 # TraceLens ``resolve_kernel_source`` methods that carry a patchability verdict
 # on the ``op_to_source_*`` fields; classify_patchability honors these directly
