@@ -307,9 +307,9 @@ class TestWiringGate:
             encoding="utf-8",
         )
 
-        wired, reason = fused_symbol_invocation_evidence(str(call_site), [str(model)])
+        wiring = fused_symbol_invocation_evidence(str(call_site), [str(model)])
 
-        assert wired, reason
+        assert wiring.verdict == "wired", wiring.reason
 
     def test_a_dead_import_anywhere_still_fails(self, tmp_path):
         call_site = tmp_path / "runtime.py"
@@ -317,10 +317,10 @@ class TestWiringGate:
         call_site.write_text("x = 1\n", encoding="utf-8")
         model.write_text("from .m_fused_chain import run  # noqa: F401\n", encoding="utf-8")
 
-        wired, reason = fused_symbol_invocation_evidence(str(call_site), [str(model)])
+        wiring = fused_symbol_invocation_evidence(str(call_site), [str(model)])
 
-        assert not wired
-        assert "dead code" in reason
+        assert wiring.verdict == "not_wired"
+        assert "dead code" in wiring.reason
 
 
 class TestExport:

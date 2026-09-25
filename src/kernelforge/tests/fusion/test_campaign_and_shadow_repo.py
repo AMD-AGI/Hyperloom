@@ -962,6 +962,7 @@ class TestCampaignCommand:
 
     def _campaign_won_on_time(self, tmp_path, monkeypatch, *, eager_launches, fused_launches):
         """A campaign the loop kept on timing alone, with the given launch counts."""
+        recipe, commit = _committed_candidate(tmp_path)
         return self._campaign_with_result(
             tmp_path,
             monkeypatch,
@@ -971,7 +972,7 @@ class TestCampaignCommand:
                 "best_ms": 0.096,
                 "improved": True,
                 "best_iteration": 3,
-                "best_commit": "c0ffee1",
+                "best_commit": commit,
                 "experiment_id": "exp-1",
             },
             reports=[
@@ -983,8 +984,10 @@ class TestCampaignCommand:
                     "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
                     "eager_launches": eager_launches,
                     "fused_launches": fused_launches,
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
                 }
             ],
+            recipe=recipe,
         )
 
     def test_a_loop_keeper_that_added_launches_is_refused(self, tmp_path, monkeypatch):

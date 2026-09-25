@@ -23,6 +23,7 @@ import click
 
 from hyperloom.common.io import atomic_write_json
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+from kernelforge.agent_backends.base import AgentProviderUnavailableError
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -114,6 +115,22 @@ def _resolve_agent_choice(
     # about which model a box is configured for.
     model = str(llm_model or "").strip() or resolve_agent_model(provider) or registration.default_model
     return provider, model
+
+
+def _campaign_agent_provider(agent_backend: str, llm_model: Optional[str]) -> str:
+    """The provider forge-loop is handed, or the requested spelling when no provider is installed.
+
+    forge-loop rejects the literal ``auto``, this command's own spelling, so the choice is
+    resolved here rather than forwarded. An unresolvable choice is not fatal at this point:
+    a run that only replays a compile pass authors nothing, and a run that does author still
+    fails on its own when it asks the registry for the backend it actually needs.
+    """
+    try:
+        provider, _model = _resolve_agent_choice(agent_backend, llm_model)
+    except AgentProviderUnavailableError as exc:
+        log.debug("no agent provider resolved for the campaign (%s); forwarding %r", exc, agent_backend)
+        return agent_backend
+    return provider
 
 
 def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
@@ -1005,10 +1022,6 @@ def run(
         )
 
     if not dry_run and top_recipe is not None:
-        # forge-loop takes a concrete provider. "auto" is this command's own spelling, and the choice was already
-        # resolved here on purpose -- forwarding the literal is exactly the disagreement _resolve_agent_choice exists
-        # to prevent, and forge-loop rejects it outright.
-        campaign_agent_backend, _campaign_model = _resolve_agent_choice(agent_backend, llm_model)
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
         # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
         # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
@@ -1050,7 +1063,7 @@ def run(
                 target_speedup=target_speedup,
                 model_path=model_path,
                 run_arch=run_arch,
-                agent_backend=campaign_agent_backend,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -1120,7 +1133,7 @@ def run(
                 combine=fuse_all_confirmed,
                 model_path=model_path,
                 gpu_arch=run_arch,
-                agent_backend=campaign_agent_backend,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
