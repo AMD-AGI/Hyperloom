@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
 from hyperloom.inference_optimizer.agentx.mapping import map_mlperf
 
@@ -28,6 +30,49 @@ def _summary(**over):
     }
     data.update(over)
     return data
+
+
+def _v6_summary(**over):
+    """A summary shaped like the harness actually emits (measured on v6)."""
+    data = {
+        "complete": True,
+        "tps": 101.0477435670524,
+        "qps": 0.8227121354449433,
+        "duration_ns": 3894436294254,
+        "n_samples_issued": 3204,
+        "n_samples_completed": 3204,
+        "n_samples_failed": 0,
+        "output_sequence_lengths": {"total": 393486},
+        "ttft": {"avg": 557_000_000},
+        "tpot": {"avg": 309_000_000},
+        "latency": {"avg": 19_000_000_000},
+        "run_config": {"load_pattern": {"type": "agentic_inference", "target_concurrency": 16}},
+    }
+    data.update(over)
+    return data
+
+
+def test_interactivity_derived_from_run_config_concurrency():
+    """The harness emits no interactivity field, so it must be derived, not 0."""
+    mapped = map_mlperf(_v6_summary())
+    assert mapped["e2e_norm_intvty_p90"] == pytest.approx(101.0477435670524 / 16)
+
+
+def test_interactivity_zero_when_concurrency_unknown():
+    summary = _v6_summary()
+    summary.pop("run_config")
+    assert map_mlperf(summary)["e2e_norm_intvty_p90"] == 0.0
+
+
+def test_interactivity_prefers_explicit_field():
+    mapped = map_mlperf(_v6_summary(e2e_avg_interactivity=42.0))
+    assert mapped["e2e_norm_intvty_p90"] == 42.0
+
+
+def test_accuracy_from_scores_json():
+    """Inline accuracy arrives as scores.json, whose primary metric is `score`."""
+    scores = {"score": 0.5988, "domains": {"coding": {"score": 0.51}}}
+    assert map_mlperf(_v6_summary(), accuracy=scores)["accuracy_score"] == pytest.approx(0.5988)
 
 
 def test_map_mlperf_happy_path():

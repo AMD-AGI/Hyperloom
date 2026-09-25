@@ -147,7 +147,13 @@ if [ -z "$SUMMARY" ]; then
   log "ERROR: no result_summary.json produced under ${ART}"
   exit 1
 fi
-ACCURACY="$(find "$ART" -path '*/accuracy/accuracy_results.json' -print -quit 2>/dev/null || true)"
+# Inline accuracy lands in scores.json beside the summary; the accuracy/ path is
+# what a separate acc-only pass would write, and K3 has no such dataset. Both are
+# checked so neither layout silently maps to "no accuracy" and blocks every KEEP.
+ACCURACY="$(find "$ART" -name 'scores.json' -print -quit 2>/dev/null || true)"
+if [ -z "$ACCURACY" ]; then
+  ACCURACY="$(find "$ART" -path '*/accuracy/accuracy_results.json' -print -quit 2>/dev/null || true)"
+fi
 MAP_ARGS=("$SUMMARY" "${RESULT_DIR}/${RESULT_FILENAME}.json")
 if [ -n "$ACCURACY" ]; then
   MAP_ARGS+=("$ACCURACY")

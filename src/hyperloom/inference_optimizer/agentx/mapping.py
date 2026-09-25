@@ -260,6 +260,26 @@ def _accuracy_score(accuracy: Mapping[str, Any] | None) -> float | None:
     return None
 
 
+def _target_concurrency(summary: Mapping[str, Any]) -> float:
+    """Served concurrency, from the harness's own record of the run.
+
+    ``run_config`` is what the harness actually ran with, so it outranks the
+    flat aliases; those remain for summaries that predate it.
+    """
+    run_config = summary.get("run_config")
+    if isinstance(run_config, dict):
+        load_pattern = run_config.get("load_pattern")
+        if isinstance(load_pattern, dict):
+            value = load_pattern.get("target_concurrency")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return float(value)
+    for key in ("target_concurrency", "concurrency"):
+        value = summary.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value)
+    return 0.0
+
+
 def map_mlperf(
     summary: Mapping[str, Any],
     *,
@@ -290,15 +310,18 @@ def map_mlperf(
     error_rate = (100.0 * failed / denom) if denom > 0 else (None if failed else 0.0)
     complete = bool(summary.get("complete"))
     interrupted = bool(summary.get("interrupted") or summary.get("error"))
+    # Interactivity is system throughput per concurrent user, the axis AgentX
+    # grades on. The harness publishes no such field -- measured: a v6 summary
+    # carries tps/ttft/tpot/latency/qps and nothing else -- so it is derived,
+    # matching utility/sweep.py's own definition. A run whose concurrency cannot
+    # be read leaves it 0.0, which the graded comparison treats as incomparable
+    # rather than as a perfect score.
     intvty = summary.get("e2e_avg_interactivity")
-    if not isinstance(intvty, (int, float)):
+    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
         intvty = summary.get("interactivity")
-    if not isinstance(intvty, (int, float)):
-        conc = summary.get("target_concurrency") or summary.get("concurrency")
-        if isinstance(conc, (int, float)) and conc and out_tput:
-            intvty = float(out_tput) / float(conc)
-        else:
-            intvty = 0.0
+    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
+        conc = _target_concurrency(summary)
+        intvty = (float(out_tput) / conc) if (conc and out_tput) else 0.0
     ttft = summary.get("ttft") or {}
     tpot = summary.get("tpot") or summary.get("itl") or {}
     latency = summary.get("latency") or summary.get("e2e") or {}
