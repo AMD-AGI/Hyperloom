@@ -49,13 +49,36 @@ def _python_owner(tmp_path: Path) -> tuple[Path, Path]:
         "print('ATOM_IMPORTED')\n",
     )
     _write(packages / "atom" / "entrypoints" / "__init__.py", "")
+    _write(packages / "atom" / "entrypoints" / "openai_server.py", "")
+    _write(packages / "atom" / "utils" / "__init__.py", "")
     _write(
-        packages / "atom" / "entrypoints" / "openai_server.py",
+        packages / "atom" / "utils" / "arg_parser.py",
+        "import argparse\n"
+        "\n"
+        "class FlexibleArgumentParser(argparse.ArgumentParser):\n"
+        "    def add_argument(self, *names, **kwargs):\n"
+        "        aliases = [n.replace('_', '-') for n in names if n.startswith('--') and '_' in n]\n"
+        "        return super().add_argument(*names, *aliases, **kwargs)\n",
+    )
+    _write(
+        packages / "atom" / "model_engine" / "__init__.py",
+        "",
+    )
+    _write(
+        packages / "atom" / "model_engine" / "arg_utils.py",
         "import os, sys\n"
-        "assert sys.argv[1:] == ['--help'], sys.argv\n"
-        "print('ATOM_HELP_PYTHON=' + sys.executable, file=sys.stderr)\n"
-        "if os.environ.get('TEST_ATOM_HELP_FAILURE'):\n"
-        "    raise SystemExit('test ATOM help failure')\n",
+        "\n"
+        "class EngineArgs:\n"
+        "    @staticmethod\n"
+        "    def add_cli_args(parser):\n"
+        "        print('ATOM_PARSER_PYTHON=' + sys.executable, file=sys.stderr)\n"
+        "        if os.environ.get('TEST_ATOM_ENGINE_ARGS_FAILURE'):\n"
+        "            raise RuntimeError('test ATOM engine args failure')\n"
+        "        # Released ATOM writes a literal % here; argparse only trips over it\n"
+        "        # while rendering help, so the engine itself stays usable.\n"
+        "        parser.add_argument('--state_checkpoint_demand', help='47% of the cache')\n"
+        "        parser.add_argument('--model')\n"
+        "        return parser\n",
     )
     bootstrap = _write(
         root / "bootstrap.py",
@@ -156,11 +179,11 @@ def _run_setup(
     ("failure", "diagnostic"),
     [
         ("TEST_ATOM_IMPORT_FAILURE", "test ATOM import failure"),
-        ("TEST_ATOM_HELP_FAILURE", "test ATOM help failure"),
+        ("TEST_ATOM_ENGINE_ARGS_FAILURE", "test ATOM engine args failure"),
         ("TEST_HIP_FAILURE", "NOT a ROCm build"),
     ],
 )
-def test_required_atom_checks_real_import_help_and_rocm_torch(tmp_path: Path, failure: str, diagnostic: str) -> None:
+def test_required_atom_checks_real_import_parser_and_rocm_torch(tmp_path: Path, failure: str, diagnostic: str) -> None:
     python, _ = _python_owner(tmp_path)
     result = _run_setup(tmp_path, python, extra_env={failure: "1"})
     assert result.returncode != 0
@@ -168,13 +191,14 @@ def test_required_atom_checks_real_import_help_and_rocm_torch(tmp_path: Path, fa
     assert "base preflight OK" not in result.stdout
 
 
-def test_check_only_atom_uses_selected_help_and_preserves_workspace(tmp_path: Path) -> None:
+def test_check_only_atom_uses_selected_parser_and_preserves_workspace(tmp_path: Path) -> None:
+    """A release whose help text carries a literal % still passes: the probe never renders help."""
     python, root = _python_owner(tmp_path)
     dotenv = _write(tmp_path / ".env", "KEEP_ME=unchanged\n")
     before = _sources(root)
     result = _run_setup(tmp_path, python)
     assert result.returncode == 0, result.stderr
-    assert f"ATOM_HELP_PYTHON={_shell_path(python)}" in result.stderr
+    assert f"ATOM_PARSER_PYTHON={_shell_path(python)}" in result.stderr
     assert "verification pass complete" in result.stdout
     assert "MUTATION" not in result.stdout + result.stderr
     assert dotenv.read_text() == "KEEP_ME=unchanged\n"
