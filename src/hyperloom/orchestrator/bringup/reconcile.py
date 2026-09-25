@@ -22,6 +22,7 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
+from ..trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
 
 log = logging.getLogger(__name__)
 
@@ -207,6 +208,7 @@ class Reconciler:
             msg_id = str(row["msg_id"])
             if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
                 report.denied_reviews.append(msg_id)
+                self._record_timeout_terminal(msg_id, age=age)
             # Marked either way: a verdict that beat this write to the log is
             # still one the copy the loop reads has to carry.
             self._mark_decided(msg_id)
@@ -239,6 +241,23 @@ class Reconciler:
         if applied:
             log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
         return applied
+
+    def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
+        """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
+        pending = self._proposals().get(msg_id) if self._proposals is not None else None
+        action_name = str(getattr(pending, "action_name", "") or "") or None
+        record_event(
+            EVENT_PROPOSAL,
+            status=STATUS_CANCELLED,
+            span_id=msg_id,
+            attributes={
+                "name": action_name,
+                "action_name": action_name,
+                "verdict": TIMEOUT_VERDICT,
+                "reason": "review_timeout",
+                "waited_sec": round(age, 1),
+            },
+        )
 
     def _mark_decided(self, msg_id: str) -> None:
         """Record the deny on the in-memory proposal the loop consults."""

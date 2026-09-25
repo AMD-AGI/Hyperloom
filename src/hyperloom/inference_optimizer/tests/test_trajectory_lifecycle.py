@@ -151,6 +151,47 @@ async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled(session_dir):
+    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
+    try:
+        assert await c.run(max_ticks=1) == "max_ticks"
+        proposal_id = next(iter(c.state.pending_proposals))
+        # A resumed leg ending over the same proposal must not close it twice.
+        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
+            c._close_undecided_proposals("max_ticks")
+    finally:
+        await c.stop()
+
+    proposal = _rows(session_dir, tt.EVENT_PROPOSAL)
+    assert [r["status"] for r in proposal] == [tt.STATUS_QUEUED, tt.STATUS_CANCELLED]
+    assert {r["span_id"] for r in proposal} == {proposal_id}
+    closed = proposal[-1]
+    assert closed["attributes"]["reason"] == "session_ended_undecided"
+    assert closed["attributes"]["stop_reason"] == "max_ticks"
+    (session_end,) = [r for r in _rows(session_dir, tt.EVENT_SESSION) if r["status"] == tt.STATUS_COMPLETED]
+    assert closed["ts"] <= session_end["ts"]
+
+    spec = trajmap.project_row(closed, trajmap.span_openings(tt.load_events(session_dir)))
+    assert spec is not None
+    assert spec.name == "proposal:baseline"
+
+
+@pytest.mark.asyncio
+async def test_a_supervisor_restart_leaves_undecided_proposals_open(session_dir):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+
+    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
+    try:
+        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
+            await c.tick(1)
+            c._close_undecided_proposals(SUPERVISOR_RESTART_REASON)
+    finally:
+        await c.stop()
+
+    assert [r["status"] for r in _rows(session_dir, tt.EVENT_PROPOSAL)] == [tt.STATUS_QUEUED]
+
+
+@pytest.mark.asyncio
 async def test_a_dispatched_task_runs_under_its_own_scope(session_dir):
     seen: dict[str, object] = {}
 

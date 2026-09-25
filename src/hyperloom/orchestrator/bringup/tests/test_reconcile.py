@@ -385,6 +385,31 @@ async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
+    """The deny bypasses the verdict handler, so the pass itself closes the proposal on the trajectory ledger."""
+    from hyperloom.orchestrator.trace import trajectory_trace as tt
+
+    pending = {"m-late": _Pending("spec-1")}
+    pending["m-late"].action_name = "integrate_patch"
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    async with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
+            " VALUES ('m-late', 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')"
+        )
+
+    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
+        await rec.run(_NOW)
+        await rec.run(_NOW)
+
+    rows = [row for row in tt.load_events(tmp_path) if row["event_type"] == tt.EVENT_PROPOSAL]
+    assert [(row["span_id"], row["status"]) for row in rows] == [("m-late", tt.STATUS_CANCELLED)]
+    assert rows[0]["attributes"]["reason"] == "review_timeout"
+    assert rows[0]["attributes"]["verdict"] == TIMEOUT_VERDICT
+    assert rows[0]["attributes"]["name"] == "integrate_patch"
+
+
+@pytest.mark.asyncio
 async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
     """The compare-and-set is the guard, so the pass is safe to run every tick."""
     rec, _rounds, _tasks, _ = _build(db, review_ttl_sec=1.0)

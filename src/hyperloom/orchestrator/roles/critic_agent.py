@@ -1088,6 +1088,7 @@ class CriticAgentBackend:
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, result.usage)
@@ -1120,6 +1121,7 @@ class CriticAgentBackend:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
@@ -1217,10 +1219,11 @@ class CriticAgentBackend:
         message: str,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> LLMCallFailed:
         """Record a failed review-model call and return the error to raise."""
         error = LLMCallFailed(message)
-        self._trace_llm_failure(error, latency_ms=latency_ms)
+        self._trace_llm_failure(error, latency_ms=latency_ms, call_id=call_id)
         return error
 
     def _trace_llm_failure(
@@ -1228,6 +1231,7 @@ class CriticAgentBackend:
         error: BaseException,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
@@ -1236,6 +1240,7 @@ class CriticAgentBackend:
                 component="critic",
                 role="critic",
                 error=error,
+                call_id=call_id,
                 model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,

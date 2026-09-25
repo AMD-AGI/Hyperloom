@@ -2027,6 +2027,37 @@ async def test_anthropic_protocol_traces_a_failed_completion(
     assert critic_rows[0]["status"] == "error"
     assert critic_rows[0]["error_type"] == "LLMCallFailed"
     assert "claude cli stream idle" in critic_rows[0]["error_message"]
+    assert critic_rows[0]["call_id"]
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_row_carries_the_ambient_call_id(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed review joins its ``llm.call`` trajectory span on call_id, like a successful one."""
+    import json as _json
+
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+    from hyperloom.orchestrator.trace.trajectory_trace import trajectory_scope
+
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[LLMCallFailed("gateway auth")],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+    with trajectory_scope(call_id="call-critic-1"), pytest.raises(LLMCallFailed):
+        await backend.run("prompt", system_prompt="critic system")
+
+    rows = [
+        _json.loads(line)
+        for line in llm_calls_path(fake_session_dir).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [r["call_id"] for r in rows if r["component"] == "critic"] == ["call-critic-1"]
 
 
 @pytest.mark.asyncio

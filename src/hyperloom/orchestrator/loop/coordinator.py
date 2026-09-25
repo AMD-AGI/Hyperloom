@@ -81,8 +81,13 @@ from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from ..trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from ..trace.trajectory_trace import (
     EVENT_LLM_CALL,
+    EVENT_PROPOSAL,
     EVENT_SESSION,
+    STATUS_CANCELLED,
+    TERMINAL_STATUSES,
     llm_call_summary,
+    load_events,
+    record_event,
     trajectory_scope,
     trajectory_span,
 )
@@ -1625,8 +1630,46 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 crash_emergency_threshold=crash_emergency_threshold,
                 closing_grace_sec=closing_grace_sec,
             )
+            self._close_undecided_proposals(stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
+
+    def _close_undecided_proposals(self, stop_reason: str) -> None:
+        """Close the trajectory span of every proposal the session ends without a verdict on.
+
+        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
+        session may end again over proposals an earlier leg already closed, so those are skipped.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON  # noqa: PLC0415
+
+        if stop_reason == SUPERVISOR_RESTART_REASON:
+            return
+        undecided = [p for p in self.state.pending_proposals.values() if not p.decided]
+        if not undecided:
+            return
+        try:
+            closed = {
+                row.get("span_id")
+                for row in load_events(self.session_dir)
+                if row.get("event_type") == EVENT_PROPOSAL and row.get("status") in TERMINAL_STATUSES
+            }
+            for pending in undecided:
+                if pending.proposal_msg_id in closed:
+                    continue
+                record_event(
+                    EVENT_PROPOSAL,
+                    status=STATUS_CANCELLED,
+                    span_id=pending.proposal_msg_id,
+                    attributes={
+                        "name": pending.action_name,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "reason": "session_ended_undecided",
+                        "stop_reason": stop_reason,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — trace must never mask the stop reason
+            log.warning("trajectory: closing undecided proposals failed", exc_info=True)
 
     def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
