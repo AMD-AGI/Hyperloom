@@ -189,7 +189,8 @@ class MessageBus:
     ) -> list[Message]:
         """Inbox for one agent: subscribed topics only, never its own messages.
 
-        Raw-DB readers (``lookup_by_id``, ``tail``) bypass both rules.
+        Raw-DB readers (``lookup_by_id``, ``tail``, ``inbox_context_sync``,
+        ``recent_outcomes_context_sync``) bypass both rules.
         """
         subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
         if not subscribed:

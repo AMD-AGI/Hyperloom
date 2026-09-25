@@ -350,7 +350,7 @@ class TaskRegistry:
         placeholders = ",".join("?" for _ in states)
         row = await self.db.fetchone(
             "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
             (prefix, *states),
         )
         return row is not None
