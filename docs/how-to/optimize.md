@@ -193,9 +193,11 @@ the corpus; native `AGENTX_DATASET` and `WEKA_LOADER_OVERRIDE` overrides are
 rejected. Canonical mode runs for 3600 seconds and configures a 393-trace
 dataset-entry cap. That value is a loader ceiling, not a guarantee that 393
 traces, sessions, or requests survive availability and context-length filters.
-`AGENTX_MODE=fast` runs for 1200 seconds and is only a direct-Magpie diagnostic:
-its result is non-publishable, so a full Hyperloom `optimize` rejects it as the
-baseline.
+For a 1200-second diagnostic directly in Magpie, set
+`benchmark.agentx.mode: fast` in an enabled AgentX configuration, or pass
+`--agentx --agentx-mode fast` to its `benchmark` command. Fast results are
+non-publishable, so a full Hyperloom `optimize` rejects them as its baseline,
+including when selected through Hyperloom's `AGENTX_MODE=fast` override.
 
 This Hyperloom integration supports Magpie AgentX v1 in local, single-node
 SGLang or vLLM mode. It bypasses Hyperloom's outer Ray actor automatically;
