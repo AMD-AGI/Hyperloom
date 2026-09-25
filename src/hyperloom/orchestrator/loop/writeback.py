@@ -4771,7 +4771,7 @@ class WritebackCollaborator:
                 return pending
             if verdict == "inflight":
                 return None
-        self.shared_state.set_stop_reason("environment_fault")
+        self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
         self.shared_state.save(self.session_dir)
         raise IntegrateRecoveryIncomplete(
             f"integrate recovery is incomplete or inconsistent for task={task_id!r}: "
@@ -5459,7 +5459,9 @@ class WritebackCollaborator:
         if state.pending_integrate:
             state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
             state.save(self.session_dir)
-            raise RuntimeError("pending integrate recovery is incomplete; refusing resume before measurement")
+            raise IntegrateRecoveryIncomplete(
+                "pending integrate recovery is incomplete; refusing resume before measurement"
+            )
         # (1b) In-flight targeted build: an off-loop compile cannot survive a
         # coordinator restart, so kill the orphan group, GC its attempt dir,
         # sweep its jit locks, fail the row, and clear the sentinel.

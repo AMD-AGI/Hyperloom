@@ -22,6 +22,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from hyperloom.orchestrator.loop.writeback import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -783,15 +784,15 @@ async def test_ordinary_integrate_completion_blocks_unconfirmed_before_promotion
     with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
         await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
-    assert type(caught.value).__name__ == "IntegrateRecoveryIncomplete"
+    assert isinstance(caught.value, IntegrateRecoveryIncomplete)
     assert coord.shared_state.pending_integrate == candidate.pending
     assert coord.shared_state.current_best == candidate.anchor
     assert coord.shared_state.optimization_stack == original_stack
     assert coord.shared_state.authored_framework_levers == original_levers
-    assert coord.shared_state.stop_reason == "environment_fault"
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
     assert persisted["pending_integrate"] == candidate.pending
-    assert persisted["stop_reason"] == "environment_fault"
+    assert persisted["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     assert candidate.backup.read_bytes() == b"accepted source before candidate"
 
 
@@ -817,7 +818,7 @@ async def test_ordinary_integrate_completion_restore_error_blocks_without_marker
     with pytest.raises(RuntimeError, match="integrate.*recovery"):
         await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
     assert coord.shared_state.current_best == candidate.anchor
-    assert coord.shared_state.stop_reason == "environment_fault"
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
 
 @pytest.mark.asyncio
@@ -830,14 +831,14 @@ async def test_ordinary_integrate_completion_legacy_keep_with_stash_error_retain
     with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
         await coord._promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
 
-    assert type(caught.value).__name__ == "IntegrateRecoveryIncomplete"
+    assert isinstance(caught.value, IntegrateRecoveryIncomplete)
     assert coord.shared_state.pending_integrate == candidate.pending
     assert coord.shared_state.current_best == candidate.anchor
     assert coord.shared_state.optimization_stack == []
-    assert coord.shared_state.stop_reason == "environment_fault"
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
     assert persisted["pending_integrate"] == candidate.pending
-    assert persisted["stop_reason"] == "environment_fault"
+    assert persisted["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     assert candidate.backup.read_bytes() == b"accepted source before candidate"
 
 
