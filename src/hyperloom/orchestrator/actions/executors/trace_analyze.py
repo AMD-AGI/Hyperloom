@@ -436,12 +436,10 @@ def _build_trace_analyze_cmd(
     if runtime_config and not is_bypass:
         cmd += ["--runtime-config", runtime_config]
 
+    # Scriptable frameworks still forward denoise-step count for per-step
+    # roofline timings. Priority: payload override > baseline workload metadata.
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
+        cmd += ["--steady-state-mode", "generic"]
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -449,9 +447,10 @@ def _build_trace_analyze_cmd(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
+
+    # LLM inference-specific splitter flags (serving frameworks only).
+    if not scriptable:
+        cmd += ["--split-llm-inference"]
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
             cmd += ["--split-conc", str(split_conc).strip()]
