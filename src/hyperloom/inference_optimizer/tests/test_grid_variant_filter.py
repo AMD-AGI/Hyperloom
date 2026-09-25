@@ -318,7 +318,7 @@ def test_parser_failure_retries_source_changes_after_cooldown(package_probe):
     assert state.calls == 2
 
 
-@pytest.mark.parametrize("change", ["env", "cwd", "executable", "command"])
+@pytest.mark.parametrize("change", ["executable", "command"])
 def test_failed_launch_retries_when_observable_identity_changes(package_probe, monkeypatch, tmp_path, change):
     state = package_probe
     executable = tmp_path / "not-an-executable"
@@ -327,17 +327,35 @@ def test_failed_launch_retries_when_observable_identity_changes(package_probe, m
     assert vf._probe_server_help_text("sglang") == ""
     assert vf._probe_server_help_text("sglang") == ""
     assert state.calls == 1
-    if change == "env":
-        monkeypatch.setenv("FAKE_RUNTIME_ENV", "changed")
-    elif change == "cwd":
-        monkeypatch.chdir(tmp_path)
-    elif change == "executable":
+    if change == "executable":
         executable.write_text("replaced invalid executable", encoding="utf-8")
     else:
         monkeypatch.setitem(vf._HELP_PROBE_COMMANDS, "sglang", ("-c", "print('different parser')"))
 
     assert vf._probe_server_help_text("sglang") == ""
     assert state.calls == 2
+
+
+@pytest.mark.parametrize("churn", ["env", "cwd"])
+def test_failed_launch_cooldown_survives_ambient_churn(package_probe, monkeypatch, tmp_path, churn):
+    """Neither of these changes what the parser prints, and a round rewrites them constantly.
+
+    Folding them into the launch identity would expire the cooldown every round
+    and re-pay a multi-second probe for a framework already known to be broken.
+    """
+    state = package_probe
+    executable = tmp_path / "not-an-executable"
+    executable.write_text("invalid executable", encoding="utf-8")
+    state.executable = str(executable)
+    assert vf._probe_server_help_text("sglang") == ""
+    assert state.calls == 1
+    if churn == "env":
+        monkeypatch.setenv("FAKE_RUNTIME_ENV", "changed")
+    else:
+        monkeypatch.chdir(tmp_path)
+
+    assert vf._probe_server_help_text("sglang") == ""
+    assert state.calls == 1
 
 
 def test_failed_stdout_and_stderr_never_become_help(package_probe, monkeypatch):

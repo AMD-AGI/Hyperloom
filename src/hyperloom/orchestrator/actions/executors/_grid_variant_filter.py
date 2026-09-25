@@ -267,14 +267,21 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
 
 
 def _help_probe_launch_identity(interpreter: str, argv_tail: tuple[str, ...]) -> str:
-    """Identify an attempted launch without importing a framework in this process."""
+    """Identify an attempted launch without importing a framework in this process.
+
+    The executable and its stat cover the cases that change what the parser
+    prints: a rebuilt venv, an upgraded framework, a different interpreter
+    resolved out of the environment. Ambient env vars are deliberately absent --
+    per-round tuning overrides rewrite them constantly, and folding those in
+    would expire the cooldown on every round and re-pay the probe each time.
+    """
     executable = Path(shutil.which(interpreter) or interpreter)
     try:
         stat = executable.stat()
         stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
     except OSError:
         stamp = None
-    payload = (interpreter, str(executable.resolve()), stamp, argv_tail, os.getcwd(), sorted(os.environ.items()))
+    payload = (interpreter, str(executable.resolve()), stamp, argv_tail)
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
 
 
@@ -306,12 +313,14 @@ def _probe_server_help_text(framework: str) -> str:
         reason = f"exit={proc.returncode}: {' '.join((proc.stderr or '').split())[-300:]}"
     except (OSError, subprocess.SubprocessError) as exc:
         reason = repr(exc)
+    already_reported = bool(failure) and failure[0] == identity
     _HELP_PROBE_FAILURES[fw] = (identity, time.monotonic() + _HELP_PROBE_RETRY_SEC)
-    log.warning(
-        "compatibility probe for %s produced no help text (%s); flag-version drops are disabled for it",
-        fw,
-        reason,
-    )
+    if not already_reported:
+        log.warning(
+            "compatibility probe for %s produced no help text (%s); flag-version drops are disabled for it",
+            fw,
+            reason,
+        )
     return ""
 
 
