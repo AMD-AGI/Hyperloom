@@ -32,14 +32,6 @@ log = logging.getLogger("forge_fusion")
 # How far the compute-bounded span around the anchor is allowed to reach before it stops being one fusible chain.
 _MAX_SPAN = 8
 
-# Operators read nanoseconds out of a trace viewer; kineto records microseconds. Conversion happens here so every
-# timestamp the operator sees or types is nanoseconds.
-_NS_PER_US = 1000
-
-# A pinned timestamp is a reference, not a key: viewers round, so the nearest launch is taken and only a gap wider
-# than this is worth telling the operator about.
-_TS_TOLERANCE_NS = 1000
-
 # A shape shared by no more than half the launches is a coin flip, not a pattern, and fusing it buys nothing
 # repeatable.
 _MIN_CONSISTENCY = 0.5
@@ -53,10 +45,9 @@ class AnchorResolutionError(ValueError):
 
 @dataclass(frozen=True)
 class KernelAnchor:
-    """The kernel an operator named, plus the launch they were looking at."""
+    """The kernel an operator named."""
 
     name: str
-    ts_ns: Optional[int] = None
 
 
 @dataclass
@@ -86,8 +77,6 @@ class AnchorReport:
     after: Optional[Slot]
     span: list[dict[str, str]]
     patterns: list[tuple[str, int]]
-    pinned_ts_ns: Optional[int] = None
-    pinned_is_dominant: bool = True
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,8 +93,6 @@ class AnchorReport:
             "after": self.after.to_dict() if self.after else None,
             "span": self.span,
             "patterns": [{"signature": s, "count": c} for s, c in self.patterns],
-            "pinned_ts_ns": self.pinned_ts_ns,
-            "pinned_is_dominant": self.pinned_is_dominant,
             "warnings": self.warnings,
         }
 
@@ -118,11 +105,6 @@ def collapse_whitespace(name: str) -> str:
     kernel this is, so nothing else may be normalized away.
     """
     return re.sub(r"\s+", " ", str(name or "")).strip()
-
-
-def _event_ts_ns(event: dict[str, Any]) -> int:
-    """The launch time in nanoseconds, the unit the operator works in."""
-    return round(float(event["ts"]) * _NS_PER_US)
 
 
 def _slot_from(events: list[dict[str, Any]]) -> Optional[Slot]:
@@ -188,34 +170,8 @@ def resolve_anchor(trace_path: str | Path, anchor: KernelAnchor) -> AnchorReport
     signature, dominant_sites = ranked[0]
     consistency = len(dominant_sites) / occurrences
 
-    pinned_site: Optional[tuple[tuple[Any, Any], int]] = None
-    pinned_ts_ns: Optional[int] = None
-    if anchor.ts_ns is not None:
-        wanted_ns = int(anchor.ts_ns)
-        pinned_site = min(sites, key=lambda site: abs(_event_ts_ns(streams[site[0]][site[1]]) - wanted_ns))
-        pinned_ts_ns = _event_ts_ns(streams[pinned_site[0]][pinned_site[1]])
-        drift = abs(pinned_ts_ns - wanted_ns)
-        if drift > _TS_TOLERANCE_NS:
-            launch_ns = [_event_ts_ns(streams[k][i]) for k, i in sites]
-            note = (
-                f"--fuse-kernel-ts {wanted_ns} matched no launch exactly; using the nearest at "
-                f"{pinned_ts_ns} ({drift} ns away)"
-            )
-            if not min(launch_ns) <= wanted_ns <= max(launch_ns):
-                note += f"; this kernel runs between {min(launch_ns)} and {max(launch_ns)} ns"
-                # The one mistake this unit invites, named rather than left as an unexplained 1000x miss.
-                if min(launch_ns) <= wanted_ns * _NS_PER_US <= max(launch_ns):
-                    note += " -- the value looks like microseconds, and this flag takes nanoseconds"
-            warnings.append(note)
-
-    representative = pinned_site if pinned_site is not None else dominant_sites[0]
-    pinned_is_dominant = representative in dominant_sites
-    if pinned_site is not None and not pinned_is_dominant:
-        warnings.append(
-            f"the launch at ts={pinned_ts_ns} ns is not in the dominant pattern ({signature}); "
-            "the aggregate below still describes every launch"
-        )
-
+    # The span is rendered for one launch; the most common neighbourhood's first site is the one that represents it.
+    representative = dominant_sites[0]
     before_events = [streams[k][i - 1] for k, i in dominant_sites if i > 0]
     after_events = [streams[k][i + 1] for k, i in dominant_sites if i + 1 < len(streams[k])]
 
@@ -245,8 +201,6 @@ def resolve_anchor(trace_path: str | Path, anchor: KernelAnchor) -> AnchorReport
         after=_slot_from(after_events),
         span=_span_around(streams[representative[0]], representative[1]),
         patterns=[(sig, len(hits)) for sig, hits in ranked],
-        pinned_ts_ns=pinned_ts_ns,
-        pinned_is_dominant=pinned_is_dominant,
         warnings=warnings,
     )
 
@@ -292,8 +246,6 @@ def describe_anchor(report: AnchorReport) -> str:
     lines += slot_lines("immediately before", report.before)
     lines += slot_lines("immediately after", report.after)
 
-    if report.pinned_ts_ns is not None:
-        lines.append(f"  the launch you referenced: ts={report.pinned_ts_ns} ns")
     lines.append("")
     lines.append("Compute-bounded span of a representative launch (ANCHOR marked):")
     for item in report.span:

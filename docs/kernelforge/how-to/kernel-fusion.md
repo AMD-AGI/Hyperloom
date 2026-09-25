@@ -79,15 +79,6 @@ coincidences. The concrete names are listed underneath so nothing is hidden.
 A name the trace does not contain is a usage error that lists the closest ones; a
 fragment is not a name.
 
-`--fuse-kernel-ts` records the launch you were looking at, **in nanoseconds**
-(`--fuse-kernel-ts 7008117376499794`). The trace itself stores microseconds; the
-conversion happens for you, and `fusion_anchor.json` reports `pinned_ts_ns` in
-nanoseconds too, so a timestamp pastes straight back in. It is a reference, not a
-filter: every launch is still aggregated, and the report says whether the one you
-named is representative. A value that lands outside the kernel's own launch window
-is reported with that window, and a value that would fit it after scaling is called
-out as microseconds.
-
 Naming a kernel also overrides the diagnosis. `is_candidate: false` normally ends
 the run, but a trace-wide verdict is not an argument about the kernel you picked.
 

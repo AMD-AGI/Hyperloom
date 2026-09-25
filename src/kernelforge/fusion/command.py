@@ -608,15 +608,6 @@ def _verdict_override(
     "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
 )
 @click.option(
-    "--fuse-kernel-ts",
-    "fuse_kernel_ts",
-    default=0,
-    type=int,
-    help="Trace timestamp in NANOSECONDS of the --fuse-kernel launch you were looking at. A "
-    "reference for reporting, not a filter: the nearest launch is used and every launch is "
-    "still aggregated.",
-)
-@click.option(
     "--dry-run",
     is_flag=True,
     help="Diagnose + locate only; emit manifest with recipe skeleton (no author/validate).",
@@ -714,7 +705,6 @@ def run(
     decode_steps: int,
     discover_mode: str,
     fuse_kernel: str,
-    fuse_kernel_ts: int,
     dry_run: bool,
     author: bool,
     validate: bool,
@@ -820,10 +810,7 @@ def run(
     anchor_report = None
     if discover_mode == "anchored":
         try:
-            anchor_report = resolve_anchor(
-                trace_path,
-                KernelAnchor(name=fuse_kernel, ts_ns=fuse_kernel_ts or None),
-            )
+            anchor_report = resolve_anchor(trace_path, KernelAnchor(name=fuse_kernel))
         except AnchorResolutionError as exc:
             raise click.UsageError(str(exc)) from exc
         write_anchor_report(anchor_report, out)

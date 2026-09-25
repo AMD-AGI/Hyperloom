@@ -27,12 +27,10 @@ it.
   Requires `--discover llm` or `--discover anchored`. Use when the fusion chain
   is not in the arch-class model file and you do not want to name its location.
 
-- **`--fuse-kernel` / `--fuse-kernel-ts` for `forge-fuse`.** Name the GPU
-  kernel a fusion is built around (full trace spelling); neighbours are taken
-  from the trace and aggregated by op category. Implies `--discover anchored`.
-  `--fuse-kernel-ts` records a reference launch timestamp in nanoseconds for
-  the report (`pinned_ts_ns` in `fusion_anchor.json`), not a filter. With
-  `--dry-run`, resolution writes `fusion_anchor.json` and stops with the new
+- **`--fuse-kernel` for `forge-fuse`.** Name the GPU kernel a fusion is built
+  around (full trace spelling); neighbours are taken from the trace and
+  aggregated by op category. Implies `--discover anchored`. With `--dry-run`,
+  resolution writes `fusion_anchor.json` and stops with the new
   `anchor_resolved` verdict. The manifest gains an `anchor` key (`null` when
   unused).
 
