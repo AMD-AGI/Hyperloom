@@ -165,31 +165,35 @@ def test_malformed_row_skipped_others_kept(tmp_path: Path) -> None:
 
 def test_ceiling_upsert_accumulates(tmp_path: Path) -> None:
     path = tmp_path / "roofline_ceiling.csv"
-    # Producer A writes the baseline arm.
-    rc.write_ceiling([{"row_type": "arm", "arm": "baseline", "peak_tok_per_sec": 626.96, "bound_kind": "memory"}], path)
-    # Producer B writes the current_best arm — must NOT clobber baseline.
+    cfg_a = {"fw": "vllm", "conc": 4}   # two distinct configs -> distinct identities
+    cfg_b = {"fw": "vllm", "conc": 32}
+    # Producer A writes config A's arm.
+    rc.write_ceiling([{"row_type": "arm", **rc.ceiling_key_columns(cfg_a), "peak_tok_per_sec": 626.96, "bound_kind": "memory"}], path)
+    # Producer B writes config B's arm — must NOT clobber config A.
     rc.write_ceiling(
-        [{"row_type": "arm", "arm": "current_best", "peak_tok_per_sec": 641.30, "bound_kind": "memory"}], path
+        [{"row_type": "arm", **rc.ceiling_key_columns(cfg_b), "peak_tok_per_sec": 641.30, "bound_kind": "memory"}], path
     )
-    # Producer C writes an L2 op row (scoped to its arm's config key).
+    # Producer C writes an L2 op row (scoped to its config's identity).
     rc.write_ceiling(
-        [{"row_type": "op", "arm": "current_best", "op_name": "moe_experts", "flops": 1.16e11, "bound_kind": "compute"}],
+        [{"row_type": "op", **rc.ceiling_key_columns(cfg_b), "op_name": "moe_experts", "flops": 1.16e11, "bound_kind": "compute"}],
         path,
     )
 
     out = rc.read_ceiling(path)
-    assert out["baseline"]["peak_tok_per_sec"] == 626.96
-    assert out["current_best"]["peak_tok_per_sec"] == 641.30
-    assert out[("op", "current_best", "moe_experts")]["bound_kind"] == "compute"
-    # baseline bound_kind normalized
-    assert out["baseline"]["bound_kind"] == "memory"
+    key_a, key_b = rc.ceiling_key(cfg_a), rc.ceiling_key(cfg_b)
+    assert out[key_a]["peak_tok_per_sec"] == 626.96
+    assert out[key_b]["peak_tok_per_sec"] == 641.30
+    assert out[("op", key_b, "moe_experts")]["bound_kind"] == "compute"
+    # config A bound_kind normalized
+    assert out[key_a]["bound_kind"] == "memory"
 
 
 def test_ceiling_upsert_same_arm_last_write_wins(tmp_path: Path) -> None:
     path = tmp_path / "c.csv"
-    rc.write_ceiling([{"row_type": "arm", "arm": "baseline", "peak_tok_per_sec": 1.0}], path)
-    rc.write_ceiling([{"row_type": "arm", "arm": "baseline", "peak_tok_per_sec": 2.0}], path)
-    assert rc.read_ceiling(path)["baseline"]["peak_tok_per_sec"] == 2.0
+    cfg = {"fw": "vllm", "conc": 4}
+    rc.write_ceiling([{"row_type": "arm", **rc.ceiling_key_columns(cfg), "peak_tok_per_sec": 1.0}], path)
+    rc.write_ceiling([{"row_type": "arm", **rc.ceiling_key_columns(cfg), "peak_tok_per_sec": 2.0}], path)
+    assert rc.read_ceiling(path)[rc.ceiling_key(cfg)]["peak_tok_per_sec"] == 2.0
 
 
 # --------------------------------------------------------------------------- #
@@ -229,21 +233,22 @@ def test_resolver_kernel_and_ceiling_lookup(tmp_path: Path) -> None:
         [{"name": "flash_attn_fwd", "flops": 5.0, "bound_type": "compute_bound"}],
         tmp_path / "kernel_roofline.csv",
     )
+    cfg = {"fw": "vllm", "conc": 4}
     rc.write_ceiling(
-        [{"row_type": "arm", "arm": "baseline", "peak_tok_per_sec": 100.0}],
+        [{"row_type": "arm", **rc.ceiling_key_columns(cfg), "peak_tok_per_sec": 100.0}],
         tmp_path / "roofline_ceiling.csv",
     )
     r = rc.RooflineResolver(tmp_path)
     k = r.kernel("flash_attn_fwd")
     assert k is not None and k["flops"] == 5.0 and k["bound_type"] == "compute"
-    assert r.ceiling("baseline")["peak_tok_per_sec"] == 100.0
-    assert r.ceiling("missing_arm") is None
+    assert r.ceiling(cfg)["peak_tok_per_sec"] == 100.0
+    assert r.ceiling({"fw": "vllm", "conc": 999}) is None
 
 
 def test_resolver_none_dir_is_inert() -> None:
     r = rc.RooflineResolver(None)
     assert r.kernel("x") is None
-    assert r.ceiling("baseline") is None
+    assert r.ceiling({"fw": "vllm", "conc": 4}) is None
     assert r.arch_peak("mi350x", "bf16") is None
 
 

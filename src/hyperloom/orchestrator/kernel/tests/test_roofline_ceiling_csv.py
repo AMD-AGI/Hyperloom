@@ -16,6 +16,7 @@ import pytest
 import hyperloom.orchestrator.kernel.roofline_csv as rc
 from hyperloom.orchestrator.kernel.roofline_ceiling import (
     RooflineBreakdown,
+    ceiling_config_columns,
     ceiling_config_key,
     compute_roofline_breakdown_from_state,
     write_ceiling_arm,
@@ -33,8 +34,8 @@ def test_native_write_ceiling_arm_publishes_arms(tmp_path: Path) -> None:
     # Rows are keyed by the CONFIG that produced them; two DISTINCT configs never clobber.
     s_a = _state(tmp_path, precision="fp8")
     s_b = _state(tmp_path, precision="mxfp4")
-    key_a, _ = ceiling_config_key(s_a, "baseline")
-    key_b, _ = ceiling_config_key(s_b, "current_best")
+    key_a, _, _ = ceiling_config_key(s_a, "baseline")
+    key_b, _, _ = ceiling_config_key(s_b, "current_best")
     assert key_a != key_b  # distinct precision -> distinct content key
     write_ceiling_arm(s_a, "baseline", RooflineBreakdown(600.0, 1800.0, 600.0, "memory"))
     write_ceiling_arm(s_b, "current_best", RooflineBreakdown(640.0, 1835.0, 640.0, "memory"))
@@ -67,9 +68,8 @@ def test_external_read_replaces_native_compute(tmp_path: Path) -> None:
     ext = tmp_path / "ext"
     ext.mkdir()
     s = _state(tmp_path, roofline_csv_dir=str(ext))
-    key, _ = ceiling_config_key(s, "baseline")
     rc.write_ceiling(
-        [{"row_type": "arm", "arm": key, "mem_tok_per_sec": 626.96, "cmp_tok_per_sec": 1820.5, "peak_tok_per_sec": 626.96, "bound_kind": "memory"}],
+        [{"row_type": "arm", **ceiling_config_columns(s, "baseline"), "mem_tok_per_sec": 626.96, "cmp_tok_per_sec": 1820.5, "peak_tok_per_sec": 626.96, "bound_kind": "memory"}],
         ext / "roofline_ceiling.csv",
     )
     bd = compute_roofline_breakdown_from_state(s, arm="baseline")
@@ -83,10 +83,9 @@ def test_external_read_derives_bound_kind_when_blank(tmp_path: Path) -> None:
     ext = tmp_path / "ext"
     ext.mkdir()
     s = _state(tmp_path, roofline_csv_dir=str(ext))
-    key, _ = ceiling_config_key(s, "baseline")
     # bound_kind blank -> reader derives memory if mem <= cmp else compute.
     rc.write_ceiling(
-        [{"row_type": "arm", "arm": key, "mem_tok_per_sec": 500.0, "cmp_tok_per_sec": 900.0, "peak_tok_per_sec": 500.0, "bound_kind": ""}],
+        [{"row_type": "arm", **ceiling_config_columns(s, "baseline"), "mem_tok_per_sec": 500.0, "cmp_tok_per_sec": 900.0, "peak_tok_per_sec": 500.0, "bound_kind": ""}],
         ext / "roofline_ceiling.csv",
     )
     bd = compute_roofline_breakdown_from_state(s, arm="baseline")
@@ -96,12 +95,13 @@ def test_external_read_derives_bound_kind_when_blank(tmp_path: Path) -> None:
 def test_external_strict_missing_arm_raises(tmp_path: Path) -> None:
     ext = tmp_path / "ext"
     ext.mkdir()
+    # A row for a DIFFERENT config exists, but not the one this run resolves to.
     rc.write_ceiling(
-        [{"row_type": "arm", "arm": "baseline", "peak_tok_per_sec": 100.0, "bound_kind": "memory"}],
+        [{"row_type": "arm", **rc.ceiling_key_columns({"fw": "vllm", "conc": 999}), "peak_tok_per_sec": 100.0, "bound_kind": "memory"}],
         ext / "roofline_ceiling.csv",
     )
     s = _state(tmp_path, roofline_csv_dir=str(ext), roofline_csv_strict=True)
-    # current_best arm is absent -> strict fails hard.
+    # this run's config is absent from the CSV -> strict fails hard.
     with pytest.raises(FileNotFoundError):
         compute_roofline_breakdown_from_state(s, arm="current_best")
 

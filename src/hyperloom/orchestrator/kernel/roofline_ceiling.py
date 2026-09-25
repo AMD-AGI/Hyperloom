@@ -452,20 +452,19 @@ _CEILING_NEUTRAL_FLAGS: frozenset[str] = frozenset(
 )
 
 
-def _ceiling_trusted(args: str) -> bool:
-    """DEFAULT-DENY guard (§7): an external row is trusted only when EVERY server_args flag is a keyed
-    axis or a verified ceiling-neutral flag. ANY unrecognized or known-affecting-unkeyed flag
-    (spec-decode, dynamic-chunking, a future knob) → untrusted → the consumer falls back to native
-    compute (never a silent wrong external read). An incomplete neutral list only causes more SAFE
-    fallbacks, never a wrong read.
+def _ceiling_untrusted_flag(args: str) -> str | None:
+    """DEFAULT-DENY guard (§7): the FIRST server_args flag that is neither a keyed axis nor a verified
+    ceiling-neutral flag (spec-decode, dynamic-chunking, a future knob), or ``None`` when every flag is
+    known. Naming the offending flag (instead of a bare bool) lets the consumer log exactly why it fell
+    back to native compute. An incomplete neutral list only causes more SAFE fallbacks, never a wrong read.
     """
     for tok in str(args).split():
         if not tok.startswith("-"):
             continue
         flag = tok.split("=", 1)[0]
         if flag not in _CEILING_KEYED_FLAGS and flag not in _CEILING_NEUTRAL_FLAGS:
-            return False
-    return True
+            return flag
+    return None
 
 
 def _ceiling_int_arg(args: str, names: tuple[str, ...], default: int = 1) -> int:
@@ -480,8 +479,8 @@ def _ceiling_int_arg(args: str, names: tuple[str, ...], default: int = 1) -> int
     return default
 
 
-def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool]:
-    """Build the ceiling-key config dict + a ``trusted`` flag from the RESOLVED runtime.
+def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool, str | None]:
+    """Build the ceiling-key config dict + a ``trusted`` flag + an ``untrust_reason`` from the RESOLVED runtime.
 
     Sourced from the SAME ``resolve_runtime_workload`` the value math uses (so key inputs ==
     value inputs — no env-vs-state drift). ``trusted`` is False when the run carries a
@@ -493,9 +492,30 @@ def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool]:
     quant = _parse_server_arg(args, "--quantization")
     dtype = _parse_server_arg(args, "--dtype")
     prec = quant or dtype or (runtime.precision or "")
-    ep = _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["ep"])
     pcp = _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["pcp"])
+    # Expert parallelism — derive the REALIZED degree AUTHORITATIVELY, not from the flag-less
+    # server_args (`--enable-expert-parallel` is appended downstream and never appears in these args).
+    # HL's `--ep N` (N>=2) requests EP: vLLM realizes it as boolean `--enable-expert-parallel` whose
+    # degree is the topology `tp * dp` (vLLM EP group size = data_parallel * tensor_parallel); SGLang
+    # realizes it as an explicit `--expert-parallel-size N`. `ep` records that REALIZED degree (so an EP
+    # config keys the same as MAIDAS's), and `tep=1` iff experts are actually EP-sharded (degree > 1).
     ep_mode = any(f in args for f in _CEILING_TEP_FLAGS)
+    explicit_ep = _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["ep"], default=0)  # --ep / --ep-size / --expert-parallel-size in args
+    try:
+        requested_ep = int(getattr(state, "ep", 1) or 1)  # HL's --ep value (authoritative)
+    except (TypeError, ValueError):
+        requested_ep = 1
+    ep_requested = explicit_ep > 1 or requested_ep > 1 or ep_mode
+    if explicit_ep > 1:
+        ep = explicit_ep  # an explicit expert-parallel size in the args wins (either framework)
+    elif fw == "sglang" and requested_ep > 1:
+        ep = requested_ep  # SGLang realizes --ep N as --expert-parallel-size N → EP degree = N
+    elif requested_ep > 1 or ep_mode:
+        dp = _ceiling_int_arg(args, ("--data-parallel-size", "--dp-size", "--dp"), default=1)
+        ep = max(int(runtime.tp or 1) * dp, 1)  # vLLM boolean EP: EP group = tp * dp (topology)
+    else:
+        ep = 1
+    tep = 1 if ep > 1 else 0
     cfg: dict = {
         "fw": fw,
         "prec": prec,
@@ -509,7 +529,7 @@ def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool]:
         "isl": runtime.isl,
         "osl": runtime.osl,
         "ep": ep,
-        "tep": 1 if ep_mode else 0,
+        "tep": tep,
         "pp": _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["pp"]),
         "dcp": _ceiling_int_arg(args, _CEILING_INT_ARG_ALIASES["dcp"]),
         "pcp": pcp,
@@ -517,35 +537,51 @@ def _ceiling_config(state: Any, arm: str | None) -> tuple[dict, bool]:
     if fw == "xdit":
         height, width = _read_diffusion_resolution(state)
         cfg.update(num_steps=_read_diffusion_num_steps(state), height=height, width=width)
-    trusted = _ceiling_trusted(args)
-    # A boolean EP / prefill-CP MODE flag with no explicit size flag → degree is underivable here
-    # (vLLM derives it from world/tp) → key would default to 1 and mis-match an external row → untrust
-    # (fall back to native compute). SGLang passes an explicit --ep-size, so it stays trusted.
-    if ep_mode and ep <= 1:
-        trusted = False
-    if "--enable-prefill-cp" in args and pcp <= 1:
-        trusted = False
-    return cfg, trusted
+    # WHY an external ceiling must NOT be read for this config (None = trusted). Named reasons so the
+    # consumer logs exactly what defeated the external read instead of falling back silently.
+    untrust_reason: str | None = None
+    bad_flag = _ceiling_untrusted_flag(args)
+    if bad_flag is not None:
+        untrust_reason = f"un-keyed ceiling-affecting server-arg {bad_flag!r} (the content key cannot distinguish it)"
+    # EP was requested but a real degree (>1) could not be derived from the resolved config → don't
+    # trust an external EP-aware row for it; fall back to native compute (safe).
+    elif ep_requested and ep <= 1:
+        untrust_reason = "expert parallelism requested but a real degree (>1) could not be derived from the resolved config"
+    # Prefill context-parallel MODE flag with no explicit size → degree underivable → untrust.
+    elif "--enable-prefill-cp" in args and pcp <= 1:
+        untrust_reason = "prefill context-parallel enabled without an explicit size flag"
+    return cfg, (untrust_reason is None), untrust_reason
 
 
-def ceiling_config_key(state: Any, arm: str | None, op_name: str | None = None) -> tuple[str, bool]:
-    """``(content-key string, trusted)`` for the arm's config.
+def ceiling_config_key(state: Any, arm: str | None) -> tuple[tuple, bool, str | None]:
+    """``(config identity tuple, trusted, untrust_reason)`` for the arm's config.
 
-    The content key replaces the symbolic arm as the ceiling-CSV row identity, so distinct
-    configs never overwrite each other. ``trusted`` False → external readers fall back to
-    native compute (never a silent wrong external read).
+    The identity (the key columns) replaces the symbolic arm as the ceiling-CSV row identity, so
+    distinct configs never overwrite each other. ``trusted`` False → external readers fall back to
+    native compute (never a silent wrong external read); ``untrust_reason`` names why (else ``None``),
+    so the consumer can log exactly what defeated the external read.
     """
-    cfg, trusted = _ceiling_config(state, arm)
-    return roofline_csv.build_ceiling_key(cfg, op_name=op_name), trusted
+    cfg, trusted, untrust_reason = _ceiling_config(state, arm)
+    return roofline_csv.ceiling_key(cfg), trusted, untrust_reason
 
 
-def _external_store_identity_ok(state: Any, read_dir: Any) -> bool:
-    """The external store must be authored for THIS run's gpu + model.
+def ceiling_config_columns(state: Any, arm: str | None) -> dict[str, str]:
+    """The arm's content key in per-column form (``key_version``/``fw``/determinants), stamped onto
+    a ceiling row so each determinant occupies its own CSV column — these columns are the row's sole
+    identity. Built from the same ``cfg`` as :func:`ceiling_config_key`, so they agree exactly.
+    """
+    cfg, _, _ = _ceiling_config(state, arm)
+    return roofline_csv.ceiling_key_columns(cfg)
+
+
+def _external_store_mismatch(state: Any, read_dir: Any) -> str | None:
+    """WHY the external store is authored for a DIFFERENT run than this one (``None`` = it matches).
 
     ``model``/``gpu`` are per-run constants (not key fields), but a shared/reused external CSV is not
     model/gpu-constant — so validate here and fail-closed (→ native fallback) on a mismatch, guarding
     against a wrong-model/gpu ceiling read under a coincidentally-matching config key. Absence of an
-    identifying column is not a mismatch (backward-compatible).
+    identifying column is not a mismatch (backward-compatible). The returned string names the specific
+    mismatch so the consumer can log exactly why it fell back.
     """
     from pathlib import Path as _Path
 
@@ -555,7 +591,7 @@ def _external_store_identity_ok(state: Any, read_dir: Any) -> bool:
     if gpu:
         arch = roofline_csv.read_arch_peaks(read_dir / "gpu_arch_peaks.csv")
         if arch and not any(str(name).strip().lower() == gpu for name in arch):
-            return False
+            return f"store gpu_arch_peaks {sorted(str(n) for n in arch)} has no entry for this run's gpu {gpu!r}"
     meta = roofline_csv.read_model_meta(read_dir / "model_roofline_meta.csv")
     store_model = (meta or {}).get("model_id")
     if store_model:
@@ -566,8 +602,8 @@ def _external_store_identity_ok(state: Any, read_dir: Any) -> bool:
 
         run_base = os.path.basename(str(runtime.model_path or "").rstrip("/"))
         if _norm_model(store_model) not in (_norm_model(runtime.model_path), _norm_model(run_base)):
-            return False
-    return True
+            return f"store model_id {store_model!r} != this run's model {(run_base or runtime.model_path)!r}"
+    return None
 
 
 def _compute_tag_for_bytes(weight_bytes: float) -> str:
@@ -1324,10 +1360,22 @@ def _external_ceiling_breakdown(state: Any, arm: str | None) -> RooflineBreakdow
     read_dir = state.roofline_csv_read_dir()
     if read_dir is None:
         return None
-    key, trusted = ceiling_config_key(state, arm)
-    # A ceiling-affecting knob HL sets but does not key (spec-decode, dynamic-chunking) or a store
-    # authored for a different model/gpu → do not read an external row; fall back to native compute.
-    if not trusted or not _external_store_identity_ok(state, read_dir):
+    key, trusted, untrust_reason = ceiling_config_key(state, arm)
+    # Two DISTINCT reasons to skip the external row and compute natively, logged separately so an
+    # ignored (MAIDAS-authored) ceiling is never silent: (1) UNTRUSTED — the config carries a
+    # ceiling-affecting knob the key can't express; (2) WRONG STORE — the CSV is for another model/gpu.
+    if not trusted:
+        log.info(
+            "[roofline-csv] CONSUME R skip — UNTRUSTED config: %s; arm=%s -> native fallback (external ceiling NOT read)",
+            untrust_reason, arm,
+        )
+        return None
+    store_mismatch = _external_store_mismatch(state, read_dir)
+    if store_mismatch:
+        log.info(
+            "[roofline-csv] CONSUME R skip — WRONG STORE: %s; arm=%s dir=%s -> native fallback (external ceiling NOT read)",
+            store_mismatch, arm, read_dir,
+        )
         return None
     row = roofline_csv.read_ceiling(read_dir / "roofline_ceiling.csv").get(key)
     peak = row.get("peak_tok_per_sec") if row else None
@@ -1365,13 +1413,12 @@ def write_ceiling_arm(state: Any, arm: str | None, breakdown: RooflineBreakdown)
     if write_dir is None:
         log.debug("[roofline-csv] PRODUCE R skip: external/disabled mode (HL writes no ceiling CSV) arm=%s", arm)
         return
-    key, _ = ceiling_config_key(state, arm)
     path = write_dir / "roofline_ceiling.csv"
     roofline_csv.write_ceiling(
         [
             {
                 "row_type": "arm",
-                "arm": key,
+                **ceiling_config_columns(state, arm),
                 "mem_tok_per_sec": breakdown.mem_tok_per_sec,
                 "cmp_tok_per_sec": breakdown.cmp_tok_per_sec,
                 "peak_tok_per_sec": breakdown.peak_tok_per_sec,
@@ -1403,7 +1450,7 @@ def _read_ceiling_arm(state: Any, arm: str | None) -> RooflineBreakdown | None:
     read_dir = state.roofline_csv_read_dir()
     if read_dir is None:
         return None
-    key, _ = ceiling_config_key(state, arm)
+    key, _, _ = ceiling_config_key(state, arm)
     path = read_dir / "roofline_ceiling.csv"
     row = roofline_csv.read_ceiling(path).get(key)
     peak = row.get("peak_tok_per_sec") if row else None
@@ -1469,7 +1516,7 @@ def write_ceiling_perfmodel(state: Any, arm: str | None, pm_bd: Any, provenance:
     write_dir = state.roofline_csv_write_dir() if hasattr(state, "roofline_csv_write_dir") else None
     if write_dir is None:
         return
-    key, _ = ceiling_config_key(state, arm)
+    cols = ceiling_config_columns(state, arm)
     mem = pm_bd.decode_mem_tok_per_s
     cmp = pm_bd.decode_cmp_tok_per_s
     positive = [v for v in (mem, cmp) if isinstance(v, (int, float)) and v > 0]
@@ -1477,7 +1524,7 @@ def write_ceiling_perfmodel(state: Any, arm: str | None, pm_bd: Any, provenance:
     rows: list[dict] = [
         {
             "row_type": "arm",
-            "arm": key,
+            **cols,
             "mem_tok_per_sec": mem,
             "cmp_tok_per_sec": cmp,
             "peak_tok_per_sec": pm_bd.decode_tok_per_s,
@@ -1494,7 +1541,7 @@ def write_ceiling_perfmodel(state: Any, arm: str | None, pm_bd: Any, provenance:
         rows.append(
             {
                 "row_type": "op",
-                "arm": key,
+                **cols,
                 "op_name": op.name,
                 "flops": op.flops,
                 "bytes_moved": op.bytes_moved,
@@ -1524,8 +1571,19 @@ def read_ceiling_perfmodel(state: Any, arm: str | None) -> tuple[dict[str, Any],
     read_dir = state.roofline_csv_read_dir() if hasattr(state, "roofline_csv_read_dir") else None
     if read_dir is None:
         return None
-    key, trusted = ceiling_config_key(state, arm)
-    if not trusted or not _external_store_identity_ok(state, read_dir):
+    key, trusted, untrust_reason = ceiling_config_key(state, arm)
+    if not trusted:
+        log.info(
+            "[roofline-csv] CONSUME R (perfmodel) skip — UNTRUSTED config: %s; arm=%s -> native fallback (external ceiling NOT read)",
+            untrust_reason, arm,
+        )
+        return None
+    store_mismatch = _external_store_mismatch(state, read_dir)
+    if store_mismatch:
+        log.info(
+            "[roofline-csv] CONSUME R (perfmodel) skip — WRONG STORE: %s; arm=%s dir=%s -> native fallback (external ceiling NOT read)",
+            store_mismatch, arm, read_dir,
+        )
         return None
     all_rows = roofline_csv.read_ceiling(read_dir / "roofline_ceiling.csv")
     arm_row = all_rows.get(key)

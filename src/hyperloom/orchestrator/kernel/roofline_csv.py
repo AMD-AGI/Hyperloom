@@ -17,8 +17,8 @@ Design invariants (see CSV_INTERFACE_REFACTOR_PLAN.md §4):
   * Normalization at the boundary: ``bound_type`` is canonicalized to {compute, memory}
     so no downstream code sees producer-specific spellings.
   * Atomic writes: temp file + ``os.replace`` (crash-safe).
-  * The ceiling writer UPSERTS by key (arm / (op, op_name)) so multiple producers can
-    each contribute a subset of rows without clobbering the file.
+  * The ceiling writer UPSERTS by config identity (one arm row + its op rows, keyed by the
+    determinant columns) so multiple producers can each contribute a subset without clobbering.
 """
 
 from __future__ import annotations
@@ -60,7 +60,6 @@ KERNEL_ROOFLINE_COLUMNS: list[str] = [
 
 CEILING_COLUMNS: list[str] = [
     "row_type",  # "arm" | "op"
-    "arm",
     "op_name",
     "mem_tok_per_sec",
     "cmp_tok_per_sec",
@@ -381,17 +380,27 @@ def arch_row_from_spec(spec: dict) -> dict | None:
     return row
 
 
-def _ceiling_row_key(row: dict) -> tuple:
-    """Upsert key for a ceiling row: ``('arm', arm)`` or ``('op', arm, op_name)``.
-
-    ``arm`` holds the row's config key, so op rows are scoped by config — per-config op
-    breakdowns of different arms never clobber one another.
+def _ceiling_row_identity(row: dict) -> tuple:
+    """A stored row's config identity, built from its per-field key columns (same shape as
+    :func:`ceiling_key`). The stored ``key_version`` is used verbatim, so a row written under a
+    different schema version fails to match rather than being silently re-keyed under the current
+    grammar. The op suffix is handled separately by :func:`_ceiling_row_key`.
     """
-    arm = str(row.get("arm") or "")
+    fw, norm = _ceiling_key_fields(row)
+    return (str(row.get("key_version") or ""), ("fw", fw)) + tuple(norm.items())
+
+
+def _ceiling_row_key(row: dict) -> tuple:
+    """Upsert key for a ceiling row: ``('arm', identity)`` or ``('op', identity, op_name)``.
+
+    The identity is the row's config columns (:func:`_ceiling_row_identity`), so op rows are scoped
+    by config — per-config op breakdowns of different arms never clobber one another.
+    """
+    ident = _ceiling_row_identity(row)
     rtype = str(row.get("row_type") or "arm").strip().lower()
     if rtype == "op":
-        return ("op", arm, str(row.get("op_name") or ""))
-    return ("arm", arm)
+        return ("op", ident, str(row.get("op_name") or ""))
+    return ("arm", ident)
 
 
 def write_ceiling(rows: Iterable[dict], path: Path | str) -> None:
@@ -461,20 +470,20 @@ def read_kernel_roofline(path: Path | str) -> dict[str, dict]:
 
 
 def read_ceiling(path: Path | str) -> dict:
-    """Read ``roofline_ceiling.csv`` -> ``{arm: row}`` plus ``{('op', arm, op_name): row}``.
+    """Read ``roofline_ceiling.csv`` -> ``{identity: row}`` plus ``{('op', identity, op_name): row}``.
 
-    ``arm`` is the row's config key; op rows are scoped by it. ``bound_kind`` is normalized
-    to ``{compute, memory}``. Missing file -> ``{}``.
+    ``identity`` is the row's config identity tuple (:func:`_ceiling_row_identity`); op rows are
+    scoped by it. ``bound_kind`` is normalized to ``{compute, memory}``. Missing file -> ``{}``.
     """
     out: dict = {}
     for row in _read_rows(path):
         row["bound_kind"] = canon_bound(row.get("bound_kind"))
-        arm = row.get("arm")
+        ident = _ceiling_row_identity(row)
         rtype = str(row.get("row_type") or "arm").strip().lower()
         if rtype == "op":
-            out[("op", str(arm or ""), str(row.get("op_name") or ""))] = row
-        elif arm:
-            out[str(arm)] = row
+            out[("op", ident, str(row.get("op_name") or ""))] = row
+        else:
+            out[ident] = row
     return out
 
 
@@ -559,6 +568,16 @@ XDIT_CEILING_KEY_FIELDS: tuple[str, ...] = (
 #: Fields normalized as dtype/precision tokens; the rest render as ints.
 _CEILING_DTYPE_FIELDS: frozenset[str] = frozenset({"prec", "act", "kv"})
 
+#: The content key stored as one column per determinant (+ version/class). These columns ARE the
+#: row identity — there is no packed key string persisted or constructed. Union across frameworks
+#: (xDiT rows leave the LLM-only columns blank, and vice-versa).
+CEILING_KEY_COLUMNS: tuple[str, ...] = ("key_version", "fw") + tuple(
+    dict.fromkeys(LLM_CEILING_KEY_FIELDS + XDIT_CEILING_KEY_FIELDS)
+)
+#: Splice the key columns into the ceiling schema after row_type/op_name. Name-based readers are
+#: order-independent; this placement is purely for human readability of the written CSV.
+CEILING_COLUMNS[2:2] = CEILING_KEY_COLUMNS
+
 
 def _norm_ceiling_field(field: str, value: Any) -> str:
     """Normalize one ceiling-key field: unset -> ``na``; dtype fields via ``_DTYPE_SYNONYMS``
@@ -574,31 +593,48 @@ def _norm_ceiling_field(field: str, value: Any) -> str:
         return str(value).strip().lower()
 
 
-def build_ceiling_key(config: dict, op_name: str | None = None) -> str:
-    """Content key for a ceiling row from its ``config`` (framework-aware).
+def _ceiling_key_fields(config: dict) -> tuple[str, dict[str, str]]:
+    """``(workload_class, {field: normalized})`` — the ONE normalization shared by the identity
+    tuple and the per-column key form, so a row's key columns rebuild to the identical identity.
 
-    ``config`` carries ``fw`` plus the determinant fields (:data:`LLM_CEILING_KEY_FIELDS`
-    for LLM frameworks, :data:`XDIT_CEILING_KEY_FIELDS` for xDiT). Returns
-    ``v1|fw=<f>|<field>=<norm>|...``; an op row appends ``|op=<op_name>``. Every field is
-    always emitted (explicit ``na`` default) so both producers agree byte-for-byte.
+    Keys on the WORKLOAD CLASS, not the specific engine: the analytical ceiling is engine-agnostic
+    within LLM (vllm/sglang compute the same roofline), while diffusion (xdit) uses a wholly different
+    formula — so an external author need not know the exact engine to produce a matching key.
     """
-    # Key on the WORKLOAD CLASS, not the specific engine: the analytical ceiling is engine-agnostic
-    # within LLM (vllm/sglang compute the same roofline), while diffusion (xdit) uses a wholly different
-    # formula. So an external author need not know the exact engine to produce a matching key.
     fw = "xdit" if str(config.get("fw") or "").strip().lower() == "xdit" else "llm"
     fields = XDIT_CEILING_KEY_FIELDS if fw == "xdit" else LLM_CEILING_KEY_FIELDS
-    parts = [CEILING_KEY_VERSION, f"fw={fw}"]
-    parts.extend(f"{name}={_norm_ceiling_field(name, config.get(name))}" for name in fields)
-    key = "|".join(parts)
-    if op_name is not None:
-        key = f"{key}|op={str(op_name).strip()}"
-    return key
+    return fw, {name: _norm_ceiling_field(name, config.get(name)) for name in fields}
+
+
+def ceiling_key(config: dict) -> tuple:
+    """Hashable per-config row identity for a ceiling row (framework-aware).
+
+    The identity IS the key columns — there is no packed string form. Returns
+    ``(version, ("fw", <class>), (<field>, <norm>), ...)`` from :data:`LLM_CEILING_KEY_FIELDS`
+    (LLM) or :data:`XDIT_CEILING_KEY_FIELDS` (xDiT). Every field is always present (explicit
+    ``na`` default) and the order is fixed, so producer and reader agree exactly.
+    """
+    fw, norm = _ceiling_key_fields(config)
+    return (CEILING_KEY_VERSION, ("fw", fw)) + tuple(norm.items())
+
+
+def ceiling_key_columns(config: dict) -> dict[str, str]:
+    """The content key in per-column form: ``{key_version, fw, <determinant>: normalized}``.
+
+    Stamped onto a ceiling row so each determinant occupies its own CSV column — these columns are
+    the sole on-disk identity (no packed key string). :func:`_ceiling_row_identity` rebuilds the
+    same tuple :func:`ceiling_key` produces, so a row is read back under exactly its config.
+    """
+    fw, norm = _ceiling_key_fields(config)
+    cols: dict[str, str] = {"key_version": CEILING_KEY_VERSION, "fw": fw}
+    cols.update(norm)
+    return cols
 
 
 class RooflineResolver:
     """Read-through facade over the three CSVs for consumers.
 
-    ``kernel(name)``, ``arch_peak(device, dtype)``, ``ceiling(arm)``. All lookups are
+    ``kernel(name)``, ``arch_peak(device, dtype)``, ``ceiling(config)``. All lookups are
     fail-soft (missing -> None). ``arch_peak`` returns the matrix peak for the dtype
     or ``None`` when the cell is blank/missing — the caller decides whether ``None``
     means "skip metric" (per-kernel recompute) or "fall through to bf16" (peak-swap).
@@ -622,12 +658,12 @@ class RooflineResolver:
             self._kernels = read_kernel_roofline(self._p("kernel_roofline.csv"))
         return self._kernels.get(canonical_key(str(name)))
 
-    def ceiling(self, arm: str) -> dict | None:
+    def ceiling(self, config: dict) -> dict | None:
         if self._dir is None:
             return None
         if self._ceiling is None:
             self._ceiling = read_ceiling(self._p("roofline_ceiling.csv"))
-        return self._ceiling.get(str(arm))
+        return self._ceiling.get(ceiling_key(config))
 
     def model_meta(self) -> dict | None:
         """The single model-level memory-size/geometry row, or ``None`` when absent."""
