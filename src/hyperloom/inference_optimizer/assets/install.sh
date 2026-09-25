@@ -192,12 +192,11 @@ EOF
 }
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
-# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
-# ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
-# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
-MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
+# Pin Magpie to the 0.3.0 release candidate commit. Operators can re-pin
+# with MAGPIE_REF=<tag|sha>, but the selected package must expose AgentXConfig
+# and the final recipe-fingerprint parity fix; an older importable AgentX build
+# is upgraded instead of being silently kept.
+MAGPIE_REF="${MAGPIE_REF:-3642ce66ae46ca4dc125340b3d14a3f4640c369b}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit
@@ -283,7 +282,7 @@ Options:
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
-    default is a commit that already copies benchmark scripts atomically),
+    default provides native InferenceX AgentX and atomic script copies),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
   INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
     to; default is a current upstream HEAD SHA),
@@ -1496,11 +1495,15 @@ for spec in specs:
 # root after import.
 ensure_magpie() {
   log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
+  # Reuse the runtime's PEP 610-aware identity resolver.  Running `git -C`
+  # directly below site-packages can otherwise walk up into the Hyperloom
+  # checkout and mistake Hyperloom's HEAD for the installed Magpie commit.
+  local capability_probe='import inspect,re,sys; from pathlib import Path; import Magpie; from Magpie.modes.benchmark import AgentXConfig; from Magpie.modes.benchmark.agentx import _expand_single_node_agentx_entries; from hyperloom.inference_optimizer.agentx.native import _MAGPIE_SOURCE_IDENTITY_CODE; scope={}; exec(_MAGPIE_SOURCE_IDENTITY_CODE,scope); assert AgentXConfig.from_value("enable"); assert "run-eval" in inspect.getsource(_expand_single_node_agentx_entries); expected=sys.argv[1].strip().lower(); package_root=Path(Magpie.__file__).resolve().parent; commit,_=scope["_resolve_magpie_source_identity"](package_root); scope["_validate_magpie_execution_tree"](package_root,commit) if commit in scope["_AUDITED_MAGPIE_EXECUTION_TREES"] else None; assert not re.fullmatch(r"[0-9a-f]{7,40}",expected) or (commit and (commit.startswith(expected) or expected.startswith(commit)))'
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
-      log "Magpie importable"
+    if "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+      log "Magpie native AgentX capability available"
     else
-      warn "Magpie not importable (check-only mode, skipping pip install)"
+      warn "Magpie native AgentX capability unavailable (check-only mode, skipping pip install)"
     fi
     return 0
   fi
@@ -1509,11 +1512,16 @@ ensure_magpie() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
-      log "Magpie already importable; skipping pip install"
+    if "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+      log "Magpie native AgentX capability already available; skipping pip install"
     else
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
-      "$PYTHON" -c "import Magpie" >/dev/null
+      if ! "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+        # pip keeps an installed VCS commit even when its files were patched.
+        # Reinstall only Magpie; the first install already resolved its deps.
+        "$PYTHON" -m pip install --quiet --force-reinstall --no-deps "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
+        "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null
+      fi
       log "Magpie installed OK from ${MAGPIE_PACKAGE_SPEC}"
     fi
     local installed_root
@@ -1706,86 +1714,6 @@ ensure_aiperf() {
   fi
 }
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
-# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
-# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
-# (Magpie's client call sites never forward the `trust` flag upstream), and
-# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
-# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
-# Coordinator process does not reach it; we patch the cloned source in place
-# at install time. The patcher itself is idempotent + flock-serialised +
-# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
-#
-# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_compat_patches() {
-  if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
-    return 0
-  fi
-  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
-  # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
-  # InferenceX ``benchmarks/`` copies Magpie executes and teach
-  # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
-  # MUST run after ensure_inferencex has exported INFERENCEX_PATH — see the
-  # call ordering at the bottom of this script.
-  if MAGPIE_PATH="$MAGPIE_PATH" INFERENCEX_PATH="${INFERENCEX_PATH:-}" "$PYTHON" - <<'PY'
-import os, sys
-from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-    magpie_scripts_patch_status,
-)
-status = magpie_scripts_patch_status(
-    os.environ["MAGPIE_PATH"],
-    os.environ.get("INFERENCEX_PATH") or None,
-)
-print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
-      f"eval_flag_ok={status.eval_flag_ok}",
-      file=sys.stderr)
-if status.ok:
-    sys.exit(0)
-if not status.remote_trust_ok:
-    sys.exit(2)
-# eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
-# survives in a caller script AND InferenceX's run_lm_eval would reject it
-# (a defence-in-depth patch that merely could not be applied, with no live
-# flag, is NOT counted as a failure -- install-time now matches the run-time
-# ensure_eval_concurrency_compat judgement). This is the genuinely fatal case:
-# every RUN_EVAL=true baseline aborts on 'Unknown parameter'. Distinct exit so
-# install can name the failure mode.
-if not status.eval_flag_ok:
-    sys.exit(5)
-sys.exit(1)
-PY
-  then
-    log "Magpie compatibility patches OK"
-  else
-    rc=$?
-    if [ "$rc" -eq 2 ]; then
-      warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
-    elif [ "$rc" -eq 5 ]; then
-      # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
-      # RUN_EVAL=true baseline in InferenceX's run_lm_eval arg parser, no
-      # results*.json is written, and the baseline accuracy gate then stops the
-      # whole run with `baseline_accuracy_failed`. There is no salvage: the
-      # executor deliberately does NOT fall back to RUN_EVAL=false for a genuine
-      # baseline (a throughput-only baseline cannot satisfy the accuracy gate).
-      # Set MAGPIE_EVAL_FLAG_STRICT=0 only when accuracy eval is genuinely
-      # not required for this deployment.
-      if is_falsy "${MAGPIE_EVAL_FLAG_STRICT:-1}"; then
-        warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line); MAGPIE_EVAL_FLAG_STRICT=${MAGPIE_EVAL_FLAG_STRICT:-} (falsy), continuing anyway — RUN_EVAL=true baselines will abort on InferenceX's 'Unknown parameter: --concurrent-requests'."
-      else
-        die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
-      fi
-    else
-      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
-    fi
-  fi
-}
-
 # --- 3. InferenceX checkout: fresh clone from upstream ---
 #
 # Previously this function scanned a list of shared-filesystem candidates
@@ -1813,9 +1741,28 @@ PY
 #     is reproducible. We still record the resolved commit into the session
 #     manifest (see manifest.py / _describe_dep) so runs stay traceable even
 #     when an operator overrides INFERENCEX_REF.
+ensure_inferencex_aiperf_submodule() {
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if [ ! -f "$INFERENCEX_PATH/utils/aiperf/pyproject.toml" ]; then
+      warn "InferenceX utils/aiperf submodule is not initialized at ${INFERENCEX_PATH}"
+    fi
+    return 0
+  fi
+  run git -C "$INFERENCEX_PATH" submodule sync -- utils/aiperf || return 1
+  if ! run git -C "$INFERENCEX_PATH" submodule update --init --depth 1 -- utils/aiperf; then
+    warn "shallow utils/aiperf submodule update failed; retrying full pinned gitlink"
+    run git -C "$INFERENCEX_PATH" submodule update --init -- utils/aiperf || return 1
+  fi
+  if [ "$DRY_RUN" -eq 0 ] && [ ! -f "$INFERENCEX_PATH/utils/aiperf/pyproject.toml" ]; then
+    warn "InferenceX utils/aiperf submodule did not materialize at ${INFERENCEX_PATH}"
+    return 1
+  fi
+  return 0
+}
+
 ensure_inferencex() {
   if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
-    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
+    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env)"
     export INFERENCEX_PATH
     return 0
   fi
@@ -1842,6 +1789,10 @@ ensure_inferencex() {
     return 0
   fi
   export INFERENCEX_PATH
+  if ! ensure_inferencex_aiperf_submodule; then
+    warn "InferenceX clone succeeded but its pinned utils/aiperf submodule is unavailable"
+    return 1
+  fi
   log "InferenceX cloned at ${INFERENCEX_PATH} (pinned ${INFERENCEX_REF})"
 }
 
@@ -2153,21 +2104,11 @@ acquire_install_lock
 # ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
+  log "benchmark backend is bypass; skipping ensure_magpie"
 else
   ensure_magpie
 fi
 ensure_inferencex
-# Ordering matters: the Magpie script patch also scrubs the redundant
-# `--concurrent-requests` eval flag from the InferenceX `benchmarks/` copies
-# Magpie actually executes, and teaches `benchmark_lib.sh::run_lm_eval` to
-# tolerate it. Both need $INFERENCEX_PATH, which only ensure_inferencex exports
-# — running the patch before it silently skipped those targets and left
-# RUN_EVAL=true baselines aborting on 'Unknown parameter'.
-if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_compat_patches
-fi
-
 # aiperf (AgentX client) installs whenever this build ships the AgentX assets.
 #
 # It used to be gated on INSTALL_AIPERF / HYPERLOOM_AGENTX being truthy HERE, in

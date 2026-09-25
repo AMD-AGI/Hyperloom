@@ -158,6 +158,7 @@ def test_auto_detected_inferencex_candidates_must_be_writable():
 
 _PIN = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 _OTHER = "a4bb43afa7fd74c1356583ed29e51421be010f0f"
+_AIPERF_PIN = "754356e9a39acc6cc6afb242d123bb57c3fb6f75"
 
 
 def _checkout(tmp_path, name="co"):
@@ -203,6 +204,61 @@ def test_explicit_empty_ref_skips_the_comparison(tmp_path, monkeypatch):
     """Used right after a clone, which is at the ref by construction."""
     _at(monkeypatch, _OTHER)
     assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref="") is True
+
+
+def test_native_agentx_checkout_fails_closed_without_exact_git_identity(tmp_path, monkeypatch):
+    """Legacy source drops stay supported, but native recipes require an exact pin."""
+    checkout = _checkout(tmp_path)
+    (checkout / "utils" / "aiperf").mkdir(parents=True)
+    (checkout / "utils" / "aiperf" / "pyproject.toml").write_text("[project]\n")
+    _at(monkeypatch, "")
+
+    assert (
+        cli_preflight._inferencex_checkout_ok(
+            checkout,
+            ref=_PIN,
+            require_agentx_submodule=True,
+        )
+        is False
+    )
+    assert (
+        cli_preflight._inferencex_checkout_ok(
+            checkout,
+            ref="main",
+            require_agentx_submodule=True,
+        )
+        is False
+    )
+
+
+def test_native_agentx_checkout_verifies_the_pinned_aiperf_gitlink(tmp_path, monkeypatch):
+    checkout = _checkout(tmp_path)
+    aiperf = checkout / "utils" / "aiperf"
+    aiperf.mkdir(parents=True)
+    (aiperf / "pyproject.toml").write_text("[project]\n")
+
+    def head(path):
+        return _AIPERF_PIN if Path(path) == aiperf else _PIN
+
+    monkeypatch.setattr(cli_preflight, "_inferencex_head_sha", head)
+    monkeypatch.setattr(
+        cli_preflight.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=f"160000 commit {_AIPERF_PIN}\tutils/aiperf\n",
+        ),
+    )
+
+    assert (
+        cli_preflight._inferencex_checkout_ok(
+            checkout,
+            ref=_PIN,
+            require_agentx_submodule=True,
+        )
+        is True
+    )
 
 
 def test_incomplete_checkout_still_rejected_before_any_ref_work(tmp_path, monkeypatch):

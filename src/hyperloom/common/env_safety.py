@@ -271,6 +271,18 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
+            # Native AgentX recipe identity. Per-candidate changes would
+            # retarget the workload rather than tune the selected server.
+            "AGENTX_MODEL_ID",
+            "AGENTX_SERVER_SCRIPT",
+            "AGENTX_RECIPE",
+            "AGENTX_CONFIG_FILE",
+            "AGENTX_SELECTOR",
+            "AGENTX_MODE",
+            "AGENTX_FAILED_REQUEST_THRESHOLD",
+            "AGENTX_DATASET",
+            "AGENTX_WARMUP_REQUESTS_PER_LANE",
+            "WEKA_LOADER_OVERRIDE",
             # Reroute traffic, model downloads or TLS trust.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
@@ -286,7 +298,24 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
 )
 
 # Env names a per-variant override may never set.
-BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
+BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = (
+    BLOCKED_UNTRUSTED_ENV_NAMES
+    | BENCHMARK_SECRET_ENV_NAMES
+    | frozenset(
+        {
+            "AGENTX_MODEL_ID",
+            "AGENTX_SERVER_SCRIPT",
+            "AGENTX_RECIPE",
+            "AGENTX_CONFIG_FILE",
+            "AGENTX_SELECTOR",
+            "AGENTX_MODE",
+            "AGENTX_FAILED_REQUEST_THRESHOLD",
+            "AGENTX_DATASET",
+            "AGENTX_WARMUP_REQUESTS_PER_LANE",
+            "WEKA_LOADER_OVERRIDE",
+        }
+    )
+)
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")

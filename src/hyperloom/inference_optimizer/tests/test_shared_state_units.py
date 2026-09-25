@@ -50,6 +50,13 @@ class TestResolveGradingAnchorTput:
         assert resolve_grading_anchor_tput(SharedState()) == 0.0
 
 
+def test_agentx_resume_disables_legacy_warm_replay_state(tmp_path):
+    state = SharedState(benchmark_mode="agentx", warm_replay_enabled=True)
+    state.save(tmp_path)
+
+    assert SharedState.load_or_init(tmp_path).warm_replay_enabled is False
+
+
 class TestInjectStackBaseParams:
     @staticmethod
     def _state():

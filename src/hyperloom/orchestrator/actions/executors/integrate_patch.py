@@ -51,7 +51,7 @@ from ...state.shared_state import (
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.perf_metric import VERDICT_KEEP, agentx_active
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
 from ...delivery import file_digest, load_records
 from ..stop_attribution import stopped_by_the_run_class
@@ -2275,6 +2275,21 @@ class IntegratePatchExecutor:
             }
 
         shared_state = extra.get("shared_state") or extra.get("state")
+        if agentx_active(
+            benchmark_mode=getattr(shared_state, "benchmark_mode", ""),
+        ):
+            return {
+                "status": "skipped",
+                "error_class": "unsupported_upstream_launcher_hook",
+                "error": (
+                    "Native AgentX cannot benchmark source or artifact mutations "
+                    "until the pinned InferenceX launcher exposes a fingerprinted "
+                    "optimizer hook."
+                ),
+                "specialist_task_id": str(params.get("specialist_task_id") or "").strip(),
+                "patches_applied": [],
+                "patches_reverted": [],
+            }
         if shared_state is not None and not params.get("accuracy_baseline"):
             _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
             if isinstance(_base_acc, (int, float)) and _base_acc > 0:

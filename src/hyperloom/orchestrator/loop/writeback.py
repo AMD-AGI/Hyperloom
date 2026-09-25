@@ -3704,6 +3704,7 @@ class WritebackCollaborator:
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
+                "agentx_gpu_count": result.get("agentx_gpu_count"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
                 "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
                 "e2e_norm_intvty_p50": result.get("e2e_norm_intvty_p50"),
@@ -3718,6 +3719,7 @@ class WritebackCollaborator:
                 current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
                 for _axis in (
                     "input_throughput",
+                    "agentx_gpu_count",
                     "tpot_p90_ms",
                     "e2e_norm_intvty_p50",
                     "duration_seconds",
@@ -5916,6 +5918,21 @@ class WritebackCollaborator:
             ``"fallback": "geak_harness"`` when only GEAK's own harness can
             deploy the candidate.
         """
+        from hyperloom.common.perf_metric import agentx_active
+
+        if agentx_active(
+            benchmark_mode=getattr(self.shared_state, "benchmark_mode", ""),
+        ):
+            # The native launcher has no optimizer-argv/overlay hook.  A GEAK
+            # rebench would therefore enqueue a grid candidate that can never
+            # be represented by the canonical AgentX harness.  Refuse here as
+            # well as at KERNEL dispatch so resumed/stale handbacks cannot
+            # create an un-runnable explore task.
+            return {
+                "skipped": True,
+                "reason": "unsupported_upstream_launcher_hook",
+            }
+
         benchmark_script = baseline_benchmark_script(self.shared_state)
         recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}

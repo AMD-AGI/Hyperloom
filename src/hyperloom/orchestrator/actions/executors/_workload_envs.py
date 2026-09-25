@@ -33,7 +33,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
@@ -253,6 +253,20 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
 AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kimik3")
 AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
 AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
+_AGENTX_IDENTITY_ENVS = frozenset(
+    {
+        "AGENTX_MODEL_ID",
+        "AGENTX_SERVER_SCRIPT",
+        "AGENTX_RECIPE",
+        "AGENTX_CONFIG_FILE",
+        "AGENTX_SELECTOR",
+        "AGENTX_MODE",
+        "AGENTX_FAILED_REQUEST_THRESHOLD",
+        "AGENTX_DATASET",
+        "AGENTX_WARMUP_REQUESTS_PER_LANE",
+        "WEKA_LOADER_OVERRIDE",
+    }
+)
 
 
 def _agentx_model_family(model: str) -> str:
@@ -435,6 +449,165 @@ def build_agentx_workload_spec(
     }
 
 
+def _config_enabled(value: Any) -> bool:
+    """Interpret one serialized Magpie ``enabled`` value."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+    return bool(value)
+
+
+def _serialized_native_agentx_enabled(value: Any) -> bool:
+    """Read ``benchmark.agentx`` without importing the optional AgentX package."""
+    if isinstance(value, Mapping):
+        return _config_enabled(value.get("enabled", True))
+    return _config_enabled(value)
+
+
+def _agentx_profile_requested(bench: Mapping[str, Any]) -> bool:
+    """Return whether Magpie v1 would reject native AgentX profiling.
+
+    Native AgentX rejects all four profiler/analysis integrations, not just
+    torch traces. Route every such leg through Hyperloom's phase-gated legacy
+    client so a custom YAML cannot survive materialization only to fail during
+    Magpie config validation.
+    """
+    raw_envs = bench.get("envs")
+    envs = raw_envs if isinstance(raw_envs, Mapping) else {}
+    if str(envs.get("PROFILE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    raw_profiler = bench.get("profiler")
+    profiler = raw_profiler if isinstance(raw_profiler, Mapping) else {}
+    for section_name in ("torch_profiler", "system_profiler", "tracelens"):
+        raw_section = profiler.get(section_name)
+        section = raw_section if isinstance(raw_section, Mapping) else {}
+        if _config_enabled(section.get("enabled", False)):
+            return True
+    raw_gap = bench.get("gap_analysis")
+    gap = raw_gap if isinstance(raw_gap, Mapping) else {}
+    return _config_enabled(gap.get("enabled", False))
+
+
+def _agentx_setting(envs: Mapping[str, Any], name: str) -> str:
+    """Resolve one AgentX setting from persisted YAML, then the process."""
+    return str(envs.get(name) or os.environ.get(name) or "").strip()
+
+
+def _native_agentx_config(envs: Mapping[str, Any], existing: Any = None) -> str | dict[str, Any]:
+    """Build Magpie's native AgentX value without erasing YAML-native pins."""
+    existing_config = dict(existing) if isinstance(existing, Mapping) else {}
+    # Hyperloom changes CONC per baseline/grid/sweep round. Magpie gives an
+    # explicit agentx.concurrency precedence over benchmark.envs.CONC, so
+    # carrying a source-YAML value here would make every materialized rung run
+    # the same load while being labelled with a different concurrency.
+    existing_config.pop("concurrency", None)
+    # ``resolved`` describes the previous point.  Magpie will recompute it for
+    # this round after Hyperloom settles CONC; carrying it forward makes a
+    # topology-changing input look pre-resolved when it is not.
+    previous_resolved = existing_config.pop("resolved", None)
+    if not existing_config.get("selector") and isinstance(previous_resolved, Mapping):
+        # A previously unique point can become ambiguous when only CONC
+        # changes (for example GLM's TP4/HiCache and TP8/no-offload arms both
+        # contain CONC=2). Preserve the accepted arm, not its old concurrency,
+        # as an explicit Magpie selector before asking it to resolve the rung.
+        stable_selector_keys = (
+            "tp",
+            "pp",
+            "pcp-size",
+            "ep",
+            "dcp-size",
+            "dp-attn",
+            "spec-decoding",
+            "kv-offloading",
+            "kv-offload-backend",
+        )
+        derived_selector = {key: previous_resolved[key] for key in stable_selector_keys if key in previous_resolved}
+        if derived_selector:
+            existing_config["selector"] = derived_selector
+    mode = _agentx_setting(envs, "AGENTX_MODE").lower() or str(existing_config.get("mode") or "canonical").lower()
+    if mode not in {"canonical", "fast"}:
+        raise ValueError("AGENTX_MODE must be 'canonical' or 'fast'")
+    recipe = _agentx_setting(envs, "AGENTX_RECIPE") or str(existing_config.get("recipe") or "").strip()
+    config_file = _agentx_setting(envs, "AGENTX_CONFIG_FILE") or str(existing_config.get("config_file") or "").strip()
+    selector_raw = _agentx_setting(envs, "AGENTX_SELECTOR")
+    threshold_raw = _agentx_setting(envs, "AGENTX_FAILED_REQUEST_THRESHOLD")
+
+    existing_selector = existing_config.get("selector")
+    selector: dict[str, Any] = dict(existing_selector) if isinstance(existing_selector, Mapping) else {}
+    if selector_raw:
+        try:
+            parsed = json.loads(selector_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"AGENTX_SELECTOR must be a JSON object: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("AGENTX_SELECTOR must be a JSON object")
+        selector = parsed
+
+    if (
+        not existing_config
+        and mode == "canonical"
+        and not recipe
+        and not config_file
+        and not selector
+        and not threshold_raw
+    ):
+        # This is the public, zero-boilerplate Magpie switch the integration is
+        # designed around. Expand to an object only for an explicit override.
+        return "enable"
+
+    config: dict[str, Any] = {**existing_config, "enabled": True, "mode": mode}
+    if recipe:
+        config["recipe"] = recipe
+    if config_file:
+        config["config_file"] = config_file
+    if selector:
+        config["selector"] = selector
+    if threshold_raw:
+        try:
+            threshold = float(threshold_raw)
+        except ValueError as exc:
+            raise ValueError("AGENTX_FAILED_REQUEST_THRESHOLD must be a number between 0 and 1") from exc
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("AGENTX_FAILED_REQUEST_THRESHOLD must be between 0 and 1")
+        config["failed_request_threshold"] = threshold
+    elif "failed_request_threshold" in config:
+        configured_threshold = to_float(config["failed_request_threshold"])
+        if configured_threshold is None or not 0.0 <= configured_threshold <= 1.0:
+            raise ValueError("benchmark.agentx.failed_request_threshold must be between 0 and 1")
+        config["failed_request_threshold"] = configured_threshold
+    return config
+
+
+def _native_agentx_local_model_path(model_ref: str) -> str:
+    """Return a local checkpoint override, excluding Hugging Face repo IDs.
+
+    InferenceX launchers interpret every non-empty ``MODEL_PATH`` as a local
+    download directory. Forwarding ``amd/GLM-5.2-MXFP4`` there would therefore
+    create a relative ``amd/...`` tree under the checkout instead of using the
+    normal Hugging Face cache. Relative local paths remain available with an
+    explicit ``./`` prefix; absolute and home-relative paths are unambiguous.
+    """
+    candidate = str(model_ref or "").strip()
+    if candidate.count("/") == 1 and not candidate.startswith(("/", ".", "~")):
+        return ""
+    return str(Path(candidate).expanduser().resolve()) if candidate else ""
+
+
+def _canonical_agentx_model(envs: Mapping[str, Any], model_path: str) -> str:
+    """Resolve the canonical InferenceX model id separately from local weights."""
+    explicit = _agentx_setting(envs, "AGENTX_MODEL_ID")
+    if explicit:
+        return explicit
+    candidate = str(model_path or "").strip()
+    # A normal Hugging Face identity is safe to reuse when --model itself is
+    # remote. Absolute/relative filesystem paths are never guessed into an id.
+    if candidate.count("/") == 1 and not candidate.startswith(("/", ".", "~")):
+        return candidate
+    raise ValueError(
+        "Native AgentX requires AGENTX_MODEL_ID=<canonical InferenceX model id>; "
+        "keep the local checkpoint in --model (it is forwarded as MODEL_PATH)"
+    )
+
+
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -442,8 +615,9 @@ def apply_agentx_switch(
     conc: Any = None,
     active: bool | None = None,
     grading: Mapping[str, Any] | None = None,
+    allow_profile_compat: bool = False,
 ) -> None:
-    """Switch serving-framework benchmarks to the AgentX aiperf client.
+    """Switch serving benchmarks to native Magpie AgentX or its trace shim.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap,
     the client's warmup grace and the published ``workload_spec.concurrency`` are
@@ -464,20 +638,62 @@ def apply_agentx_switch(
     if not framework or framework_registry.is_scriptable(framework):
         return
     envs = bench.setdefault("envs", {})
-    bench["benchmark_script"] = "aiperf_client.sh"
+    local_model = str(
+        model_path
+        or envs.get("MODEL_PATH")
+        or envs.get("MODEL")
+        or bench.get("model")
+        or os.environ.get("MODEL_PATH", "")
+    ).strip()
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
-    _agentx_env = agentx_env_for_conc(conc)
+    resolved_conc: int | None = None
+    if conc not in (None, ""):
+        if isinstance(conc, bool):
+            raise ValueError("AgentX concurrency must be a positive integer")
+        try:
+            resolved_conc = int(conc)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("AgentX concurrency must be a positive integer") from exc
+        if resolved_conc <= 0:
+            raise ValueError("AgentX concurrency must be a positive integer")
+        # This is the value the native launcher consumes. Publishing only the
+        # workload_spec value would make the result metadata disagree with the
+        # actual replay.
+        envs["CONC"] = resolved_conc
+    _agentx_env = agentx_env_for_conc(resolved_conc)
     envs["RUN_EVAL"] = "false"
-    envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
-    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
-    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
-    # documents it as a supported knob; without forwarding it only works when
-    # the benchmark process happens to inherit the full parent environment,
-    # which is exactly the kind of silent difference this path exists to remove.
+    profile_compat = _agentx_profile_requested(bench)
+    if profile_compat and not allow_profile_compat:
+        raise ValueError(
+            "Native AgentX profiler/gap-analysis settings are diagnostic-only "
+            "and may be materialized only by ProfileExecutor; they cannot "
+            "become a baseline, grid, or optimization measurement."
+        )
+    forbidden_native_corpus_envs = (
+        "AGENTX_DATASET",
+        "AGENTX_WARMUP_REQUESTS_PER_LANE",
+        "WEKA_LOADER_OVERRIDE",
+    )
+    if not profile_compat:
+        overridden = [
+            name for name in forbidden_native_corpus_envs if str(envs.get(name) or os.environ.get(name) or "").strip()
+        ]
+        if overridden:
+            raise ValueError(
+                "Native AgentX corpus selection belongs to the resolved "
+                "InferenceX recipe; remove " + ", ".join(overridden)
+            )
+
+    # The profiler compatibility client still consumes the legacy AGENTX_*
+    # controls.  Native Magpie must not inherit them: duration, entry count,
+    # dataset, or a foreign AIPerf binary would change the replay without
+    # changing InferenceX's recipe fingerprint.
     for key, value in os.environ.items():
-        if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
+        if profile_compat and (key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE")):
+            if key in _AGENTX_IDENTITY_ENVS and str(envs.get(key) or "").strip():
+                continue
             envs[key] = value
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
@@ -491,6 +707,65 @@ def apply_agentx_switch(
             _grace,
             _raw_grace or "unset",
         )
+
+    canonical_model = _canonical_agentx_model(envs, local_model)
+    if profile_compat:
+        # Magpie AgentX v1 deliberately rejects torch/system profiling. Keep
+        # Hyperloom's phase-gated client for this one leg, and clear the native
+        # launcher pin so the client cannot recursively invoke a full AgentX
+        # replay as though it were a server-only script.
+        bench.pop("agentx", None)
+        bench["benchmark_script"] = "aiperf_client.sh"
+        bench["model"] = local_model
+        envs["MODEL"] = local_model
+        # The compatibility server still needs the local checkpoint path, but
+        # corpus selection must follow the InferenceX recipe identity.  A local
+        # directory name is arbitrary and cannot identify the 1M/256k corpus.
+        envs["AGENTX_MODEL_ID"] = canonical_model
+        envs["AGENTX_SERVER_SCRIPT"] = ""
+        native = False
+    else:
+        from hyperloom.inference_optimizer.agentx.native import validate_native_launcher_name
+
+        script = _agentx_setting(envs, "AGENTX_SERVER_SCRIPT")
+        validate_native_launcher_name(script)
+        agentx_config = _native_agentx_config(envs, bench.get("agentx"))
+        bench["agentx"] = agentx_config
+        bench["benchmark_script"] = script
+        bench["model"] = canonical_model
+        # The generic Magpie path maps MI325X/MI308X to the MI300X launcher
+        # family. Native AgentX recipes validate the physical hardware encoded
+        # in their model-specific launcher, so retain the probed target identity
+        # instead of that compatibility alias.
+        physical_runner = str(os.environ.get("TARGET_GPU_TYPE") or "").strip().lower()
+        if physical_runner:
+            bench["runner_type"] = physical_runner
+        raw_gpu_selection = bench.get("gpu_selection")
+        gpu_selection = dict(raw_gpu_selection) if isinstance(raw_gpu_selection, Mapping) else {}
+        # The bundled Hyperloom baselines disable Magpie GPU selection because
+        # the generic path derives a mask from CLI TP. AgentX resolves its
+        # physical rank count only after loading the InferenceX recipe, so let
+        # Magpie select that count unless an explicit visible-device mask (or
+        # candidates list) constrains it. A stale generic ``count`` must not
+        # override the resolved recipe topology.
+        gpu_selection["auto"] = True
+        gpu_selection.pop("count", None)
+        bench["gpu_selection"] = gpu_selection
+        envs.pop("MODEL", None)
+        envs.pop("MODEL_PATH", None)
+        local_model_path = _native_agentx_local_model_path(local_model)
+        if local_model_path:
+            envs["MODEL_PATH"] = local_model_path
+        # Persist both identity pins so a resumed/grid rebuild remains native
+        # even if its subprocess did not inherit the operator's shell.
+        envs["AGENTX_MODEL_ID"] = canonical_model
+        envs["AGENTX_SERVER_SCRIPT"] = script
+        # The launcher owns native replay shape.  Hyperloom only supplies a
+        # deterministic grace bound; legacy corpus/warmup controls are rejected
+        # above because they are not part of the InferenceX recipe fingerprint.
+        envs["AGENTIC_WARMUP_GRACE_PERIOD"] = str(_grace)
+        native = True
+
     # Publish LAST, and only now: the spec is what GEAK replays, so every value
     # in it must be the one this function settled on. ``warmup_grace_period_s``
     # reads AGENTX_WARMUP_GRACE_PERIOD back off ``envs`` above, so publishing
@@ -498,13 +773,23 @@ def apply_agentx_switch(
     # while the client ran with the scaled one. ``_agentx_env`` carries this
     # round's CONC, so the spec's concurrency is the served concurrency by
     # construction rather than by later repair.
-    bench["workload_spec"] = build_agentx_workload_spec(
+    spec = build_agentx_workload_spec(
         bench,
         envs,
-        model_path=model_path,
+        model_path=canonical_model,
         env=_agentx_env,
         grading=grading,
     )
+    spec["harness"] = "magpie-native-agentx" if native else "hyperloom-profiler-compat"
+    if native:
+        mode = str(bench["agentx"].get("mode") or "canonical") if isinstance(bench["agentx"], dict) else "canonical"
+        # InferenceX owns these values on the native path. Do not advertise
+        # legacy AGENTX_DURATION/NUM_ENTRIES knobs that it does not consume.
+        spec["duration_s"] = 1200 if mode == "fast" else 3600
+        spec["geak_loop_duration_s"] = min(int(spec["duration_s"]), 900)
+        spec["num_entries"] = 393
+        spec["warmup_requests_per_lane"] = 1 if mode == "fast" else 10
+    bench["workload_spec"] = spec
 
 
 def prepare_agentx_runtime(
@@ -514,18 +799,24 @@ def prepare_agentx_runtime(
     config_path: Path | str | None = None,
     output_dir: Path | str | None = None,
     active: bool | None = None,
+    allow_profile_compat: bool = False,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
-    runtime_env = env or os.environ
+    runtime_env = env if env is not None else os.environ
     if active is None:
         active = agentx_enabled(runtime_env)
         if not active and config_path:
             try:
                 materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
                 benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = (
-                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
-                )
+                if isinstance(benchmark, dict):
+                    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+                    active = str(
+                        benchmark.get("benchmark_script") or ""
+                    ) == "aiperf_client.sh" or native_agentx_enabled(benchmark.get("agentx"))
+                else:
+                    active = False
             except (OSError, ValueError, TypeError):
                 active = False
     if not active:
@@ -540,6 +831,7 @@ def prepare_agentx_runtime(
             env=runtime_env,
             inferencex_path=str(inferencex_path or ""),
             config_path=Path(config_path) if config_path else "",
+            allow_profile_compat=allow_profile_compat,
         )
     except AgentXPreflightError as exc:
         return f"AgentX preflight failed: {exc}"
@@ -1033,6 +1325,9 @@ def default_baseline_config() -> Path:
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
+    explicit = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
     return asset_root() / rel
@@ -1283,6 +1578,7 @@ def materialize_config_with_envs(
     flydsl_source_dirs: bool = False,
     agentx_mode: bool | None = None,
     grading: Mapping[str, Any] | None = None,
+    allow_agentx_profile_compat: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -1335,6 +1631,8 @@ def materialize_config_with_envs(
         grading: The session's ``SharedState.grading``, which settles the axis
             and noise band the AgentX ``workload_spec`` publishes to GEAK.
             ``None`` preserves the environment-derived fallback.
+        allow_agentx_profile_compat: Permit the non-native, diagnostic AgentX
+            profile shim. Only ``ProfileExecutor`` may set this.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -1351,6 +1649,15 @@ def materialize_config_with_envs(
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
+    source_native_agentx = _serialized_native_agentx_enabled(bench.get("agentx"))
+    if source_native_agentx and agentx_mode is False:
+        raise ValueError(
+            "The benchmark YAML enables agentx, but the Hyperloom session is "
+            "synthetic. Set HYPERLOOM_AGENTX=1 so grading, epochs, budgets, and "
+            "runtime preparation use the AgentX contract."
+        )
+    source_agentx_model = str(bench.get("model") or "").strip() if source_native_agentx else ""
+    source_agentx_script = str(bench.get("benchmark_script") or "").strip() if source_native_agentx else ""
     if model_path:
         bench["model"] = str(model_path)
     precision = os.environ.get("PRECISION", "").strip()
@@ -1366,6 +1673,10 @@ def materialize_config_with_envs(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
+    if source_agentx_model:
+        envs.setdefault("AGENTX_MODEL_ID", source_agentx_model)
+    if source_agentx_script:
+        envs.setdefault("AGENTX_SERVER_SCRIPT", source_agentx_script)
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -1375,7 +1686,20 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
+    apply_agentx_switch(
+        bench,
+        model_path,
+        active=True if source_native_agentx else agentx_mode,
+        grading=grading,
+        allow_profile_compat=allow_agentx_profile_compat,
+    )
+    native_agentx = False
+    if "agentx" in bench:
+        native_agentx = _serialized_native_agentx_enabled(bench.get("agentx"))
+    agentx_workload = (
+        isinstance(bench.get("workload_spec"), Mapping)
+        and str(bench["workload_spec"].get("kind") or "").strip() == "agentx_trace_replay"
+    )
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -1392,8 +1716,31 @@ def materialize_config_with_envs(
                 f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
                 f"to boot server (would launch the wrong framework's entrypoint)"
             )
-    effective_inferencex_path = str(inferencex_path or "").strip() or os.environ.get("INFERENCEX_PATH", "").strip()
+    explicit_inferencex_path = str(inferencex_path or "").strip()
+    configured_inferencex_path = str(bench.get("inferencex_path") or "").strip()
+    runtime_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if native_agentx:
+        # Preflight may replace an unwritable or wrong-revision source checkout
+        # with the verified pinned checkout.  That post-preflight runtime path
+        # is authoritative for native AgentX; letting the original YAML win
+        # here would launch and fingerprint a different tree than preflight
+        # validated.  A task-scoped explicit path remains highest priority.
+        effective_inferencex_path = explicit_inferencex_path or runtime_inferencex_path or configured_inferencex_path
+        if (
+            runtime_inferencex_path
+            and configured_inferencex_path
+            and Path(runtime_inferencex_path).expanduser().resolve()
+            != Path(configured_inferencex_path).expanduser().resolve()
+        ):
+            log.warning(
+                "Native AgentX: replacing benchmark.inferencex_path=%s with the preflight-validated INFERENCEX_PATH=%s",
+                configured_inferencex_path,
+                runtime_inferencex_path,
+            )
+    else:
+        effective_inferencex_path = explicit_inferencex_path or configured_inferencex_path or runtime_inferencex_path
     if effective_inferencex_path:
+        effective_inferencex_path = str(Path(effective_inferencex_path).expanduser().resolve())
         # Persist the resolved InferenceX checkout so Magpie's runtime checkout
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
@@ -1405,6 +1752,13 @@ def materialize_config_with_envs(
         "TP",
         "PORT",
     ):
+        # Hyperloom's process TP is the number of physical ranks reserved by
+        # the outer scheduler.  In an AgentX recipe, envs.TP is inner tensor
+        # parallelism and physical ranks are TP x PP x PCP.  Do not overwrite
+        # the recipe selector with the outer count when PP/PCP is greater than
+        # one; Magpie will persist the resolved inner TP below.
+        if native_agentx and env_key == "TP":
+            continue
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = _coerce_workload_int_env(env_key, val)
@@ -1420,12 +1774,16 @@ def materialize_config_with_envs(
     tp_from_yaml = envs.get("TP")
     rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
     rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
-    if tp_from_env:
+    native_gpu_count = os.environ.get("HYPERLOOM_AGENTX_GPU_COUNT", "").strip()
+    if native_agentx and native_gpu_count:
+        resolved_tp = _coerce_workload_int_env("HYPERLOOM_AGENTX_GPU_COUNT", native_gpu_count)
+    elif tp_from_env:
         resolved_tp = int(tp_from_env)
     elif rocr_yaml and not tp_from_yaml:
         # Derive TP from the user-pinned GPU list when the YAML doesn't set TP.
         resolved_tp = len(rocr_devices)
-        envs["TP"] = resolved_tp
+        if not native_agentx:
+            envs["TP"] = resolved_tp
     else:
         resolved_tp = int(tp_from_yaml or 1)
     # Auto-clamp TP to the visible GPU count. Override via
@@ -1443,8 +1801,15 @@ def materialize_config_with_envs(
                 visible,
             )
             resolved_tp = visible
-    envs["TP"] = resolved_tp
-    if not rocr_yaml or len(rocr_devices) < resolved_tp:
+    if not native_agentx:
+        envs["TP"] = resolved_tp
+    if native_agentx and not rocr_yaml:
+        # The pinned InferenceX agentic launchers copy ROCR's physical values
+        # back into HIP_VISIBLE_DEVICES after ROCR has re-indexed the devices.
+        # Pin the only mapping that is safe for those scripts; recipe resolution
+        # below verifies the count and rejects nonzero masks.
+        envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(resolved_tp))
+    elif not native_agentx and (not rocr_yaml or len(rocr_devices) < resolved_tp):
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
             log.warning(
@@ -1466,6 +1831,147 @@ def materialize_config_with_envs(
     isl_val = int(envs.get("ISL") or _default_isl)
     osl_val = int(envs.get("OSL") or _default_osl)
     conc_val = int(envs.get("CONC") or _default_conc)
+
+    if native_agentx:
+        # Native InferenceX launchers own their full argv.  The pinned revision
+        # does not expose an EXTRA_SGLANG_ARGS/EXTRA_VLLM_ARGS hook, so accepting
+        # any Hyperloom candidate override here would benchmark an unchanged
+        # server and mislabel it as the candidate.  Keep the baseline path
+        # useful, and fail closed until that interface exists upstream.
+        framework_env = server_args_env_name(bench.get("framework"))
+        source_server_args = str(envs.get(framework_env) or "").strip()
+        ref_args, reference_envs, reference_controls = resolve_reference_launch()
+        unsupported: list[str] = []
+        if source_server_args:
+            unsupported.append(f"benchmark.envs.{framework_env}")
+        if server_args:
+            unsupported.append("extra_server_args")
+        if ref_args or reference_envs or any(reference_controls.values()):
+            unsupported.append("reference launch recipe")
+        if remove_args:
+            unsupported.append("remove_args")
+        if unset_envs:
+            unsupported.append("unset_envs")
+        if replace_args:
+            unsupported.append("args_mode=replace")
+        if drop_moe_runner_backend:
+            unsupported.append("drop_moe_runner_backend")
+        if flydsl_source_dirs:
+            unsupported.append("flydsl_source_dirs")
+
+        combined_extra: dict[str, Any] = dict(_operator_extra_env())
+        if extra_envs:
+            combined_extra.update(extra_envs)
+        safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
+            combined_extra,
+            allow_predicate=is_allowed_variant_env_key,
+        )
+        for key in dropped_extra_envs:
+            log.warning(
+                "Dropping unsafe extra_envs key %s before AgentX materialization",
+                key,
+            )
+        allowed_round_envs = {"CONC", "NUM_PROMPTS", "NUM_WARMUPS"}
+        unsupported_extra = sorted(set(safe_extra_envs).difference(allowed_round_envs))
+        if unsupported_extra:
+            unsupported.append("extra_envs=" + ",".join(unsupported_extra))
+        if unsupported:
+            raise ValueError(
+                "Native AgentX cannot apply Hyperloom server candidates with "
+                "the pinned InferenceX launcher (no optimizer-argv hook): " + "; ".join(unsupported)
+            )
+
+        if "CONC" in safe_extra_envs:
+            requested_conc = _coerce_workload_int_env(
+                "CONC",
+                str(safe_extra_envs["CONC"]),
+            )
+            if requested_conc != conc_val:
+                raise ValueError(
+                    "Native AgentX concurrency is fixed for the session: "
+                    f"resolved CONC={conc_val}, candidate requested {requested_conc}"
+                )
+            envs["CONC"] = requested_conc
+        # NUM_PROMPTS/NUM_WARMUPS are synthetic-client controls and are allowed
+        # in generic sweep payloads only so they can be discarded explicitly.
+        envs.pop("NUM_PROMPTS", None)
+        envs.pop("NUM_WARMUPS", None)
+        envs.pop(framework_env, None)
+
+        # Re-settle the public switch after the fixed CONC has landed, then ask
+        # the pinned Magpie implementation to resolve and persist the exact
+        # InferenceX recipe point before any caller can acquire GPU resources.
+        apply_agentx_switch(
+            bench,
+            model_path,
+            conc=envs.get("CONC"),
+            active=True,
+            grading=grading,
+            allow_profile_compat=allow_agentx_profile_compat,
+        )
+        if not effective_inferencex_path:
+            raise ValueError(
+                "Native AgentX requires inferencex_path or INFERENCEX_PATH during benchmark materialization"
+            )
+        # Magpie overlays benchmark.envs on its inherited environment before
+        # invoking the InferenceX launcher.  Persist the runtime search paths
+        # so a later resume uses (or rejects drift from) the same ROCm/Python
+        # libraries instead of silently inheriting a different login shell.
+        runtime_search_paths = {
+            name: os.environ.get(name, "").strip() for name in ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH")
+        }
+        if runtime_search_paths["PATH"]:
+            path_parts = runtime_search_paths["PATH"].split(":")
+            if not path_parts or path_parts[0] != "/opt/venv/bin":
+                runtime_search_paths["PATH"] = f"/opt/venv/bin:{runtime_search_paths['PATH']}"
+        for name, value in runtime_search_paths.items():
+            if value:
+                envs[name] = value
+        # The native resolver fingerprints the complete BenchmarkConfig it is
+        # handed.  Remove credentials before that boundary so the persisted
+        # YAML and its launch-config fingerprint describe the same config.
+        # Filtering only after resolution makes every source YAML carrying a
+        # control-plane credential fail launch-boundary revalidation even
+        # though the credential itself is correctly omitted from the file.
+        envs = bench.setdefault("envs", {})
+        filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
+            envs,
+            allow_predicate=lambda key: key not in BENCHMARK_SECRET_ENV_NAMES,
+        )
+        if dropped_credentials:
+            log.warning(
+                "Dropping control-plane credentials from benchmark envs: %s",
+                ", ".join(sorted(dropped_credentials)),
+            )
+            envs.clear()
+            envs.update(filtered_envs)
+
+        from hyperloom.inference_optimizer.agentx.native import resolve_native_recipe
+
+        resolve_native_recipe(
+            bench,
+            inferencex_path=effective_inferencex_path,
+            expected_gpu_count=resolved_tp,
+        )
+        envs = bench.setdefault("envs", {})
+        # Pinned recipe inputs do not add credentials.  Keep that invariant
+        # explicit so a future resolver change fails closed instead of either
+        # persisting a secret or mutating the already-fingerprinted config.
+        _, unsafe_resolved_envs = filter_untrusted_env_mapping(
+            envs,
+            allow_predicate=lambda key: key not in BENCHMARK_SECRET_ENV_NAMES,
+        )
+        if unsafe_resolved_envs:
+            raise ValueError(
+                "Native AgentX resolver produced unsafe benchmark envs after "
+                "execution fingerprinting: " + ", ".join(sorted(unsafe_resolved_envs))
+            )
+        seal_server_argv(envs, bench.get("framework"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        materialized = output_dir / out_name
+        with materialized.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+        return materialized
 
     # Steady-state window for profiling configs (detected by YAML
     # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
@@ -1583,11 +2089,17 @@ def materialize_config_with_envs(
 
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
+        patch_requested = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
+        patch_attempted = patch_requested and not agentx_workload
         # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
         # "never tried because the image already carries it", and those two call for different reactions when a
         # trace later turns up without annotations.
         envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+        if patch_requested and agentx_workload:
+            # Diagnostic capture shares the recipe's installed framework.
+            # Patching it would change subsequent native measurements.
+            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+            log.info("AgentX diagnostic profiling preserves the installed framework; source patches are skipped.")
         if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
@@ -1806,7 +2318,7 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
     # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
     # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
-    combined_extra: dict[str, Any] = dict(_operator_extra_env())
+    combined_extra = dict(_operator_extra_env())
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
@@ -2076,7 +2588,12 @@ def materialize_config_with_envs(
     # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
     # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
     _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
+    if (
+        not agentx_workload
+        and _tracelens_patch_enabled()
+        and "sglang" in _fw
+        and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
+    ):
         if not ensure_sglang_patched_for_ck_blockscale():
             log.warning(
                 "CK fp8 block-scale patch could not be applied; "
@@ -2165,6 +2682,20 @@ def materialize_config_with_envs(
             if "--mark-trace" not in extra:
                 envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
     _apply_vllm_source_runtime(bench, envs)
+    if agentx_workload:
+        # Re-settle after process envs, reference controls, variant extra_envs,
+        # and unset_envs have all landed. In particular this keeps the launcher's
+        # CONC, the native AgentX selector, warmup grace, and the GEAK handoff on
+        # one round value. The switch is idempotent and deliberately removes a
+        # stale source ``agentx.concurrency`` in favor of envs.CONC.
+        apply_agentx_switch(
+            bench,
+            model_path,
+            conc=envs.get("CONC"),
+            active=True,
+            grading=grading,
+            allow_profile_compat=allow_agentx_profile_compat,
+        )
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,

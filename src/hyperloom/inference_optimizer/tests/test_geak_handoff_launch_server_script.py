@@ -42,7 +42,9 @@ def _checkout(tmp_path: Path, *scripts: str, lib: bool = True) -> Path:
     if lib:
         (benchmarks / "benchmark_lib.sh").write_text("# stub\n", encoding="utf-8")
     for name in scripts:
-        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+        script = benchmarks / name
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# stub\n", encoding="utf-8")
     return benchmarks.parent
 
 
@@ -54,20 +56,20 @@ def _recipe(
     framework: str = "vllm",
     runner_type: str = "mi355x",
     envs: dict | None = None,
+    agentx: object | None = None,
 ) -> str:
+    benchmark = {
+        "framework": framework,
+        "runner_type": runner_type,
+        "envs": envs if envs is not None else {"FRAMEWORK": framework},
+        "benchmark_script": benchmark_script,
+        "inferencex_path": inferencex_path,
+    }
+    if agentx is not None:
+        benchmark["agentx"] = agentx
     recipe = tmp_path / "baseline_config.with_envs.yaml"
     recipe.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": framework,
-                    "runner_type": runner_type,
-                    "envs": envs if envs is not None else {"FRAMEWORK": framework},
-                    "benchmark_script": benchmark_script,
-                    "inferencex_path": inferencex_path,
-                }
-            }
-        ),
+        yaml.safe_dump({"benchmark": benchmark}),
         encoding="utf-8",
     )
     return str(recipe)
@@ -109,6 +111,34 @@ def test_a_missing_builtin_stays_silent_instead_of_pinning_a_dead_path(tmp_path:
     """No vllm_mi355x.sh on disk -> "" so GEAK degrades as it does today."""
     root = _checkout(tmp_path, "aiperf_client.sh")
     assert _RESOLVE(_recipe(tmp_path, benchmark_script="aiperf_client.sh", inferencex_path=str(root))) == ""
+
+
+def test_native_agentx_resolves_the_generic_server_only_proxy(tmp_path: Path) -> None:
+    root = _checkout(tmp_path, "sglang_mi355x.sh", "single_node/agentic/glm.sh")
+    resolved = _RESOLVE(
+        _recipe(
+            tmp_path,
+            benchmark_script="single_node/agentic/glm.sh",
+            inferencex_path=str(root),
+            framework="sglang",
+            agentx="enable",
+        )
+    )
+    assert resolved == str(root / "benchmarks" / "sglang_mi355x.sh")
+
+
+def test_native_agentx_missing_proxy_fails_closed(tmp_path: Path) -> None:
+    root = _checkout(tmp_path, "single_node/agentic/glm.sh")
+    recipe = _recipe(
+        tmp_path,
+        benchmark_script="single_node/agentic/glm.sh",
+        inferencex_path=str(root),
+        framework="sglang",
+        agentx="enable",
+    )
+
+    with pytest.raises(RuntimeError, match="server-only proxy"):
+        _RESOLVE(recipe)
 
 
 def test_a_checkout_without_benchmark_lib_stays_silent(tmp_path: Path) -> None:

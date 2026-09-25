@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX grading: an E2E-normalised-interactivity objective guarded by per-chip throughput."""
+"""AgentX grading: median interactivity guarded by slow-tail interactivity and output throughput."""
 
 from __future__ import annotations
 
@@ -165,6 +165,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
+        ("agentx_gpu_count", _positive(source.get("agentx_gpu_count"))),
     ):
         if value is not None:
             snap[key] = value
@@ -193,6 +194,15 @@ def intvty_of(snapshot: Mapping[str, float] | None) -> float:
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     """Total token throughput from a perf snapshot; 0.0 when unavailable."""
     return axis_of(snapshot, GRADED_TOTAL)
+
+
+def total_tput_per_chip_of(snapshot: Mapping[str, float] | None) -> float:
+    """Total token throughput per physical GPU; 0.0 when not measurable."""
+    total = total_tput_of(snapshot)
+    if total <= 0 or not isinstance(snapshot, Mapping):
+        return 0.0
+    gpu_count = _positive(snapshot.get("agentx_gpu_count"))
+    return total / gpu_count if gpu_count is not None else total
 
 
 def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
@@ -226,6 +236,9 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     if error_rate is not None:
         axes[GRADED_ERROR_RATE] = error_rate
+    gpu_count = _positive(source.get("agentx_gpu_count"))
+    if gpu_count is not None:
+        axes["agentx_gpu_count"] = gpu_count
     return axes
 
 
@@ -298,6 +311,25 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def passes_tput_guard(
+    candidate: Mapping[str, float],
+    anchor: Mapping[str, float],
+    *,
+    noise_pct: float | None = None,
+) -> bool:
+    """Whether per-chip candidate throughput holds within the band."""
+    candidate_count = _positive(candidate.get("agentx_gpu_count"))
+    anchor_count = _positive(anchor.get("agentx_gpu_count"))
+    # A one-sided topology is not comparable: dividing only one side would mix
+    # aggregate and per-chip units. Old snapshots with neither count retain the
+    # historical aggregate comparison; new native results carry both counts
+    # from the InferenceX aggregate.
+    if (candidate_count is None) != (anchor_count is None):
+        return False
+    band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
+    return _within_band(total_tput_per_chip_of(candidate), total_tput_per_chip_of(anchor), band)
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
@@ -357,9 +389,11 @@ __all__ = [
     "is_agentx_mode",
     "output_tput_of",
     "parse_intvty_noise_pct",
+    "passes_tput_guard",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
     "rounds_are_comparable",
     "stamp_output_per_gpu",
     "total_tput_of",
+    "total_tput_per_chip_of",
 ]

@@ -547,7 +547,7 @@ EVAL_PROBE_TARGET_PARTS = ("utils", "evals", "patches", "lm_eval_sitecustomize.p
 def _discover_inferencex_roots(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every InferenceX checkout root Hyperloom should patch."""
+    """Use the explicit checkout, or discover defaults when none is supplied."""
     roots: list[Path] = []
     seen: set[Path] = set()
 
@@ -567,6 +567,8 @@ def _discover_inferencex_roots(
         roots.append(resolved)
 
     _add(inferencex_path)
+    if inferencex_path is not None:
+        return roots
     _add(os.environ.get("INFERENCEX_PATH", "").strip() or None)
     magpie_dir = (os.environ.get("MAGPIE_PATH") or "").strip()
     if magpie_dir:

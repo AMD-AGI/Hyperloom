@@ -25,8 +25,15 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 def _should_use_ray_backend() -> bool:
     """Whether GPU/serving work runs through the Ray backend.
 
-    ``INFERENCE_OPTIMIZER_RAY_EXEC`` wins when set; otherwise single-node is ON, multi-node OFF, and pytest OFF.
+    Native AgentX stays local. Otherwise ``INFERENCE_OPTIMIZER_RAY_EXEC`` wins
+    when set; single-node defaults ON, multi-node and pytest default OFF.
     """
+    # Magpie AgentX v1 is local-only.  More importantly, its idle-GPU selector
+    # reads the materialized YAML rather than Ray's ambient actor mask, so
+    # nesting it in a Ray lease can escape the allocation.  Keep the entire
+    # AgentX session on the direct local backend.
+    if env_flag("HYPERLOOM_AGENTX", default=False):
+        return False
     from ._multi_node_env import is_multi_node
 
     auto = not os.environ.get("PYTEST_CURRENT_TEST") and not is_multi_node()

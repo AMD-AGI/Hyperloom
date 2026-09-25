@@ -140,8 +140,11 @@ def _write_patch_pair(
 def graded_integrate_case(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    # Exercise the interactivity grading policy without claiming this source
+    # mutation is representable by native AgentX.  Native AgentX itself is
+    # measurement-only until InferenceX exposes an optimizer hook.
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
     base_yaml = tmp_path / "base.yaml"
@@ -149,7 +152,7 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
     target, patch_file = _write_patch_pair(tmp_path)
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
-    state.benchmark_mode = "agentx"
+    state.benchmark_mode = "synthetic"
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -218,7 +221,7 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
 
 # integrate_handler
 @pytest.mark.asyncio
-async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir, tmp_path, monkeypatch):
+async def test_integrate_handler_refuses_persisted_agentx_before_mutation(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -286,15 +289,14 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         session_dir=session_dir,
     )
 
-    assert seen["benchmark"]["benchmark_script"] == "aiperf_client.sh"
-    assert seen["shared_state"] is not None
-    assert seen["shared_state"].benchmark_mode == "agentx"
+    assert seen == {}
     assert yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
-    assert result["status"] == "ok"
-    assert result["decision"] == "KEEP"
-    assert result["graded_objective"] == "e2e_norm_intvty_p50"
-    assert result["bench_result"] == measurement
-    assert result["gain_pct"] == pytest.approx(10.0)
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+    assert result["status"] == "skipped"
+    assert result["decision"] == "NEEDS_REVIEW"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["patches_applied"] == []
+    assert result["patches_reverted"] == []
 
 
 @pytest.fixture
@@ -321,7 +323,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     base_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
-    state.benchmark_mode = "agentx"
+    state.benchmark_mode = "synthetic"
     state.baseline_double_run = False
     state.baseline_tput = 100.0
     state.baseline_config_path = str(base_yaml)
@@ -418,7 +420,7 @@ async def test_integrate_handler_materializes_recipe_controls(
         assert "REENABLE" not in envs
     else:
         assert envs["REENABLE"] == "candidate"
-    assert benchmarks[0]["benchmark_script"] == "aiperf_client.sh"
+    assert benchmarks[0]["benchmark_script"] == "sglang_mi300x.sh"
     assert base_yaml.read_bytes() == original_yaml
 
 
@@ -609,29 +611,21 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
     monkeypatch.setenv("RUN_EVAL", "true")
-    # AgentX currently falls back to one round; admit its script only in this
-    # test to exercise deferred double-run scheduling, not enable AgentX reuse.
-    monkeypatch.setattr(
-        _server_lifecycle,
-        "MAGPIE_BUILTIN_SCRIPTS",
-        _server_lifecycle.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
-    )
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
-    state.benchmark_mode = "agentx"
+    state.benchmark_mode = "synthetic"
     state.baseline_double_run = True
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
@@ -754,7 +748,6 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agentx_env", [True, False], ids=["env", "persisted-mode"])
 @pytest.mark.parametrize(
     "output,total,intvty,decision",
     [
@@ -768,11 +761,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
-    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision
+    session_dir, graded_integrate_case, output, total, intvty, decision
 ):
     _, payload, measurement, target = graded_integrate_case
-    if not agentx_env:
-        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     measurement.update(
         output_throughput=output,
         total_token_throughput=total,
@@ -855,7 +846,7 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
     if explicit_output:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     else:
-        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         state.benchmark_mode = ""
         state.save(session_dir)
     measurement.update(output_throughput=output, total_token_throughput=900.0, e2e_norm_intvty_p90=90.0)
@@ -922,24 +913,19 @@ async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate", ["accuracy", "submission_valid"])
-async def test_integrate_handler_intvty_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
+async def test_integrate_handler_intvty_win_still_requires_accuracy_evidence(session_dir, graded_integrate_case):
     _, payload, measurement, target = graded_integrate_case
-    measurement[gate] = 0.60 if gate == "accuracy" else False
+    measurement["accuracy"] = 0.60
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert result["decision"] == "REVERT"
     assert result["revert_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
-    if gate == "accuracy":
-        assert result["decision_reason"] == "accuracy_regression"
-        assert result["accuracy_pass"] is False
-        assert result["gain_pct"] == pytest.approx(10.0)
-        assert result["bench_result"] == measurement
-    else:
-        assert result["error_class"] == "bench_exception"
-        assert result["rebaseline_detail"] == measurement
+    assert result["decision_reason"] == "accuracy_regression"
+    assert result["accuracy_pass"] is False
+    assert result["gain_pct"] == pytest.approx(10.0)
+    assert result["bench_result"] == measurement
 
 
 @pytest.mark.asyncio

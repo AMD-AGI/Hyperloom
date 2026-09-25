@@ -20,7 +20,53 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
-Nothing yet.
+- **Run AgentX measurements through native Magpie/InferenceX launchers.** The
+  tested pair is Magpie 0.3.0 release-candidate commit
+  `3642ce66ae46ca4dc125340b3d14a3f4640c369b` and InferenceX commit
+  `3d5581562f643f9bdeb8410cd924e2c70906c966`. Magpie 0.3.0 is pinned by
+  commit while its release PR awaits merge. Install preserves the audited
+  package and launcher trees; preflight repairs Magpie files changed by an
+  earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
+  `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.
+  A new
+  `--benchmark-config <yaml>` option accepts the Magpie source config;
+  `benchmark.agentx: enable` automatically selects Hyperloom's AgentX session
+  and grading mode. `HYPERLOOM_AGENTX` remains an optional legacy switch, not a
+  second requirement. The YAML can provide `benchmark.model`,
+  `benchmark.precision`, `benchmark.framework`, `benchmark.runner_type`,
+  `benchmark.run_mode`, `benchmark.benchmark_script`, optional
+  `benchmark.inferencex_path`, effective `benchmark.docker_image`, fixed
+  `benchmark.envs.CONC`, and YAML-native `benchmark.agentx.selector`. Hyperloom
+  pre-resolves each recipe through the benchmark interpreter,
+  separates a canonical model id from local `MODEL_PATH`, requires an explicit
+  `single_node/agentic` launcher, and validates strict recipe/launch/raw
+  fingerprints plus trusted topology. This addresses
+  [#1601](https://github.com/AMD-AGI/Hyperloom/issues/1601).
+  **Upgrade note:** native local mode takes its effective image pin from
+  `benchmark.docker_image` (an override included in the fingerprint) or the
+  resolved recipe default; an existing `HYPERLOOM_IMAGE` must match it. Omitted
+  `--tp`/`--ep` are filled from resolved recipe topology; explicit values are
+  consistency assertions. Topology changes are rejected, and Hyperloom derives
+  the zero-based `ROCR_VISIBLE_DEVICES` mask with `gpu_selection.auto=false`.
+  Native AgentX
+  bypasses outer Ray; explicitly enabling `INFERENCE_OPTIMIZER_RAY_EXEC` fails.
+  The launchers are never modified and expose no optimizer-argv hook, so native
+  server-arg/env candidates fail closed: this is a measurement-only release,
+  not server-configuration optimization. Native AgentX concurrency sweep
+  defaults off, and explicitly passing `--enable-conc-sweep` fails preflight.
+  Native runs collect no PyTorch trace; PRELUDE's generic-server compatibility
+  profile remains diagnostic and is not recipe-identical. It skips TraceLens/CK
+  framework source patches to preserve subsequent native measurements, with
+  potentially reduced trace annotation coverage,
+  while native `KERNEL_AGENT`/GEAK records `skipped` with
+  `unsupported_upstream_launcher_hook` instead of dispatching. AIPerf
+  `profile`/`profiled` fields are workload statistics. Finally, `publishable`
+  is only the Magpie protocol attestation; Hyperloom separately binds the
+  selected recipe to exact audited launcher bytes and the pinned checkout. It
+  does not cryptographically attest the actual outer image. The execution
+  identity additionally hashes the effective, scrubbed launcher environment
+  for audited server/framework/runtime controls, while excluding credentials,
+  cache routing, output paths, and unrelated login-shell variables.
 
 ## Hyperloom 1.1.2 release
 
@@ -1074,7 +1120,9 @@ are marked below; the full per-change list is in the
   `HYPERLOOM_AGENTX`); `--conc-sweep-concs` still overrides both. The `sweep`
   action is gone from the LLM catalogue, the executor registry and the phase
   contract, and `conc_sweep_done` / `conc_sweep_failed` collapse into
-  `sweep_done` / `sweep_failed` with no alias for the old spelling.
+  `sweep_done` / `sweep_failed` with no alias for the old spelling. This records
+  the 1.1.0 behavior; the Unreleased native AgentX bridge above supersedes its
+  AgentX default by disabling the sweep and rejecting explicit enablement.
 
 - **The post-KEEP confirmation round is removed** *(breaking change — session record)*:
   an `explore` variant and an `integrate_patch` candidate were each re-benched

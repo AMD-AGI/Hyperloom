@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -163,6 +164,59 @@ def _neutralize_seed_io(monkeypatch):
 
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+
+def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _neutralize_seed_io(monkeypatch)
+    inferencex = tmp_path / "InferenceX"
+    inferencex.mkdir()
+    source = tmp_path / "operator-agentx.yaml"
+    source_text = "benchmark:\n  agentx: enable\n  framework: sglang\n"
+    source.write_text(source_text, encoding="utf-8")
+    pins = {
+        "AGENTX_MODEL_ID": "amd/GLM-5.2-MXFP4",
+        "AGENTX_SERVER_SCRIPT": "single_node/agentic/glm.sh",
+        "INFERENCEX_PATH": str(inferencex),
+        "HYPERLOOM_IMAGE": "rocm/agentx:accepted",
+        "AGENTX_MODE": "canonical",
+        "AGENTX_RECIPE": "glm5-agentic",
+        "AGENTX_CONFIG_FILE": "configs/amd-master.yaml",
+        "AGENTX_FAILED_REQUEST_THRESHOLD": "0.1",
+        "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT": "a" * 64,
+        "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT": "b" * 64,
+        "HYPERLOOM_AGENTX_GPU_COUNT": "4",
+        "MAGPIE_REF": "c" * 40,
+        "INFERENCEX_REF": "d" * 40,
+    }
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
+    monkeypatch.setenv(
+        "HYPERLOOM_BENCHMARK_CONFIG_SHA256",
+        hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+    )
+    for name, value in pins.items():
+        monkeypatch.setenv(name, value)
+
+    state = cb._seed_shared_state(
+        tmp_path,
+        _args(enable_conc_sweep=None),
+        session_id="agentx-session",
+    )
+
+    snapshot = tmp_path / "benchmark.source.yaml"
+    assert snapshot.read_text(encoding="utf-8") == source_text
+    assert state.benchmark_mode == "agentx"
+    assert state.agentx_runtime_pins == pins
+    assert state.benchmark_source_config_path == str(snapshot)
+    assert state.active_inferencex_path == str(inferencex.resolve())
+    assert state.warm_replay_enabled is False
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["agentx_runtime_pins"] == pins
+    assert persisted["benchmark_source_config_path"] == str(snapshot)
+    assert persisted["warm_replay_enabled"] is False
 
 
 def test_seed_records_the_launch_verdict_for_the_partition_shape(

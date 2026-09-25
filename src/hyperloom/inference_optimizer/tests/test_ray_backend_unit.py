@@ -56,6 +56,13 @@ def test_should_use_ray_backend_unset_multi_node_false(monkeypatch: pytest.Monke
     assert rb._should_use_ray_backend() is False
 
 
+def test_agentx_session_forces_direct_local_execution(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    assert rb._should_use_ray_backend() is False
+    assert rb.ray_gpu_specialist_exec_enabled() is False
+
+
 # ── visible-device merge invariant ───────────────────────────────────────────
 def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.MonkeyPatch):
     """Ray owns *_VISIBLE_DEVICES; the caller must never override them."""
@@ -286,6 +293,7 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="process-tree supervision requires Linux procfs")
 def test_managed_process_start_and_reap():
     """A supervised process is reaped on stop() — no detached GPU-proc escape."""
     mgr = ManagedServerProcess()
@@ -304,6 +312,7 @@ def test_managed_process_start_and_reap():
     assert not _pid_alive(pid), "supervised process must not survive stop()"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
 def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
     """The parent-death signal must be SIGTERM, never SIGKILL.
 
@@ -330,6 +339,7 @@ def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
     assert log_path.read_text(encoding="utf-8").strip() == str(int(signal.SIGTERM))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
 def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
     """An abrupt owner death leaves no server behind.
 
@@ -381,6 +391,7 @@ def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
             os.killpg(server_pgid, signal.SIGKILL)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="process-tree supervision requires Linux procfs")
 def test_managed_process_stop_idempotent():
     mgr = ManagedServerProcess()
     mgr.start(["sleep", "5"])
@@ -570,6 +581,80 @@ def test_num_gpus_for_config_reads_tp(tmp_path: Path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text("benchmark:\n  envs:\n    TP: 4\n", encoding="utf-8")
     assert gr._num_gpus_for_config(cfg) == 4.0
+
+
+def test_num_gpus_for_config_counts_tp_pp_and_pcp(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "benchmark:\n  envs:\n    TP: 2\n    PP_SIZE: 2\n    PCP_SIZE: 2\n",
+        encoding="utf-8",
+    )
+    assert gr._num_gpus_for_config(cfg) == 8.0
+
+
+def test_num_gpus_for_config_prefers_resolved_agentx_topology(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  agentx: enable\n"
+        "  envs:\n"
+        "    TP: 1\n"
+        "  workload_spec:\n"
+        "    resolved_topology:\n"
+        "      tp: 2\n"
+        "      pp: 2\n"
+        "      pcp_size: 2\n"
+        "      gpu_count: 8\n",
+        encoding="utf-8",
+    )
+    assert gr._num_gpus_for_config(cfg) == 8.0
+
+
+def test_num_gpus_for_config_rejects_inconsistent_agentx_topology(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  agentx: enable\n"
+        "  envs:\n"
+        "    TP: 16\n"
+        "  workload_spec:\n"
+        "    resolved_topology:\n"
+        "      tp: 2\n"
+        "      pp: 2\n"
+        "      pcp_size: 2\n"
+        "      gpu_count: 4\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid native AgentX resolved topology"):
+        gr._num_gpus_for_config(cfg)
+
+
+def test_num_gpus_for_config_ignores_stale_topology_outside_agentx(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    TP: 3\n"
+        "    PP_SIZE: 2\n"
+        "  workload_spec:\n"
+        "    resolved_topology:\n"
+        "      tp: 2\n"
+        "      pp: 2\n"
+        "      pcp_size: 2\n"
+        "      gpu_count: 8\n",
+        encoding="utf-8",
+    )
+
+    assert gr._num_gpus_for_config(cfg) == 6.0
 
 
 def test_num_gpus_for_config_defaults_to_one(tmp_path: Path):
@@ -1826,6 +1911,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     assert lease._actor is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="process-tree supervision requires Linux procfs")
 def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_double):
     """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first."""
     lease = serving_lease_on_a_ray_double
@@ -1842,6 +1928,7 @@ def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_doubl
     assert lease._actor is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="process-tree supervision requires Linux procfs")
 def test_releasing_a_specialist_lease_reaps_its_subprocess(monkeypatch: pytest.MonkeyPatch):
     """The same invariant on the specialist lease, which used to skip the stop.
 

@@ -938,44 +938,21 @@ class KernelPhase(PhaseHandler):
 
     @staticmethod
     def _resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
-        """Name the server-phase script GEAK should launch through Magpie.
+        """Resolve AgentX's server-only proxy for GEAK, failing closed for native recipes."""
+        from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
+        from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
 
-        GEAK infers its launcher from the recipe's ``benchmark_script``, which on
-        every non-AgentX run IS a server launcher. The AgentX switch replaces
-        that field with the aiperf client -- which boots a server, replays the
-        corpus for ``AGENTX_DURATION``, then tears the server down in its exit
-        trap. Run under ``MAGPIE_RUN_PHASE=server`` it therefore returns no pid,
-        and GEAK's bench aborts before it measures a single repeat.
-
-        Naming the builtin the client itself delegates to keeps GEAK on the
-        Magpie launch path -- the reason that launcher exists, since the platform
-        kernel preset, ``--trust-remote-code`` and the gpu-mem-util default are
-        not flags and so cannot be recovered from the accepted-flags handoff --
-        while letting its own bench repeats run again.
-
-        Resolution mirrors ``aiperf_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
-        override, the same ``{framework}_{gpu}.sh`` fallback, the same
-        ``<checkout>/benchmarks/`` directory and deliberately no recursive
-        search, so what we advertise is the path that would have booted the
-        server rather than merely a plausible one. Recipe-recorded values beat
-        the ambient env because the recipe is the record of what actually ran.
-
-        Returns "" for any non-AgentX recipe -- there GEAK's own derivation names
-        the script that really launched the baseline, which is strictly better
-        than anything re-derived here -- and "" whenever the builtin cannot be
-        confirmed on disk, leaving current behaviour untouched. Never raises.
-        """
-        try:
-            from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
-
-            # Only the AgentX client misleads the inference; anything else in
-            # this field is the launcher GEAK should keep deriving for itself.
-            if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
-                return ""
-            return resolve_launch_server_script(bench)
-        except Exception:
-            log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
+        native_agentx = native_agentx_enabled(bench.get("agentx"))
+        legacy_client = Path(str(bench.get("benchmark_script") or "").strip()).name == AGENTX_CLIENT_SCRIPT
+        if not native_agentx and not legacy_client:
             return ""
+        script = resolve_launch_server_script(bench)
+        if native_agentx and not script:
+            raise RuntimeError(
+                "Native AgentX GEAK requires a server-only proxy plus benchmark_lib.sh "
+                "in the pinned InferenceX checkout; refusing to fall back to the full agentic launcher"
+            )
+        return script
 
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
@@ -1077,6 +1054,35 @@ class KernelPhase(PhaseHandler):
             # Persist the wind-down hint durably.
             state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
+
+        if agentx:
+            # The pinned native launcher exposes neither Hyperloom nor GEAK an
+            # optimizer-argv hook. Running the proxy here can consume the full
+            # KERNEL_AGENT budget, but every resulting candidate is
+            # unpromotable by the canonical AgentX revalidation path. Skip
+            # before dispatch instead of doing work that can never be kept.
+            recorder = self._kernel_timeline()
+            if recorder is not None:
+                recorder.finish_failed(
+                    stage="geak_dispatch",
+                    error_class="unsupported_upstream_launcher_hook",
+                    message=(
+                        "native AgentX kernel optimization is unavailable until "
+                        "InferenceX exposes a fingerprinted optimizer-argv hook"
+                    ),
+                )
+            _finish_skip(
+                {
+                    "status": "skipped",
+                    "error_class": "unsupported_upstream_launcher_hook",
+                    "error": (
+                        "native AgentX kernel optimization is unavailable until "
+                        "InferenceX exposes a fingerprinted optimizer-argv hook"
+                    ),
+                },
+                record_delegation=False,
+            )
+            return
 
         cb = state.current_best or {}
         try:

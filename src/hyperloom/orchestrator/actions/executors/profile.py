@@ -9,6 +9,8 @@ import gzip
 import json
 import logging
 import os
+import re
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -805,6 +807,10 @@ class ProfileExecutor(BaselineExecutor):
     """Subclass that swaps the default config + extracts trace_dir."""
 
     benchmark_watchdog = False
+    # The compatibility client is diagnostic evidence only. Baseline/grid
+    # materialization keeps the default False and therefore cannot silently
+    # downgrade a native AgentX measurement into this path.
+    allow_agentx_profile_compat = True
 
     def __init__(
         self,
@@ -840,6 +846,274 @@ class ProfileExecutor(BaselineExecutor):
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml."""
         return _default_profile_config()
+
+    def _agentx_profile_compatibility_error(self, shared_state: Any) -> str:
+        """Reject a generic trace whose TP would flatten native PP/PCP ranks."""
+        config_path = str(getattr(shared_state, "baseline_config_path", "") or "").strip()
+        if not config_path:
+            return (
+                "AgentX compatibility profiling requires an accepted native "
+                "baseline config with fingerprint-bound topology metadata."
+            )
+        try:
+            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            return f"Cannot read accepted AgentX baseline config {config_path!r}: {exc}"
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        workload = bench.get("workload_spec") if isinstance(bench, dict) else {}
+        topology = workload.get("resolved_topology") if isinstance(workload, dict) else {}
+        if not isinstance(topology, dict):
+            return "Accepted AgentX baseline is missing fingerprint-bound workload_spec.resolved_topology metadata."
+        required = ("tp", "pp", "pcp_size", "gpu_count")
+        missing = [name for name in required if name not in topology]
+        if missing:
+            return f"Accepted AgentX topology is incomplete for compatibility profiling: missing {', '.join(missing)}."
+        try:
+            tp = int(topology["tp"])
+            pp = int(topology["pp"])
+            pcp = int(topology["pcp_size"])
+            gpu_count = int(topology["gpu_count"])
+        except (TypeError, ValueError):
+            return "Accepted AgentX topology contains non-integer rank counts."
+        if min(tp, pp, pcp, gpu_count) <= 0 or gpu_count != tp * pp * pcp:
+            return (
+                "Accepted AgentX topology is inconsistent: expected "
+                f"gpu_count=TP*PP*PCP, got {gpu_count} vs {tp}*{pp}*{pcp}."
+            )
+        if pp == 1 and pcp == 1:
+            return ""
+        return (
+            "AgentX compatibility profiling cannot preserve the accepted "
+            f"native topology (PP={pp}, PCP={pcp}); a generic TP-only server "
+            "would produce a non-equivalent trace."
+        )
+
+    def _agentx_runtime_checkout(
+        self,
+        *,
+        config_path: Path,
+        output_dir: Path,
+        inferencex_path: str,
+        agentx_session: bool,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Clone a disposable checkout for the AgentX compatibility profile.
+
+        This leg deploys ``aiperf_client.sh`` and applies profiler compatibility
+        patches.  The accepted native baseline pins a clean InferenceX tree by
+        commit and executable hashes, so mutating that tree would invalidate
+        every subsequent measurement.  A local, detached clone keeps the
+        diagnostic profile isolated without requiring network access.
+        """
+        if not agentx_session:
+            return inferencex_path, None
+        try:
+            source = Path(inferencex_path).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot resolve pinned AgentX InferenceX checkout: {exc}",
+            }
+        if not source.is_dir():
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"pinned AgentX InferenceX checkout is missing: {source}",
+            }
+
+        def run_git(
+            argv: list[str],
+            *,
+            timeout: int,
+        ) -> tuple[subprocess.CompletedProcess[str] | None, dict[str, Any] | None]:
+            try:
+                return (
+                    subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        check=False,
+                    ),
+                    None,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return None, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": (f"cannot prepare isolated AgentX profile checkout: {type(exc).__name__}: {exc}"),
+                }
+
+        head_proc, git_error = run_git(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert head_proc is not None
+        head = (head_proc.stdout or "").strip().lower()
+        if head_proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot verify pinned AgentX InferenceX checkout at {source}",
+            }
+        expected = os.environ.get("INFERENCEX_REF", "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{7,40}", expected) and not (head.startswith(expected) or expected.startswith(head)):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"InferenceX HEAD {head} does not match pinned ref {expected}"),
+            }
+
+        output_root = output_dir.expanduser().resolve()
+        isolated = output_root / ".agentx-profile-inferencex"
+        if isolated.is_symlink():
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout must not be a symbolic link: {isolated}"),
+            }
+        try:
+            isolated_resolved = isolated.resolve(strict=False)
+            isolated_resolved.relative_to(output_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout escapes its output directory: {isolated} ({exc})"),
+            }
+        if isolated_resolved == source:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout resolves to the pinned native checkout: {source}"),
+            }
+        if not isolated.exists():
+            clone, git_error = run_git(
+                [
+                    "git",
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    "--no-tags",
+                    str(source),
+                    str(isolated_resolved),
+                ],
+                timeout=300,
+            )
+            if git_error is not None:
+                return inferencex_path, git_error
+            assert clone is not None
+            if clone.returncode != 0:
+                detail = (clone.stderr or clone.stdout or "").strip()
+                return inferencex_path, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": f"cannot clone isolated InferenceX profile tree: {detail}",
+                }
+            checkout, git_error = run_git(
+                ["git", "-C", str(isolated_resolved), "checkout", "--detach", head],
+                timeout=120,
+            )
+            if git_error is not None:
+                return inferencex_path, git_error
+            assert checkout is not None
+            if checkout.returncode != 0:
+                detail = (checkout.stderr or checkout.stdout or "").strip()
+                return inferencex_path, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": f"cannot checkout isolated InferenceX profile tree: {detail}",
+                }
+        top_level, git_error = run_git(
+            ["git", "-C", str(isolated_resolved), "rev-parse", "--show-toplevel"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert top_level is not None
+        try:
+            isolated_top = Path((top_level.stdout or "").strip()).resolve(strict=True)
+        except (OSError, RuntimeError):
+            isolated_top = Path()
+        if top_level.returncode != 0 or isolated_top != isolated_resolved:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is not its own git "
+                    f"worktree: path={isolated_resolved}, top={isolated_top}"
+                ),
+            }
+        isolated_head, git_error = run_git(
+            ["git", "-C", str(isolated_resolved), "rev-parse", "HEAD"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert isolated_head is not None
+        isolated_sha = (isolated_head.stdout or "").strip().lower()
+        if (
+            isolated_head.returncode != 0
+            or isolated_sha != head
+            or not (isolated_resolved / "benchmarks" / "benchmark_lib.sh").is_file()
+        ):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is incomplete or at "
+                    f"the wrong revision: path={isolated_resolved}, head={isolated_sha or '<unreadable>'}, "
+                    f"expected={head}"
+                ),
+            }
+        status, git_error = run_git(
+            [
+                "git",
+                "-C",
+                str(isolated_resolved),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert status is not None
+        dirty = (status.stdout or "").strip()
+        if status.returncode != 0 or dirty:
+            detail = dirty or (status.stderr or "").strip() or "git status failed"
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is not clean; refusing "
+                    f"to reuse stale profiler patches: {detail}"
+                ),
+            }
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+            if not isinstance(bench, dict):
+                raise ValueError("materialized profile config has no benchmark mapping")
+            bench["inferencex_path"] = str(isolated_resolved)
+            envs = bench.get("envs")
+            if isinstance(envs, dict) and "INFERENCEX_PATH" in envs:
+                envs["INFERENCEX_PATH"] = str(isolated_resolved)
+            config_path.write_text(
+                yaml.safe_dump(cfg, sort_keys=False),
+                encoding="utf-8",
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot bind profile config to isolated checkout: {exc}",
+            }
+        return str(isolated_resolved), None
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
         """Return the shared torch-trace base dir for multi-node, or ''."""
@@ -1132,6 +1406,15 @@ class ProfileExecutor(BaselineExecutor):
         from ._workload_envs import agentx_active
 
         agentx_session = agentx_active(shared_state)
+        if agentx_session:
+            compatibility_error = self._agentx_profile_compatibility_error(shared_state)
+            if compatibility_error:
+                return {
+                    "status": "failed",
+                    "error_class": "agentx_profile_topology_incompatible",
+                    "error": compatibility_error,
+                    "trace_input_ready": False,
+                }
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)

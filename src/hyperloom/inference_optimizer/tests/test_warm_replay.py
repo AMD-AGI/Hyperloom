@@ -2152,8 +2152,10 @@ def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
     return repo, patch
 
 
+@pytest.mark.parametrize("benchmark_mode", ("synthetic", "agentx"))
 def test_combined_keep_retains_validated_framework_root_without_reapply(
     tmp_path,
+    benchmark_mode,
 ):
     checkout, patch_content = _git_repo_for_required_patch(tmp_path)
     subprocess.run(
@@ -2165,6 +2167,9 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.benchmark_mode = benchmark_mode
+    original_inferencex_path = str(tmp_path / "pinned-inferencex")
+    coord.shared_state.active_inferencex_path = original_inferencex_path
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     task = _StubTask(
         params={
@@ -2210,6 +2215,11 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
+    assert coord.shared_state.active_inferencex_path == (
+        original_inferencex_path if benchmark_mode == "agentx" else str(checkout.resolve())
+    )
+    if benchmark_mode == "agentx":
+        return
     assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
     entry = coord.shared_state.optimization_stack[-1]
     assert entry["recipe_delta"] == {

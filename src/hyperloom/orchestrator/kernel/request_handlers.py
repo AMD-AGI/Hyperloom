@@ -4766,6 +4766,30 @@ async def integrate_handler(
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
+    # Native AgentX is measurement-only at this revision.  Its pinned
+    # InferenceX launchers own the complete server command and expose no
+    # fingerprinted optimizer hook, so applying a kernel/source mutation here
+    # would either benchmark an unchanged server or fail much later while
+    # materializing the native recipe.  Refuse before touching the framework
+    # tree.  The specialist integrate path enforces the same boundary.
+    state = SharedState.load_or_init(session_dir)
+    from hyperloom.common.perf_metric import agentx_active
+
+    if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+        return {
+            "status": "skipped",
+            "error_class": "unsupported_upstream_launcher_hook",
+            "error": (
+                "Native AgentX cannot benchmark kernel, source, or runtime "
+                "mutations until the pinned InferenceX launcher exposes a "
+                "fingerprinted optimizer hook."
+            ),
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": payload.get("kernel_id"),
+            "patches_applied": [],
+            "patches_reverted": [],
+        }
+
     if payload.get("_vendor_playbook_deploy_blocked"):
         # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
         # tuning) has no deployable artifact: best_artifact_path is a copy of
@@ -4824,7 +4848,6 @@ async def integrate_handler(
         if missing_inputs is not None:
             return missing_inputs
 
-    state = SharedState.load_or_init(session_dir)
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
     preapplied = payload.get("preapplied_apply_result")

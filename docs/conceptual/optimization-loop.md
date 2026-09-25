@@ -101,8 +101,10 @@ PRELUDE establishes the session baseline:
    `competitor_target.json`. With no external GPU configured, it writes a
    no-target marker and clears the competitor target. Advisory and final-report
    comparisons read the same target file; missing targets remain unavailable.
-   AgentX uses accepted `current_best` metrics, normalized by `state.tp` and
-   matched at `state.conc`, without rereading benchmark artifacts.
+   AgentX uses accepted `current_best` metrics, normalizing total throughput by
+   the trusted, fingerprint-bound recipe's recorded TP×PP×PCP GPU count (with
+   `state.tp` only as a legacy-artifact fallback) and matching at `state.conc`,
+   without rereading benchmark artifacts.
    `--no-target-advisory` disables prompt hints, not the final comparison.
    External references never change Objective, scoring, or KEEP/REVERT.
 2. `baseline` measures the starting throughput and records the benchmark
@@ -110,6 +112,26 @@ PRELUDE establishes the session baseline:
 3. `roofline` or `profile` captures the first performance analysis.
    `roofline` is the preferred composite path when enabled; it wraps
    profiling, trace analysis, and `analysis.md` snapshot publication.
+
+For native AgentX, Hyperloom pre-resolves every recipe point through the same
+interpreter that runs Magpie. It fills an omitted outer `--tp` from resolved
+TP×PP×PCP and treats an explicit value as an exact assertion. Topology-changing
+rounds fail before launch. The current pinned
+launchers expose no candidate-argv hook, so this is measurement integration:
+server-argument/environment candidates fail closed instead of entering the
+optimization loop. Native AgentX produces no PyTorch trace. If PRELUDE's normal
+roofline/profile analysis is admitted by its budget, it uses a generic-server
+compatibility profile; that trace is diagnostic and not recipe-identical.
+“Measurement-only” describes which native results can be accepted; it does not
+silently relabel compatibility profiling as a native measurement. The native
+`KERNEL_AGENT`/GEAK phase records a direct
+`skipped` result with `error_class=unsupported_upstream_launcher_hook` instead
+of dispatching an optimizer.
+
+Session mode is selected before PRELUDE: `--benchmark-config <yaml>` reads the
+source config, and `benchmark.agentx: enable` automatically stamps AgentX mode
+for grading and persisted state. `HYPERLOOM_AGENTX` is only a legacy optional
+switch; it is not a second requirement for the YAML path.
 
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
@@ -256,6 +278,11 @@ gates.
 What the phase actually does depends on the kernel backend, and the branches
 look very different from Orchestration's side:
 
+- **Native AgentX**: the phase does not dispatch GEAK or Forge. The pinned
+  InferenceX launcher has no fingerprinted optimizer-argv hook, so the
+  Coordinator immediately records `status="skipped"` and
+  `error_class="unsupported_upstream_launcher_hook"`, then advances toward
+  SWEEP. This is a measurement-only release for native AgentX.
 - **Default (`geak`)**: entering the phase enqueues one Coordinator-owned
   `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
   `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
@@ -294,15 +321,20 @@ be attempted or explicitly rejected before report can close the run.
 
 ## SWEEP
 
-SWEEP measures the optimized stack against the baseline across a
-concurrency ladder, one arm each, and produces the throughput-vs-
-interactivity curve. The ladder is sized for the workload: powers of two
-down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
-where a request carries orders of magnitude more prompt and the same card
-saturates far lower. Override either with `--conc-sweep-concs`.
+Outside native AgentX, SWEEP measures the optimized stack against the baseline
+across a concurrency ladder, one arm each, and produces the throughput-vs-
+interactivity curve. Synthetic serving workloads default to powers of two down
+from 256; `--conc-sweep-concs` can override that ladder.
+
+Native AgentX measures one resolved recipe concurrency supplied by `--conc`.
+Its concurrency sweep defaults off because the pinned launcher exposes no
+optimizer-argv hook and therefore no distinct optimized arm to compare.
+Explicit `--enable-conc-sweep` is rejected during preflight rather than
+silently running an invalid ladder; `--conc-sweep-concs` does not enable it.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`).
+When enabled, the phase exits on `sweep_done` (or `sweep_failed`); a disabled
+sweep records its terminal skip and proceeds to CLOSE.
 
 ## CLOSE
 

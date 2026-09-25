@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 from pathlib import Path
 
@@ -71,22 +70,28 @@ def test_optimize_has_no_supervisor_launcher_hooks() -> None:
     assert "orchestrator.supervisor" not in source
 
 
-def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:
+def test_multinode_tp_exceeds_total_gpus_exits_2(capsys) -> None:
     """Gate 1: TP larger than nodes*gpus_per_node fails fast with exit code 2."""
     # nodes=2, gpus_per_node=1 -> total_gpus=2 < tp=4.
-    args = argparse.Namespace(nodes=2, tp=4, ep=1, gpus_per_node=1)
+    args = ocli._build_parser().parse_args(
+        ["optimize", "--nodes", "2", "--tp", "4", "--ep", "1", "--gpus-per-node", "1"]
+    )
     with pytest.raises(SystemExit) as exc:
         asyncio.run(ocli._run_optimize(args))
     assert exc.value.code == 2
+    assert "TP=4 exceeds total GPU count" in capsys.readouterr().err
 
 
-def test_multinode_ep_exceeds_tp_exits_2() -> None:
+def test_multinode_ep_exceeds_tp_exits_2(capsys) -> None:
     """Gate 2: EP greater than TP fails fast with exit code 2."""
     # total_gpus=16 >= tp=2 so gate 1 passes; ep=4 > tp=2 trips gate 2.
-    args = argparse.Namespace(nodes=2, tp=2, ep=4, gpus_per_node=8)
+    args = ocli._build_parser().parse_args(
+        ["optimize", "--nodes", "2", "--tp", "2", "--ep", "4", "--gpus-per-node", "8"]
+    )
     with pytest.raises(SystemExit) as exc:
         asyncio.run(ocli._run_optimize(args))
     assert exc.value.code == 2
+    assert "EP=4 > TP=2" in capsys.readouterr().err
 
 
 def test_session_busy_exits_with_session_busy_code(tmp_path: Path) -> None:

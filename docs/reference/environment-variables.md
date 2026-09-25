@@ -77,11 +77,12 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
-`TP` / `EP` env vars are ignored and overwritten (`GPU_TYPE` is a fallback when
-`--gpu-type` is omitted).
+Set with CLI flags or an explicit `--benchmark-config`, not ambient workload
+env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` / `TP` / `EP` env vars
+are ignored and overwritten (`GPU_TYPE` is a fallback when `--gpu-type` is
+omitted).
 
-- **Model / workload shape:** `--model`, `--model-class`, `--framework`,
+- **Model / workload shape:** `--benchmark-config`, `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
 - **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
@@ -438,7 +439,7 @@ metadata and credential-shaped values are dropped.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`on` for single-node) | Controls whether single-node serving benchmarks and `needs_gpu` specialists run through Ray actors. When unset, single-node runs are routed through Ray-managed leases while multi-node stays on the multi-node backend. Set to `0` / `false` / `no` / `off` to force the local subprocess path, or `1` / `true` / `yes` / `on` to force Ray. |
+| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`on` for ordinary single-node runs) | Controls whether single-node serving benchmarks and `needs_gpu` specialists run through Ray actors. When unset, ordinary single-node runs are routed through Ray-managed leases while multi-node stays on the multi-node backend. Set to `0` / `false` / `no` / `off` to force the local subprocess path, or `1` / `true` / `yes` / `on` to force Ray. Native AgentX is the exception: it always bypasses the outer Ray actor, and explicitly forcing Ray is rejected. |
 
 ---
 
@@ -957,13 +958,100 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
-sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
-publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
+An input YAML with `benchmark.agentx: enable`, passed through
+`--benchmark-config`, automatically adopts the 2-D grading shape InferenceX
+uses and persists AgentX session mode. Upstream InferenceX submissions sweep a
+concurrency ladder, keep TTFT / ITL / TPOT percentiles separately, and
+publish a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
 weighted number, and it has **no fixed interactivity target** — interactivity is
 a frontier coordinate, not a constraint, so a point that trades interactivity for
 throughput moves along the frontier rather than violating a rule.
+
+Normal AgentX measurements are materialized from that source YAML as Magpie
+`agentx: enable` runs.
+The canonical identity and launcher are intentionally separate from the local
+checkpoint path. The tested pair is Magpie 0.3.0 release-candidate commit
+`3642ce66ae46ca4dc125340b3d14a3f4640c369b` and InferenceX commit
+`3d5581562f643f9bdeb8410cd924e2c70906c966`:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `HYPERLOOM_BENCHMARK_CONFIG` | No | None | Legacy environment alias for CLI `--benchmark-config`. Prefer the CLI flag. Fresh launches only. Resume restores the accepted materialized config, or the snapshotted source config when baseline was not accepted yet. |
+| `HYPERLOOM_AGENTX` | No | Off | Optional legacy mode switch for callers without a source YAML. A `--benchmark-config` whose source has `benchmark.agentx: enable` sets session mode automatically; an explicitly false environment value conflicts and is rejected. |
+| `HYPERLOOM_IMAGE` | No | Effective resolved image | Optional strict consistency assertion for native local mode. `benchmark.docker_image` overrides/pins the effective recipe image; otherwise the recipe default is used. If this variable already exists, it must match exactly. It does not attest the running container. |
+| `AGENTX_MODEL_ID` | Only without `benchmark.model` | None | Legacy fallback for the exact model id from the selected InferenceX recipe (for example `amd/GLM-5.2-MXFP4`). A separate CLI `--model` may name the local checkpoint and is emitted as `MODEL_PATH`; omitting it uses the source model id remotely. |
+| `AGENTX_SERVER_SCRIPT` | Only without `benchmark.benchmark_script` | None | Legacy fallback for the launcher. It must be one file directly under `InferenceX/benchmarks/single_node/agentic/`; Hyperloom refuses traversal, generic launchers, and missing files, and never edits it. |
+| `INFERENCEX_PATH` | No | Installer pin | Legacy fallback for source `benchmark.inferencex_path`. The source path nominates a preferred writable checkout. Preflight replaces a missing or wrong-revision path with a pinned clone; an explicit correct but non-writable checkout fails. A simultaneously supplied, different ambient path conflicts with the source before preflight. Because pinned Magpie interpolates the checkout into an unquoted local `bash -c` command, its resolved absolute path must use only shell-safe token characters; whitespace or shell metacharacters fail closed before launch. |
+| `AGENTX_MODE` | No | `canonical` | Legacy equivalent of `benchmark.agentx.mode`. `canonical` uses the 3600-second native protocol and is required by `optimize`. `fast` uses 1200 seconds and is a direct-Magpie diagnostic; its non-publishable result is rejected as a Hyperloom baseline. |
+| `AGENTX_RECIPE` | When inference is ambiguous | Inferred by Magpie | Legacy equivalent of `benchmark.agentx.recipe`: an exact recipe key from the pinned InferenceX config. |
+| `AGENTX_CONFIG_FILE` | No | InferenceX `configs/amd-master.yaml` or `nvidia-master.yaml` | Legacy equivalent of `benchmark.agentx.config_file`: an explicit recipe-config path understood by Magpie. |
+| `AGENTX_SELECTOR` | When one recipe/concurrency has multiple arms | `{}` | Legacy equivalent of `benchmark.agentx.selector`, encoded as a JSON object, for example `{"tp":4,"kv_offloading":"dram","kv_offload_backend":"hicache"}`. Prefer the YAML object with `--benchmark-config`. |
+| `AGENTX_FAILED_REQUEST_THRESHOLD` | No | `0.10` | Legacy equivalent of `benchmark.agentx.failed_request_threshold`, from `0` through `1`. |
+
+The source YAML can provide `benchmark.model`, `benchmark.precision`,
+`benchmark.framework`, `benchmark.runner_type`, `benchmark.run_mode`,
+`benchmark.benchmark_script`, optional `benchmark.inferencex_path`, effective
+`benchmark.docker_image`, `benchmark.envs.CONC`, optional topology assertions,
+and either scalar `benchmark.agentx: enable` or the object form:
+
+```yaml
+agentx:
+  enabled: true
+  recipe: glm5.2-fp4-mi355x-sglang-agentic-mtp  # only if inference is ambiguous
+  selector:                                     # only if this CONC has multiple arms
+    tp: 4
+    kv_offloading: dram
+    kv_offload_backend: hicache
+```
+
+Hyperloom checks those source fields before session state is seeded. The image
+field overrides/pins the effective recipe image and is included in its
+fingerprint; Hyperloom does not inspect the runtime to prove the actual
+container. The selected recipe owns logical TP/PP/PCP/EP, `MODEL_PREFIX`,
+`KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`, and `TOTAL_CPU_DRAM_GB`; users do not copy
+those fields into `benchmark.envs`. In particular, `envs.TP` is not an arm
+selector. A concurrency not present in the recipe, or an ambiguous point
+without `agentx.selector`, fails before launch. Hyperloom pre-resolves each
+point through the same benchmark interpreter that will run Magpie. Native
+InferenceX owns the duration (3600 seconds in canonical mode, 1200 in fast
+mode) and configures a 393-trace dataset-entry cap. That value is a loader
+ceiling, not a guarantee that 393 traces, sessions, or requests survive
+availability and context-length filters. Native `AGENTX_DATASET` and
+`WEKA_LOADER_OVERRIDE` overrides are
+rejected. A pre-existing `HYPERLOOM_IMAGE` must exactly match the effective
+resolved image. In contrast,
+`AGENTX_DURATION` and `AGENTX_NUM_ENTRIES` apply only to the profiler
+compatibility client, not normal native measurements.
+
+Hyperloom owns the fixed concurrency of native measurement rounds through
+CLI `--conc` or source/materialized `benchmark.envs.CONC`. It removes
+`benchmark.agentx.concurrency` from the source YAML because Magpie gives that
+field precedence over `envs.CONC`. Native AgentX concurrency sweep defaults off;
+explicit `--enable-conc-sweep` fails preflight, and `--conc-sweep-concs` does
+not enable it.
+
+When omitted, Hyperloom fills outer `--tp` with the resolved `TP×PP×PCP`
+physical GPU count and `--ep` with recipe EP. Explicit values are exact
+consistency assertions. Topology-changing AgentX sweeps are rejected. The
+pinned launchers copy physical ROCR values back into logical
+`HIP_VISIBLE_DEVICES`, so Hyperloom derives `gpu_selection.auto=false` and
+`ROCR_VISIBLE_DEVICES=0,...,N-1` when omitted. Explicit masks are assertions;
+nonzero, reordered, short, or long masks are rejected rather than remapped.
+
+Hyperloom's native bridge currently supports local, single-node SGLang and
+vLLM. It automatically bypasses Hyperloom's outer Ray actor; leave
+`INFERENCE_OPTIMIZER_RAY_EXEC` unset or set it to `0`. An explicit true value is
+rejected. Multi-node/disaggregated AgentX, `server_lifecycle`, and Atom are not
+supported.
+
+The launchers in the pinned InferenceX revision own their full server argv and
+have no optimizer-argument hook. Hyperloom does not patch them. Native
+server-argument/environment candidates, arg removals, reference launch recipes,
+and other configuration overrides fail closed. The current bridge is therefore
+measurement-only, not server-configuration optimization; an upstream launcher
+hook is required before those candidates or a distinct optimized sweep arm can
+be measured honestly.
 
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
@@ -980,31 +1068,44 @@ into the session a round lands, so the decaying session threshold does not apply
 to it. Total token throughput no longer participates in the verdict — on this
 corpus it is almost entirely prefill, so it cannot see an output collapse.
 
-Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
-grading and advisory comparison. This is aiperf's summary **P10** of the
-per-request rate `OSL / E2EL_s`, representing the slow tail for a
-`LARGER_IS_BETTER` metric. Comparison does not recompute request-level metrics.
-The external reference uses `1 / P90(E2EL_s / OSL)`; finite-sample linear
-interpolation means the estimators need not be numerically identical.
-The comparison is advisory and does not change KEEP/REVERT.
+Hyperloom reads `e2e_norm_intvty_p90` from native Magpie's
+`agentx_metrics.latency_seconds`. InferenceX computes it as
+`1 / P90(E2EL_s / OSL)`, so it is already the slow-tail rate for a
+`LARGER_IS_BETTER` metric; Hyperloom does not multiply it by 1000 or invert it
+again. Older profiler-compatibility artifacts carry AIPerf's P10 of the
+per-request `OSL / E2EL_s` rate. The two finite-sample estimators can differ;
+profile output is diagnostic and does not replace the native measurement used
+for KEEP/REVERT.
 
 TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
-`benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
-inherited the env var still grades on the agentic axis. Serving frameworks only;
-scriptable frameworks (xDiT, custom) keep output-throughput grading.
+otherwise. Source `benchmark.agentx: enable` stamps `benchmark_mode=agentx` at
+seed; the legacy ambient `HYPERLOOM_AGENTX=1` can do the same — so a round in a
+subprocess that never inherited the env var still grades on the agentic axis.
+Serving frameworks only; scriptable frameworks (xDiT, custom) keep
+output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` in AgentX session mode, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
-AgentX profiling starts when AIPerf reports its measured phase. The legacy
+Native Magpie AgentX v1 does not support PyTorch/system profiler, TraceLens, or
+gap-analysis options, and its pinned InferenceX launchers do not call profiler
+start/stop endpoints. Native fixed-concurrency measurement therefore emits no
+PyTorch trace and forces the model's native context rather than applying
+`ISL`, `OSL`, or `MAX_MODEL_LEN`. If PRELUDE schedules roofline/profile
+analysis, Hyperloom uses its legacy `aiperf_client.sh` with a generic server.
+That compatibility trace is diagnostic and not recipe-identical. It skips
+TraceLens/CK framework source patches to preserve the installed framework for
+subsequent native measurements; annotation coverage may be lower. Its capture
+starts when AIPerf reports
+its measured phase. AIPerf's own `profile`/`profiled` terminology describes
+workload statistics, not a PyTorch profiler trace. The legacy
 `AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
 the capture window and defaults to 20 seconds; phase waiting is bounded by the
 materialized benchmark timeout. Capture lifecycle status is
@@ -1013,6 +1114,24 @@ written to a per-invocation `capture-status.json`; the adjacent
 Benchmark measurement success and trace-capture success are reported
 independently. AgentX multi-node profiling is currently rejected because its
 legacy fixed-delay capture is not aligned with the AIPerf phase signal.
+Because the pinned native launcher has no candidate-argv hook, the native
+`KERNEL_AGENT`/GEAK phase is not dispatched;
+it records `status=skipped` and
+`error_class=unsupported_upstream_launcher_hook`.
+
+For native results, Hyperloom requires both `benchmark_valid=true` and
+`publishable=true`, an `agentic-coding` scenario, and a valid recipe fingerprint,
+including exact recipe-to-launch and recipe-to-raw fingerprint matches. It
+accepts GPU count only from a trusted, fingerprint-bound report, Magpie config
+snapshot, materialized workload record, or InferenceX raw aggregate. The raw
+aggregate retains measured token-length distributions and cache metrics.
+Magpie's `publishable` bit attests the canonical AgentX protocol and recipe
+fingerprint. Hyperloom separately binds the selected recipe to the exact audited
+launcher bytes and pinned checkout. It does not cryptographically attest the
+actual outer image. The execution identity covers the resolved
+`BenchmarkConfig` and the effective, scrubbed launcher environment for the
+audited server/framework/runtime controls. It intentionally excludes
+credentials, cache routing, output paths, and unrelated login-shell variables.
 
 ---
 

@@ -457,6 +457,37 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_agentx_rejects_integrate_patch_before_mutation(tmp_path: Path):
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir,
+        "t-agentx-spec",
+        patch_contents=[_VALID_PATCH],
+    )
+    ctx = _make_ctx(
+        "t-agentx-integrate",
+        {
+            "specialist_task_id": "t-agentx-spec",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
+    ctx.extra["shared_state"] = SimpleNamespace(benchmark_mode="agentx")
+
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["patches_applied"] == []
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     """A bad patch fails ``git apply``; the executor reverses + reports apply_failed."""
     session_dir = tmp_path / "session"
@@ -2258,7 +2289,12 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
-    if grading_mode == "explicit-output":
+    if grading_mode == "agentx":
+        # Exercise the AgentX comparison policy without claiming this source-
+        # mutation test is a native AgentX session. Native sessions now reject
+        # source patches before any mutation by design.
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+    elif grading_mode == "explicit-output":
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     session_dir = tmp_path / "session"
     repo = tmp_path / "framework"
@@ -2295,7 +2331,7 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         framework="vllm",
-        benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
+        benchmark_mode="synthetic",
         current_best={
             "tput": 100.0,
             "total_throughput": 20000.0,

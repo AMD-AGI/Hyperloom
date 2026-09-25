@@ -787,6 +787,79 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     assert "result_dir" in result["error"]
 
 
+def test_native_agentx_rejects_runtime_override_before_materialization(tmp_path):
+    base = tmp_path / "agentx.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SimpleNamespace(
+        benchmark_mode="agentx",
+        model_path="/models/glm",
+    )
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "runtime_override": {
+                "PATH": "/candidate/bin",
+                "PYTHONPATH": "/candidate/python",
+            },
+        }
+    )
+    ctx.extra["shared_state"] = state
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.materialize_config_with_envs") as materialize:
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["output_dir"] == str(tmp_path / "ws")
+    materialize.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "mutation_params",
+    (
+        {"patches": [{"patch_file": "candidate.patch"}]},
+        {"warm_kernel_plan": [{"column": "gemm"}]},
+    ),
+)
+def test_native_agentx_rejects_mutation_replay_before_materialization(
+    tmp_path,
+    mutation_params,
+):
+    base = tmp_path / "agentx.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SimpleNamespace(
+        benchmark_mode="agentx",
+        model_path="/models/glm",
+    )
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            **mutation_params,
+        }
+    )
+    ctx.extra["shared_state"] = state
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.materialize_config_with_envs") as materialize:
+        result = _run(executor(ctx))
+
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert result["output_dir"] == str(tmp_path / "ws")
+    materialize.assert_not_called()
+
+
 # reference-script base layer (precedence + 0-degrade)
 def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
     cfg = yaml.safe_load(materialized.read_text())
