@@ -3164,7 +3164,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
 
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
-    src = tmp_path / "gpt_oss.py"
+    src = tmp_path / "vendor_module.py"
     src.write_text(
         "def x():\n    pass\n\n\ndef forward(x):\n    return x\n",
         encoding="utf-8",

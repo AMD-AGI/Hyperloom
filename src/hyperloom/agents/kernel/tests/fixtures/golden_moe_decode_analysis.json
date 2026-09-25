@@ -1,0 +1,641 @@
+{
+  "report_info": {
+    "mode": "agentic",
+    "comparison_scope": "standalone",
+    "trace_quality": "ok"
+  },
+  "title": "MoE decode (MoEForCausalLM) - MI300X Standalone Analysis",
+  "executive_summary": {
+    "narrative": "MoE decode inference is compute-dominated, with communication fully hidden and a modest GPU-idle share. The MoE expert path dominates GPU time, followed by the vendor BF16 GEMMs and the fused paged-decode attention kernel. The main opportunities are fusing the MoE expert stages and tuning the below-roofline GEMMs; residual idle is host-side launch overhead addressable with GPU graph mode.",
+    "metrics": {
+      "total_time_ms": 2494.24,
+      "compute_pct": 84.24,
+      "idle_pct": 15.48,
+      "exposed_communication_pct": 0.0
+    }
+  },
+  "top_operations": [
+    {
+      "rank": 1,
+      "category": "GEMM",
+      "time_ms": 449.043,
+      "pct_of_compute": 21.37,
+      "ops": 4,
+      "potential_improvement_md": "~225.5–300.3 ms (9.0–12.0%)"
+    },
+    {
+      "rank": 2,
+      "category": "InferenceAttention",
+      "time_ms": 353.088,
+      "pct_of_compute": 16.8,
+      "ops": 3,
+      "potential_improvement_md": "~72.6–97.0 ms (2.9–3.9%)"
+    },
+    {
+      "rank": 3,
+      "category": "RMSNorm",
+      "time_ms": 52.745,
+      "pct_of_compute": 2.51,
+      "ops": 3,
+      "potential_improvement_md": "~25.2–33.7 ms (1.0–1.4%)"
+    },
+    {
+      "rank": 4,
+      "category": "GroupQuant",
+      "time_ms": 25.394,
+      "pct_of_compute": 1.21,
+      "ops": 1,
+      "potential_improvement_md": "~16.7–22.2 ms (0.7–0.9%)"
+    }
+  ],
+  "compute_optimizations": [
+    {
+      "operation": "aiter::gemm_a16w16",
+      "members": [
+        {
+          "impact_score": 3.55,
+          "kernel_launcher_path": "aiter/tuned_gemm.py(252): gemm_a16w16",
+          "library": "AITER",
+          "category": "gemm",
+          "analysis_md_rank": "P1",
+          "kernel_name": [
+            "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x64_MI32x32x1_SN_LDSB..."
+          ],
+          "args_shapes": [
+            "(640,2880)",
+            "(5120,2880)",
+            "(5120,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 151.565,
+          "count": 4608,
+          "pct_e2e": 6.08,
+          "flops_per_byte": 475.01,
+          "efficiency_percent": 33.29,
+          "efficiency_peak_value": 1307.0,
+          "efficiency_peak_unit": "TFLOPS",
+          "bound": "compute-bound"
+        },
+        {
+          "impact_score": 3.29,
+          "kernel_launcher_path": "aiter/tuned_gemm.py(252): gemm_a16w16",
+          "library": "AITER",
+          "category": "gemm",
+          "analysis_md_rank": "P1",
+          "kernel_name": [
+            "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDS..."
+          ],
+          "args_shapes": [
+            "(640,4096)",
+            "(2880,4096)",
+            "(2880,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 134.148,
+          "count": 4608,
+          "pct_e2e": 5.38,
+          "flops_per_byte": 464.26,
+          "efficiency_percent": 30.09,
+          "efficiency_peak_value": 1307.0,
+          "efficiency_peak_unit": "TFLOPS",
+          "bound": "compute-bound"
+        },
+        {
+          "impact_score": 1.93,
+          "kernel_launcher_path": "aiter/tuned_gemm.py(252): gemm_a16w16",
+          "library": "AITER",
+          "category": "gemm",
+          "analysis_md_rank": "P5",
+          "kernel_name": [
+            "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x64_MI16x16x1_SN_LDSB0_..."
+          ],
+          "args_shapes": [
+            "(640,2880)",
+            "(128,2880)",
+            "(128,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 57.918,
+          "count": 4608,
+          "pct_e2e": 2.32,
+          "flops_per_byte": 102.87,
+          "efficiency_percent": 4.94,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        },
+        {
+          "impact_score": 1.77,
+          "kernel_launcher_path": "aiter/tuned_gemm.py(252): gemm_a16w16",
+          "library": "AITER",
+          "category": "gemm",
+          "analysis_md_rank": "P1",
+          "kernel_name": [
+            "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x320x64_MI16x16x1_SN_LDSB..."
+          ],
+          "args_shapes": [
+            "(640,2880)",
+            "(201088,2880)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 105.412,
+          "count": 128,
+          "pct_e2e": 4.23,
+          "flops_per_byte": 522.28,
+          "efficiency_percent": 52.19,
+          "efficiency_peak_value": 1307.0,
+          "efficiency_peak_unit": "TFLOPS",
+          "bound": "compute-bound"
+        }
+      ],
+      "impact": {
+        "mid": 10.54,
+        "low": 9.04,
+        "high": 12.04
+      },
+      "identification": "BF16 matrix multiplies dispatched through the AITER vendor GEMM library, flagged for running below the compute roofline, plus one memory-bound routing/gate projection.",
+      "reasoning": "The compute-bound GEMMs leave a gap between achieved and peak matrix throughput, while the narrow-output projection is bandwidth-limited.",
+      "resolution": "Tune tile size and wave occupancy to close the compute gap, and improve the memory access pattern and fuse the bias epilogue for the memory-bound projection.",
+      "prose_truncated": false,
+      "priority": 1
+    },
+    {
+      "operation": "pseudo_op::moe_flydsl_stage1",
+      "members": [
+        {
+          "impact_score": 7.61,
+          "kernel_launcher_path": "aiter/fused_moe.py(839): _flydsl_stage1_wrapper",
+          "library": "AITER",
+          "category": "moe_unfused",
+          "analysis_md_rank": "P2",
+          "kernel_name": [
+            "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1_fp4q_sort_async_v32"
+          ],
+          "args_shapes": [
+            "(640,3072)",
+            "(128,6144,1536)",
+            "(128,3072,1536)",
+            "(640,4)",
+            "(640,4)",
+            "(786432,96)",
+            "(393216,96)",
+            "(128,6144)",
+            "(128,3072)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "fp4",
+            "fp4",
+            "fp32",
+            "int",
+            "fp8",
+            "fp8",
+            "fp32",
+            "fp32"
+          ],
+          "time_ms": 632.42,
+          "count": 4608,
+          "pct_e2e": 25.36,
+          "flops_per_byte": 78.72,
+          "efficiency_percent": null,
+          "efficiency_peak_value": null,
+          "efficiency_peak_unit": null,
+          "bound": null
+        }
+      ],
+      "impact": {
+        "mid": 7.61,
+        "low": 3.8,
+        "high": 11.41
+      },
+      "identification": "First stage of the MoE expert path, launched from the AITER flydsl stage-1 wrapper. It is a distinct kernel launch from the FC2 stage, so it is bucketed as unfused, and it carries no roofline model.",
+      "reasoning": "This stage carries the largest share of end-to-end GPU time. As a separate launch from FC2 it writes its intermediate activation back to HBM and pays its own launch overhead.",
+      "resolution": "Fusing the expert stages keeps the intermediate activation on-chip and removes a kernel launch per token group, cutting bytes moved per invocation.",
+      "prose_truncated": false,
+      "priority": 2
+    },
+    {
+      "operation": "pseudo_op::moe_flydsl_stage2",
+      "members": [
+        {
+          "impact_score": 4.32,
+          "kernel_launcher_path": "aiter/fused_moe.py(903): _flydsl_stage2_wrapper",
+          "library": "AITER",
+          "category": "moe_unfused",
+          "analysis_md_rank": "P3",
+          "kernel_name": [
+            "mfma_moe2_afp4_wfp4_bf16_cshuffle_t64x256x256_vscale_fix3_fp4opt_v1_pm1"
+          ],
+          "args_shapes": [
+            "(640,3072)",
+            "(128,6144,1536)",
+            "(128,3072,1536)",
+            "(640,4)",
+            "(640,4)",
+            "(786432,96)",
+            "(393216,96)",
+            "(128,6144)",
+            "(128,3072)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "fp4",
+            "fp4",
+            "fp32",
+            "int",
+            "fp8",
+            "fp8",
+            "fp32",
+            "fp32"
+          ],
+          "time_ms": 358.854,
+          "count": 4608,
+          "pct_e2e": 14.39,
+          "flops_per_byte": 77.48,
+          "efficiency_percent": null,
+          "efficiency_peak_value": null,
+          "efficiency_peak_unit": null,
+          "bound": null
+        }
+      ],
+      "impact": {
+        "mid": 4.32,
+        "low": 2.16,
+        "high": 6.48
+      },
+      "identification": "Second stage of the MoE expert path, launched from the AITER flydsl stage-2 wrapper as a separate GEMM downstream of FC1. It carries no roofline model.",
+      "reasoning": "As an unfused second launch it reloads the FC1 output from HBM and pays a second launch overhead.",
+      "resolution": "Folding this stage into the fused expert kernel lets it read the FC1 output on-chip, removing the reload and the extra launch.",
+      "prose_truncated": false,
+      "priority": 3
+    },
+    {
+      "operation": "aiter::pa_decode_gluon",
+      "members": [
+        {
+          "impact_score": 2.03,
+          "kernel_launcher_path": "aiter/ops/triton/gluon/pa_decode_gluon.py(5194): pa_decode_gluon",
+          "library": "AITER",
+          "category": "inferenceattention",
+          "analysis_md_rank": "P4",
+          "kernel_name": [
+            "paged_attention_decode_sliding_window"
+          ],
+          "args_shapes": [
+            "(640,64,64)",
+            "(640,64,64)",
+            "(313996,8,4,16,16)",
+            "(313996,8,1,64,16)",
+            "(640,)",
+            "(640,160)",
+            "()",
+            "()",
+            "(640,8,1,8)",
+            "(640,8,1,8)",
+            "(640,8,1,8,64)",
+            "(64,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "fp8",
+            "fp8",
+            "int",
+            "int",
+            "fp32",
+            "fp32",
+            "fp32",
+            "fp32",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 283.601,
+          "count": 2304,
+          "pct_e2e": 11.37,
+          "flops_per_byte": 15.74,
+          "efficiency_percent": 79.59,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        },
+        {
+          "impact_score": 1.37,
+          "kernel_launcher_path": "aiter/ops/triton/gluon/pa_decode_gluon.py(5194): pa_decode_gluon",
+          "library": "AITER",
+          "category": "inferenceattention",
+          "analysis_md_rank": "P6",
+          "kernel_name": [
+            "paged_attention_decode_sliding_window"
+          ],
+          "args_shapes": [
+            "(640,64,64)",
+            "(640,64,64)",
+            "(313996,8,4,16,16)",
+            "(313996,8,1,64,16)",
+            "(640,)",
+            "(640,160)",
+            "()",
+            "()",
+            "(640,8,1,8)",
+            "(640,8,1,8)",
+            "(640,8,1,8,64)",
+            "(64,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "fp8",
+            "fp8",
+            "int",
+            "int",
+            "fp32",
+            "fp32",
+            "fp32",
+            "fp32",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 68.94,
+          "count": 2304,
+          "pct_e2e": 2.76,
+          "flops_per_byte": 14.12,
+          "efficiency_percent": 43.34,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        }
+      ],
+      "impact": {
+        "mid": 3.4,
+        "low": 2.91,
+        "high": 3.8899999999999997
+      },
+      "identification": "Full-attention and sliding-window layers of MoE decode, served by the AITER paged-attention decode kernel using grouped-query attention.",
+      "reasoning": "The kernel is memory-bound, so runtime is set by streaming the paged KV cache from HBM. It already runs close to the memory ceiling, so recoverable time is small.",
+      "resolution": "Improve coalescing of the paged KV-cache reads and pack more decode queries per wave. Gains are modest since the kernel is near the roofline; profile occupancy with hardware counters.",
+      "prose_truncated": false,
+      "priority": 4
+    },
+    {
+      "operation": "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)",
+      "members": [
+        {
+          "impact_score": 1.19,
+          "kernel_launcher_path": "AITER (vendor)",
+          "library": "AITER",
+          "category": "fusedrope",
+          "analysis_md_rank": "P7",
+          "kernel_name": [
+            "_fused_qk_rope_reshape_and_cache_kernel"
+          ],
+          "args_shapes": [
+            "(640,4096)",
+            "(640,512)",
+            "(640,512)",
+            "(640,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16",
+            "long int"
+          ],
+          "time_ms": 99.373,
+          "count": 4608,
+          "pct_e2e": 3.98,
+          "flops_per_byte": null,
+          "efficiency_percent": null,
+          "efficiency_peak_value": null,
+          "efficiency_peak_unit": null,
+          "bound": null
+        }
+      ],
+      "impact": {
+        "mid": 1.19,
+        "low": 0.6,
+        "high": 1.79
+      },
+      "identification": "Vendor-fused AITER RoPE reshape-and-cache kernel on the attention path. It is a synthetic op with no roofline model.",
+      "reasoning": "No analytic model covers this fused op, so it is ranked on its share of end-to-end GPU time. It is invoked at high frequency.",
+      "resolution": "Batching the RoPE and cache-write launches upstream amortizes per-launch overhead. Profile with hardware counters to confirm the bottleneck.",
+      "prose_truncated": false,
+      "priority": 5
+    },
+    {
+      "operation": "aiter::dynamic_per_group_scaled_quant",
+      "members": [
+        {
+          "impact_score": 0.78,
+          "kernel_launcher_path": "aiter/ops/quant.py(441): perx32_mx_quant_hip",
+          "library": "AITER",
+          "category": "groupquant",
+          "analysis_md_rank": "P9",
+          "kernel_name": [
+            "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp..."
+          ],
+          "args_shapes": [
+            "(640,1536)",
+            "(640,3072)",
+            "(640,96)"
+          ],
+          "args_datatypes": [
+            "fp4",
+            "bf16",
+            "c10::Float8_e8m0fnu"
+          ],
+          "time_ms": 25.394,
+          "count": 4608,
+          "pct_e2e": 1.02,
+          "flops_per_byte": 0.51,
+          "efficiency_percent": 12.27,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        }
+      ],
+      "impact": {
+        "mid": 0.78,
+        "low": 0.67,
+        "high": 0.89
+      },
+      "identification": "AITER per-group scaled quantization kernel that quantizes expert activations before the fused MoE GEMM. It was flagged as memory-bound.",
+      "reasoning": "The kernel is memory-bound with low arithmetic intensity, so its runtime is dominated by moving the input and writing the packed output plus per-group scales.",
+      "resolution": "Coalesce the per-group reads and writes, and fuse this quantization into the adjacent MoE stage to remove a write-back and re-read.",
+      "prose_truncated": false,
+      "priority": 6
+    },
+    {
+      "operation": "aiter::moe_sorting_opus_fwd",
+      "members": [
+        {
+          "impact_score": 0.71,
+          "kernel_launcher_path": "aiter/fused_moe.py(70): _moe_sorting_impl",
+          "library": "AITER",
+          "category": "moe_aux",
+          "analysis_md_rank": "P10",
+          "kernel_name": [
+            "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<...",
+            "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<ai..."
+          ],
+          "args_shapes": [
+            "(640,4)",
+            "(640,4)",
+            "(10748,)",
+            "(10748,)",
+            "(168,)",
+            "(2,)",
+            "(640,3072)",
+            "(82688,)"
+          ],
+          "args_datatypes": [
+            "int",
+            "fp32",
+            "int",
+            "fp32",
+            "int",
+            "int",
+            "bf16",
+            "fp8"
+          ],
+          "time_ms": 58.98,
+          "count": 4608,
+          "pct_e2e": 2.36,
+          "flops_per_byte": null,
+          "efficiency_percent": null,
+          "efficiency_peak_value": null,
+          "efficiency_peak_unit": null,
+          "bound": null
+        }
+      ],
+      "impact": {
+        "mid": 0.71,
+        "low": 0.35,
+        "high": 1.06
+      },
+      "identification": "AITER token-sort helper that groups tokens by assigned expert before the fused MoE GEMMs. It carries no roofline model and was surfaced by GPU-time share.",
+      "reasoning": "The kernel moves routing indices and token metadata rather than dense math, so it is memory- and latency-bound. Aggregate cost is driven by a high count of small launches.",
+      "resolution": "Fuse or amortize the per-layer sort with neighboring gating and quant-sort steps to cut small kernel launches. Profile occupancy before a rewrite.",
+      "prose_truncated": false,
+      "priority": 7
+    },
+    {
+      "operation": "aiter::add_rmsnorm",
+      "members": [
+        {
+          "impact_score": 0.59,
+          "kernel_launcher_path": "aiter/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
+          "library": "AITER",
+          "category": "rmsnorm",
+          "analysis_md_rank": "P8",
+          "kernel_name": [
+            "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, std::bfloat16_t, 256,..."
+          ],
+          "args_shapes": [
+            "(640,2880)",
+            "(640,2880)",
+            "(640,2880)",
+            "(640,2880)",
+            "(2880,)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 26.103,
+          "count": 4608,
+          "pct_e2e": 1.05,
+          "flops_per_byte": 0.62,
+          "efficiency_percent": 35.32,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        }
+      ],
+      "impact": {
+        "mid": 0.59,
+        "low": 1.01,
+        "high": 1.35
+      },
+      "identification": "Fused residual-add plus RMSNorm kernels launched by the AITER backend, flagged for running below the expected memory-bandwidth band.",
+      "reasoning": "Both kernels are memory-bound, so runtime is gated by how fast activations move through HBM, and they leave a large share of bandwidth unused.",
+      "resolution": "Tune the memory access pattern so each wave moves more contiguous bytes per HBM transaction. Generate a reproducer at the flagged shape for the kernel team.",
+      "prose_truncated": false,
+      "priority": 8
+    },
+    {
+      "operation": "aiter::fused_add_rmsnorm_pad_",
+      "members": [
+        {
+          "impact_score": 0.58,
+          "kernel_launcher_path": "/app/ATOM/atom/model_ops/layernorm.py(111): fused_add_rmsnorm_pad_",
+          "library": "AITER",
+          "category": "rmsnorm",
+          "analysis_md_rank": "P8",
+          "kernel_name": [
+            "_fused_add_rmsnorm_pad"
+          ],
+          "args_shapes": [
+            "(640,2880)",
+            "(2880,)",
+            "(640,2880)"
+          ],
+          "args_datatypes": [
+            "bf16",
+            "bf16",
+            "bf16"
+          ],
+          "time_ms": 25.97,
+          "count": 4608,
+          "pct_e2e": 1.04,
+          "flops_per_byte": 0.61,
+          "efficiency_percent": 36.09,
+          "efficiency_peak_value": 5.3,
+          "efficiency_peak_unit": "TB/s",
+          "bound": "memory-bound"
+        }
+      ],
+      "impact": {
+        "mid": 0.58,
+        "low": 1.01,
+        "high": 1.35
+      },
+      "identification": "Fused residual-add plus RMSNorm kernels launched by the AITER backend, flagged for running below the expected memory-bandwidth band.",
+      "reasoning": "Both kernels are memory-bound, so runtime is gated by how fast activations move through HBM, and they leave a large share of bandwidth unused.",
+      "resolution": "Tune the memory access pattern so each wave moves more contiguous bytes per HBM transaction. Generate a reproducer at the flagged shape for the kernel team.",
+      "prose_truncated": false,
+      "priority": 9
+    }
+  ],
+  "appendix": {
+    "model_architecture": {
+      "Model": "MoE decode (MoEForCausalLM)",
+      "Architecture": "Mixture-of-Experts Transformer (decoder-only)",
+      "Scale": "120B",
+      "Precision": "FP8 MoE weights (BF16 activations, FP8 KV cache)"
+    },
+    "hardware_reference": {
+      "Platform": "MI300X",
+      "Peak HBM BW": "5.3 TB/s",
+      "Peak MAF (BF16)": "1307 TFLOPS",
+      "Peak MAF (FP8)": "2614 TFLOPS"
+    }
+  }
+}

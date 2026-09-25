@@ -7,8 +7,8 @@
 
 """Golden equivalence lock: the analysis.json path reproduces the md-scrape path.
 
-``golden_gptoss_baseline.json`` was captured from the old md-scrape path on a
-pinned GPTOSS_ATOM compute trace (GEMMs + Tensile ``Cijk_`` symbols) before the
+``golden_moe_decode_baseline.json`` was captured from the old md-scrape path on a
+representative MoE decode compute trace (GEMMs + Tensile ``Cijk_`` symbols) before the
 migration deleted that path. This test runs the new ``analysis.json`` reader over
 the rendered fixture and asserts the kept structural fields -- the shape, metric,
 category and identity fields a downstream consumer reads -- match that baseline
@@ -57,8 +57,8 @@ def test_analysis_json_path_matches_md_scrape_baseline(monkeypatch):
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
     )
-    analysis_json = _FIXTURES / "golden_gptoss_analysis.json"
-    baseline = json.loads((_FIXTURES / "golden_gptoss_baseline.json").read_text())
+    analysis_json = _FIXTURES / "golden_moe_decode_analysis.json"
+    baseline = json.loads((_FIXTURES / "golden_moe_decode_baseline.json").read_text())
 
     rows = aj.load_report_tasks(analysis_json)
     finalized = tla._finalize_candidates(rows, perf_report_csv_dir=None, framework="")
