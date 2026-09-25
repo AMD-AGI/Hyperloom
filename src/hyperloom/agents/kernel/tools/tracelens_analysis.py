@@ -6240,23 +6240,23 @@ def _build_split_cmd(
         "--num-steps",
         str(split_num_steps),
     ]
-    conc = args.split_conc or os.environ.get("CONC", "").strip()
-    if str(conc).strip():
-        split_cmd += ["--CONC", str(conc).strip()]
-    osl = args.split_osl or os.environ.get("OSL", "").strip()
-    if str(osl).strip():
-        split_cmd += ["--OSL", str(osl).strip()]
-    r_raw = args.split_r or os.environ.get("RANDOM_RANGE_RATIO", "")
-    r_str = str(r_raw).strip()
-    if r_str:
-        try:
-            float(r_str)
-        except ValueError:
-            append_log(log_path, f"split_trace: ignoring non-numeric --R={r_str!r}")
-        else:
-            split_cmd += ["--R", r_str]
     if args.split_llm_inference:
         split_cmd += ["--llm-inference"]
+        conc = args.split_conc or os.environ.get("CONC", "").strip()
+        if str(conc).strip():
+            split_cmd += ["--CONC", str(conc).strip()]
+        osl = args.split_osl or os.environ.get("OSL", "").strip()
+        if str(osl).strip():
+            split_cmd += ["--OSL", str(osl).strip()]
+        r_raw = args.split_r or os.environ.get("RANDOM_RANGE_RATIO", "")
+        r_str = str(r_raw).strip()
+        if r_str:
+            try:
+                float(r_str)
+            except ValueError:
+                append_log(log_path, f"split_trace: ignoring non-numeric --R={r_str!r}")
+            else:
+                split_cmd += ["--R", r_str]
     return split_cmd
 
 
