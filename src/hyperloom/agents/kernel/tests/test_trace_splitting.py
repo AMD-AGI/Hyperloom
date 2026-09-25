@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
