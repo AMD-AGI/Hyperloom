@@ -1132,9 +1132,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         _os.environ.update(env_backup)
 
     assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
-    assert all(
-        "TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd
-    ), f"splitter must not run on CPU-only trace; captured={captured}"
+    assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
+        f"splitter must not run on CPU-only trace; captured={captured}"
+    )
     assert all(
         "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
     ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
