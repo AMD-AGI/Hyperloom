@@ -47,6 +47,7 @@ from .lane_budget import (
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.task_progress import heartbeat_while_output_flows
+from ..trace.trajectory_trace import inherited_scope_fields
 
 
 from ._recorder_trace import trace_recording_skipped
@@ -5143,6 +5144,9 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
+        # The tool's SDK run books its model requests onto this session's trajectory ledger.
+        for key, value in inherited_scope_fields().items():
+            cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
     elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
         cmd += ["--require-single-rank"]
         try:

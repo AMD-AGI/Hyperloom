@@ -6775,6 +6775,28 @@ def _default_workspace_path() -> str:
     return workspace_root()
 
 
+def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
+    """Scope the SDK run to the launching session's trajectory ledger, when the launcher named one.
+
+    ``asyncio.run`` copies the calling context into its main task, so the scope reaches the run's coroutine.
+    """
+    if not args.trajectory_session_dir:
+        return contextlib.nullcontext()
+    try:
+        from hyperloom.orchestrator.trace.trajectory_trace import trajectory_scope  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - an installed hyperloom predating the ledger
+        return contextlib.nullcontext()
+    return trajectory_scope(
+        session_dir=Path(args.trajectory_session_dir),
+        component="tracelens",
+        agent="tracelens",
+        phase=args.trajectory_phase or None,
+        tick=args.trajectory_tick,
+        task_id=args.trajectory_task_id or None,
+        parent_span_id=args.trajectory_parent_span_id or None,
+    )
+
+
 def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
@@ -6897,6 +6919,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
+    # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
+    parser.add_argument("--trajectory-session-dir", default="")
+    parser.add_argument("--trajectory-phase", default="")
+    parser.add_argument("--trajectory-tick", type=int, default=None)
+    parser.add_argument("--trajectory-task-id", default="")
+    parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
     default_llm_orchestrator = os.environ.get(
         "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
@@ -7766,22 +7794,23 @@ def main() -> int:
                     started_at=started_at,
                 )
                 try:
-                    skill_result = asyncio.run(
-                        run_tracelens_skill(
-                            skill_path=skill,
-                            trace_path=cli_trace_path,
-                            output_dir=tracelens_dir,
-                            tracelens_root=tl_root,
-                            tracelens_internal_root=tl_internal_root,
-                            platform=args.target_platform,
-                            framework=args.framework,
-                            analysis_mode=args.analysis_mode,
-                            capture_folder=capture_folder,
-                            budget_minutes=args.budget_minutes,
-                            model=_resolve_tracelens_model(),
-                            log=lambda msg: append_log(log_path, msg),
+                    with _trajectory_scope(args):
+                        skill_result = asyncio.run(
+                            run_tracelens_skill(
+                                skill_path=skill,
+                                trace_path=cli_trace_path,
+                                output_dir=tracelens_dir,
+                                tracelens_root=tl_root,
+                                tracelens_internal_root=tl_internal_root,
+                                platform=args.target_platform,
+                                framework=args.framework,
+                                analysis_mode=args.analysis_mode,
+                                capture_folder=capture_folder,
+                                budget_minutes=args.budget_minutes,
+                                model=_resolve_tracelens_model(),
+                                log=lambda msg: append_log(log_path, msg),
+                            )
                         )
-                    )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = skill_result.runner

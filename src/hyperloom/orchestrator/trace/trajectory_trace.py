@@ -200,6 +200,25 @@ def _resolved_phase_tick(ctx: TrajectoryContext) -> tuple[str | None, int | None
     return coerce_optional_str(phase), coerce_optional_int(tick)
 
 
+def inherited_scope_fields() -> dict[str, Any]:
+    """The ambient join keys a child process needs to keep recording into this session's ledger.
+
+    Empty outside a session scope. ``phase`` / ``tick`` are resolved now, since a live source cannot cross a process.
+    """
+    ctx = _CONTEXT.get()
+    if ctx.session_dir is None:
+        return {}
+    phase, tick = _resolved_phase_tick(ctx)
+    fields = {
+        "session_dir": str(ctx.session_dir),
+        "phase": phase,
+        "tick": tick,
+        "task_id": ctx.task_id,
+        "parent_span_id": ctx.parent_span_id,
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
 def _validate_row(row: dict[str, Any]) -> None:
     """Fail fast if ``row`` deviates from the closed trajectory schema."""
     keys = set(row)
@@ -428,6 +447,7 @@ __all__ = [
     "VALID_EVENT_TYPES",
     "VALID_STATUSES",
     "current_context",
+    "inherited_scope_fields",
     "llm_call_summary",
     "load_events",
     "load_shard",

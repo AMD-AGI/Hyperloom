@@ -4701,6 +4701,42 @@ class TestBuildTraceAnalyzeCmd:
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
 
+    def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
+        from hyperloom.orchestrator.trace.trajectory_trace import trajectory_scope
+
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        kwargs = dict(
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            workload={},
+            model_name="",
+            framework="",
+            target_platform="",
+            analysis_mode="",
+            scriptable=False,
+        )
+        with trajectory_scope(
+            session_dir=session_dir,
+            component="coordinator",
+            phase_tick_source=lambda: ("roofline", 3),
+            task_id="t-roof",
+            parent_span_id="span-roof",
+        ):
+            cmd, _steady = krh._build_trace_analyze_cmd(
+                {"trace_input": "/t/trace"}, tracelens_root=Path("/tl"), is_bypass=False, **kwargs
+            )
+            bypass_cmd, _steady = krh._build_trace_analyze_cmd(
+                {"trace_input": "/t/trace"}, tracelens_root=None, is_bypass=True, **kwargs
+            )
+        assert cmd[cmd.index("--trajectory-session-dir") + 1] == str(session_dir)
+        assert cmd[cmd.index("--trajectory-phase") + 1] == "roofline"
+        assert cmd[cmd.index("--trajectory-tick") + 1] == "3"
+        assert cmd[cmd.index("--trajectory-task-id") + 1] == "t-roof"
+        assert cmd[cmd.index("--trajectory-parent-span-id") + 1] == "span-roof"
+        assert not [arg for arg in bypass_cmd if arg.startswith("--trajectory-")]
+
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
