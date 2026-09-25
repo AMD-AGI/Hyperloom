@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -350,7 +350,7 @@ class TaskRegistry:
         placeholders = ",".join("?" for _ in states)
         row = await self.db.fetchone(
             "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
             (prefix, *states),
         )
         return row is not None
@@ -373,42 +373,42 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
 
-    def running_context_sync(self) -> Iterator[tuple[Task, list[str], str, list[int]]]:
-        """Read running tasks, then project their lanes, soonest expiry and GPUs.
+    def running_context_sync(self) -> list[tuple[Task, list[str], str, list[int]]]:
+        """Read running tasks with the lanes, soonest lease expiry and GPUs each holds.
 
-        Only the task query runs eagerly. Iteration reads resources separately
-        before decoding tasks; these reads do not form a transactional snapshot.
+        The three statements are separate reads, not one transactional snapshot.
         """
         rows = self.db.fetchall_sync(
             "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
             (),
         )
-
-        def project() -> Iterator[tuple[Task, list[str], str, list[int]]]:
-            if not rows:
-                return
-            lanes_by_task: dict[str, list[str]] = {}
-            expiry_by_task: dict[str, str] = {}
-            for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
-                tid = str(row["task_id"])
-                lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
-                expires = str(row["expires_at"])
-                prev = expiry_by_task.get(tid)
-                if prev is None or expires < prev:
-                    expiry_by_task[tid] = expires
-            gpus_by_task: dict[str, list[int]] = {}
-            for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
-                gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
-            for row in rows:
-                task = Task.from_row(row)
-                yield (
+        if not rows:
+            return []
+        lanes_by_task: dict[str, list[str]] = {}
+        # Soonest lane expiry: the first one to lapse is when reclaim starts.
+        expiry_by_task: dict[str, str] = {}
+        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+            tid = str(row["task_id"])
+            lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
+            expires = str(row["expires_at"])
+            prev = expiry_by_task.get(tid)
+            if prev is None or expires < prev:
+                expiry_by_task[tid] = expires
+        gpus_by_task: dict[str, list[int]] = {}
+        for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+            gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
+        projected: list[tuple[Task, list[str], str, list[int]]] = []
+        for row in rows:
+            task = Task.from_row(row)
+            projected.append(
+                (
                     task,
                     lanes_by_task.get(task.task_id, []),
                     expiry_by_task.get(task.task_id, ""),
                     gpus_by_task.get(task.task_id, []),
                 )
-
-        return project()
+            )
+        return projected
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
