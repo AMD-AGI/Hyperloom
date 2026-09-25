@@ -418,14 +418,20 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
 
 
 def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypatch, tmp_path):
-    """Raising the capture bound must not reintroduce an iteration delay."""
+    """Diagnostic profiling keeps delay zero without permitting native measurement."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_MODEL_ID", "amd/GLM-5.2-MXFP4")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
     src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
-    bench = _materialize(src, tmp_path / "out")
+    with pytest.raises(ValueError, match="diagnostic-only"):
+        _materialize(src, tmp_path / "measurement")
+
+    bench = _materialize(src, tmp_path / "out", allow_agentx_profile_compat=True)
+    assert bench["workload_spec"]["harness"] == "hyperloom-profiler-compat"
+    assert "agentx" not in bench
     args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
     assert "--profiler-config.delay_iterations 0" in args
     assert "--profiler-config.max_iterations 128" in args
