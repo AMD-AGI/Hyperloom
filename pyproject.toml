@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.1"
+version = "1.1.2"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -317,7 +317,7 @@ testpaths = [
     "src/**/tests",
     "scripts/tests",
 ]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "scripts"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
@@ -361,7 +361,6 @@ omit = [
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
     "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
     "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
@@ -482,7 +481,7 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+select = ["E", "F", "W", "BLE", "RUF100"]
 # E501 is owned by ``ruff format``; E741 would only cause churn-only renames in
 # math / parsing helpers where single-letter locals are idiomatic.
 ignore = ["E501", "E741"]
@@ -510,7 +509,7 @@ ignore = ["E501", "E741"]
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
-"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/inference_optimizer/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is

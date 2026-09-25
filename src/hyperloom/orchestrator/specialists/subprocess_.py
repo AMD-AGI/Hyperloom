@@ -45,7 +45,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -64,7 +64,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-from ..trace.parse_usage import (
+from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
     parse_claude_stream_json_turn_usages,
@@ -421,8 +421,7 @@ def _write_private_codex_config(
 
 def _build_specialist_env() -> dict[str, str]:
     """Build a minimal env for Bash-enabled specialist subprocesses."""
-    inherit_setting = os.environ.get("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
-    inherit_secrets = True if inherit_setting is None else is_truthy(inherit_setting)
+    inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
     allowed = set(_SPECIALIST_ENV_ALLOWLIST)
     if inherit_secrets:
         allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
@@ -774,7 +773,7 @@ class _RayLeaseProcess:
         latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
         real failure immediately rather than looping until the wall-clock cap.
         """
-        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+        from hyperloom.orchestrator.actions.executors._ray_serving import (
             _RAY_ACTOR_DIED_RC,
         )
 
@@ -794,6 +793,39 @@ class _RayLeaseProcess:
         # close() destroys the actor, so retain its exit status while it is observable.
         self.returncode = self._lease.exit_code()
         return confirmed or self._lease.close() is True
+
+
+def _local_tree_pgid(proc: Any) -> int | None:
+    """The process group to name in an operator's log for this specialist, or None.
+
+    Nothing probes this number. A served process is setsid'd by design, so it
+    leaves the group its spawn created, and every attempt to decide from such an
+    identity whether a lane was free was refuted in review. What the number is
+    still worth is a starting point for the human who has to clear a retained
+    lane by hand.
+
+    A local specialist is spawned with ``start_new_session=True``, so its root
+    pid is also the id of the group and session it leads, and that number keeps
+    naming the group once the root itself has exited.
+
+    A group id means something only inside the PID namespace that issued it, and
+    a Ray actor's ids come from whichever node Ray placed the actor on. Printing
+    one of those would point the operator at a process on a different host, so
+    an actor names nothing here.
+
+    Args:
+        proc: The specialist's process handle, which may be absent when the
+            cleanup that failed never spawned one.
+
+    Returns:
+        int | None: A local process group to record for an operator's benefit,
+        or None when there is none to name. Either way the lane is retained:
+        nothing reclaims it from this number.
+    """
+    if proc is None or isinstance(proc, _RayLeaseProcess):
+        return None
+    pid = getattr(proc, "pid", None)
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
 # Dispatcher
@@ -906,7 +938,7 @@ class SpecialistSubprocessDispatcher:
         env = _build_specialist_env()
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
+        from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
@@ -1112,9 +1144,13 @@ class SpecialistSubprocessDispatcher:
                     else:
                         confirmed = self._kill(proc) if proc is not None else True
                 except (OSError, subprocess.SubprocessError) as exc:
-                    raise ExecutionCleanupUnconfirmed(f"task={task_id}: specialist cleanup failed: {exc}") from exc
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
+                    ) from exc
                 if confirmed is not True:
-                    raise ExecutionCleanupUnconfirmed(f"task={task_id}: specialist cleanup unconfirmed")
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
+                    )
                 raise
             finally:
                 if log_fh is not None:
@@ -1434,7 +1470,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+            except Exception:
                 log.exception("specialist progress callback raised")
             break
         return newest
@@ -1585,17 +1621,24 @@ class SpecialistSubprocessDispatcher:
         if isinstance(proc, _RayLeaseProcess):
             if proc.reap():
                 return True
+            # No ``tree_pgid``: see :func:`_local_tree_pgid`.
             raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: actor cleanup unconfirmed")
         if proc.poll() is not None:
             # A re-parented descendant can outlive its root and old process group.
-            raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: exited root has no verifiable tree")
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: exited root has no verifiable tree", tree_pgid=proc.pid
+            )
         try:
             tree = collect_tree([proc.pid])
             if not any(pid == proc.pid for pid, _ in tree.members) or not kill_tree(tree):
-                raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed")
+                raise ExecutionCleanupUnconfirmed(
+                    f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid
+                )
             proc.wait(timeout=1.0)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup failed: {exc}") from exc
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: tree cleanup failed: {exc}", tree_pgid=proc.pid
+            ) from exc
         return True
 
     @staticmethod

@@ -140,10 +140,8 @@ def _seed_shared_state(
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.orchestrator.policy.gate import (
-        detect_gpu_count,
-        research_lane_ceiling,
-    )
+    from hyperloom.common.visible_devices import detect_gpu_count
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
     research_lane_capacity = max(
@@ -365,11 +363,7 @@ def _print_final_summary(
             if failure_summary.get("server_log"):
                 print(f"  server_log           : {failure_summary.get('server_log')}")
     if state.cumulative_gain_validated_ts:
-        stale = (
-            " ⚠ stack changed since validation"
-            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
-            else ""
-        )
+        stale = " ⚠ stack changed since validation" if state.optimization_stack_has_unvalidated_keeps() else ""
         print(
             f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
             f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "
@@ -464,7 +458,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         if int(disk_state.crash_count or 0) < live:
             disk_state.crash_count = live
             disk_state.save(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
     # reports/final.json: patch the single field in place if present.
@@ -480,7 +474,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
                     json.dumps(data, indent=2, sort_keys=True),
                     encoding="utf-8",
                 )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 

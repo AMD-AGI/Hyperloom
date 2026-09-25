@@ -10,13 +10,13 @@ import hashlib
 import json
 import logging
 import math
-import os
 import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
@@ -78,9 +78,6 @@ EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
 # expected to run.
 BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
 
-# Truthy-false spellings that disable the accuracy gate.
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 
 def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     """Report whether lm-eval is disabled in the materialized benchmark config."""
@@ -89,8 +86,7 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     except (OSError, yaml.YAMLError):
         return False
     envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
-    val = envs.get("RUN_EVAL")
-    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
+    return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
 def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> bool:
@@ -117,14 +113,12 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
 
 def require_framework_accuracy_default() -> bool:
     """Default for the framework source-patch accuracy-KEEP gate."""
-    v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "").strip().lower()
-    return v not in ("0", "false", "no", "off")
+    return env_flag("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", default=True)
 
 
 def require_kernel_accuracy_default() -> bool:
     """Default for the kernel-patch accuracy-KEEP gate."""
-    v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "").strip().lower()
-    return v not in ("0", "false", "no", "off")
+    return env_flag("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", default=True)
 
 
 def resolve_enablement_mode(shared_state: Any) -> str:

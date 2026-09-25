@@ -29,8 +29,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from hyperloom.common.llm_headers import format_custom_headers
 from kernelforge.llm import (
-    format_custom_headers,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
@@ -184,28 +184,6 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
     return translated
 
 
-def _options_accept(options_type: Any, field: str) -> bool:
-    """Whether this SDK's options type carries ``field``.
-
-    Read off the dataclass when it is one and off the constructor otherwise, so
-    a fake options object in a test is treated as accepting everything -- the
-    same as the real type it stands in for.
-    """
-    import dataclasses
-    import inspect
-
-    if dataclasses.is_dataclass(options_type):
-        return any(item.name == field for item in dataclasses.fields(options_type))
-    try:
-        signature = inspect.signature(options_type)
-    except (TypeError, ValueError):
-        return True
-    parameters = signature.parameters
-    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
-        return True
-    return field in parameters
-
-
 def _load_claude_sdk() -> tuple[Any, Any]:
     """Load the optional Claude SDK or raise a provider-level error."""
     try:
@@ -314,13 +292,18 @@ class ClaudeBackend:
 
     def preflight(self) -> None:
         """Validate that an explicitly configured executable is Claude CLI."""
-        explicit = self.runtime.executable.strip()
-        if not explicit:
+        if not self.runtime.executable.strip():
             return
-        candidate = Path(explicit).expanduser()
-        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(explicit)
+        self.validate_runtime(self.runtime)
+
+    @staticmethod
+    def validate_runtime(runtime: AgentRuntimeConfig) -> None:
+        """Check the selected CLI with a 10-second --version call, without loading the SDK."""
+        selected = resolve_claude_cli(runtime.executable)
+        candidate = Path(selected).expanduser()
+        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(selected)
         if not executable:
-            raise ClaudeUnavailableError(f"Claude CLI is not executable: {explicit}")
+            raise ClaudeUnavailableError(f"Claude CLI is not executable: {selected}")
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -333,7 +316,7 @@ class ClaudeBackend:
         version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
         if version.returncode != 0 or "claude" not in version_text.lower():
             raise ClaudeUnavailableError(
-                f"configured CLI does not appear to be Claude: {explicit}; --version returned {version_text!r}"
+                f"configured CLI does not appear to be Claude: {selected}; --version returned {version_text!r}"
             )
 
     def probe(
@@ -563,11 +546,6 @@ class ClaudeBackend:
         provider_options = self._provider_options(spec)
         if resume_session_id:
             provider_options["resume"] = resume_session_id
-        if "tools" in provider_options and not _options_accept(self._options_type, "tools"):
-            # Naming the built-in base set is a saving, not a requirement: an SDK
-            # too old to have the field must still run rather than fail to build
-            # its options at all.
-            provider_options.pop("tools")
         options = self._options_type(**provider_options)
         text_parts: list[str] = []
         tool_calls: list[tuple[str, dict[str, Any]]] = []
@@ -620,7 +598,7 @@ class ClaudeBackend:
                                             getattr(block, "input", {}) or {},
                                         )
                                     )
-            except Exception as exc:  # noqa: BLE001 - convert to a resumable result
+            except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
                     if not session_id:
@@ -663,7 +641,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):
+                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
@@ -687,8 +665,13 @@ class ClaudeBackend:
             end_reason = "turn_cap"
         elif subtype and subtype != "success":
             end_reason = f"sdk_{subtype}"
-        else:
+        elif subtype == "success":
             end_reason = "agent_stopped"
+        else:
+            # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
+            # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
+            # as the agent's answer.
+            end_reason = "sdk_no_result"
 
         result = AgentRunResult(
             text="\n".join(text_parts).strip(),
@@ -705,7 +688,7 @@ class ClaudeBackend:
         except Exception:
             # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
             # must not mask them.
-            with suppress(Exception):
+            with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.target_edit_count = guard.count_target_edits()

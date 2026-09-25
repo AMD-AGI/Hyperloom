@@ -78,7 +78,7 @@ class SweepPhase(PhaseHandler):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
+        except Exception as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -142,9 +142,11 @@ class SweepPhase(PhaseHandler):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
+        lanes, _ = self._registry_lanes_ttl("conc_sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="conc_sweep",
             params=params,
+            requires_lanes=lanes,
             idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
         )

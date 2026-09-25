@@ -17,13 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.env import env_bool
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
-from ...state.shared_state import SharedState
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)
@@ -45,14 +46,11 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when absent or raising."""
+    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 — report must never crash on annotations
-        return default
+    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
@@ -186,7 +184,7 @@ def _build_failure_summary(
                 from ._subprocess_kill import server_log_death_excerpt
 
                 excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:  # noqa: BLE001 — excerpt enrichment is best-effort
+            except Exception:
                 log.debug("server_log_death_excerpt failed", exc_info=True)
                 excerpt = None
             if excerpt:
@@ -217,7 +215,7 @@ def _build_failure_summary(
         if suppressed:
             summary["suppressed_benign"] = suppressed[:5]
         return summary
-    except Exception:  # noqa: BLE001 — report must never crash on the summary
+    except Exception:
         log.warning(
             "report_executor: failed to build failure_summary",
             exc_info=True,
@@ -336,7 +334,7 @@ def _explain_conc_sweep_skip(state) -> str:
         return ""
     # Imported here, not at module scope: ``kernel.conc_sweep`` imports the grid runner in this same package, so a
     # top-level import is the edge CodeQL reports as a cycle.
-    from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
+    from ...kernel.conc_sweep import conc_sweep_declined_to_run
 
     detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
     if conc_sweep_declined_to_run(last):
@@ -362,11 +360,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
     comparison = summary.get("performance_comparison")
     if comparison is not None:
-        from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, INTVTY_V1
+        from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
 
-        # The objective is the interactivity axis; total throughput is the guard the verdict also consulted, so it is
-        # rendered as a second axis rather than as the figure the session was scored on.
-        graded_on_intvty = comparison["objective"] == GRADED_INTVTY
+        # Read the family, not one percentile: the graded axis is the median while the session marker still names
+        # the tail, and pinning either one here prints the wrong mode for the other.
+        graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
         lines.extend(["## Performance comparison", ""])
         lines.append(f"- objective           : `{comparison['objective']}`")
         lines.append(f"- reference           : `{comparison['reference']:.1f}`")
@@ -380,8 +378,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append(f"- verdict             : `{comparison['verdict']}`")
         lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
         if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
+            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
         return
 
     from hyperloom.common.gain_math import gain_pct
@@ -411,7 +409,7 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
             lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (diagnostic, neither objective nor guard)")
     grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
     objective = str(grading.get("objective") or "").strip()
     if objective == GRADED_INTVTY:
@@ -437,15 +435,16 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
         or summary["cumulative_gain_validated"]
     ):
         return "unavailable"
-    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"]:
+    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"] or summary.get(
+        "has_unvalidated_keeps"
+    ):
         return "stale"
     from hyperloom.common.perf_metric import VERDICT_KEEP
 
     comparison = summary["performance_comparison"]
     if not comparison["comparable"] or comparison["gain_pct"] is None:
         return "unavailable"
-    # Anything short of KEEP -- a REVERT, or a RECORDED point the frontier neither promotes nor discards -- disagrees
-    # with a stamp claiming the stack's gain was validated.
+    # Anything short of KEEP disagrees with a stamp claiming the stack's gain was validated.
     if comparison["verdict"] != VERDICT_KEEP or not math.isclose(
         summary["cumulative_gain_validated"], comparison["gain_pct"], abs_tol=1e-9
     ):
@@ -496,8 +495,8 @@ def _build_summary_dict(
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,
-            # The guard axis is snapshotted alongside the objective so a re-rendered report can say what the 2-D
-            # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
+            # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
+            # actually measured, instead of a ``current_best`` that has since moved on.
             "tput_reference": graded.tput_reference,
             "tput_candidate": graded.tput_candidate,
         },
@@ -527,7 +526,7 @@ def _build_summary_dict(
     if external_baseline:
         summary["external_baseline"] = _external_baseline_with_comparison(state, external_baseline, session_dir)
     # Roofline comparison: emit only when at least one snapshot exists.
-    from ...kernel.roofline_snapshot import build_roofline_comparison_from_history
+    from hyperloom.inference_optimizer.roofline_snapshot import build_roofline_comparison_from_history
 
     cmp = build_roofline_comparison_from_history(getattr(state, "roofline_snapshots", None))
     if cmp:
@@ -590,13 +589,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
     stack_len = summary.get("optimization_stack_len", 0) or 0
+    changed_since_validation = stack_len > val_len or bool(summary.get("has_unvalidated_keeps"))
     if val_ts:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
     elif val_gain or val_len:
-        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
@@ -828,7 +828,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
-    from ...kernel.roofline_snapshot import format_roofline_metrics_table
+    from hyperloom.inference_optimizer.roofline_snapshot import format_roofline_metrics_table
 
     lines: list[str] = ["## Roofline Comparison", ""]
     baseline = cmp.get("baseline") or {}
@@ -935,7 +935,11 @@ def _external_baseline_with_comparison(
 ) -> dict[str, Any]:
     """Use the same persisted target as prompt advisory, never reconstructing missing evidence."""
     from hyperloom.common.perf_metric import agentx_active
-    from ...knowledge.research_hints import ComparisonReason, gap_for_state, load_competitor_target
+    from hyperloom.inference_optimizer.baseline_comparison.research_hints import (
+        ComparisonReason,
+        gap_for_state,
+        load_competitor_target,
+    )
 
     if not agentx_active(benchmark_mode=state.benchmark_mode):
         return external
@@ -996,7 +1000,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 
     comparison = ext.get("comparison")
     if isinstance(comparison, dict) and comparison.get("benchmark_mode") == "agentx":
-        from ...knowledge.research_hints import full_gap_summary
+        from hyperloom.inference_optimizer.baseline_comparison.research_hints import full_gap_summary
 
         lines.extend(["", full_gap_summary(comparison)])
         lines.append("")
@@ -1282,7 +1286,7 @@ class ReportExecutor:
                 output_dir=output_dir,
                 state=state,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
         if conc_sweep_curve_png is not None:
             try:
@@ -1331,8 +1335,7 @@ class ReportExecutor:
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
         """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
-        auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
-        if not service_url and auto_publish not in {"1", "true", "yes"}:
+        if not service_url and not env_bool("HYPERLOOM_RESULTS_AUTO_PUBLISH"):
             return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
 
         repo_root = Path(__file__).resolve().parents[3]
@@ -1369,7 +1372,7 @@ class ReportExecutor:
                 "stdout": proc.stdout[-4000:],
                 "stderr": proc.stderr[-4000:],
             }
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             log.warning("report_executor: result publish failed: %s", e)
             return {"enabled": True, "error": str(e)}
 

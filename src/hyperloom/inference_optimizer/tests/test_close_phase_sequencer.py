@@ -26,6 +26,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
@@ -763,6 +764,35 @@ async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
 
 
 @pytest.mark.asyncio
+async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(coord):
+    """A sweep that spent its budget without a comparable pair did not validate the sweep objective."""
+    coord.shared_state.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "budget_exhausted": True,
+        "skip_reason": "budget_exhausted_no_successful_pairs",
+        "summary": {"successful_pairs": 0},
+    }
+    coord.shared_state.phase_history = [
+        {
+            "to_phase": "CLOSE",
+            "reason": "sweep_done",
+            "evidence": {
+                "sweep_status": "skipped",
+                "sweep_was_skipped": True,
+                "sweep_skip_budget_exhausted": True,
+                "sweep_skip_reason": "budget_exhausted_no_successful_pairs",
+            },
+        },
+    ]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "sweep_failed"
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord,
 ):
@@ -861,7 +891,8 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
         {"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"},
     ]
-    coord.shared_state.record_phase_transition(
+    machine_state.record_phase_transition(
+        coord.shared_state,
         to_phase="CLOSE",
         reason="sweep_done",
         evidence={"trigger": "test_e2e"},
@@ -941,7 +972,8 @@ class TestEveryTerminalReachesAWrittenReport:
     @pytest.mark.asyncio
     async def test_the_close_sequence_runs_once_and_not_again(self, tmp_path: Path):
         coord = self._coordinator(tmp_path / "session")
-        coord.shared_state.record_phase_transition(
+        machine_state.record_phase_transition(
+            coord.shared_state,
             to_phase="CLOSE",
             reason="sweep_done",
             evidence={"trigger": "test"},
@@ -998,7 +1030,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     )
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
-    coord.shared_state.record_phase_transition(to_phase="CLOSE", reason="sweep_done", evidence={})
+    machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
 
     await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 

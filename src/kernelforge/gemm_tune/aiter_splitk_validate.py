@@ -41,9 +41,9 @@ def _resolve_device(gpu_ids: str = "") -> str:
 
 def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
     """True if the production a8w8_blockscale CK kernel dispatches (m,n,k,split_k)."""
-    import torch  # noqa: PLC0415
-    import aiter  # noqa: PLC0415
-    from aiter import dtypes  # noqa: PLC0415
+    import torch
+    import aiter
+    from aiter import dtypes
 
     sn = (n + _BLOCK_N - 1) // _BLOCK_N
     sk_dim = (k + _BLOCK_K - 1) // _BLOCK_K

@@ -337,20 +337,20 @@ class TestRooflineSnapshotUnits:
     """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
         assert rs._fmt_tput(None, "vllm") == "—"
 
     def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         out = rs._fmt_tput(0.15528, "xdit")
         assert out == "6440.0 ms"
         assert "tok/s" not in out
 
     def test_build_snapshot_carries_framework(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
@@ -358,7 +358,7 @@ class TestRooflineSnapshotUnits:
         assert snap["framework"] == "xdit"
 
     def test_metrics_table_scriptable_achieved_is_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
@@ -370,7 +370,7 @@ class TestRooflineSnapshotUnits:
 
     def test_snapshot_carries_latency_siblings_and_within(self):
         """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -390,7 +390,7 @@ class TestRooflineSnapshotUnits:
 
     def test_metrics_table_scriptable_shows_compute_ceiling(self):
         """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -410,7 +410,7 @@ class TestRooflineSnapshotUnits:
 
     def test_serving_snapshot_latency_siblings_are_none(self):
         """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -494,16 +494,12 @@ class TestHyperloomArchSpec:
 
         return tab
 
-    def test_build_spec_mi355x(self):
+    def test_build_spec_mi355x_falls_back_to_vendor(self):
         tab = self._tab()
         spec = tab.build_hyperloom_arch_spec("mi355x")
         assert spec is not None
         assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
-        maf = spec["max_achievable_tflops"]
-        assert maf["matrix_bf16"] == pytest.approx(1686.0)
-        assert maf["matrix_fp8"] == pytest.approx(3567.0)
-        assert maf["matrix_fp4"] == pytest.approx(5663.0)
-        assert all(v > 0 for v in maf.values())
+        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
 
     def test_build_spec_case_insensitive_and_named(self):
         tab = self._tab()
@@ -517,11 +513,11 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
+        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
         assert out is not None and out.is_file()
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
 
 
 class TestValidateTraceStructureScriptable:

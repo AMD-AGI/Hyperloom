@@ -17,6 +17,9 @@ ENABLEMENT_SEGMENT: str = "enablement"
 
 
 # Top-level files
+BREAKDOWN_FILENAME: str = "session_breakdown.json"
+
+
 def manifest_path(session_dir: Path) -> Path:
     """Compute the path to ``manifest.json`` (the Python-written resume tag)."""
     return Path(session_dir) / "manifest.json"
@@ -191,7 +194,7 @@ def trace_dir(session_dir: Path) -> Path:
 
 
 def llm_calls_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.orchestrator.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
+    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.inference_optimizer.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
@@ -433,6 +436,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 
 __all__ = [
+    "BREAKDOWN_FILENAME",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",

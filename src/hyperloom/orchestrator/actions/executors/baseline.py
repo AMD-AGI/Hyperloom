@@ -19,7 +19,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -43,7 +43,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -64,7 +64,6 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # launch needs.
 from ._grid_runner import (
     SessionDirField,
-    _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
@@ -83,7 +82,6 @@ from ._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 from ._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES,
     materialized_run_eval_disabled,
 )
 from ._agentx_timeouts import (
@@ -92,6 +90,7 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
@@ -105,6 +104,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
     failed_patch_anchors_in,
@@ -515,7 +515,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)
@@ -866,55 +866,40 @@ def _revert_patches(
     snapshot_manifest: Any = None,
 ) -> dict[str, Any]:
     """Restore exact patch-touched state without broad reset/clean."""
+    manifest, error = _validated_restore_manifest(repo_path, pre_sha, snapshot_manifest)
+    result = {"ok": False, "errors": [error]} if error else _restore_patch_snapshot(manifest)
+    if not result["ok"]:
+        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
+    return result
+
+
+def _validated_restore_manifest(
+    repo_path: str,
+    pre_sha: str,
+    snapshot_manifest: Any,
+) -> tuple[dict[str, Any], str]:
+    """Load the snapshot manifest and check it was taken of ``repo_path`` at ``pre_sha``.
+
+    Returns ``(manifest, "")`` when the restore may proceed, else ``({}, error)``.
+    """
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
-            result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"manifest_read:{exc}"
     if not isinstance(manifest, dict):
-        result = {"ok": False, "errors": ["missing_manifest"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest"
     manifest_repo_value = str(manifest.get("repo_path") or "").strip()
     if not manifest_repo_value:
-        result = {"ok": False, "errors": ["missing_manifest_repo"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest_repo"
     try:
         caller_repo = Path(repo_path).resolve(strict=True)
         manifest_repo = Path(manifest_repo_value).resolve(strict=True)
     except (OSError, ValueError) as exc:
-        result = {
-            "ok": False,
-            "errors": [f"repo_validation:{type(exc).__name__}:{exc}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_validation:{type(exc).__name__}:{exc}"
     if caller_repo != manifest_repo:
-        result = {
-            "ok": False,
-            "errors": [f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
     if pre_sha:
         try:
             head = subprocess.run(
@@ -936,29 +921,10 @@ def _revert_patches(
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
         ) as exc:
-            result = {
-                "ok": False,
-                "errors": [f"head_validation:{type(exc).__name__}:{exc}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"head_validation:{type(exc).__name__}:{exc}"
         if head != pre_sha:
-            result = {
-                "ok": False,
-                "errors": [f"head_mismatch:expected={pre_sha}:actual={head}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
-    result = _restore_patch_snapshot(manifest)
-    if not result["ok"]:
-        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
-    return result
+            return {}, f"head_mismatch:expected={pre_sha}:actual={head}"
+    return manifest, ""
 
 
 def _three_way_residue_snapshot(
@@ -1590,6 +1556,62 @@ def _revert_legacy_warm_patch_trees(
     )
 
 
+def restore_warm_kernel_snapshots(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Restore exact kernel target bytes captured before each mutation."""
+    errors: list[str] = []
+    for snapshot in reversed(snapshots):
+        target = Path(str(snapshot.get("target") or ""))
+        try:
+            if snapshot.get("existed"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(Path(str(snapshot.get("backup") or "")).read_bytes())
+                if snapshot.get("mode") is not None:
+                    target.chmod(int(snapshot["mode"]))
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            if snapshot.get("existed"):
+                expected = Path(str(snapshot.get("backup") or "")).read_bytes()
+                if not target.is_file() or target.read_bytes() != expected:
+                    raise OSError("kernel restore verification failed")
+            elif target.exists() or target.is_symlink():
+                raise OSError("kernel target still exists after restore")
+        except OSError as exc:
+            errors.append(f"{target}:{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
+
+
+def revert_warm_kernel_patches(
+    applied: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Rollback kernels exactly, reporting every failure."""
+    from ._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    errors: list[str] = []
+    for apply_result in reversed(applied):
+        if not apply_result.get("manifest_path"):
+            continue
+        try:
+            reverted = _maybe_revert_kernel_patch(apply_result)
+            if reverted.get("status") != "ok":
+                raise RuntimeError(
+                    str(
+                        reverted.get("error")
+                        or reverted.get("reason")
+                        or f"kernel revert status={reverted.get('status')}"
+                    )
+                )
+        except Exception as exc:
+            log.warning("warm-kernel KB: revert failed", exc_info=True)
+            errors.append(f"{type(exc).__name__}:{exc}")
+    if snapshots:
+        restored = restore_warm_kernel_snapshots(snapshots)
+        errors.extend(restored.get("errors") or [])
+    return {"ok": not errors, "errors": errors}
+
+
 def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
@@ -1597,12 +1619,37 @@ def _rollback_warm_kernel_apply_results(
     """Rollback kernel mutations and report whether every restore succeeded."""
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...phases.prelude import PreludePhase
 
-    return PreludePhase._revert_warm_kernel_patches(
+    return revert_warm_kernel_patches(
         [r for r in results if isinstance(r, dict)],
         list(snapshots) if isinstance(snapshots, list) else None,
     )
+
+
+_LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+
+
+def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, tail)`` for each known log under *root*, over at most *limit* files."""
+    seen = 0
+    try:
+        for path in root.rglob("*.log"):
+            if path.name not in _LOG_NAMES:
+                continue
+            seen += 1
+            if seen > limit:
+                break
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(0, 2)
+                    size = handle.tell()
+                    handle.seek(max(0, size - max_bytes))
+                    tail = handle.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            yield path, tail
+    except OSError:
+        return
 
 
 class BaselineExecutor:
@@ -1658,15 +1705,8 @@ class BaselineExecutor:
 
     def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
         """Peek the one-shot eager fallback flag WITHOUT consuming it."""
-        try:
-            state = self._resolve_shared_state(shared_state)
-            return bool(getattr(state, "baseline_eager_fallback", False))
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
-            log.debug(
-                "baseline_executor: eager-fallback flag peek failed",
-                exc_info=True,
-            )
-            return False
+        state = self._resolve_shared_state(shared_state)
+        return bool(getattr(state, "baseline_eager_fallback", False))
 
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
@@ -1677,7 +1717,7 @@ class BaselineExecutor:
             state.baseline_eager_fallback = False
             state.save(self.session_dir)
             return True
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
+        except Exception:
             log.debug(
                 "baseline_executor: eager-fallback flag check failed",
                 exc_info=True,
@@ -1779,6 +1819,10 @@ class BaselineExecutor:
             # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
             # rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
+            # Best-effort, unlike the probe below: without it a refused connection ends the round on
+            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+            # was already going to fail -- not a reason to refuse to start one.
+            ensure_eval_unbound_outputs_patched(probe_root)
             if not ensure_eval_probe_patched(probe_root):
                 msg = (
                     "the generation-pathology probe is not installed "
@@ -1802,12 +1846,8 @@ class BaselineExecutor:
             # stops the whole session.
             try:
                 compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
-            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
-                log.error(
-                    "baseline_executor: eval-concurrency compat patch raised for %s: %s",
-                    ix_root,
-                    exc,
-                )
+            except OSError as exc:
+                log.error("baseline_executor: eval-concurrency compat patch failed for %s: %s", ix_root, exc)
                 compat_ok = False
             if not compat_ok:
                 msg = (
@@ -1920,28 +1960,7 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if _hit(chunk):
-                    return True
-        except OSError:
-            return False
-        return False
+        return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
     def _record_baseline_convergence(
@@ -1971,7 +1990,7 @@ class BaselineExecutor:
                         measured,
                     )
             result["baseline_convergence"] = record
-        except Exception:  # noqa: BLE001 - observability must never break a baseline
+        except Exception:
             log.debug("baseline convergence record failed", exc_info=True)
 
     @staticmethod
@@ -2002,28 +2021,10 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False, ""
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                w = _window(chunk)
-                if w is not None:
-                    return True, f"{path.name}: {w}"
-        except OSError:
-            return False, ""
+        for path, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES):
+            window = _window(tail)
+            if window is not None:
+                return True, f"{path.name}: {window}"
         return False, ""
 
     @staticmethod
@@ -2055,28 +2056,11 @@ class BaselineExecutor:
         root = Path(out_dir)
         if not root.is_dir():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
-                    return True
-        except OSError:
-            return False
-        return False
+        return any(
+            marker in tail
+            for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES)
+            for marker in _EVAL_SERVER_UNREACHABLE_MARKERS
+        )
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
@@ -2094,7 +2078,7 @@ class BaselineExecutor:
         # Only a context that names its session binds one.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -2133,30 +2117,22 @@ class BaselineExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "baseline timeline: no session bound; this measurement's whole event will "
-                    "be missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            if inline:
-                return make_sink(inline, producer=_RECORDER_PRODUCER)
-            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
-            event = baseline_event_id(
-                str(getattr(state, "phase", "") or "unphased"),
-                int(getattr(state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+        if not session_is_bound():
             log.warning(
-                "baseline timeline: could not resolve an event to record into; this "
-                "measurement's whole event will be missing from the breakdown",
-                exc_info=True,
+                "baseline timeline: no session bound; this measurement's whole event will "
+                "be missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        if inline:
+            return make_sink(inline, producer=_RECORDER_PRODUCER)
+        state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+        event = baseline_event_id(
+            str(getattr(state, "phase", "") or "unphased"),
+            int(getattr(state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
 
     def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
         """The session's baseline failure counts as this measurement starts.
@@ -2173,7 +2149,7 @@ class BaselineExecutor:
             tuple[int | None, int | None]: The consecutive-failure streak and
                 the session total, or ``(None, None)`` when no state is bound.
         """
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return (
                 int(getattr(state, "baseline_failure_streak", 0) or 0),
@@ -2184,7 +2160,7 @@ class BaselineExecutor:
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Name the serving framework this measurement runs against."""
         params = ctx.task.params or {}
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return str(
                 params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
@@ -2220,9 +2196,7 @@ class BaselineExecutor:
         params = ctx.task.params or {}
         # A failed required patch timeline means the donor is incompatible with the current tree.
         _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = (
-            "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        )
+        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
@@ -2582,10 +2556,7 @@ class BaselineExecutor:
             result.setdefault("nonfatal_warnings", [])
             result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
-            try:
-                shared_state.baseline_accuracy = acc_val
-            except Exception:  # noqa: BLE001 — salvage must never break baseline
-                log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            shared_state.baseline_accuracy = acc_val
         return acc_val
 
     def _salvage_sibling_baseline_accuracy(
@@ -2604,7 +2575,7 @@ class BaselineExecutor:
             from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
-        except Exception:  # noqa: BLE001 — salvage must never break the stop path
+        except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
         if _finite_score(eval_data.get("accuracy")) is None:
@@ -2726,6 +2697,13 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
@@ -2743,7 +2721,7 @@ class BaselineExecutor:
                 _cfg_envs = _cfg_bench.setdefault("envs", {})
                 apply_runtime_override(_cfg_envs, _rt_from_params)
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+            except Exception:
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
@@ -2751,16 +2729,15 @@ class BaselineExecutor:
         # their say by here, and after the launch the same answer can only be
         # guessed at by parsing the server's own log back.
         if recorder is not None:
-            with suppress(Exception):
-                recorder.record_invocation(
-                    run_index=run_index,
-                    framework_args=effective_extra_server_args,
-                    extra_envs=base_extra_envs,
-                    config_path=materialized_config_path,
-                    framework=fw,
-                    model_path=resolved_model,
-                    args_mode=str(params.get("args_mode") or "append"),
-                )
+            recorder.record_invocation(
+                run_index=run_index,
+                framework_args=effective_extra_server_args,
+                extra_envs=base_extra_envs,
+                config_path=materialized_config_path,
+                framework=fw,
+                model_path=resolved_model,
+                args_mode=str(params.get("args_mode") or "append"),
+            )
         # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
         # capability-preflight aiperf before Magpie runs the materialized config.
         # Baseline/profile shell out here (not via _run_magpie), so without this the
@@ -2877,7 +2854,7 @@ class BaselineExecutor:
             live_shared_state.warm_replay_pending = pending
             try:
                 live_shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "combined warm replay recipe snapshot persist failed",
                     exc_info=True,
@@ -2947,7 +2924,7 @@ class BaselineExecutor:
                             live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.warning(
                             "combined warm replay cleanup persist failed",
                             exc_info=True,
@@ -2979,7 +2956,7 @@ class BaselineExecutor:
                 live_shared_state.warm_replay_pending = pending
                 try:
                     live_shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.debug(
                         "combined warm replay pending persist failed",
                         exc_info=True,
@@ -3415,7 +3392,7 @@ class BaselineExecutor:
             session_dir = Path(str(extra.get("session_dir") or self.session_dir))
             state = SharedState.load_or_init(session_dir)
             return bool(getattr(state, "baseline_double_run", False))
-        except Exception:  # noqa: BLE001 - keep baseline fallback double-run.
+        except Exception:
             log.debug(
                 "baseline_executor: could not resolve baseline_double_run from session state",
                 exc_info=True,
@@ -3464,7 +3441,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round."""
+        """Remove the pid/json files a previous round left for this framework and port."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -3473,15 +3450,6 @@ class BaselineExecutor:
                     p.unlink()
             except OSError:
                 pass
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
-        try:
-            await asyncio.to_thread(_kill_stale_servers)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
-                exc,
-            )
 
     def _teardown_lifecycle_server(
         self,

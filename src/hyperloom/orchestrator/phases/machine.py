@@ -8,10 +8,12 @@
 from __future__ import annotations
 import logging as _logging
 from typing import Any
-from . import geak_rebench as _geak_rebench
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
+from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -49,18 +51,19 @@ class MachinePhase(PhaseHandler):
             state.phase_budget_pct = dict(self._phase_budget_pct)
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
         # Fresh start; pre-phase-machine resume state is treated as fresh.
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "fresh_session"},
         )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
@@ -71,7 +74,8 @@ class MachinePhase(PhaseHandler):
             "reopening at PRELUDE so the new budget can be spent on the work "
             "the earlier leg stopped short of."
         )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
             evidence={"trigger": "resumed_from_close"},
@@ -113,7 +117,7 @@ class MachinePhase(PhaseHandler):
                 session_dir=self.session_dir,
                 save_state=True,
             )
-        except Exception:  # noqa: BLE001 — defensive; helper is itself best-effort
+        except Exception:
             log.exception(
                 "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
                 workload,
@@ -130,11 +134,16 @@ class MachinePhase(PhaseHandler):
 
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work."""
-        kinds = _phase_state.KERNEL_LANE_TASK_KINDS
+        kinds = _phase_state.PHASE_ALLOWED_ACTIONS[_phase_state.PHASE_KERNEL_AGENT]
         tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
         return tuple(
             sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
         )
+
+    async def _kernel_agent_in_flight(self) -> bool:
+        """Whether the ``kernel_agent`` task is queued or running."""
+        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return any(task.kind == "kernel_agent" for task in tasks)
 
     async def _track_kernel_idle_streak(self) -> None:
         """Advance or reset the KERNEL idle-streak counters for this tick."""
@@ -171,6 +180,7 @@ class MachinePhase(PhaseHandler):
         optimize_enabled = self._optimize_enabled()
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        in_kernel = str(state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
@@ -178,6 +188,7 @@ class MachinePhase(PhaseHandler):
             optimize_enabled=optimize_enabled,
             enablement_enabled=self._enablement_admitted(),
             enablement_in_flight=in_enablement and await self._enablement_in_flight(),
+            kernel_work_in_flight=in_kernel and await self._kernel_agent_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._maybe_enqueue_explore_research_scout()
@@ -189,13 +200,43 @@ class MachinePhase(PhaseHandler):
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
+        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
+        # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
+        # registry confirms none is left running. Queued work the next phase does not admit is dropped here too.
+        cancelled = await self.tasks.cancel_queued(
+            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
+            reason=barrier_reason,
+        )
+        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        if cancelled or stopped:
+            log.info(
+                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
+                barrier_reason,
+                len(cancelled),
+                len(stopped),
+            )
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "stopped_task_ids": stopped,
+                },
+            )
+        running = await self.tasks.running()
+        if running:
+            log.info("phase_machine: holding %s until %d running task(s) stop", barrier_reason, len(running))
+            return
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
-            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
@@ -217,23 +258,20 @@ class MachinePhase(PhaseHandler):
             and isinstance(evidence, dict)
             and evidence.get("terminal")
             and reason
-            and _phase_state.is_valid_stop_reason(reason)
+            and is_valid_stop_reason(reason)
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
         # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
         # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
-            try:
-                state.mark_bottleneck_switch(
-                    prev_bottleneck=state.current_top_bottleneck(),
-                )
-                log.info(
-                    "plateau → bottleneck switch flagged (off %r)",
-                    state.last_cycle_bottleneck,
-                )
-            except Exception:  # noqa: BLE001 — advisory bookkeeping is best-effort
-                log.exception("mark_bottleneck_switch failed")
+            state.mark_bottleneck_switch(
+                prev_bottleneck=state.current_top_bottleneck(),
+            )
+            log.info(
+                "plateau → bottleneck switch flagged (off %r)",
+                state.last_cycle_bottleneck,
+            )
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
         if is_loopback:
             prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -250,51 +288,24 @@ class MachinePhase(PhaseHandler):
             and "no_gain_cycle_streak_effective" in evidence
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
-        allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
-        target_phase = str(target or "").strip().upper()
-        cancelled = await self.tasks.cancel_queued_not_allowed(
-            allowed_kinds=allowed_kinds,
-            reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
-            spare_queued=lambda _task_id, kind, params: _geak_rebench.spare_geak_rebench_on_phase_transition(
-                target_phase=target_phase,
-                kind=kind,
-                params=params,
-            ),
-        )
-        if cancelled:
-            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "queued_tasks_cancelled_on_phase_transition",
-                    "prior_phase": str(prior or ""),
-                    "target_phase": target,
-                    "reason": reason,
-                    "cancelled_task_ids": cancelled,
-                    "count": len(cancelled),
-                    "detail": f"kind not allowed in {target}; re-dispatch if still needed",
-                },
-            )
-        state.record_phase_transition(
+        _phase_state.record_phase_transition(
+            state,
             to_phase=target,
             reason=reason,
             evidence=evidence,
         )
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
-        try:
-            state.record_lifecycle_event(
-                step=target,
-                status=_phase_state.LIFECYCLE_STATUS_ENTER,
-                phase=target,
-                detail=f"reason={reason}" if reason else "",
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.debug("Coordinator: lifecycle phase emit failed", exc_info=True)
+        _phase_state.record_lifecycle_event(
+            state,
+            step=target,
+            status=_phase_state.LIFECYCLE_STATUS_ENTER,
+            phase=target,
+            detail=f"reason={reason}" if reason else "",
+        )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: save after phase transition failed")
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
@@ -317,9 +328,10 @@ class MachinePhase(PhaseHandler):
                     },
                 )
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged only.
+        # Phase-entry side effects are additive; hook failures are logged only. They run on the transition itself,
+        # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.
         try:
             await self._on_phase_entered(
                 from_phase=prior or "",
@@ -327,10 +339,10 @@ class MachinePhase(PhaseHandler):
                 reason=reason or "",
                 evidence=evidence if isinstance(evidence, dict) else None,
             )
-        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
+        except Exception as exc:
             log.exception("Coordinator: _on_phase_entered hook failed")
-            # This hook is also what closes the left phase's event, so a raise
-            # here is the case where that event never got its exit evidence.
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
             self._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     async def _on_phase_entered(
@@ -354,17 +366,14 @@ class MachinePhase(PhaseHandler):
                 a phase that recomputed them at close would report counts over
                 a history that kept growing after the decision.
         """
-        try:
-            self._reseed_orch_prompt_for_phase(to_phase)
-        except Exception:  # noqa: BLE001 — prompt scoping is best-effort
-            log.exception("Coordinator: phase-boundary prompt reseed failed")
+        self._reseed_orch_prompt_for_phase(to_phase)
 
         # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
         # a hook of its own.
         if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
             try:
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
-            except Exception:  # noqa: BLE001 — observability cannot change the transition
+            except Exception:
                 log.debug("Coordinator: kernel timeline close failed", exc_info=True)
         # FRAMEWORK closes on the same terms, and additionally needs the
         # evidence: its exit rule already read both arms' plateau state, and
@@ -375,7 +384,7 @@ class MachinePhase(PhaseHandler):
                     exit_reason=str(reason or ""),
                     evidence=evidence if isinstance(evidence, dict) else None,
                 )
-            except Exception:  # noqa: BLE001 — observability cannot change the transition
+            except Exception:
                 log.debug("Coordinator: framework timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
@@ -424,7 +433,7 @@ class MachinePhase(PhaseHandler):
             evidence[k] = v
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "phase entry evidence: SharedState.save failed for kvs=%r",
                 kvs,

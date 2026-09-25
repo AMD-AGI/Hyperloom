@@ -13,7 +13,7 @@ from typing import Any
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.perf_metric import VERDICT_KEEP
-from ._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +172,8 @@ class VariantResult:
     input_throughput: float | None = None
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
+    intvty_p50: float | None = None
+    request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -217,6 +219,8 @@ class VariantResult:
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
+            "e2e_norm_intvty_p50": self.intvty_p50,
+            "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

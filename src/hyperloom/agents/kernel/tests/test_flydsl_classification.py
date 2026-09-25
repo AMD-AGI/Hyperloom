@@ -18,7 +18,7 @@ import unittest.mock as mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from tracelens_analysis import (  # noqa: E402
+from tracelens_analysis import (
     _defines_traced_triton_kernel,
     _flydsl_kernel_params,
     _flydsl_reusable_roots,
@@ -29,7 +29,7 @@ from tracelens_analysis import (  # noqa: E402
     enrich_candidates_with_runtime_metadata,
     source_type_for,
 )
-from tracelens_skill_runner import (  # noqa: E402
+from tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
     normalize_upstream_category,
 )
@@ -377,9 +377,9 @@ class TestCandidateEnvForwarding(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[5]
         sys.path.insert(0, str(repo_root))
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+        from hyperloom.orchestrator.actions.executors import trace_analyze
 
-        self.h = kernel_request_handlers
+        self.h = trace_analyze
 
     def test_flydsl_prefix_allowed(self) -> None:
         self.assertIn("FLYDSL_", self.h._CANDIDATE_ENV_PREFIXES)
@@ -449,6 +449,23 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
             source_type_for("pseudo_op::moe_fused_aiter", ""),
             "unknown",
         )
+
+
+class TestFlyDSLTargetArch(unittest.TestCase):
+    """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
+
+    def test_every_supported_board_gets_the_table_arch(self) -> None:
+        from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+
+        for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+            self.assertEqual(
+                _flydsl_kernel_params("", board).get("FLYDSL_TARGET_ARCH"),
+                arch,
+                board,
+            )
+
+    def test_an_unsupported_board_gets_no_arch(self) -> None:
+        self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params("", "mi250x"))
 
 
 if __name__ == "__main__":

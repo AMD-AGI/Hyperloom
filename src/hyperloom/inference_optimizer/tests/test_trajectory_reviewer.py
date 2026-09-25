@@ -9,7 +9,7 @@ from hyperloom.orchestrator.knowledge.trajectory_reviewer import (
     _stalled_cycle_count,
     build_trajectory_digest,
 )
-from hyperloom.orchestrator.state.optimization_journal import OUTCOME_SKIP
+from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_SKIP
 
 
 @dataclass
@@ -154,7 +154,7 @@ def test_build_trajectory_digest_stall_without_validated(tmp_path):
 
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     """Cover exhausted_directions formatting."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         Journal,
         JournalEntry,
     )
@@ -184,14 +184,13 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     assert "non-promoting attempts" in result
 
 
-def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
-    """A Journal.load_or_create failure yields an empty entry list."""
+def test_load_journal_entries_is_empty_for_a_corrupt_journal(tmp_path):
+    """A journal that cannot be parsed yields an empty entry list."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
 
-    def boom(*_a, **_k):
-        raise RuntimeError("journal unreadable")
-
-    monkeypatch.setattr(tr.Journal, "load_or_create", boom)
+    path = tr.Journal._journal_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
     assert tr._load_journal_entries(tmp_path, _FakeState()) == []
 
 

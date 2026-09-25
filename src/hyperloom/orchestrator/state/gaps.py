@@ -11,17 +11,15 @@ from hashlib import sha1
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.common.timeutil import now_iso
 
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
 
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from . import shared_state
-
-    return shared_state
+# gap ledger caps; both enforced in upsert_gap.
+_GAPS_MAX_ENTRIES = 50
+_GAPS_ATTEMPTS_HISTORY = 20
 
 
 class GapsStateMixin:
@@ -44,8 +42,7 @@ class GapsStateMixin:
         cid = str(entry.get("canonical_id") or "").strip()
         if not cid:
             return {}
-        ss = _shared_state_module()
-        now = ss._now_iso()
+        now = now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -61,8 +58,8 @@ class GapsStateMixin:
                 "last_updated_ts": now,
                 "attempts": list(entry.get("attempts") or []),
             }
-            if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY :]
+            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
+                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
@@ -76,12 +73,12 @@ class GapsStateMixin:
             if incoming_attempts:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
                 # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
+                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
+                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
                 existing["attempts"] = merged_attempts
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
-        if len(self.gaps) > ss._GAPS_MAX_ENTRIES:
+        if len(self.gaps) > _GAPS_MAX_ENTRIES:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
@@ -89,7 +86,7 @@ class GapsStateMixin:
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
-            keep_count = ss._GAPS_MAX_ENTRIES - 1
+            keep_count = _GAPS_MAX_ENTRIES - 1
             others = others[-keep_count:] if keep_count > 0 else []
             self.gaps = others + [merged]
         return merged
@@ -104,12 +101,11 @@ class GapsStateMixin:
         if gap is None:
             return None
         attempts = list(gap.get("attempts") or [])
-        ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
-        if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or now_iso())})
+        if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+            attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss._now_iso()
+        gap["last_updated_ts"] = now_iso()
         return gap
 
 
@@ -117,22 +113,16 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
+        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.
         """
         state = self.shared_state
-        try:
-            for entry in self._extract_gaps_from_baseline():
-                state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("gaps refresh: baseline extraction failed")
-        try:
-            for entry in self._extract_gaps_from_attempts():
-                state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("gaps refresh: attempts extraction failed")
+        for entry in self._extract_gaps_from_baseline():
+            state.upsert_gap(entry)
+        for entry in self._extract_gaps_from_attempts():
+            state.upsert_gap(entry)
 
         plane = getattr(self, "knowledge_plane", None)
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
@@ -148,7 +138,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                             entry = dict(entry)
                             entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.warning(
                     "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
@@ -268,7 +258,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
 
     def _seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
         for hint in hints:
@@ -279,23 +269,17 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             tags = hint.get("domain_tags") or []
             key = f"{what.lower()}::{source.lower()}"
             cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
-            try:
-                self.shared_state.upsert_gap(
-                    {
-                        "canonical_id": cid,
-                        "symptom": what,
-                        "layer": "research_hint",
-                        "severity": "medium",
-                        "domain_hint": str(tags[0]) if tags else "",
-                        "source": "research_scout",
-                        "provenance": str(hint.get("source") or ""),
-                    }
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "research-scout: upsert_gap failed for %s",
-                    cid,
-                )
+            self.shared_state.upsert_gap(
+                {
+                    "canonical_id": cid,
+                    "symptom": what,
+                    "layer": "research_hint",
+                    "severity": "medium",
+                    "domain_hint": str(tags[0]) if tags else "",
+                    "source": "research_scout",
+                    "provenance": str(hint.get("source") or ""),
+                }
+            )
 
     def _framework_authoring_domain(self) -> str:
         """Return the authoring domain matching this session's framework kind.
@@ -325,10 +309,10 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
 
         a = str(action or "").strip().lower()
         if a in {
-            # ``kernel_opt`` names the lane, not a request kind: it is still in
-            # KERNEL_LANE_TASK_KINDS and still what a gap row calls kernel work,
-            # so it keeps classifying to the kernel layer.
+            # ``kernel_opt`` names the lane, not a request kind: it is still what
+            # a gap row calls kernel work, so it keeps classifying to the kernel layer.
             "kernel_opt",
+            "kernel_agent",
             "integrate",
             "trace_analyze",
             "run_gemm_tuning",

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
+from hyperloom.common.env import env_bool
+
 
 KB_STORE_URL_ENV = "KB_STORE_URL"
 PR_MONITOR_ENABLED_ENV = "HYPERLOOM_PR_MONITOR_ENABLED"
@@ -15,9 +17,7 @@ DEFAULT_KB_STORE_URL = "https://global.primus-safe.amd.com/knowledge-base"
 def pr_monitor_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether runtime preflight left PR Monitor enabled."""
 
-    source = os.environ if env is None else env
-    value = str(source.get(PR_MONITOR_ENABLED_ENV, "")).strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    return env_bool(PR_MONITOR_ENABLED_ENV, True, env=env)
 
 
 def kb_store_url(

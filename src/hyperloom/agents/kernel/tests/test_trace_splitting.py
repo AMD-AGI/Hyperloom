@@ -336,7 +336,7 @@ class TestSplitterE2E:
 
 def _request_handlers_importable() -> bool:
     try:
-        from hyperloom.orchestrator.kernel.request_handlers import (
+        from hyperloom.orchestrator.actions.executors.trace_analyze import (
             _build_trace_analyze_cmd,
         )  # noqa: F401
 
@@ -361,7 +361,7 @@ class TestBuildTraceAnalyzeCmd:
         import os
 
         os.environ.setdefault("HYPERLOOM_KERNEL_AGENT_ROOT", str(TOOLS_DIR.parent))
-        from hyperloom.orchestrator.kernel.request_handlers import (
+        from hyperloom.orchestrator.actions.executors.trace_analyze import (
             _build_trace_analyze_cmd,
         )
 

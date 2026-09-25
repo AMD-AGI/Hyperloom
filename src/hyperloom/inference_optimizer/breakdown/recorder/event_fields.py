@@ -10,6 +10,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.timeutil import now_iso
 
 __all__ = [
@@ -75,19 +76,13 @@ def as_list(value: Any) -> list[Any]:
 
 
 def int_or_none(value: Any) -> int | None:
-    """Best-effort int coercion that reports ``None`` instead of raising."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-int coercion; rejects ``bool``, ``None``, non-finite floats."""
+    return to_int(value)
 
 
 def float_or_none(value: Any) -> float | None:
-    """Best-effort float coercion that reports ``None`` instead of raising."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    """Finite-float coercion; rejects ``bool``, ``None``, ``nan``/``inf``."""
+    return to_float(value)
 
 
 def bool_or_none(value: Any) -> bool | None:
@@ -113,15 +108,16 @@ def text_or_none(value: Any) -> str | None:
 
 
 def graded_axes(source: Any) -> dict[str, Any]:
-    """The four graded axes a measurement carries, as explicit nulls where it carries none.
+    """The graded axes a measurement carries, as explicit nulls where it carries none.
 
     A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
     reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
-    and it was zero", so all four are always present.
+    and it was zero", so every axis is always present.
 
     Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
-    slow-tail interactivity percentile with total throughput held as a guard, and none of that is recoverable from
-    the output axis -- on the canonical corpus the two throughputs differ by roughly two orders of magnitude.
+    median interactivity percentile with the slow tail and output throughput held as guards, and none of that is
+    recoverable from the output axis -- on the canonical corpus the two throughputs differ by roughly two orders
+    of magnitude.
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
 

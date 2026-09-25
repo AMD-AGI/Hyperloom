@@ -481,24 +481,39 @@ def _read_pod_script(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def _strip_pod_script_header(body: str) -> str:
-    """Drop shebang and ``from __future__ import annotations`` from a pod script."""
-    lines = body.splitlines()
-    if lines and lines[0].startswith("#!"):
-        lines = lines[1:]
-    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
-    return "\n".join(lines).strip()
+def _read_jit_cache_core() -> str:
+    """Read the same stdlib-only cache owner used by local patch transactions."""
+    return (Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py").read_text(encoding="utf-8")
 
 
-def _read_bundled_pod_python_script(
-    main: str,
-    *,
-    deps: tuple[str, ...] = ("patch_path_safety.py",),
-) -> str:
-    """Read a pod Python script with stdlib-only dependencies inlined."""
-    chunks = [_strip_pod_script_header(_read_pod_script(dep)) for dep in deps]
-    main_body = _strip_pod_script_header(_read_pod_script(main))
-    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
+_KERNEL_NODE_OPS_DEPS = (
+    Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
+    _SCRIPTS_DIR / "patch_path_safety.py",
+)
+_LAUNCHER_DEPS = (
+    Path(__file__).parent / "_internal" / "server_args_safety.py",
+    _SCRIPTS_DIR / "sglang_shape_gate.py",
+)
+
+
+def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...] = _KERNEL_NODE_OPS_DEPS) -> str:
+    """Bundle a pod script with its dependencies registered under their own module names.
+
+    Pods receive one file, so each dependency is registered in ``sys.modules``
+    before the script runs and keeps importing it by name, on the driver and on
+    any Ray worker that deserializes a function closing over it.
+    """
+    chunks = ["import sys, types\n"]
+    for dep in deps:
+        source = dep.read_text(encoding="utf-8")
+        chunks.append(
+            f"_dependency = types.ModuleType({dep.stem!r})\n"
+            f"_dependency.__file__ = {dep.name!r}\n"
+            f"sys.modules[{dep.stem!r}] = _dependency\n"
+            f"exec(compile({source!r}, _dependency.__file__, 'exec'), _dependency.__dict__)\n"
+        )
+    chunks.append(f"exec(compile({_read_pod_script(main)!r}, {main!r}, 'exec'), globals())\n")
+    return "".join(chunks)
 
 
 def _build_restart_entrypoint(
@@ -645,7 +660,7 @@ def _build_multinode_launch_entrypoint(
     log_dir: str,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
-    py = _read_pod_script("launch_multinode.py")
+    py = _read_bundled_pod_python_script("launch_multinode.py", _LAUNCHER_DEPS)
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
         extra_args = prepare_shell_safe_extra_args(
@@ -745,6 +760,21 @@ def _build_multinode_router_entrypoint(
     )
 
 
+def _kernel_patch_pod_files() -> str:
+    """Ship the kernel patch driver and its fixed sibling imports to Ray pods."""
+    return (
+        'cat > "$WORK_DIR/aiter_jit_cache.py" '
+        "<<'__MN_JIT_CACHE_EOF__'\n"
+        f"{_read_jit_cache_core()}__MN_JIT_CACHE_EOF__\n"
+        'cat > "$WORK_DIR/patch_path_safety.py" '
+        "<<'__MN_PPATH_EOF__'\n"
+        f"{_read_pod_script('patch_path_safety.py')}__MN_PPATH_EOF__\n"
+        'cat > "$WORK_DIR/kernel_patch_multinode.py" '
+        "<<'__MN_KPATCH_PY_EOF__'\n"
+        f"{_read_pod_script('kernel_patch_multinode.py')}__MN_KPATCH_PY_EOF__\n"
+    )
+
+
 def _build_multinode_apply_patch_entrypoint(
     target_path: str,
     patch_b64: str,
@@ -754,16 +784,9 @@ def _build_multinode_apply_patch_entrypoint(
     jit_build_dir: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
         f"--target-path {shlex.quote(str(target_path))} "
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
@@ -781,16 +804,9 @@ def _build_multinode_revert_patch_entrypoint(
     records_json: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply)."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" revert '
         f"--target-path {shlex.quote(str(target_path))} "
         f"--records-json {shlex.quote(str(records_json))} "
@@ -804,16 +820,9 @@ def _build_multinode_finalize_patch_entrypoint(
     timeout_sec: int,
 ) -> str:
     """Compose the head-pod entrypoint that finalizes accepted backups."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" finalize '
         f"--records-json {shlex.quote(str(records_json))} "
         f"--timeout-sec {int(timeout_sec)}"

@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 
-    from ..breakdown import BREAKDOWN_FILENAME
+    from ..session.session_paths import BREAKDOWN_FILENAME
 
     state_path = session_dir / "state.json"
     close_done = False
@@ -31,7 +31,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
     breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
 
-    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
+    from ..trace.langfuse_emitter import read_receipt
 
     receipt = read_receipt(session_dir) or {}
     counts = receipt.get("counts") or {}
@@ -96,14 +96,14 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
         breakdown_path = write_breakdown_json(session_dir)
         print(f"  rebuilt breakdown : {breakdown_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: breakdown rebuild failed")
         return 1
 
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from ..trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )
@@ -112,7 +112,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: langfuse push failed (non-fatal)")
 
     # 3) Optional full generation replay (off by default).
@@ -122,7 +122,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
             rc = ingest(build_plan(session_dir))
             print(f"  trace backfill    : rc={rc}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recover-session: trace backfill failed (non-fatal)")
 
     # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
@@ -132,7 +132,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         pkg_path = package_session_artifacts(session_dir)
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0

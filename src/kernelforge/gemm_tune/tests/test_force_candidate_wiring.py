@@ -93,7 +93,7 @@ def test_all_new_shapes_force_candidate(tmp_path, monkeypatch):
     result = _run_no_splitk(tmp_path)
     assert result.candidate is True
     assert result.status == "ok"
-    assert result.improved_shapes == 0 and result.unverified_shapes == 1
+    assert result.improved_shapes is None and result.unverified_shapes == 1
     assert any(r.get("is_new") for r in result.shape_results)
 
 
@@ -106,7 +106,7 @@ def test_candidate_csv_fallback_forces_candidate(tmp_path, monkeypatch):
     result = _run_no_splitk(tmp_path)
     assert result.candidate is True
     assert result.status == "ok"
-    assert result.improved_shapes == 0 and result.unverified_shapes == 1
+    assert result.improved_shapes is None and result.unverified_shapes == 1
     assert all(r.get("tuned_unverified") for r in result.shape_results)
 
 

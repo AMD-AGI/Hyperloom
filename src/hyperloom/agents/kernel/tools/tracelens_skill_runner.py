@@ -34,11 +34,11 @@ from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODE
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _capture_shapes import is_capture_dir_name  # noqa: E402
-from _io_utils import safe_float  # noqa: E402
-from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS  # noqa: E402
-from _literal_utils import safe_literal_eval as _safe_literal_eval  # noqa: E402
-from _task_group_contract import (  # noqa: E402
+from _capture_shapes import is_capture_dir_name
+from _io_utils import safe_float
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
+from _task_group_contract import (
     build_operator_identity,
     build_task_group_shape_cases,
     legacy_operator_identity_keys,
@@ -448,7 +448,7 @@ def _should_use_codex_runner() -> bool:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
-    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
+    from hyperloom.common.claude_oneshot import message_text
 
     yield from (t for t in message_text(message) if t)
 
@@ -459,6 +459,7 @@ async def _run_tracelens_skill_codex(
     output_dir: Path,
     prefix_path: Path,
     tracelens_root: Path,
+    capture_folder: Path | None,
     model: str,
     timeout_sec: float,
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]],
@@ -468,11 +469,14 @@ async def _run_tracelens_skill_codex(
 
     The session works out of ``tracelens_root``, matching the Claude path, so
     the skill's command-prefix cache and the TraceLens CLIs' own relative paths
-    resolve identically on both runners. The write scope is that workspace plus
-    ``output_dir``; the rest of the host is readable but immutable. The
-    TraceLens checkout has to stay writable because its CLIs write caches and
-    intermediates into their own tree, so narrowing the workspace to
-    ``output_dir`` alone would break the analysis rather than harden it.
+    resolve identically on both runners. The write scope is that workspace,
+    ``output_dir`` and ``capture_folder``; the rest of the host is readable but
+    immutable. The TraceLens checkout has to stay writable because its CLIs
+    write caches and intermediates into their own tree, so narrowing the
+    workspace to ``output_dir`` alone would break the analysis rather than
+    harden it. The capture folder is writable for the same reason: the
+    inference perf report classifies it before merging it, and that
+    classification writes ``execution_details.json`` into the folder itself.
 
     Args:
         prompt (str): The orchestrator prompt.
@@ -480,6 +484,8 @@ async def _run_tracelens_skill_codex(
         prefix_path (Path): The command-prefix cache path, reported as an
             artifact.
         tracelens_root (Path): The TraceLens project root; the session cwd.
+        capture_folder (Path | None): Graph-capture folder the inference perf
+            report writes into, or ``None`` outside graph-capture runs.
         model (str): The Codex model id.
         timeout_sec (float): Wall-clock budget for the turn.
         codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]]): The
@@ -501,7 +507,7 @@ async def _run_tracelens_skill_codex(
             cwd=tracelens_root,
             model=model,
             timeout_sec=timeout_sec,
-            writable_roots=(output_dir,),
+            writable_roots=(output_dir, capture_folder) if capture_folder else (output_dir,),
         )
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
@@ -613,6 +619,7 @@ async def run_tracelens_skill(
             output_dir=output_dir,
             prefix_path=prefix_path,
             tracelens_root=tracelens_root,
+            capture_folder=capture_folder,
             model=codex_model,
             timeout_sec=max(60.0, float(budget_minutes) * 60.0),
             codex_turn_runner=codex_turn_runner or run_codex_turn,
@@ -1220,7 +1227,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         return []
     try:
         text = md_path.read_text(encoding="utf-8")
-    except Exception:
+    except OSError:
         return []
 
     pitems = _extract_pitem_categories(text)

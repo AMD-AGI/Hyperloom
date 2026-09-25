@@ -6,10 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
@@ -111,6 +117,7 @@ async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
         action="bench",
         ttl_sec=60,
     )
+    assert isinstance(a.acquired_at, str)
     with pytest.raises(LaneBusy) as exc:
         await locks.acquire_many(
             ["benchmark_lane"],
@@ -473,6 +480,264 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
         is None
     )
     assert not hasattr(locks, "reap_expired")
+
+
+_T0 = "2026-09-21T07:00:00+00:00"
+
+#: What the runner records when the release ran and teardown was acknowledged.
+_CLEANED = {"cleanup_confirmed": True}
+
+
+def _unconfirmed(tree_pgid: int | None = None) -> dict:
+    """Build the cleanup evidence of a holder that retained its lane.
+
+    What the runner records on the path that deliberately SKIPS the release,
+    with the process group the raise site named when it could name one. Omitting
+    it is not only a raise site with nothing to name: it is also the exact shape
+    every row written before this code shipped carries, 2026-09-21's included.
+    """
+    evidence: dict = {"cleanup_confirmed": False, "cleanup_error": "physical cleanup unconfirmed"}
+    if tree_pgid is not None:
+        evidence["cleanup_tree_pgid"] = tree_pgid
+    return evidence
+
+
+@pytest.fixture(autouse=True)
+def _forget_logged_remedies():
+    """The remedy log de-duplicates for the life of the process, not of one test."""
+    resource_lock._DIAGNOSED.clear()
+    yield
+    resource_lock._DIAGNOSED.clear()
+
+
+def _seed_task(conn, task_id: str, state: str, *, evidence: dict | None = None) -> None:
+    """Give a lane holder the registry row and cleanup account reclamation judges it by."""
+    history = json.dumps([{"from": "running", "to": state, "ts": _T0, "evidence": evidence or _CLEANED}])
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, history, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?,?)",
+        (task_id, "specialist", state, f"idem-{task_id}", history, _T0, _T0),
+    )
+    conn.raw.commit()
+
+
+def _dead_tree_pgid() -> int:
+    """A process-group id whose group has certainly emptied.
+
+    Spawned with ``start_new_session``, as both real launch sites do, so the
+    child's pid is its group id -- and once it is reaped neither the process nor
+    the group it led has a member left.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", ""], start_new_session=True)  # nosec B603
+    proc.wait()
+    return proc.pid
+
+
+@contextlib.contextmanager
+def _live_tree(*, own_session: bool = True):
+    """A real process, alive for the body of the test.
+
+    Args:
+        own_session: Whether it leads a session of its own, as a specialist
+            launched with ``start_new_session`` does. False reproduces a root
+            that shares its launcher's process group, where its own pid names
+            no group at all and only walking the tree can see it.
+    """
+    proc = subprocess.Popen(  # nosec B603
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=own_session
+    )
+    try:
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_rate_counts_what_decides_the_next_design(conn, locks):
+    """How often teardown is unconfirmed, which is the number worth measuring.
+
+    ``leases_unverifiable`` says how many lanes are held now; it cannot say
+    whether that is an accident or the ordinary outcome. Every portable way to
+    release such a lane automatically was refuted, and the one candidate left is
+    safety-critical, so this ratio is what decides whether anyone should build
+    it. A task with no cleanup evidence at all counts as unconfirmed: that is
+    exactly the shape that strands a lane.
+    """
+    _seed_task(conn, "confirmed", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+    _seed_task(conn, "unconfirmed", "failed", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    # _seed_task treats an empty dict as "not supplied", so a history carrying no
+    # cleanup account at all is written directly -- that is the real shape here.
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, history, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?,?)",
+        (
+            "silent",
+            "specialist",
+            "succeeded",
+            "idem-silent",
+            json.dumps([{"from": "running", "to": "succeeded", "ts": _T0}]),
+            _T0,
+            _T0,
+        ),
+    )
+    conn.raw.commit()
+    _seed_task(conn, "still-running", "running", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+
+    unconfirmed, ended = await locks.cleanup_confirmation_rate()
+
+    # 'still-running' has not ended, so it is not part of the question.
+    assert (unconfirmed, ended) == (2, 3)
+
+
+def _remedies(caplog) -> list[str]:
+    """Every operator-facing warning the lane diagnostic logged."""
+    return [r.getMessage() for r in caplog.records if r.name == "hyperloom.orchestrator.bus.resource_lock"]
+
+
+@pytest.mark.asyncio
+async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_remedy(conn, locks, caplog):
+    """2026-09-21's own rows are not auto-healed, and are not meant to be.
+
+    The code that wrote them recorded ``cleanup_confirmed=False`` and no group
+    id, so they take the unverifiable path and keep their lanes -- for the life
+    of the session if need be, because no age or TTL may break the tie and a
+    row like this reads exactly like a holder still on the machine.
+
+    What the operator gets instead is this warning: the lane, the holder, why it
+    could not be settled, and the statement that releases that one row, with the
+    check that makes running it safe. On the day it took an hour of ``py-spy``
+    and sqlite spelunking to arrive at the same command.
+    """
+    _seed_task(conn, "tincident", "failed", evidence={"cleanup_confirmed": False})
+    await locks.acquire_many(
+        ["build_lane"], holder_id="incident", task_id="tincident", action="specialist", ttl_sec=3600
+    )
+
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+        # A sweep runs every maintenance tick, for the life of the session.
+        assert len(await locks.diagnose_unverifiable_holders()) == 1
+
+    assert [(r["lane"], r["task_id"], r["reason"]) for r in stuck] == [
+        ("build_lane", "tincident", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)
+    ]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    remedies = _remedies(caplog)
+    assert len(remedies) == 1
+    assert resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED in remedies[0]
+    assert "FIRST confirm no process of task tincident is still running" in remedies[0]
+    # The remedy names this session's real database, not a $SESSION_DIR the
+    # operator would have to resolve before they could paste it.
+    assert f'sqlite3 "{conn.db_path}" ' in remedies[0]
+    assert "\"DELETE FROM leases WHERE lane='build_lane' AND holder_id='incident';\"" in remedies[0]
+    assert "$SESSION_DIR" not in remedies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_lease_that_outlived_its_pruned_task_is_still_reported(conn, locks, caplog):
+    """A holder pruned out from under its lease must not vanish from the report.
+
+    ``prune_tasks`` deletes finished task rows without sparing one that still
+    holds a lease, and reclamation joins through ``tasks`` — so such a row can
+    be held with nothing able to judge it. Retaining unverifiable rows makes
+    that MORE likely, not less, because they now outlive their task on purpose.
+    Silence here would be the 2026-09-21 outcome with no log line at all.
+    """
+    await locks.acquire_many(["build_lane"], holder_id="orphan", task_id="torphan", action="specialist", ttl_sec=3600)
+    _seed_task(conn, "torphan", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    conn.raw.execute("DELETE FROM tasks WHERE task_id=?", ("torphan",))
+    conn.raw.commit()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDER_PRUNED)]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    assert len(_remedies(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_gpu_exempt_holder_is_retained_but_still_reported(conn, locks, caplog):
+    """The exemption is a reason not to reclaim, never a reason not to report.
+
+    A lane records its coordinator, not the specialist's GPU worker, so a holder
+    with live ``gpu_leases`` rows is exempt from reclamation. But that exemption
+    covers the GPU path — the one ``release_resources()`` fails on — which is
+    precisely the shape that wedged 2026-09-21. Reclamation must respect it; the
+    operator report must not.
+    """
+    await locks.acquire_many(["build_lane"], holder_id="gpuheld", task_id="tgpuheld", action="specialist", ttl_sec=3600)
+    _seed_task(conn, "tgpuheld", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    conn.raw.execute(
+        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (0, "gpuheld", "tgpuheld", _T0, _T0, _T0),
+    )
+    conn.raw.commit()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    # Nothing reclaims it either way now; the point is that it is REPORTED.
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDS_GPU)]
+    assert len(_remedies(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_holder_whose_work_may_still_run_is_reported_too(conn, locks, caplog):
+    """The accepted cost of refusing to guess: a winding-down holder is reported as well.
+
+    Earlier revisions tried to stay quiet while "something still answers under
+    the recorded process group", so an orderly teardown would not put a remedy
+    in the log. Every version of that test turned out to be a proxy a served
+    process escapes -- it is setsid'd by design -- so this pass no longer claims
+    to tell a busy holder from an abandoned one. It reports both, once per
+    ``(lane, holder)``, and lets the operator look.
+
+    The noise is the price of the asymmetry: a lane reported while its work
+    winds down costs a glance at a log, whereas a lane released while its work
+    runs puts two rounds on the same cards.
+    """
+    with _live_tree() as tree:
+        _seed_task(conn, "tbusy", "failed", evidence=_unconfirmed(tree.pid))
+        await locks.acquire_many(["build_lane"], holder_id="busy", task_id="tbusy", action="specialist", ttl_sec=3600)
+        with caplog.at_level(logging.WARNING):
+            stuck = await locks.diagnose_unverifiable_holders()
+            # A second pass must not repeat itself, however long the holder lingers.
+            assert await locks.diagnose_unverifiable_holders() == stuck
+
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    remedies = _remedies(caplog)
+    assert len(remedies) == 1
+    # The recorded spawn group is offered as a lead, explicitly not as proof.
+    assert f"its spawn process group was {tree.pid}" in remedies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_row_this_process_may_not_judge_is_still_reported(conn, locks, caplog):
+    """No reaper here will ever take it back, so the operator is the only way out.
+
+    The scope guard keeps the sweep from probing an id minted in another boot or
+    PID namespace, where any answer would be about the wrong machine. That is
+    the right call and also a dead end, so the diagnostic deliberately ignores
+    scope where the sweep must not.
+    """
+    _seed_task(conn, "tfarstuck", "failed", evidence=_unconfirmed())
+    await locks.acquire_many(
+        ["build_lane"], holder_id="farstuck", task_id="tfarstuck", action="specialist", ttl_sec=3600
+    )
+    conn.raw.execute("UPDATE leases SET owner_scope='other-boot:4026531836'")
+    conn.raw.commit()
+
+    with caplog.at_level(logging.WARNING):
+        stuck = await locks.diagnose_unverifiable_holders()
+
+    assert [r["reason"] for r in stuck] == [resource_lock.UNVERIFIABLE_FOREIGN_SCOPE]
+    assert resource_lock.UNVERIFIABLE_FOREIGN_SCOPE in _remedies(caplog)[0]
 
 
 @pytest.mark.asyncio

@@ -81,7 +81,8 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_INT", " 7 ")
     assert env.env_int("HL_INT") == 7
     monkeypatch.setenv("HL_INT", "bad")
-    assert env.env_int("HL_INT", default=3) == 3
+    with pytest.raises(env.EnvValueError):
+        env.env_int("HL_INT", default=3)
 
     monkeypatch.setenv("HL_FLOAT", " 2.5 ")
     assert env.env_float("HL_FLOAT") == pytest.approx(2.5)
@@ -89,11 +90,12 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
 
-def test_env_float_invalid_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common.env import env_float
+def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.common.env import EnvValueError, env_float
 
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
-    assert env_float("HL_BAD_FLOAT", 3.5) == 3.5
+    with pytest.raises(EnvValueError):
+        env_float("HL_BAD_FLOAT", 3.5)
 
 
 # common.io
@@ -162,9 +164,9 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        parse_custom_headers,
         resolve_openai_client_config,
     )
+    from hyperloom.common.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}
@@ -226,6 +228,8 @@ def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, mo
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     # Pre-seeded so "left alone" is observable rather than indistinguishable from "was never going to be written".
     cfg_path = tmp_path / ".claude" / "config.json"
@@ -264,6 +268,8 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     cfg_path = tmp_path / ".claude" / "config.json"
     cfg_path.parent.mkdir(parents=True)
@@ -281,12 +287,13 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -314,7 +321,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -333,7 +340,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()
@@ -373,7 +380,8 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
@@ -395,7 +403,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: rebuilt.append(s) or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: rebuilt.append(s) or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda _s: None)
     monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda _s: None)
@@ -636,7 +644,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -1645,10 +1653,9 @@ def test_llm_prompt_parse_response_edges() -> None:
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False
-    assert sp._coerce_bool("yes", default=False) is True
-    assert sp._coerce_bool(None, default=True) is True
-    assert sp._coerce_bool("???", default=True) is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "yes"}).bench is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "off"}).bench is False
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "???"}).bench is sp.DEFAULT_BENCH
 
     profile = sp.resolve_specialist_profile({})
     assert profile.scope == sp.SCOPE_FREEFORM
@@ -1676,20 +1683,20 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# orchestrator.trace.trace_env
+# inference_optimizer.trace.trace_env
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.trace import trace_env
+    from hyperloom.common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
-    assert trace_env.env_flag("HL_TEST_FLAG") is True
+    assert common_env.env_flag("HL_TEST_FLAG") is True
     monkeypatch.setenv("HL_TEST_FLAG", "off")
-    assert trace_env.env_flag("HL_TEST_FLAG") is False
+    assert common_env.env_flag("HL_TEST_FLAG") is False
     monkeypatch.setenv("HL_TEST_FLAG", "maybe")
-    assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
+    assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
+    assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
 # orchestrator.bus.gpu_pool._parse_gpu_list

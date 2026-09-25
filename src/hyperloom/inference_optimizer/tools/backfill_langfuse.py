@@ -5,10 +5,10 @@
 """Backfill one hyperloom session's trace JSONL into Langfuse (offline).
 
 Sibling of the *live* emitter
-(:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
+(:mod:`hyperloom.inference_optimizer.trace.langfuse_emitter`): the live
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
-projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
+projection (:mod:`hyperloom.inference_optimizer.trace.langfuse_mapping`), so the spans
 this CLI does emit are shaped like the live ones. Not replayed here: ext token
 shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
 GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
@@ -81,14 +81,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
-from hyperloom.orchestrator.state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
-from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
-from hyperloom.orchestrator.trace.langfuse_emitter import (
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
+from hyperloom.inference_optimizer.trace.langfuse_emitter import (
     _end_obs,
     _set_trace_attrs,
     _start_obs,
@@ -369,7 +369,7 @@ def ingest(plan: dict[str, Any]) -> int:
                         comment=score.get("comment") or "",
                         metadata=meta,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("create_score failed for decision %d", i)
 
     _end_obs(root, last_end)

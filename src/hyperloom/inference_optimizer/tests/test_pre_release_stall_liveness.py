@@ -243,6 +243,16 @@ def test_demo_prompts_forbid_ending_the_turn_early(script: str) -> None:
         assert "state.json" in text
 
 
+def test_demo_prompts_forbid_retired_robustness_monitor(script: str) -> None:
+    prompts = _BOOTSTRAP.parent / "prompts" / "pre-release"  # type: ignore[union-attr]
+    for name in ("demo-3h.md", "demo-12h.md", "demo-12h-forge.md"):
+        text = (prompts / name).read_text(encoding="utf-8")
+        lowered = text.lower()
+        assert "robustness_monitor" not in lowered
+        assert "do **start**" not in lowered
+        assert "do **not** start a background watchdog" in lowered
+
+
 def test_dockerd_never_runs_on_vfs(script: str) -> None:
     """vfs copies every layer in full and evicted the host pod twice (200Gi, 1792Gi)."""
     assert "--storage-driver=vfs" not in script

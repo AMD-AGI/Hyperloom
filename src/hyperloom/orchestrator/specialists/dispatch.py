@@ -10,21 +10,17 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator import (
-    FORCE_STALLED_KEEP_ROUNDS,
-    FORCE_STALLED_SPECIALIST_ROUNDS,
-    SPECIALIST_AUTO_RETRY_MAX,
-)
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
     PolicyDenied,
     validate_freeform_wave_task,
 )
-from .runner import SpecialistFailureType
+from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
     from ..loop.sub_agent_runner import SubAgentResult
@@ -34,12 +30,22 @@ log = _logging.getLogger(__name__)
 
 __all__ = ["SpecialistDispatchCollaborator"]
 
+_SOURCE_PATCH_FAMILY = "source_patch"
+
+# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
+SPECIALIST_AUTO_RETRY_MAX: int = 2
+
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
+# Coordinator force-dispatches one.
+FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
+FORCE_STALLED_KEEP_ROUNDS: int = 12
+
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty.
+        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
 
         Args:
             params: The specialist task params dict mutated in place with PR
@@ -88,7 +94,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+                from hyperloom.inference_optimizer.framework_paths import (
+                    resolve_framework_tree,
+                    resolve_kernel_search_roots,
+                )
 
                 roots = resolve_kernel_search_roots()
                 if roots:
@@ -128,7 +137,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
-            from ..state.shared_state import render_model_arch_compact
+            from ..state._shared_state.render import render_model_arch_compact
 
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
@@ -152,22 +161,18 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            try:
-                _gap_notes = self._target_gap_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: specialist target gap advisory failed")
-                _gap_notes = ""
+            _gap_notes = self._target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
         if "research_hints" not in params:
             try:
-                from ..knowledge import research_hints as _research_hints
+                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
                 _hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: specialist research hints failed")
                 _hints_block = ""
             if _hints_block:
@@ -228,7 +233,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
         )
         if has_evidence and "roofline_evidence" not in params:
-            from ..kernel.roofline_snapshot import extract_workload_summary
+            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
             executive_summary: dict[str, Any] = {}
@@ -273,15 +278,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             ``True`` when a retry was scheduled (caller must skip this
             attempt's bookkeeping); ``False`` otherwise.
         """
-        flag = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY",
-                "1",
-            )
-            .strip()
-            .lower()
-        )
-        if flag in ("0", "false", "no", "off"):
+        if not env_flag("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", default=True):
             return False
         try:
             cap = int(
@@ -329,24 +326,16 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu_raw = retry_params.get("needs_gpu", False)
-        needs_gpu = (
-            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-            if isinstance(needs_gpu_raw, str)
-            else bool(needs_gpu_raw)
-        )
+        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
         if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
             # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
             needs_gpu = True
         if needs_gpu:
             lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            try:
-                ttl = self._gpu_lease_ttl_sec(
-                    int(ttl or 0),
-                    params=retry_params,
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("specialist auto-retry: gpu_research_lane TTL re-source failed; using registry default")
+            ttl = self._gpu_lease_ttl_sec(
+                int(ttl or 0),
+                params=retry_params,
+            )
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -522,14 +511,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return None
         spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
         keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
-        try:
-            stalled = state.stalled_domains(
-                specialist_threshold=spec_thr,
-                keep_threshold=keep_thr,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("stalled-domain force: stalled_domains() failed")
-            return None
+        stalled = state.stalled_domains(
+            specialist_threshold=spec_thr,
+            keep_threshold=keep_thr,
+        )
         if not stalled:
             return None
 
@@ -551,35 +536,57 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "source": "coordinator_internal",
                 "reason": f"stalled_domain_force:{anchor}",
             }
+            from .profile import MODE_PATCH, resolve_specialist_profile
+
+            is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
+            if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
+                continue
+            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"
+            lookup = getattr(self.tasks, "find_by_idempotency_key", None)
+            if callable(lookup):
+                existing = await lookup(idempotency_key)
+                if existing is not None:
+                    continue
+            await self._warm_specialist_params(params)
+            if is_source_patch:
+                preflight_error = specialist_patch_preflight_error(
+                    params,
+                    framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
+                )
+                if preflight_error:
+                    if state.add_pruned_family(_SOURCE_PATCH_FAMILY):
+                        state.record_action_failure(
+                            action="specialist",
+                            task_id=idempotency_key,
+                            result={
+                                "error_class": preflight_error,
+                                "error": preflight_error,
+                            },
+                        )
+                        try:
+                            state.save(self.session_dir)
+                        except Exception:
+                            log.exception("stalled-domain force: source-patch prune save failed")
+                        log.error(
+                            "stalled-domain force: pruned %s after deterministic failure: %s",
+                            _SOURCE_PATCH_FAMILY,
+                            preflight_error,
+                        )
+                    continue
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={
                     "action_name": "specialist",
                     "params": params,
-                    "idempotency_key": (f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"),
+                    "idempotency_key": idempotency_key,
                 },
             )
             # Zero the counter up-front so a slow enqueue can't re-fire next tick.
-            try:
-                state.note_specialist_dispatched(anchor)
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "stalled-domain force: counter reset failed for %s",
-                    anchor,
-                )
-            try:
-                await self._handle_intent("orchestration", intent)
-            except Exception:  # noqa: BLE001 — defensive, never crash the tick
-                log.exception(
-                    "stalled-domain force: dispatch failed for anchor=%s domain=%s gap=%s",
-                    anchor,
-                    dom.key,
-                    gap_cid,
-                )
-                continue
+            state.note_specialist_dispatched(anchor)
+            await self._handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("stalled-domain force: state save failed")
             log.info(
                 "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",

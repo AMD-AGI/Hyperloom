@@ -13,21 +13,12 @@ import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
-    tokenize_server_args_preserving_json,
-)
+from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
-
-# Recipe snapshot severity tags (schema has no fixed enum).
-_SEVERITY_CRASH: str = "crash"
-_SEVERITY_REGRESS: str = "regress"
-
-# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
-SPECIALIST_AUTO_RETRY_MAX: int = 2
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
 MAINTENANCE_INTERVAL_SEC: int = 1800
@@ -36,18 +27,8 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
-# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
-_BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
-_AUTHORED_LANE_MAX_ATTEMPTS: int = 3
-# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
-_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
-# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
-# drift.
-_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
-from ..state.optimization_journal import Journal
+from hyperloom.inference_optimizer.session.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -56,11 +37,11 @@ from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
 from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
-from ..bus.message_bus import Message, MessageBus
+from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.gate import (
     PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,  # noqa: F401 - re-exported for callers/tests
+    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
@@ -77,380 +58,23 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
-from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
-from ..trace.orchestration_trace import (
+from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
 from .coordinator_helpers import (
     _infer_model_class_from_config,
     format_exc_brief,
     resolve_reactor_turn_timeout_sec,
-    serialize_verdict_advisory,
 )
 
 
 log = logging.getLogger(__name__)
 
 
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
-        return ""
-    parts: list[str] = []
-    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
-        val = result_payload.get(key)
-        if isinstance(val, str) and val.strip():
-            parts.append(val.strip())
-        elif isinstance(val, (list, tuple)):
-            joined = "\n".join(str(x) for x in val if str(x).strip())
-            if joined.strip():
-                parts.append(joined.strip())
-    return "\n".join(parts).strip()
-
-
-def _resolvable_artifacts_from_done(
-    done_payload: dict[str, Any] | None,
-    resolve_bases: list[Path],
-) -> list[dict[str, Any]]:
-    """Return ``artifacts_written`` entries whose ``source`` file exists on disk."""
-    if not isinstance(done_payload, dict):
-        return []
-    arts = done_payload.get("artifacts_written")
-    if not isinstance(arts, list):
-        return []
-    out: list[dict[str, Any]] = []
-    # Sandbox bases are invariant across entries — resolve once.
-    bases_resolved = [base.resolve() for base in resolve_bases]
-    for entry in arts:
-        if not isinstance(entry, dict):
-            continue
-        src = str(entry.get("source") or "").strip()
-        tgt = str(entry.get("target") or "").strip()
-        if not src or not tgt:
-            continue
-        raw = Path(src)
-        # An absolute ``source`` is checked as-is; a relative one is resolved under each base.
-        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
-        for cand in cands:
-            resolved = cand.resolve()
-            if not resolved.is_file():
-                continue
-            contained = False
-            for base in bases_resolved:
-                try:
-                    resolved.relative_to(base)
-                except ValueError:
-                    continue
-                contained = True
-                break
-            if contained:
-                out.append(entry)
-                break
-    return out
-
-
-def _framework_config_levers_from_done(
-    done_payload: dict[str, Any] | None,
-    *,
-    levers_ride_with_patches: bool = False,
-) -> dict[str, Any]:
-    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
-
-    Args:
-        done_payload: The specialist's ``specialist_done`` payload.
-        levers_ride_with_patches: Whether a lever delivered alongside a patch
-            belongs to the patch's round. True for ENABLEMENT, where the pair is
-            jointly what makes the model boot; False while optimizing, where a
-            patch is its own outcome and a lever is judged on its own.
-    """
-    if not isinstance(done_payload, dict):
-        return {}
-    proposals = done_payload.get("proposal_set") or []
-    if not isinstance(proposals, list):
-        return {}
-    # A patch deliverable otherwise takes precedence: a lever that merely
-    # *accompanies* a patch is not a config-only outcome. ``atomic`` remains the
-    # specialist's own way to say the two are inseparable, but it cannot be the
-    # only way -- it is a model-authored boolean, and the same specialist has
-    # emitted ``atomic: false`` on a lever whose own reason read "required to
-    # boot at all once the patch lands". Enablement therefore decides this from
-    # the lane it is running, not from the deliverable's self-description.
-    patches = done_payload.get("patches_written") or []
-    if isinstance(patches, list) and patches and not levers_ride_with_patches:
-        proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
-        if not proposals:
-            return {}
-    for entry in proposals:
-        if not isinstance(entry, dict):
-            continue
-        extra_envs: dict[str, str] = {}
-        envs = entry.get("extra_envs")
-        if isinstance(envs, dict):
-            for k, v in envs.items():
-                key = str(k).strip()
-                if key:
-                    extra_envs[key] = str(v)
-        args = entry.get("extra_args")
-        extra_server_args = ""
-        if isinstance(args, str) and args.strip():
-            parsed_args = tokenize_server_args_preserving_json(args)
-            if parsed_args is None:
-                log.warning(
-                    "FRAMEWORK config lever %r has server args unsupported by "
-                    "Magpie's unquoted argv transport; dropping the args%s",
-                    entry.get("name"),
-                    " while preserving its environment overrides" if extra_envs else "",
-                )
-                if not extra_envs:
-                    continue
-            else:
-                extra_server_args = parsed_args[0]
-        elif isinstance(args, (list, tuple)):
-            arg_tokens = [str(a) for a in args if str(a).strip()]
-            if any(any(ch.isspace() for ch in token) for token in arg_tokens):
-                log.warning(
-                    "FRAMEWORK config lever %r has a whitespace-bearing argv token; dropping the args%s",
-                    entry.get("name"),
-                    " while preserving its environment overrides" if extra_envs else "",
-                )
-                if not extra_envs:
-                    continue
-            else:
-                parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
-                if parsed_args is None:
-                    log.warning(
-                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
-                        entry.get("name"),
-                        " while preserving its environment overrides" if extra_envs else "",
-                    )
-                    if not extra_envs:
-                        continue
-                else:
-                    extra_server_args = parsed_args[0]
-        if extra_server_args or extra_envs:
-            return {
-                "extra_server_args": extra_server_args,
-                "extra_envs": extra_envs,
-            }
-    return {}
-
-
-# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
-# Coordinator force-dispatches one.
-FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
-FORCE_STALLED_KEEP_ROUNDS: int = 12
-
-
-# Result keys surfaced in delegated_result inbox line; first match wins per group.
-_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
-    "validated_gain_pct",
-    "gain_pct",
-    "predicted_gain_pct",
-    "delta_pct",
-)
-_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
-    "tokens_per_s",
-    "tput",
-    "throughput",
-    "tput_tok_s",
-)
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
-# Notes rendered per inbox line.
-_OUTCOME_NOTES_MAX: int = 3
-
-
-def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
-    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
-    if not isinstance(d, dict):
-        return None
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            return v
-    return None
-
-
-def _defang_alert_payload(value: Any) -> Any:
-    """Recursively defang string leaves of an alert payload (keys untouched)."""
-    if isinstance(value, str):
-        return _defang_prompt_structure(value)
-    if isinstance(value, dict):
-        return {k: _defang_alert_payload(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_defang_alert_payload(v) for v in value]
-    return value
-
-
-def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line."""
-    topic = (m.topic or "").strip()
-    payload = m.payload if isinstance(m.payload, dict) else {}
-    # Canonical inbox header ordering that downstream parsers anchor on.
-    if getattr(m, "msg_id", None):
-        head = f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
-    else:
-        head = f"seq={m.seq} from={m.from_agent} topic={topic}"
-
-    if topic == "delegated_result":
-        kind = payload.get("kind")
-        state = payload.get("state")
-        error = payload.get("error")
-        result = payload.get("result")
-        parts = [head, f"kind={kind!r}", f"state={state!r}"]
-        notes: list[Any] = []
-        if isinstance(result, dict):
-            status = _first_present(result, _OUTCOME_STATUS_KEYS)
-            gain = _first_present(result, _OUTCOME_GAIN_KEYS)
-            tput = _first_present(result, _OUTCOME_TPUT_KEYS)
-            kept = result.get("kept")
-            if status is not None:
-                parts.append(f"status={status!r}")
-            if kept is not None:
-                parts.append(f"kept={kept!r}")
-            if gain is not None:
-                parts.append(f"gain={gain}")
-            if tput is not None:
-                parts.append(f"tput={tput}")
-            # Executors that never raise report the failure inside the result envelope, leaving the top-level error
-            # None.
-            if not error:
-                error = result.get("error")
-            raw_notes = result.get("notes")
-            if isinstance(raw_notes, list):
-                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
-                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
-                    :_OUTCOME_NOTES_MAX
-                ]
-            done = result.get("specialist_done") if kind == "specialist" else None
-            if isinstance(done, dict):
-                summary = str(done.get("summary") or "").strip()
-                if summary:
-                    parts.append(f"summary={summary[:400]!r}")
-                if done.get("confidence") is not None:
-                    parts.append(f"confidence={done['confidence']}")
-                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
-                    items = done.get(key)
-                    if isinstance(items, list) and items:
-                        parts.append(f"{label}={len(items)}")
-        if error:
-            parts.append(f"error={str(error)[:200]!r}")
-        if notes:
-            shown = "; ".join(str(n) for n in notes)
-            parts.append(f"notes={shown[:300]!r}")
-        header_line = " ".join(parts)
-        if max_variant_rows <= 0 or not isinstance(result, dict):
-            return header_line
-        pvos = result.get("per_variant_outcomes")
-        if not isinstance(pvos, list):
-            return header_line
-        failures = [
-            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
-        ]
-        if not failures:
-            return header_line
-        lines = [header_line]
-        for vo in failures[:max_variant_rows]:
-            row = dict(vo)
-            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
-            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
-        elided = len(failures) - max_variant_rows
-        if elided > 0:
-            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
-        return "\n".join(lines)
-
-    if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
-        return (
-            f"{head} action={payload.get('action_name')!r} "
-            f"rule={payload.get('rule')!r} "
-            f"hint={str(payload.get('hint') or '')[:140]!r}"
-        )
-
-    if topic == "review_verdict":
-        parts = [
-            f"{head} target={payload.get('target_proposal_msg_id')!r} "
-            f"verdict={payload.get('verdict')!r} "
-            f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
-        ]
-        advisory = serialize_verdict_advisory(payload)
-        required_evidence = advisory.get("required_evidence")
-        if required_evidence:
-            shown = "; ".join(str(item) for item in required_evidence[:3])
-            parts.append(f"required_evidence[{len(required_evidence)}]={shown[:140]!r}")
-        risks = advisory.get("risks")
-        if risks:
-            parts.append(f"risks={len(risks)}")
-        advice_text = advisory.get("advice_text")
-        if advice_text:
-            parts.append(f"advice={advice_text[:140]!r}")
-        return " ".join(parts)
-
-    if topic == "observation":
-        kind = payload.get("kind")
-        if kind is not None:
-            return f"{head} kind={kind!r} payload={payload}"
-
-    if topic == "alert":
-        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
-        # can't inject prompt structure.
-        return f"{head} payload={_defang_alert_payload(payload)}"
-
-    return f"{head} payload={payload}"
-
-
-@dataclass
-class PendingProposal:
-    """A propose_action intent waiting for Critic Review."""
-
-    proposal_msg_id: str
-    from_agent: str
-    action_name: str
-    predicted_gain_pct: float
-    payload: dict[str, Any]
-    decided: bool = False
-    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-
-
-# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
-_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input",
-    "trace_dir",
-    "candidates_path",
-    "analysis_md_path",
-    "kernel_candidates",
-    "best_artifact_path",
-    "patch_path",
-    "target_file",
-    "workspace",
-    "workspace_path",
-    "out_dir",
-    "output_dir",
-    "run_dir",
-    "report_path",
-    "json_path",
-    "md_path",
-    "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler.
-    "trace_report_path",
-    "analysis_report_path",
-    "tracelens_summary_path",
-    "kernel_roofline_path",
-    "cli_log_path",
-)
-
-
-def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
-    if not isinstance(payload, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key in _LIFECYCLE_PATH_KEYS:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            out[key] = val
-    return out
+if TYPE_CHECKING:
+    from .proposals import PendingProposal
 
 
 @dataclass
@@ -463,7 +87,7 @@ class CoordinatorState:
 class _CoordinatorMeta(type):
     """Class-level delegation for extracted collaborator methods."""
 
-    def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
+    def __getattr__(cls, name):
         prop = cls._DELEGATED.get(name)
         if prop is not None:
             import importlib
@@ -602,7 +226,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+        except Exception:
             log.exception("failed to sync research_lane_capacity to leases DB")
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
@@ -654,16 +278,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
         # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -689,20 +304,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        _inline_raw = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS",
-                "",
-            )
-            .strip()
-            .lower()
-        )
-        self._inline_fast_actions_enabled: bool = _inline_raw not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        self._inline_fast_actions_enabled: bool = env_flag("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", default=True)
         self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -770,6 +372,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
+        "_internal_analysis_params": "phase_prelude",
         "_on_enter_sweep": "phase_sweep",
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_record_session_budget_conc_sweep_skip": "phase_sweep",
@@ -777,7 +380,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
-        "_drain_geak_rebench_for_close": "phase_close",
+        "_revalidate_stack_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
         "_enqueue_internal_report_task": "phase_close",
@@ -811,6 +414,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
+        "_run_kernel_agent": "phase_kernel",
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
         "_kernel_timeline": "phase_kernel",
@@ -842,7 +446,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_cycle_strategy_block": "phase_macro_cycle",
         "_apply_macro_cycle_reloop": "phase_macro_cycle",
         "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_restart_inference_servers": "phase_macro_cycle",
         "_on_cycle_start_reprofile": "phase_macro_cycle",
         "_capture_cycle_memory": "cycle_memory",
         "_cycle_directive_fallback": "cycle_memory",
@@ -874,7 +477,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "gpu_lanes",
         "_framework_gpu_params": "gpu_lanes",
         "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
@@ -1020,6 +622,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resume_rollback_pending_integrate": "writeback",
         "_resume_recover_pending_integrate": "writeback",
         "_resume_recover_orphaned_keeps": "writeback",
+        "_geak_rebench_params": "writeback",
         "_enqueue_internal_stack_rebench": "writeback",
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
@@ -1264,7 +867,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+        except Exception:
             log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
@@ -1302,7 +905,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
-        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+        except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
@@ -1313,7 +916,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except asyncio.CancelledError:
                 # Expected: we just cancelled these tasks.
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
 
@@ -1371,20 +974,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "disabled",
         }:
             return
-        try:
-            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-            if config.mode is KnowledgeStoreMode.LOCAL:
-                if self.recipe_kb is None:
-                    return
-                sid = (self.shared_state.recipe_kb_session_id or "").strip()
-                if not sid:
-                    return
-            self.ensure_recipe_finalized(source="t4_fallback")
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("recipe KB T4 fact_finalize fallback failed")
+        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
+        if config.mode is KnowledgeStoreMode.LOCAL:
+            if self.recipe_kb is None:
+                return
+            sid = (self.shared_state.recipe_kb_session_id or "").strip()
+            if not sid:
+                return
+        self.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
     # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
@@ -1395,14 +995,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Max re-author rounds per candidate on a needs_review verdict.
-    _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
 
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
@@ -1411,6 +1006,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+
+    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
+    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
+    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
@@ -1471,7 +1070,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist Coordinator exception metadata")
 
     def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
@@ -1642,7 +1241,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 self._advance_phase_if_needed,
                                 stage="advance_phase_hint",
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance before reactors (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase_pre_reactor",
@@ -1672,7 +1271,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             self._advance_phase_if_needed,
                             stage="advance_phase",
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase",
@@ -1680,16 +1279,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             tick=tick_n,
                         )
                     # Periodic reaper + DB retention; time-gated.
-                    try:
-                        now = time.monotonic()
-                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                            await self._run_maintenance(tick=tick_n)
-                            self._last_maintenance_ts = now
-                    except Exception:  # noqa: BLE001
-                        log.exception("maintenance tick raised")
+                    now = time.monotonic()
+                    if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+                        await self._run_maintenance(tick=tick_n)
+                        self._last_maintenance_ts = now
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     last_tick_exc = exc
                     log.exception("Coordinator.run: tick %d body raised", tick_n)
                     self._record_coordinator_exception(
@@ -1775,7 +1371,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
             try:
                 await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
             log.info(
@@ -1804,7 +1400,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 continue
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+            except Exception:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
@@ -1818,14 +1414,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         backend_self_traces = callable(_set_trace_ctx)
         if backend_self_traces:
-            try:
-                _set_trace_ctx(
-                    tick=int(self.shared_state.tick or 0),
-                    phase=(self.shared_state.phase or "") or None,
-                    macro_cycle=int(self.shared_state.macro_cycle or 0),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         try:
@@ -1858,7 +1451,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             await self._advance_rendered_cursor(agent_name)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1898,7 +1491,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 setup = setup_getter()
                 if isinstance(setup, dict):
                     write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("orchestration mcp setup trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
@@ -1932,7 +1525,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
                 agent_name,
@@ -1958,7 +1551,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,
@@ -2008,7 +1601,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "PendingProposal",
     "SharedState",
     # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
     "_infer_model_class_from_config",

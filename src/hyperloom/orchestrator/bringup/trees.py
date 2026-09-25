@@ -18,7 +18,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.inference_optimizer.session import session_paths as session_layout
 from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT
-from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
+from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 #: ``vcs`` value for a tree whose directory is itself a git working tree.
 VCS_GIT = "git_checkout"
@@ -119,7 +119,7 @@ def head_commit(root: str | Path) -> str:
             ``""`` as a diff base.
     """
     args = safe_directory_args(["-C", str(root), "rev-parse", "HEAD"])
-    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    proc = subprocess.run(
         ["git", *args],
         capture_output=True,
         text=True,

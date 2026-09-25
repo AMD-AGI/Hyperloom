@@ -243,12 +243,8 @@ class VllmDenseTunableopTuner(BaseTuner):
             load_demand,
         )
 
-        try:
-            report = load_demand(path)
-            entry = demand_for_tuner(report, self.name) if report else None
-        except Exception as exc:  # noqa: BLE001 - a bad demand file is not fatal
-            log.warning("%s: could not read demand from %s: %s", self.name, path, exc)
-            return None
+        report = load_demand(path)
+        entry = demand_for_tuner(report, self.name) if report else None
         if report is None:
             return None
 
@@ -434,7 +430,7 @@ class VllmDenseTunableopTuner(BaseTuner):
             }
 
         # TunableOp picks the fastest hipBLASLt/rocBLAS solution per shape but never times the untuned dispatch, so
-        # there is no baseline to compare against and improved_shapes is 0 by construction, not by measurement.
+        # there is no baseline to compare against and this tuner has no micro metrics to report at all.
         return TuneResult(
             tuner_name=self.name,
             status="ok" if tuned_shapes > 0 else "empty_output",
@@ -444,8 +440,5 @@ class VllmDenseTunableopTuner(BaseTuner):
             env_vars=env_vars,
             candidate=tuned_shapes > 0,
             total_shapes=tuned_shapes,
-            improved_shapes=0,
             unverified_shapes=tuned_shapes,
-            best_micro_speedup=1.0,
-            avg_micro_speedup=1.0,
         )

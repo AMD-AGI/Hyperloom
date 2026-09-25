@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom.common.llm_headers import parse_custom_headers
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
@@ -829,9 +830,9 @@ class CodexSession:
             if not completed:
                 # Teardown of an already-failed turn: the timeout below is the reported failure, so interrupt errors
                 # add no signal.
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
                 raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
             sdk_result = turn_task.result()

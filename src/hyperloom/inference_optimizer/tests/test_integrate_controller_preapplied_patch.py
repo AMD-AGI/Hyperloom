@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
 from hyperloom.orchestrator.kernel import controller_patch_integration as cpi
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -119,7 +120,7 @@ def _controller_payload(applied: Path, patch_file: Path) -> dict:
 @pytest.fixture
 def through_apply(monkeypatch):
     """Record what the real apply was handed and what it returned."""
-    real = krh._maybe_apply_kernel_patch
+    real = kernel_agent_tool._maybe_apply_kernel_patch
     calls: list[tuple[dict, dict]] = []
 
     def record(payload, **kwargs):
@@ -219,8 +220,8 @@ def settle_calls(monkeypatch):
         called.append("revert")
         return {"status": "ok"}
 
-    monkeypatch.setattr(krh, "_maybe_finalize_kernel_patch", finalize)
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_finalize_kernel_patch", finalize)
+    monkeypatch.setattr(kernel_agent_tool, "_maybe_revert_kernel_patch", revert)
     return called
 
 
@@ -250,7 +251,7 @@ def test_settling_a_manifestless_apply_does_nothing(settle_calls):
 def test_an_incomplete_settle_is_reported(monkeypatch):
     """A silent failure here leaves a pod patched with its backups already gone."""
     monkeypatch.setattr(
-        krh,
+        kernel_agent_tool,
         "_maybe_revert_kernel_patch",
         lambda _apply_result: {"status": "failed", "error": "pod unreachable"},
     )

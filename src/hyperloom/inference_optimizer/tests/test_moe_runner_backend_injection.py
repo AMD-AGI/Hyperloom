@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     _remove_moe_runner_backend_arg,
@@ -132,7 +133,7 @@ def quark_mxfp4_moe_model(tmp_path) -> str:
 )
 def test_model_is_moe_true(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli_model_gate._model_is_moe(path) is True
+    assert model_config_utils._model_is_moe(path) is True
 
 
 @pytest.mark.parametrize(
@@ -146,11 +147,11 @@ def test_model_is_moe_true(tmp_path, config):
 )
 def test_model_is_moe_false(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli_model_gate._model_is_moe(path) is False
+    assert model_config_utils._model_is_moe(path) is False
 
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
-    assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
+    assert model_config_utils._model_is_moe(str(tmp_path / "does-not-exist")) is False
 
 
 # _model_moe_runner_requires_aiter detection
@@ -354,18 +355,18 @@ def test_aiter_ck_fused_moe_needs_128_aligned_partition(tmp_path, tp, supported)
             "moe_intermediate_size": 768,
         },
     )
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(model, tp) is supported
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(model, tp) is supported
 
 
 def test_aiter_ck_fused_moe_support_defaults_open(tmp_path, dense_model) -> None:
     """Dense models and unreadable configs leave the choice to sglang."""
     # Never reaches the MoE kernel, so nothing to gate.
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(dense_model, 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(dense_model, 8) is True
     # No config to judge by: do not skip work on a guess.
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(str(tmp_path / "absent"), 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(str(tmp_path / "absent"), 8) is True
     # MoE without a declared intermediate size is equally undecidable.
     moe_no_size = _write_model_config(
         tmp_path / "moe-no-size",
         {"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe", "num_experts": 128},
     )
-    assert cli_model_gate.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True
+    assert model_config_utils.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True

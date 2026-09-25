@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.io import atomic_write_bytes, atomic_write_json
 
 from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
@@ -196,24 +196,13 @@ class _ColumnKB:
                     if destination.read_bytes() != content:
                         raise KBStoreError(f"artifact ref already has different bytes: {ref}")
                     continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                temp = destination.with_name(f".{destination.name}.tmp")
-                temp.write_bytes(content)
-                os.replace(temp, destination)
+                atomic_write_bytes(destination, content, make_parents=True)
                 created.append(destination)
-            target = self._sections.root / _SECTIONS_MEMBER / f"{self.SECTION}.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temp_section = target.with_name(f".{target.name}.tmp")
-            temp_section.write_text(
-                json.dumps(
-                    {"knowledge": dict(document), "files": all_refs},
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
+            atomic_write_json(
+                self._sections.root / _SECTIONS_MEMBER / f"{self.SECTION}.json",
+                {"knowledge": dict(document), "files": all_refs},
+                ensure_ascii=False,
             )
-            os.replace(temp_section, target)
         except (KBStoreError, OSError, ValueError) as exc:
             for destination in created:
                 destination.unlink(missing_ok=True)

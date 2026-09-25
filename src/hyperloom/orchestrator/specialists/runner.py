@@ -32,14 +32,15 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from .domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
     domain_for_tag,
+    get_domain,
     normalize_dispatch_tags,
 )
 from .subprocess_ import (
@@ -52,7 +53,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
-from ..framework.paths import resolve_framework_tree
+from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -61,6 +62,33 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
+
+
+def specialist_patch_preflight_error(
+    params: dict[str, Any] | None,
+    *,
+    framework_repo_path: str = "",
+    framework_source_roots: tuple[str, ...] = (),
+) -> str:
+    """Return the deterministic source-root error for a patch specialist."""
+    task_params = params or {}
+    domain = get_domain(str(task_params.get("domain") or ""))
+    if resolve_specialist_profile(task_params, domain=domain).mode != MODE_PATCH:
+        return ""
+    roots = tuple(
+        path
+        for path in (
+            str(framework_repo_path or "").strip(),
+            *(framework_source_roots or tuple(task_params.get("framework_source_roots") or ())),
+        )
+        if path
+    )
+    preferred = str(task_params.get("session_framework_tree") or "").strip() or resolve_framework_tree(
+        str(task_params.get("framework") or "")
+    )
+    return "" if _pick_worktree_base(roots, preferred=preferred) is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -128,9 +156,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
         "SlashCommand",
     }
 )
-
-
-_now_iso = now_iso
 
 
 _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
@@ -696,22 +721,19 @@ class SpecialistRunner:
 
     @staticmethod
     def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
-        """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
+        """(tick, phase) from the live SharedState on ``ctx.extra``.
 
         Returns ``(None, None)`` when unavailable.
         """
-        try:
-            ss = (ctx.extra if ctx is not None else {}).get("shared_state")
-            if ss is None:
-                return None, None
-            tick = ss.tick
-            phase = ss.phase
-            return (
-                int(tick) if tick is not None else None,
-                (str(phase) or None) if phase else None,
-            )
-        except Exception:  # noqa: BLE001 — telemetry must never break the run
+        ss = (ctx.extra if ctx is not None else {}).get("shared_state")
+        if ss is None:
             return None, None
+        tick = ss.tick
+        phase = ss.phase
+        return (
+            int(tick) if tick is not None else None,
+            (str(phase) or None) if phase else None,
+        )
 
     def _trace_specialist_llm_call(
         self,
@@ -763,7 +785,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
                 task_id,
@@ -809,7 +831,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
                 task_id,
@@ -835,7 +857,7 @@ class SpecialistRunner:
         try:
             path = specialist_intel_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            ts = _now_iso()
+            ts = now_iso()
             with path.open("a", encoding="utf-8") as f:
                 for call in tool_calls:
                     if not isinstance(call, dict):
@@ -850,7 +872,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -878,34 +900,26 @@ class SpecialistRunner:
         """
         if self.session_dir is None:
             return
-        try:
-            md = metadata or {}
-            prompt = md.get("prompt")
-            response = md.get("response")
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="specialist",
-                # Same metadata dict as the token row for this turn, so both
-                # halves carry the backend's call_id when it stamped one.
-                call_id=md.get("call_id"),
-                task_id=task_id,
-                turn=turn,
-                tick=tick,
-                phase=phase,
-                model=md.get("model"),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
-            log.debug(
-                "full-trace: specialist conversation append failed for task_id=%s turn=%s",
-                task_id,
-                turn,
-                exc_info=True,
-            )
+        md = metadata or {}
+        prompt = md.get("prompt")
+        response = md.get("response")
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="specialist",
+            # Same metadata dict as the token row for this turn, so both
+            # halves carry the backend's call_id when it stamped one.
+            call_id=md.get("call_id"),
+            task_id=task_id,
+            turn=turn,
+            tick=tick,
+            phase=phase,
+            model=md.get("model"),
+            prompt=prompt or "",
+            response=response or "",
+        )
+        append_conversation(session_dir=self.session_dir, record=record)
 
     # In-process Backend path (test path)
     async def _run_via_backend(
@@ -1503,12 +1517,16 @@ class SpecialistRunner:
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
+        preflight_error = specialist_patch_preflight_error(
+            ctx.task.params,
+            framework_source_roots=self.subprocess_config.framework_source_roots,
+        )
+        if preflight_error:
+            return None, None, preflight_error
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
             preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
         )
-        if base is None:
-            return None, None, "no_git_framework_source_root"
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
@@ -1643,7 +1661,7 @@ class SpecialistRunner:
         line = json.dumps(
             {
                 "turn": turn,
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 **safe_entry,
             },
             sort_keys=True,
@@ -1675,7 +1693,7 @@ class SpecialistRunner:
         if path is None:
             return
         payload = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "ts_unix": time.time(),
             "turn": turn,
             "max_turns": max_turns,
@@ -1700,7 +1718,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": _now_iso(), **payload}, make_parents=False)
+        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
 
     def _write_specialist_done_partial(
         self,
@@ -1722,12 +1740,13 @@ class SpecialistRunner:
             return
         _common_io.atomic_write_json(
             path,
-            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
+            {"ts": now_iso(), "_recovered_from_partial": True, **payload},
             make_parents=False,
         )
 
 
 __all__ = [
+    "NO_GIT_FRAMEWORK_SOURCE_ROOT",
     "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",
@@ -1736,4 +1755,5 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
     "classify_specialist_failure",
+    "specialist_patch_preflight_error",
 ]

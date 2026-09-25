@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``) and unified-diff parsing (``_audit_common``)."""
+"""Unit tests for framework-agent KB prior-scoring (``decision``)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.agents.framework import _audit_common as ac
 from hyperloom.agents.framework.decision import (
     candidate_score,
     prior_score,
@@ -100,38 +99,3 @@ def test_candidate_score_and_winner_decision() -> None:
     assert winner_decision(req, None, None, "")[0] is False
     assert winner_decision(req, 150.0, 0.80, "4/4")[0] is True
     assert winner_decision(req, 101.0, 0.80, "")[0] is False  # ratio below floor
-
-
-# _audit_common.py
-def test_parse_unified_diff_with_and_without_git_header() -> None:
-    patch = (
-        "diff --git a/src/foo.py b/src/foo.py\n"
-        "new file mode 100644\n"
-        "--- /dev/null\n"
-        "+++ b/src/foo.py\n"
-        "@@ -0,0 +1,2 @@\n"
-        "+def added():\n"
-        "+    return 1\n"
-        " context line\n"
-        "-removed line\n"
-    )
-    changes = ac.parse_unified_diff(patch)
-    assert len(changes) == 1
-    assert changes[0].path == "src/foo.py"
-    assert changes[0].is_new is True
-    assert "def added():" in changes[0].added
-
-    # No "diff --git" header: a bare "--- / +++" section still parses.
-    bare = "--- a/x.py\n+++ b/x.py\n@@\n+line\n"
-    bare_changes = ac.parse_unified_diff(bare)
-    assert bare_changes and bare_changes[0].path == "x.py"
-
-    # Junk before any section is tolerated (no crash, no sections).
-    assert ac.parse_unified_diff("random preamble\nnothing here\n") == []
-
-
-def test_strip_diff_path_variants() -> None:
-    assert ac._strip_diff_path("a/src/foo.py\t2024") == "src/foo.py"
-    assert ac._strip_diff_path("/dev/null") == "/dev/null"
-    # No a//b/ prefix -> returned as-is.
-    assert ac._strip_diff_path("plain/path.py") == "plain/path.py"

@@ -12,10 +12,21 @@ only for the advanced workload choices that differ from the fixed demo presets.
 
 ## Setup Configuration
 
-Load `.env` from the current Hyperloom workspace before launching. Treat it as
-the source of truth for setup-owned values such as `HYPERLOOM_RUN_MODE`,
-`HYPERLOOM_DOCKER_TARGET_HOST`, `FRAMEWORK`, `USER_DATA_PATH`, and LLM provider
-settings. Do not ask the user to re-enter setup values that are already present.
+In the current Hyperloom workspace, load `.env` through the shared loader.
+Existing non-empty exports take precedence; do not ask the user to re-enter
+setup values that are already present. Repeat this preamble in each new execution
+shell, including inside Docker, before setup or runtime installation:
+
+```bash
+set -e
+export REPO_ROOT="$(pwd -P)"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+```
 
 When `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly in
 the current environment.
@@ -44,7 +55,7 @@ skip the user-approval step (#1314).
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
+- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
 
@@ -250,28 +261,19 @@ step must happen before launching.
 For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:
 
+Use the [setup preamble](#setup-configuration) in this shell first, then run:
+
 ```bash
-export REPO_ROOT="$(pwd -P)"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a; . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+load_dotenv_no_clobber
+: "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
-if [ ! -f "$INSTALL_SH" ]; then
-  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
-fi
 bash "$INSTALL_SH"
-. "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
-If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
-checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
+The optimizer's startup preflight loads `kernel-agent.env.sh` in process;
+do not source the generated file in the launch shell.
 
 ## Launch Command Template
 
@@ -460,8 +462,8 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 ## Launch Requirements
 
-1. Run the pre-launch runtime install above and source
-   `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
+1. Run the pre-launch runtime install above; startup preflight loads the generated
+   runtime environment in process.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after
    changing cwd.

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +106,7 @@ def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
         "was_skipped": True,
         "skip_reason": "session_time_budget",
     }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -120,7 +120,7 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
     st.last_conc_sweep = {}
     st.last_conc_sweep = {}
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, _evidence = nxt
@@ -143,7 +143,7 @@ def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
     """A budget-driven close is time_exhausted, not an early close."""
     # 3h budget, ~2h39m spent -> ~1260s left, under the 5400s reloop floor.
     st = _framework_state(max_minutes=180, started_hours_ago=2.65)
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -156,7 +156,7 @@ def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
 def test_framework_skip_to_close_with_budget_left_stays_escalated():
     """With budget to spare, skip_to_close is still a genuine early abandonment."""
     st = _framework_state(max_minutes=180, started_hours_ago=1.0)
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -176,7 +176,7 @@ def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
     """Budget that cannot fund one variant round is exhausted, not an early close."""
     # 3h budget, ~1699s left: above the old 15% floor, below one variant grant.
     st = _framework_state(max_minutes=180, started_hours_ago=2.528)
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -195,7 +195,7 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
         "was_skipped": True,
         "skip_reason": "session_time_budget",
     }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -470,9 +470,9 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
         "was_skipped": True,
         "skip_reason": "session_time_budget",
     }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
@@ -480,7 +480,7 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
 
     assert st.phase == ps.PHASE_CLOSE
     assert st.pending_escalate_hint == ""
-    assert st.last_consumed_escalate_hint == ps.ESCALATE_HINT_SKIP_TO_CLOSE
+    assert st.last_consumed_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE
 
 
 @pytest.mark.asyncio

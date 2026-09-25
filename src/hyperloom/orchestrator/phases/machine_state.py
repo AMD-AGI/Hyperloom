@@ -11,13 +11,24 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
+)
+from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
+from ..state.shared_state import (
+    ESCALATE_HINT_SKIP_TO_CLOSE,
+    ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
+    _LIFECYCLE_CAP,
+    is_valid_escalate_hint,
 )
 
 
@@ -61,6 +72,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "baseline",
             "roofline",
             "profile",
+            # Coordinator-internal: replay a warm recipe from a prior session at PRELUDE entry.
+            "replay_warm_recipe",
         }
     ),
     # ``baseline`` is carried so the Coordinator's revalidation survives the
@@ -88,14 +101,15 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "profile",
         }
     ),
-    # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase entry, so an LLM re-issuing them per
-    # tick would bypass the lane budget they are derived from.
+    # No specialist: KERNEL is a single-pipeline phase; a specialist dispatched here would occupy gpu_research_lane
+    # that kernel_agent holds via benchmark_lane's expansion, and its authoring output has no path to integration.
     PHASE_KERNEL_AGENT: frozenset(
         {
             "integrate",
-            "specialist",
             "roofline",
             "profile",
+            # Coordinator-internal: the phase's whole pipeline, enqueued once at entry.
+            "kernel_agent",
         }
     ),
     # No specialist below: SWEEP is the validation window and CLOSE only reports.
@@ -132,16 +146,6 @@ def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
     return (action_name or "").strip() in reserved
 
 
-# Task kinds that mean the KERNEL lane is busy, which is a wider question than what a model may propose: a
-# Coordinator-owned lane is dispatched without ever being proposable, and its task occupies the phase just the same.
-KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
-    {
-        "kernel_opt",
-        "gemm_tuning",
-    }
-)
-
-
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
@@ -164,84 +168,6 @@ def render_phase_action_bullets(
         else:
             out.append(f"- **{phase}**: {', '.join(actions)}")
     return out
-
-
-#: Named rather than inlined below because the writeback gate that sets it lives
-#: in another module, and the vocabulary is closed -- PolicyGate rejects any
-#: stop_reason outside it, so a typo on either side would silently degrade into
-#: "the run did not stop" rather than into an error anyone sees.
-AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
-
-
-# stop_reason vocab
-STOP_REASON_VOCAB: frozenset[str] = frozenset(
-    {
-        "target_reached",
-        "time_exhausted",
-        "max_ticks",
-        "baseline_failed",
-        "emergency",
-        "coordinator_exception",
-        "signal",
-        "unknown",
-        "custom",
-        "robustness_escalated",
-        "prelude_baseline_failed",
-        "prelude_cold_anchor_low_budget",
-        "time_exhausted_during_prelude",
-        "warm_replay_rollback_failed",
-        "active_inferencex_checkout_missing",
-        "no_kernel_skipped",
-        "sweep_done",
-        "sweep_failed",
-        "framework_agent_phase_done",
-        # R7: cyclic phase machine exhausted leverage across macro-cycles.
-        "global_converged",
-        # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
-        "model_context_window_too_small",
-        # Model-arch preflight: multimodal/vision model unsupported.
-        "unsupported_model_arch",
-        # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
-        # max-position field (both crash at load).
-        "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
-        "baseline_arg_error",
-        # Enablement attempt cap: too many consecutive rounds bought no ground.
-        # A bring-up that is still advancing is bounded by the run's wall clock.
-        "enablement_attempts_exhausted",
-        # The baseline could not produce an accuracy result even though the
-        # accuracy test was expected to run (broken eval / missing quality
-        # gate). Optimizing against an unvalidated baseline is unsafe, so the
-        # run halts. Post-baseline accuracy failures REVERT the offending
-        # change instead of stopping.
-        "baseline_accuracy_failed",
-        # Bring-up terminals: the host cannot run the combo, or the harness
-        # composed an argument the installed parser does not have. Classified as
-        # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
-        "environment_fault",
-        "server_argv_invalid",
-        # A bring-up round expired with nothing confirming its holder dead, so
-        # it keeps excluding the machine.
-        # The out-of-band supervisor found the coordinator's process gone; it
-        # reaches a report through the terminal artifact the supervisor writes.
-        "supervisor_coordinator_died",
-        # The out-of-band supervisor found the tick not advancing and the
-        # coordinator did not answer the stop it was sent; it reaches a report
-        # through the terminal artifact the supervisor writes.
-        "supervisor_tick_stalled",
-        # AgentX is on but its benchmark client (aiperf) is missing or is not
-        # the pinned build, and the runtime install could not supply it. An
-        # environment/supply gap, not a code gap: nothing downstream can author
-        # its way out of it, so the run halts on the FIRST occurrence instead of
-        # spending the budget in the enablement lane.
-        AGENTX_PREFLIGHT_STOP_REASON,
-    }
-)
-
-
-def is_valid_stop_reason(value: str) -> bool:
-    """Return True when ``value`` is a member of :data:`STOP_REASON_VOCAB`."""
-    return (value or "").strip() in STOP_REASON_VOCAB
 
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
@@ -460,12 +386,6 @@ def should_reloop_to_explore(
     return True, evidence
 
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored).
-ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
-ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-
-
 def _kernel_idle_max_ticks() -> int:
     """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP."""
     raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
@@ -513,29 +433,9 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
 
 
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
-
-# ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal: from FRAMEWORK_AGENT it advances to
-# KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
-ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
-    {
-        ESCALATE_HINT_SKIP_TO_KERNEL,
-        ESCALATE_HINT_SKIP_TO_SWEEP,
-        ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-    }
-)
-
 # ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
 ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
-
-
-def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab)."""
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def apply_escalate_budget_bump(
@@ -703,15 +603,6 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
-def is_phase_transition_row(row: Any) -> bool:
-    """True when ``row`` records an actual phase change, not an in-phase marker."""
-    if not isinstance(row, dict):
-        return False
-    to_phase = str(row.get("to_phase") or "").strip().upper()
-    from_phase = str(row.get("from_phase") or "").strip().upper()
-    return bool(to_phase) and to_phase != from_phase
-
-
 def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
     """Rebuild per-phase completed-segment totals from a ``phase_history`` log."""
     if not isinstance(history, list):
@@ -755,20 +646,6 @@ def phase_cumulative_seconds(
     if target == current:
         accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
     return accumulated
-
-
-def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Return total optimisation-phase wall-clock seconds across all macro cycles."""
-    raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-    if raw_accumulated is None:
-        return None
-    try:
-        accumulated = float(raw_accumulated or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if (getattr(state, "phase", "") or "").strip().upper() == PHASE_FRAMEWORK_AGENT:
-        accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
-    return max(0.0, accumulated)
 
 
 def _phase_budget_total_seconds(
@@ -907,6 +784,61 @@ def session_remaining_seconds(
     if started is None:
         return None
     return max(0.0, mm * 60.0 - max(0.0, now - started))
+
+
+def phase_status_summary(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> str:
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
+    phase = (state.phase or "").strip().upper() or "UNSET"
+    elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
+    # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+    cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
+    budget = normalize_budget_pct(budget_pct or state.phase_budget_pct)
+    budget_pct_for_phase = budget.get(phase, 0.0)
+    remaining = phase_budget_remaining_seconds(
+        state,
+        budget_pct=budget,
+        now_unix=now_unix,
+    )
+    budget_line: str
+    if remaining is None:
+        budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
+    else:
+        budget_line = (
+            f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
+            f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
+        )
+    actions_in_phase = allowed_actions_for(phase)
+    allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
+    lines = [
+        f"phase     : {phase}",
+        f"cycle     : {int(getattr(state, 'macro_cycle', 0) or 0)}",
+        f"entered   : {state.phase_started_ts or '(unset)'}",
+        budget_line,
+        allowed_line,
+    ]
+    # Whether deferring work to a later cycle is still a real option.
+    if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        reloop, evidence = should_reloop_to_explore(state, now_unix=now_unix)
+        feasible = reloop and state.framework_agent_phase_enabled
+        reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
+        threshold = evidence.get("min_remaining_sec_effective")
+        if threshold is not None:
+            reloop_line += f" threshold_sec={int(threshold)}"
+        session_remaining = session_remaining_seconds(state, now_unix=now_unix)
+        if session_remaining is not None:
+            reloop_line += f" session_remaining_sec={int(session_remaining)}"
+        blocked = evidence.get("reloop_blocked")
+        if blocked:
+            reloop_line += f" blocked={blocked}"
+        if phase != PHASE_SWEEP:
+            reloop_line += " (projected)"
+        lines.append(reloop_line)
+    return "\n".join(lines)
 
 
 # plateau pure functions
@@ -1074,13 +1006,6 @@ def warm_replay_in_flight(state: Any) -> bool:
     return str(outcome.get("status") or "").strip() == "in_flight"
 
 
-def _kernel_opt_max_failures() -> int:
-    """Resolve the kernel infra-failure retry budget (lazy import)."""
-    from ..state.shared_state import resolve_kernel_opt_max_failures
-
-    return resolve_kernel_opt_max_failures()
-
-
 # The statuses a finished GEAK run writes to ``geak_result.status``.
 GEAK_TERMINAL_STATUSES = frozenset(
     {
@@ -1203,35 +1128,17 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    if bool(getattr(state, "has_keep_pending_integrate", False)):
+        return True
 
     if _controller_phase_terminal(state):
         return False
     if _geak_phase_terminal(state):
-        result = getattr(state, "geak_result", None) or {}
-        pending = getattr(state, "geak_pending", None) or {}
-        if (
-            isinstance(result, dict)
-            and str(result.get("status") or "").strip().lower() == "ok"
-            and isinstance(pending, dict)
-            and str(pending.get("status") or "").strip().lower() == "awaiting_rebench"
-            and bool(str(pending.get("revalidation_task_id") or "").strip())
-        ):
-            return True
         return False
 
-    try:
-        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-        if callable(untried_hot) and bool(untried_hot()):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+    if callable(untried_hot) and bool(untried_hot()):
+        return True
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
     integrated_entries: list[dict[str, Any]] = []
@@ -1289,7 +1196,7 @@ def kernel_work_pending(state: Any) -> bool:
                 failure_count = int(attempt.get("failure_count") or 0)
             except (TypeError, ValueError):
                 failure_count = 0
-            if 0 < failure_count < _kernel_opt_max_failures():
+            if 0 < failure_count < resolve_kernel_opt_max_failures():
                 return True
             continue
         if decision in ("", "PARTIAL", "NEEDS_REVIEW"):
@@ -1398,10 +1305,7 @@ def session_usable_seconds(state: Any) -> float | None:
     """Seconds a unit of work may still claim, from the session's own accounting."""
     getter = getattr(state, "session_budget_usable_sec", None)
     if callable(getter):
-        try:
-            return getter()
-        except Exception:  # noqa: BLE001 — fall back to the attribute path
-            pass
+        return getter()
     return session_remaining_seconds(state)
 
 
@@ -1496,8 +1400,46 @@ def exit_normal_kernel(
     *,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
+    kernel_work_in_flight: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit."""
+    """KERNEL normal exit.
+
+    Args:
+        state: The session state the exit rules read.
+        budget_pct: Per-phase budget shares.
+        now_unix: Clock override for the wall-clock rules.
+        kernel_work_in_flight: Whether the ``kernel_agent`` task is queued or
+            running. It owns the phase until it returns, so only the budget
+            exits can end the phase under it.
+    """
+    if not kernel_work_in_flight:
+        leverage_exit = _kernel_leverage_exit(state, now_unix=now_unix)
+        if leverage_exit is not None:
+            return leverage_exit
+    rejected = getattr(state, "rejected_kernel_ids", None) or []
+    rejected_count = len(rejected) if isinstance(rejected, list) else 0
+    remaining = phase_budget_remaining_seconds(
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    if remaining is not None and remaining <= 0:
+        return "kernel_phase_budget_exhausted", {
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "kernel_budget_cap", {
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    return None
+
+
+def _kernel_leverage_exit(state: Any, *, now_unix: float | None) -> tuple[str, dict[str, Any]] | None:
+    """The KERNEL exits that say the phase ran out of work rather than out of time."""
     # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
     # so asking it here keeps this exit from stepping over an unintegrated KEEP.
     if _controller_phase_terminal(state) and not kernel_work_pending(state):
@@ -1530,25 +1472,6 @@ def exit_normal_kernel(
                 "idle_seconds": round(idle_seconds, 3),
                 "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
             }
-    rejected = getattr(state, "rejected_kernel_ids", None) or []
-    rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if remaining is not None and remaining <= 0:
-        return "kernel_phase_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "kernel_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
     return None
 
 
@@ -1583,6 +1506,13 @@ def exit_normal_sweep(
                 evidence["sweep_was_skipped"] = True
                 evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
                 evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+                summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
+                spent_budget_without_pair = bool(last_conc.get("budget_exhausted")) or (
+                    str(last_conc.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
+                )
+                ran_but_reported_no_pair = bool(summary) and int(summary.get("successful_pairs") or 0) <= 0
+                if spent_budget_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
+                    return "sweep_failed", evidence
             return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,
@@ -1779,6 +1709,7 @@ def compute_next_phase(
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
     enablement_in_flight: bool = False,
+    kernel_work_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``."""
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
@@ -1866,6 +1797,7 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
+            kernel_work_in_flight=kernel_work_in_flight,
         )
         if norm is not None:
             return PHASE_SWEEP, norm[0], norm[1]
@@ -1914,7 +1846,10 @@ def compute_next_phase(
     return None
 
 
-# phase_history helper (shape used by SharedState.record_phase_transition)
+# phase_history cap (record_phase_transition, append_phase_history_event).
+_PHASE_HISTORY_CAP = 100
+
+
 def make_history_row(
     *,
     from_phase: str,
@@ -2029,18 +1964,6 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
         banked = 0.0
     totals[phase] = banked + segment
     state.phase_elapsed_totals = totals
-    # The optimisation phase keeps its own accumulator: it carries a tri-state "unknown" for legacy resumes that
-    # status telemetry reports as absent, whereas ``phase_elapsed_totals`` must never report "unknown" — a budget
-    # guard would read that as "no cap".
-    if phase == PHASE_FRAMEWORK_AGENT:
-        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-        if raw_accumulated is not None:
-            try:
-                accumulated = float(raw_accumulated or 0.0)
-            except (TypeError, ValueError):
-                state.explore_elapsed_accum_s = None
-            else:
-                state.explore_elapsed_accum_s = accumulated + segment
     return segment
 
 
@@ -2056,7 +1979,6 @@ def record_phase_transition(
     """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
-    from ..state.shared_state import _PHASE_HISTORY_CAP
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
@@ -2134,7 +2056,6 @@ def append_phase_history_event(
     """Append a non-transition marker row for the current phase."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
-    from ..state.shared_state import _PHASE_HISTORY_CAP
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
@@ -2182,8 +2103,6 @@ def record_lifecycle_event(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """Append a structured lifecycle event marking a phase/step boundary."""
-    from ..state.shared_state import _LIFECYCLE_CAP, _now_iso
-
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
@@ -2217,12 +2136,6 @@ __all__ = [
     "DEFAULT_PLATEAU_KERNEL_REVERT_STREAK",
     "ESCALATE_HINT_BUDGET_BUMP_CAP",
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
-    "ESCALATE_HINT_EXTEND_EXPLORE_BUDGET",
-    "ESCALATE_HINT_EXTEND_KERNEL_BUDGET",
-    "ESCALATE_HINT_SKIP_TO_CLOSE",
-    "ESCALATE_HINT_SKIP_TO_KERNEL",
-    "ESCALATE_HINT_SKIP_TO_SWEEP",
-    "ESCALATE_HINT_VOCAB",
     "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
     "LIFECYCLE_STATUS_ERROR",
@@ -2240,7 +2153,6 @@ __all__ = [
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
-    "STOP_REASON_VOCAB",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_MAX_MACRO_CYCLES",
@@ -2267,7 +2179,6 @@ __all__ = [
     "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
     "append_phase_history_event",
-    "is_phase_transition_row",
     "baseline_round_cost_sec",
     "benchmark_cost_sec",
     "boot_cost_sec",
@@ -2278,18 +2189,16 @@ __all__ = [
     "prelude_exit_viability",
     "session_usable_seconds",
     "render_phase_action_bullets",
-    "is_valid_escalate_hint",
-    "is_valid_stop_reason",
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",
-    "explore_elapsed_seconds",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
     "phase_elapsed_totals_from_history",
     "phase_index",
+    "phase_status_summary",
     "session_remaining_seconds",
     "warm_replay_in_flight",
 ]

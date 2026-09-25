@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import bypass_trace_analysis as bta  # noqa: E402
-import diffusion_roofline as dr  # noqa: E402
+import bypass_trace_analysis as bta
+import diffusion_roofline as dr
 
 _TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
@@ -698,7 +698,7 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
 
 
 # --- _maybe_build_shape_manifest: enabled-path coverage (WP-1) --------------
-import argparse as _argparse  # noqa: E402
+import argparse as _argparse
 
 
 def _mk_args(**kw):
@@ -844,21 +844,6 @@ def _prov_args(**kw):
 def test_build_manifest_provenance_shared_path(monkeypatch):
     monkeypatch.setattr(bta, "_shared_build_provenance", lambda args, env, probe: {"_provenance_source": "shared"})
     assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "shared"
-
-
-def test_build_manifest_provenance_stub_when_shared_absent(monkeypatch):
-    monkeypatch.setattr(bta, "_shared_build_provenance", None)
-    out = bta._build_manifest_provenance(_prov_args())
-    assert out["_provenance_source"] == "wp1_stub"
-    assert out["model_name"] == "m" and out["dtype"] == "fp8"
-
-
-def test_build_manifest_provenance_stub_when_shared_raises(monkeypatch):
-    def _boom(*a, **k):
-        raise RuntimeError("shared blew up")
-
-    monkeypatch.setattr(bta, "_shared_build_provenance", _boom)
-    assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "wp1_stub"
 
 
 def test_discover_capture_shards_dedups_tp_ranks(tmp_path):

@@ -376,7 +376,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             # A previous attempt timed out and its runner has since finished; it
             # may have connected. Clear what it left before taking the process.
             _STALE_CONNECT_POSSIBLE.clear()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(RuntimeError, OSError):
                 ray.shutdown()
         outcome: dict[str, BaseException] = {}
         # One lock decides, for a connect that lands near the deadline, whether
@@ -436,7 +436,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     try:
         _init(os.environ.get("RAY_ADDRESS", "auto"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if not _is_ray_version_mismatch(str(exc)):
             raise
         # Foreign cluster: replace with a local head, then retry exactly once.

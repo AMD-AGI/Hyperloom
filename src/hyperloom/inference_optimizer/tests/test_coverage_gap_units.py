@@ -57,7 +57,8 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_INT", " 7 ")
     assert env.env_int("HL_INT") == 7
     monkeypatch.setenv("HL_INT", "bad")
-    assert env.env_int("HL_INT", default=3) == 3
+    with pytest.raises(env.EnvValueError):
+        env.env_int("HL_INT", default=3)
 
     monkeypatch.setenv("HL_FLOAT", " 2.5 ")
     assert env.env_float("HL_FLOAT") == pytest.approx(2.5)
@@ -88,9 +89,18 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
+    # An inherited key on either side resolves that side's official URL, so both must be absent for "unconfigured".
+    for name in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
@@ -134,12 +144,13 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -167,7 +178,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -475,7 +486,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -1036,7 +1047,7 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
 
 
 def test_canonical_fingerprint_remaining_normalization_branches() -> None:
-    from hyperloom.orchestrator.actions.executors import _canonical_fingerprint as fp
+    from hyperloom.inference_optimizer import canonical_fingerprint as fp
 
     with_controls = fp.canonical_fingerprint(
         '--flag "unterminated',
@@ -1095,7 +1106,7 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()

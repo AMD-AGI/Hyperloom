@@ -60,22 +60,22 @@ See [Hyperloom authentication and credentials](authentication.md) for credential
 credentials. `tr '\0' '\n' < /proc/<pid>/environ | grep ANTHROPIC_API_KEY` on the
 running optimizer shows the previous key.
 
-**Cause**: `install.sh` snapshots the resolved credentials into
-`$USER_DATA_PATH/runtime/kernel-agent.env.sh`, and every launch sources `.env`
-first and that file second. The snapshot is a fallback, so the rotated value
-wins — but only if it is in the environment when the file is sourced. Sourcing
-the file in a shell that never loaded the new `.env` still yields the old key.
+**Cause**: `install.sh` snapshots credentials into
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Optimizer preflight loads the
+workspace settings before this fallback, preserving caller exports. An old key
+still exported by the launching shell therefore wins over a rotated `.env` value.
 
 **Fix**:
 
-1. Source `.env` before `kernel-agent.env.sh`, which is the documented launch
-   order:
+1. Reconcile any stale credential export, then use the shared workspace loader:
    ```bash
-   set -a; . "$REPO_ROOT/.env"; set +a
-   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+   INSTALL_SH="$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
+   [ -f "$INSTALL_SH" ] || INSTALL_SH="$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+   . "${INSTALL_SH%/*}/runtime_env.sh"
+   load_dotenv_no_clobber
    ```
-   The file prints `ANTHROPIC_API_KEY differs from the install-time snapshot` on
-   a mismatch; that line means the rotated value is the one in effect.
+   Do not print credential values. Let optimizer preflight load the runtime
+   snapshot; do not source it over the current launch environment.
 2. To refresh the snapshot itself, re-run the installer:
    ```bash
    bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
@@ -257,6 +257,77 @@ bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
+
+---
+
+## Codex SDK turns stall or TraceLens roofline times out
+
+**Symptom**: On code paths that use the shared Codex SDK session helper
+(TraceLens roofline via `run_codex_turn`, orchestrator Codex turns), one or
+more of:
+
+* A Codex stage hits its phase budget with no declared output (for example,
+  no `analysis.md`).
+* Individual turns take minutes even when the upstream LLM responds in seconds.
+* Codex internal logs report `pool timed out while waiting for an open
+  connection` or `state db update_thread_metadata failed`.
+
+**Cause**: Hyperloom picks exactly one parent directory for each SDK turn via
+`_codex_home_parent` in `codex_session.py`:
+
+1. `HYPERLOOM_RUNTIME_DIR` when set (must be outside a source checkout and
+   creatable, or the turn raises `CodexSessionUnavailableError`).
+2. Otherwise the first safe declared **writable root** for that turn.
+3. Otherwise the run working directory.
+
+Each turn then creates a mode-`0700` `.hyperloom-codex-home-*` directory under
+that parent; Codex stores SQLite (WAL) state there. When the SDK client closes,
+`_cleanup_codex_home` removes that directory — it is not left behind for a
+post-stage listing.
+
+Installers often **export** `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
+that is launch configuration, not a separate placement rule inside
+`_codex_home_parent`. If that path (or an unset-runtime writable root) sits on
+storage that does not support the file locking SQLite needs, concurrent writers
+from the main agent and spawned sub-agents can block for minutes on the critical
+path.
+
+**Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
+It does **not** cover Forge-fusion / GEAK Codex (KernelForge uses its own home
+under `~/.cache/kernelforge/codex_home`) or subprocess **specialist** Codex
+tasks (`CODEX_HOME=<task-workspace>/.codex`, which also ignores
+`HYPERLOOM_RUNTIME_DIR`). Treat stalls on those paths as separate placement
+issues.
+
+**Fix**: Before launch, set `HYPERLOOM_RUNTIME_DIR` to a private directory
+outside any source checkout, on storage suitable for SQLite (typically
+node-local fast disk). Session artifacts can stay under `USER_DATA_PATH` on a
+shared mount:
+
+```bash
+export USER_DATA_PATH=/path/on/shared/storage/hyperloom-sessions
+export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime
+mkdir -p "$HYPERLOOM_RUNTIME_DIR"
+chmod 700 "$HYPERLOOM_RUNTIME_DIR"
+```
+
+Use a per-job subdirectory when several runs can share one node (for example,
+`/var/lib/hyperloom/runtime-$SLURM_JOB_ID`).
+
+**Verify**:
+
+1. Before and during the run, confirm the configured parent is on suitable
+   storage:
+   ```bash
+   df -T "$HYPERLOOM_RUNTIME_DIR"
+   ```
+2. While a turn is still open (before the SDK client closes), pool-timeout
+   warnings in Codex `logs_*.sqlite` under the active `.hyperloom-codex-home-*`
+   directory indicate the parent is still unsuitable. After close, rely on the
+   stage finishing within budget rather than inspecting removed directories.
+
+See [Environment variables](environment-variables.md) for
+`HYPERLOOM_RUNTIME_DIR` and Codex `CODEX_HOME` lifecycle.
 
 ---
 

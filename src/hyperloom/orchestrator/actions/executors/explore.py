@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import os
@@ -20,14 +19,18 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
-    VERDICT_RECORDED,
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
+    stamp_output_per_gpu,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
     FAILURE_STAGE_DECISION,
@@ -39,7 +42,6 @@ from ...state.shared_state import (
     first_positive_tput,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
-    resolved_grading,
     stack_base_params,
 )
 from ..stop_attribution import (
@@ -53,7 +55,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import workload_signature
+from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_base import (
     TS_FAILED,
@@ -66,7 +68,6 @@ from ._grid_runner import (
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
-    _kill_stale_servers,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -79,13 +80,14 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from ._grid_server_args import compose_server_args, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
 
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -445,20 +447,6 @@ class ExploreExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
-        try:
-            return await self._run_explore(ctx)
-        finally:
-            if not os.environ.get("PYTEST_CURRENT_TEST"):
-                try:
-                    await asyncio.to_thread(_kill_stale_servers)
-                except Exception:  # noqa: BLE001 - best-effort safety net
-                    log.warning(
-                        "explore: post-run _kill_stale_servers failed",
-                        exc_info=True,
-                    )
-
-    async def _run_explore(self, ctx) -> dict[str, Any]:
-        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
@@ -512,6 +500,12 @@ class ExploreExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
             }
 
@@ -715,6 +709,14 @@ class ExploreExecutor:
                 runnable,
                 framework=framework,
                 model_path=resolved_model,
+                gpu_type=resolved_gpu or str(getattr(ss, "gpu_type", "") or ""),
+                stack_fingerprint=getattr(ss, "stack_fingerprint_meta", None),
+                base_server_args=compose_server_args(
+                    inherited_args=_effective_inherited_args,
+                    base_extra_args=base_extra_args,
+                    remove_args=base_remove_args,
+                    args_mode=base_args_mode,
+                ),
             )
             # Operator-supplied --skip-variants patterns.
             runnable, _skip_dropped = apply_user_skip_list(
@@ -1020,7 +1022,6 @@ class ExploreExecutor:
                         base_extra_envs=dict(stack_extra_envs),
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
-                        preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,
@@ -1045,7 +1046,11 @@ class ExploreExecutor:
                         "total_throughput": r.total_token_throughput,
                         GRADED_INTVTY: r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
+                        GRADED_INTVTY_P50: r.intvty_p50,
+                        GRADED_DURATION: r.duration_seconds,
+                        GRADED_ERROR_RATE: r.request_error_rate,
                     }
+                    stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
                         ss,
                         variant_meas,
@@ -1086,13 +1091,9 @@ class ExploreExecutor:
                         gain = None
                         outcome = "REVERT"
                         if _graded_on_intvty:
-                            reason = f"both_axes_regressed ({axes})"
+                            reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
-                    elif graded.verdict == VERDICT_RECORDED:
-                        gain = gain_pct(graded.candidate, graded.reference)
-                        outcome = "RECORDED"
-                        reason = f"neither_dominates ({axes})"
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if r.status == "succeeded":
@@ -1104,11 +1105,7 @@ class ExploreExecutor:
                                 "gate": "graded_axes"
                                 if (_graded_on_intvty or graded.degrade_reason)
                                 else "keep_threshold",
-                                "passed": (
-                                    False
-                                    if graded.degrade_reason
-                                    else graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED)
-                                ),
+                                "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
                                 # the tolerance does for accuracy.
@@ -1187,7 +1184,7 @@ class ExploreExecutor:
                         "e2e_norm_intvty_p90": r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
-                        "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
+                        "graded_objective": graded.objective,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1283,7 +1280,7 @@ class ExploreExecutor:
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
-                            "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
+                            "graded_objective": graded.objective,
                             # The verdict this KEEP rests on. ``None`` means the variant was not gated (not
                             # high-risk, or no baseline) rather than that it scored nothing.
                             "accuracy": accuracy_value,

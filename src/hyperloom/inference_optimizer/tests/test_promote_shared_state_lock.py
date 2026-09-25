@@ -28,7 +28,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
-from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS
+from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -458,7 +458,7 @@ async def test_promote_integrate_patch_carries_nested_launch_evidence(session_di
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lane", ["fusion", "integrate_patch"])
-@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win_output_drop", "intvty_regression"])
+@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win", "intvty_regression"])
 async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monkeypatch, lane, vetoed):
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
@@ -467,12 +467,22 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     anchor = {
         "action": "explore",
         "tput": 100.0,
         "total_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "extra_server_args": "",
         "extra_envs": {},
     }
@@ -482,10 +492,13 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     s.last_fusion_integrate = dict(prior_fusion)
     bench = {
         "status": "succeeded",
-        "output_throughput": 90.0,
+        "output_throughput": 105.0,
         "total_token_throughput": 1200.0,
         "input_throughput": 1110.0,
         "e2e_norm_intvty_p90": 50.0 if vetoed else 120.0,
+        "e2e_norm_intvty_p50": 50.0 if vetoed else 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "ttft_mean_ms": 12.0,
         "e2el_mean_ms": 23.0,
@@ -513,6 +526,9 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "total_throughput": 2000.0,
         "input_throughput": 1860.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 99.0,
         "ttft_mean_ms": 99.0,
         "e2el_mean_ms": 99.0,
@@ -559,7 +575,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         assert s.last_fusion_integrate == prior_fusion
         return
 
-    assert s.current_best["tput"] == 90.0
+    assert s.current_best["tput"] == 105.0
     assert s.current_best["total_throughput"] == 1200.0
     assert s.current_best["input_throughput"] == 1110.0
     assert s.current_best["e2e_norm_intvty_p90"] == 120.0
@@ -568,7 +584,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     assert len(s.optimization_stack) == 1
     entry = s.optimization_stack[0]
     assert entry["action"] == lane
-    assert entry["tput"] == 90.0
+    assert entry["tput"] == 105.0
     assert entry["workspace"] == bench["workspace"]
     assert s.current_best["extra_server_args"] == "--page-size 32"
     assert s.current_best["extra_envs"] == {"ACCEPTED_ENV": "1"}
@@ -607,7 +623,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
     """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_NO_PROMOTE,
         derive_journal_outcome,
     )
@@ -627,6 +643,69 @@ async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
 
     assert s.current_best["tput"] == 200.0
     assert derive_journal_outcome("integrate_patch", result, promotable=True) == OUTCOME_NO_PROMOTE
+
+
+@pytest.mark.asyncio
+async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
+    """Reproduces a real session: a forge-loop kernel_rewrite_controller KEEP lands on
+    optimization_stack via _record_integrate_keep, which never went through the generic
+    _fact_write_hook -> _record_fact_per_task path every dispatched Task uses to append its own
+    optimization_journal.json row. The journal's header (final_throughput/total_gain_pct) ends up
+    naming a KEEP its own entries list never records."""
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
+
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 140.0,
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "integration_id": "int-forge-1",
+            "gain_pct": 7.72,
+            "backend": "forge",
+            "engine": "kernel_rewrite_controller",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "integrate"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-forge-1"]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry.outcome == OUTCOME_KEEP
+    assert entry.gain_pct == 7.72
+    assert entry.throughput_after == 140.0
+    assert entry.variant_name == "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x"
+    assert entry.lever_kind == "kernel"
+
+
+@pytest.mark.asyncio
+async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
+    """The fusion sibling of the same lane must land a journal entry too."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "kernel_id": "fuse-rmsnorm-silu",
+            "integration_id": "int-fusion-1",
+            "gain_pct": 2.0,
+            "source": "forge_fusion",
+            "action_label": "fusion",
+        }
+    )
+
+    assert s.optimization_stack[0]["action"] == "fusion"
+    journal = coord.writeback._ensure_journal()
+    matches = [e for e in journal.entries if e.task_id == "int-fusion-1"]
+    assert len(matches) == 1
+    assert matches[0].variant_name == "fuse-rmsnorm-silu"
 
 
 @pytest.mark.asyncio
@@ -1845,13 +1924,23 @@ class TestWritebackRequiredAxes:
         state.framework = "sglang"
         state.benchmark_mode = "agentx"
         state.baseline_tput = 100.0
-        state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+        state.baseline_perf = {
+            "output_throughput": 100.0,
+            "total_throughput": 1000.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        }
         state.current_best = {
             "action": "explore",
             "variant_name": "prior",
             "tput": 120.0,
             "total_throughput": 1200.0,
             "e2e_norm_intvty_p90": 120.0,
+            "e2e_norm_intvty_p50": 120.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "extra_server_args": "--page-size 16",
             "extra_envs": {"PRIOR_ENV": "1"},
         }
@@ -1880,6 +1969,9 @@ class TestWritebackRequiredAxes:
             "tput": 150.0,
             "total_throughput": 1600.0,
             "e2e_norm_intvty_p90": 150.0,
+            "e2e_norm_intvty_p50": 150.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "extra_server_args": "--page-size 32",
             "extra_envs": {"NEXT_ENV": "1"},
             "unset_envs": ["PRIOR_ENV"],
@@ -2033,6 +2125,8 @@ class TestWritebackRequiredAxes:
             "tp_size": 2,
         }
         assert self._validation_state(state) == prior_validation
+        assert state.working_recipe_generation == state.validated_recipe_generation + 1
+        assert state.optimization_stack_has_unvalidated_keeps()
         record.assert_not_called()
         watermark.assert_not_called()
 
@@ -2065,6 +2159,34 @@ class TestWritebackRequiredAxes:
         assert state.optimization_stack == prior_stack
         record.assert_not_called()
 
+    def test_keeps_whose_throughput_losses_sum_past_the_band_still_validate(self, coord, monkeypatch):
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+        monkeypatch.setattr(stack_event, "record_validation", Mock())
+        state = coord.shared_state
+        state.current_best["total_throughput"] = state.baseline_perf["total_throughput"]
+        total, intvty = state.current_best["total_throughput"], state.current_best["e2e_norm_intvty_p90"]
+        # Each lift trades 4% throughput (inside the 5% band) for interactivity; by the third the
+        # stack sits past the band against baseline, which must not stop the gain from following it.
+        for step in range(3):
+            total *= 0.96
+            intvty *= 1.10
+            candidate = {
+                **self._candidate(),
+                "name": f"step{step}",
+                "extra_server_args": f"--page-size {64 << step}",
+                "total_throughput": total,
+                "e2e_norm_intvty_p90": intvty,
+                "e2e_norm_intvty_p50": intvty,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
+            }
+            assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+            assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
+            assert state.cumulative_gain_validated == pytest.approx(intvty - 100.0)
+            assert not state.optimization_stack_has_unvalidated_keeps()
+        assert total < state.baseline_perf["total_throughput"] * 0.95
+
     def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
@@ -2086,6 +2208,8 @@ class TestWritebackRequiredAxes:
         assert state.current_best["extra_envs"] == {"NEXT_ENV": "1"}
         assert len(state.optimization_stack) == 2
         assert self._validation_state(state) == (50.0, "2026-01-02T00:00:00+00:00", 2)
+        assert state.validated_recipe_generation == state.working_recipe_generation == 1
+        assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
         assert record.call_args.kwargs["baseline_tput"] == 100.0
         assert record.call_args.kwargs["validated_tput"] == 150.0
@@ -2186,8 +2310,8 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "last_tput,last_total,last_intvty,rejected",
-    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, False), (140.0, 1150.0, 115.0, True)],
-    ids=["last_winner_intvty", "last_winner_output_drop", "last_duplicate_recorded"],
+    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_output_drop_rejected", "last_duplicate_recorded"],
 )
 async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected
@@ -2200,8 +2324,23 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
-    s.current_best = {"action": "baseline", "tput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
+    s.current_best = {
+        "action": "baseline",
+        "tput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     first = {
         "name": "first",
         "fingerprint": "fp_first",
@@ -2209,6 +2348,9 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "total_throughput": 1200.0,
         "input_throughput": 1080.0,
         "e2e_norm_intvty_p90": 120.0,
+        "e2e_norm_intvty_p50": 120.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "gain_pct": 20.0,
         "candidate_extra_server_args": "--flag-a 1",
@@ -2224,6 +2366,9 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "total_throughput": last_total,
         "input_throughput": last_total - last_tput,
         "e2e_norm_intvty_p90": last_intvty,
+        "e2e_norm_intvty_p50": last_intvty,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 9.0,
         "gain_pct": 4.0,
         "candidate_extra_server_args": "--flag-b 2",

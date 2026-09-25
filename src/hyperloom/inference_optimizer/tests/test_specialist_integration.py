@@ -146,6 +146,7 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = _FakeKnowledgePlane()
 
     @dataclass
@@ -176,6 +177,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = None
 
     @dataclass

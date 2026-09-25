@@ -11,6 +11,7 @@ import types
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod
+from hyperloom.orchestrator.phases import framework as framework_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
@@ -37,7 +38,7 @@ def coord(session_dir) -> Coordinator:
 
 # _framework_config_levers_from_done
 def test_config_levers_non_dict_and_missing() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     assert f(None) == {}
     # A patch takes precedence over a lever that merely accompanies it, unless the
     # lane says the pair is inseparable.
@@ -49,7 +50,7 @@ def test_config_levers_non_dict_and_missing() -> None:
 
 
 def test_config_levers_preserve_envs_and_args() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
@@ -68,13 +69,13 @@ def test_config_levers_preserve_envs_and_args() -> None:
 
 
 def test_config_levers_args_as_list() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
     assert levers == {}
 
 
 def test_invalid_config_args_preserve_independent_env_overrides() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -92,7 +93,7 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
-    f = coord_mod._framework_config_levers_from_done
+    f = framework_mod._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -177,7 +178,7 @@ class _FakeStream:
     async def __anext__(self):
         try:
             return next(self._it)
-        except StopIteration:  # noqa: PERF203
+        except StopIteration:
             raise StopAsyncIteration from None
 
 
@@ -200,7 +201,7 @@ class _FakeClient:
 
 
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, seen: list | None = None):
-    def _fake(args, timeout=None):  # noqa: ANN001
+    def _fake(args, timeout=None):
         sub = args[2] if len(args) > 2 else ""
         if seen is not None:
             seen.append(sub)

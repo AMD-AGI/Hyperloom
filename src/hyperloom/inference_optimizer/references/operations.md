@@ -11,14 +11,24 @@ Credentials must already be in the shell environment: `OPENAI_API_KEY` and
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
 
 ```bash
-export REPO_ROOT="$(pwd)"
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+set -e
+export REPO_ROOT="$(pwd -P)"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+bash "$INSTALL_SH"
 ```
 
-`install.sh` is the only full install entrypoint. Source the generated
-`kernel-agent.env.sh`; do not derive auth aliases, GEAK paths, or InferenceX
-paths by hand. Do not manually repair `$USER_DATA_PATH/runtime/` or
+`install.sh` is the only full install entrypoint. CLI preflight reads the generated
+`kernel-agent.env.sh` in-process; do not source it in the launch shell or derive
+auth aliases, GEAK paths, or InferenceX paths by hand. `runtime_env.sh` only fills
+missing or empty shell values from workspace `.env`, without executing its contents.
+In Docker mode, it excludes dotenv-provided Python/venv pins but preserves explicit
+shell selections. Do not manually repair `$USER_DATA_PATH/runtime/` or
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`.
 
 Optionally write `<session_dir>/model_arch.json` if the architecture is known.
@@ -88,14 +98,17 @@ sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
 
 ```bash
+set -e
 cd "$REPO_ROOT"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+# Resolve the launch interpreter in this shell; preflight loads generated runtime state.
+export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"

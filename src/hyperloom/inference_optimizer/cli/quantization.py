@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run()."""
+"""The ``--quantize`` prelude: quantize the model once, before the optimization loop starts."""
 
 from __future__ import annotations
 
@@ -11,17 +11,9 @@ import os
 import sys
 from pathlib import Path
 
+from hyperloom.common.env import env_bool
+
 log = logging.getLogger(__name__)
-
-
-def _quantization_enabled_via_env() -> bool:
-    """Return ``True`` iff the deterministic quantization master switch is on."""
-    return os.environ.get("HYPERLOOM_QUANTIZE_ENABLED", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
@@ -59,7 +51,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     # Deterministic master switch: quantization runs ONLY when $HYPERLOOM_QUANTIZE_ENABLED is truthy, regardless of
     # the flags.
-    if not _quantization_enabled_via_env():
+    if not env_bool("HYPERLOOM_QUANTIZE_ENABLED"):
         reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
         os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
         print(

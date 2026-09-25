@@ -14,6 +14,7 @@ from typing import Any
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
+from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ._common import (
     _dict_rows,
@@ -24,52 +25,6 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
-
-
-# Structural model fields carried verbatim out of ``state.model_info``. Kept in
-# lockstep with the recorder's own list (``recorder/session_metadata.py``) so a
-# fragment-backed session and a collector fallback expose the same block.
-_ARCHITECTURE_FIELDS = (
-    "model_family",
-    "model_type",
-    "architectures",
-    "attention_type",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "hidden_size",
-    "intermediate_size",
-    "max_position_embeddings",
-    "vocab_size",
-    "torch_dtype",
-    "kv_cache_dtype",
-    "quantization",
-    "is_moe",
-    "num_experts",
-    "num_experts_per_tok",
-    "has_shared_expert",
-    "num_shared_experts",
-)
-
-
-def _architecture(workload: dict[str, Any], model_info: dict[str, Any]) -> dict[str, Any]:
-    """The structural model summary, carried whole rather than digested.
-
-    ``model_class`` is the operator's declaration when present and a dense/moe
-    split otherwise; every other field is the parsed ``config.json`` summary as
-    ``summarize_model_config`` produced it.
-    """
-    if not workload and not model_info:
-        return {}
-    model_class = str(workload.get("model_class") or "").strip()
-    if not model_class and model_info:
-        model_class = "moe" if bool(model_info.get("is_moe")) else "dense"
-    architecture: dict[str, Any] = {"model_class": model_class}
-    for field in _ARCHITECTURE_FIELDS:
-        if field in model_info:
-            architecture[field] = model_info[field]
-    return architecture
 
 
 def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
@@ -144,8 +99,11 @@ def collect_v6_metadata(
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
-        "architecture": _architecture(workload, model_info),
+        "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
     }
+    signature = workload_signature(task_config)
+    if signature:
+        task_config["workload_signature"] = signature
     projected = {
         "versions": {
             "framework": str(workload.get("framework_name") or "") or None,
@@ -171,11 +129,7 @@ def collect_v6_metadata(
             "image_id": (image.split("/")[-1] or None) if image else None,
             "max_minutes": int(session.get("max_minutes") or 0),
             "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
-            # Absent a per-leg history the fallback can only report the one
-            # window it can measure, so a never-resumed session reads the same
-            # either way and a resumed one is under-reported rather than
-            # charged the gap between its legs.
-            "total_elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
+            "total_elapsed_minutes": _projected_total_elapsed_minutes(session, state),
             "tick_count": int(session.get("tick_count") or 0),
             "recovery": {
                 "recovered": bool(recovery.get("recovered")),
@@ -189,8 +143,27 @@ def collect_v6_metadata(
         "task_config": task_config,
         "langfuse": langfuse_block(langfuse),
     }
+    grading = grading_block(state)
+    if grading:
+        projected["grading"] = grading
     metadata = _overlay_recorded(projected, recorded)
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+
+
+def _projected_total_elapsed_minutes(session: dict[str, Any], state: dict[str, Any]) -> float:
+    """Minutes charged across every leg, falling back to this window only.
+
+    Prefer a recorded total, then the state's charged budget. Copying the
+    current-leg elapsed is last-resort for a never-resumed session that has
+    neither -- not for a resume whose gap would otherwise vanish.
+    """
+    recorded = _optional_float(session.get("total_elapsed_minutes"))
+    if recorded is not None:
+        return recorded
+    charged_sec = _optional_float(state.get("elapsed_charged_sec"))
+    if charged_sec is not None and charged_sec > 0:
+        return round(charged_sec / 60.0, 2)
+    return float(session.get("elapsed_minutes") or 0.0)
 
 
 def _overlay_recorded(projected: dict[str, Any], recorded: Any) -> dict[str, Any]:
@@ -216,18 +189,29 @@ def _overlay_leaves(target: dict[str, Any], recorded: dict[str, Any]) -> dict[st
     for key, value in recorded.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _overlay_leaves(merged[key], value)
-        elif _recorded_leaf(value) or key not in merged:
+        elif _recorded_leaf(value, key=key) or key not in merged:
             merged[key] = value
     return merged
 
 
-def _recorded_leaf(value: Any) -> bool:
-    """Whether a recorded leaf carries evidence (``0`` / ``""`` / ``None`` do not)."""
+#: Count leaves where a recorded zero is a fact, not an empty default.
+_ZERO_IS_EVIDENCE = frozenset({"tick_count", "crash_count"})
+
+
+def _recorded_leaf(value: Any, *, key: str = "") -> bool:
+    """Whether a recorded leaf carries evidence.
+
+    ``None`` and ``""`` are absence. A numeric ``0`` is absence for most
+    fields (``pid=0`` is not a pid) but is a fact for counts the recorder
+    snapshots as an integer.
+    """
     if value is None or value == "":
         return False
     if isinstance(value, (list, dict)):
         return bool(value)
-    return not (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0:
+        return key in _ZERO_IS_EVIDENCE
+    return True
 
 
 def _recorded_types(timeline: list[dict[str, Any]], event_type: str) -> bool:
@@ -280,6 +264,7 @@ def _stage_reached(
     state: dict[str, Any],
     stop_reason: str,
     timeline: list[dict[str, Any]],
+    warnings: list[str] | None = None,
 ) -> str:
     if stop_reason in MODEL_GATE_STOP_REASONS:
         return "model_gate"
@@ -290,32 +275,6 @@ def _stage_reached(
             if isinstance(row, dict) and str(row.get("to_phase") or "").strip():
                 phase = str(row.get("to_phase") or "").strip().upper()
                 break
-    if phase == "PRELUDE":
-        if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
-            return "roofline"
-        if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
-            return "profile"
-        if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
-            return "warm_replay"
-        if _recorded_types(timeline, "enablement"):
-            return "enablement"
-        baseline_tput = state.get("baseline_tput")
-        if (
-            isinstance(baseline_tput, (int, float))
-            and baseline_tput > 0
-            or state.get("last_baseline")
-            or state.get("baseline_attempts")
-            or int(state.get("baseline_failure_streak") or 0) > 0
-        ):
-            return "baseline"
-        if (
-            state.get("warm_start_ts")
-            or state.get("warm_start_recipe")
-            or state.get("warm_start_pitfalls")
-            or state.get("warm_start_lessons")
-            or state.get("warm_start_context")
-        ):
-            return "warm_start"
     phase_map = {
         "ENABLEMENT": "enablement",
         "FRAMEWORK_AGENT": "framework_agent",
@@ -330,9 +289,50 @@ def _stage_reached(
     }
     if phase in phase_map:
         return phase_map[phase]
-    if timeline:
-        return str(timeline[-1].get("type") or "")
+    for event in reversed(timeline):
+        if isinstance(event, dict):
+            kind = str(event.get("type") or "")
+            if kind:
+                return kind
+    if phase == "PRELUDE":
+        heuristic = _prelude_stage_from_state(state, timeline)
+        if heuristic:
+            if warnings is not None:
+                warnings.append(
+                    f"v6.outcome: stage_reached derived from state heuristic ({heuristic}); timeline had no typed event"
+                )
+            return heuristic
     return "install"
+
+
+def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
+    """PRELUDE stage from leftover state fields when the timeline is empty."""
+    if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
+        return "roofline"
+    if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
+        return "profile"
+    if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
+        return "warm_replay"
+    if _recorded_types(timeline, "enablement"):
+        return "enablement"
+    baseline_tput = state.get("baseline_tput")
+    if (
+        isinstance(baseline_tput, (int, float))
+        and baseline_tput > 0
+        or state.get("last_baseline")
+        or state.get("baseline_attempts")
+        or int(state.get("baseline_failure_streak") or 0) > 0
+    ):
+        return "baseline"
+    if (
+        state.get("warm_start_ts")
+        or state.get("warm_start_recipe")
+        or state.get("warm_start_pitfalls")
+        or state.get("warm_start_lessons")
+        or state.get("warm_start_context")
+    ):
+        return "warm_start"
+    return ""
 
 
 #: The figures ``outcome.baseline`` publishes, named as the ``baseline`` event's
@@ -352,17 +352,17 @@ _ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 
 def _graded_axes(recorded: Any) -> dict[str, Any]:
-    """Publish the four graded axes a recorder projected, absent ones as explicit nulls.
+    """Publish the graded axes a recorder projected, absent ones as explicit nulls.
 
-    The recorder already filled all four, so this only has to hold the shape for a session recorded before it did.
-    All four are always present because absent would be indistinguishable from an axis the framework failed to
+    The recorder already filled them, so this only has to hold the shape for a session recorded before it did.
+    Every axis is always present because absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero".
 
     Args:
         recorded (Any): The recorded ``perf`` block, or ``None`` on a session that has none.
 
     Returns:
-        dict[str, Any]: The four axes, each ``None`` where nothing measured it.
+        dict[str, Any]: Every axis in ``GRADED_AXIS_KEYS``, each ``None`` where nothing measured it.
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
 
@@ -587,6 +587,7 @@ def collect_v6_outcome(
     close: dict[str, Any],
     state: dict[str, Any],
     timeline: list[dict[str, Any]],
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the V6 ``outcome`` block off the timeline and the close-out.
 
@@ -606,7 +607,11 @@ def collect_v6_outcome(
         dict[str, Any]: The ``outcome`` block.
     """
     stop_reason = str(session.get("stop_reason") or "").strip()
-    outcome_status = _outcome_status(stop_reason)
+    baseline = _baseline_from_timeline(timeline)
+    measured_tput = _optional_float(baseline.get("throughput_tok_s_per_gpu"))
+    if measured_tput is None:
+        measured_tput = _optional_float(state.get("baseline_tput")) or 0.0
+    outcome_status = _outcome_status(stop_reason, measured_tput)
     for event in reversed(timeline):
         if not isinstance(event, dict) or str(event.get("type") or "") not in {"install", "model_gate"}:
             continue
@@ -618,16 +623,15 @@ def collect_v6_outcome(
     return {
         "stop_reason": stop_reason,
         "status": outcome_status,
-        "stage_reached": _stage_reached(state, stop_reason, timeline),
-        "baseline": _baseline_from_timeline(timeline),
+        "stage_reached": _stage_reached(state, stop_reason, timeline, warnings),
+        "baseline": baseline,
         "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
             "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
-            # The ledger's own settled figure rather than a second tally of it:
-            # the validation row that measured the whole stack is what the
-            # session's total means, and asking two sources the same question
-            # is how the export came to publish an answer nothing measured.
-            "gain_pct": validation.get("validated_total_gain_pct") or 0.0,
+            # The ledger's own settled figure rather than a second tally of it.
+            # Absent a validation this is ``None``, not ``0.0``: nothing
+            # measured is not the same as a measured zero.
+            "gain_pct": validation.get("validated_total_gain_pct"),
             # The same axis and the same measurement as the gain above, from the one row that produced both. A
             # consumer sorting sessions has to be able to tell an interactivity-graded AgentX result from an
             # output-graded synthetic one: on the canonical corpus the two axes differ by two orders of magnitude,
