@@ -294,7 +294,6 @@ def build_anchored_discovery_prompt(
     repo_root: str = "",
 ) -> str:
     """Assemble a discovery prompt whose target is fixed and whose fusion is not."""
-    multi_file = len(source_files) > 1
     if repo_scope:
         source_block = render_repo_scope_brief(
             repo_root,
@@ -314,10 +313,7 @@ def build_anchored_discovery_prompt(
     else:
         source_block = render_source_files(source_files, model_type=model_type, framework=framework)
         reach = (
-            "If the anchor's neighbours are not reachable from ANY of these files, say so\n"
-            "by proposing the largest fusion that IS reachable and including the anchor."
-            if multi_file
-            else "If the anchor's neighbours are not reachable from this source file, say so\n"
+            "If the anchor's neighbours are not reachable from this source file, say so\n"
             "by proposing the largest fusion that IS reachable and including the anchor."
         )
     read_verb = "Explore the repository described below" if repo_scope else "Read the source below"
@@ -345,11 +341,11 @@ Representative decode shapes: {shapes}
 collapses this anchor into its neighbours. Name the exact call site you would
 replace. {reach}
 
-{fusion_constraints(multi_file, repo_scope=repo_scope)}
+{fusion_constraints(repo_scope=repo_scope)}
 - The anchor kernel must be part of every proposal. A proposal that does not
   include it answers a question nobody asked.
 
-{_output_schema_block(model_type, multi_file=multi_file, repo_scope=repo_scope)}
+{_output_schema_block(model_type, repo_scope=repo_scope)}
 
 {source_block}
 """
@@ -366,7 +362,6 @@ def discover_anchored_recipes(
     category_shares: Optional[dict[str, float]] = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
-    extra_source_files: Sequence[str] = (),
     repo_scope: bool = False,
     repo_root: str = "",
 ) -> list[Recipe]:
@@ -376,36 +371,20 @@ def discover_anchored_recipes(
     verdict: the operator named a kernel, which overrides a trace-wide judgement
     that there was nothing worth fusing.
 
-    ``extra_source_files`` are shown alongside ``source_file`` and are equally
-    proposable. The anchor's chain frequently lives in one of them -- the model
-    file often reaches it through a single opaque call whose operands are not
-    local names there -- and a prompt showing only the model file forces the
-    answer to be a smaller chain that happens to be local to it.
-
-    ``repo_scope`` turns those files into mere entry points: nothing is embedded,
-    the whole repository is proposable, and a proposal may name several files.
-    That is the difference between needing to know where the chain lives and
-    being able to go and find out.
+    ``repo_scope`` turns ``source_file`` into a mere entry point: nothing is
+    embedded, the whole repository is proposable, and a proposal may name several
+    files. That is the difference between needing to know where the chain lives
+    and being able to go and find out.
     """
-    in_scope: list[str] = []
-    for path in [source_file, *extra_source_files]:
-        if path and path not in in_scope and Path(path).is_file():
-            in_scope.append(path)
+    in_scope = [source_file] if source_file and Path(source_file).is_file() else []
     if not in_scope and not repo_scope:
         log.warning("anchored discovery: model source unreadable (%s); cannot propose a fusion", source_file)
         return []
     if repo_scope:
         log.info(
-            "anchored discovery: repo scope over %s (entry point%s: %s)",
+            "anchored discovery: repo scope over %s (entry point: %s)",
             repo_root or "the working directory",
-            "" if len(in_scope) == 1 else "s",
             ", ".join(Path(p).name for p in in_scope) or "none resolved",
-        )
-    elif len(in_scope) > 1:
-        log.info(
-            "anchored discovery: %d in-scope file(s): %s",
-            len(in_scope),
-            ", ".join(Path(p).name for p in in_scope),
         )
 
     prompt = build_anchored_discovery_prompt(

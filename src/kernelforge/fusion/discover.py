@@ -534,31 +534,6 @@ _SCOPE_SINGLE = """- SCOPE — the single hardest constraint, and the one that w
   propose them as two SEPARATE entries, each self-contained in its own file --
   never one entry spanning both."""
 
-_SCOPE_MULTI = """- SCOPE — the single hardest constraint, and the one that wastes a whole run when
-  it is broken. EVERY file printed below is in scope and editable, so the call
-  site you replace may live in ANY of them; say which one in "source_file". The
-  chain must live inside that one file, and every tensor your kernel takes as
-  input must already be a local name at the call site you name. Do not fuse
-  across a boundary into a module that is NOT printed below: not into a method
-  defined in an unlisted module (an imported `XMLP`, an imported norm class), and
-  not into work the framework performs below the call (in vLLM the KV-cache write
-  happens inside the attention backend, so `key_cache` / `value_cache` /
-  `slot_mapping` are NOT reachable from a model `forward` and a fusion folding
-  them in cannot be wired). Before proposing, name the exact call site and check
-  that every input is in scope there. A chain that fails this test is worth zero
-  end-to-end even when its microbenchmark is 30x.
-- Several files are listed precisely because the chain worth fusing often does
-  NOT live in the model file: the model file frequently reaches it through one
-  opaque call (`attn_backend.forward_xxx(...)`, `self.indexer(...)`) whose
-  operands are not local names there. When that is what you find, do NOT fall
-  back to a smaller chain that happens to be local to the model file. Follow the
-  call into whichever listed file actually performs the work and propose the
-  fusion THERE, naming that file in "source_file". A big chain wired in the file
-  that owns it beats a minor chain wired where it was convenient.
-- One patch, one file. If two different listed modules each hold a fusible chain,
-  propose them as two SEPARATE entries, each self-contained in its own file --
-  never one entry spanning both."""
-
 _SCOPE_REPO = """- SCOPE — the WHOLE repository is in scope and editable, and a fusion may span as
   many files as it needs. Name the file holding the call site you would replace in
   "source_file", and every OTHER existing file that has to change in
@@ -601,15 +576,14 @@ _FUSION_CONSTRAINTS_TAIL = """- ROCm-native: it will be authored as a Triton ker
   (say which symbol to import), never a re-derivation."""
 
 
-def fusion_constraints(multi_file: bool = False, repo_scope: bool = False) -> str:
+def fusion_constraints(repo_scope: bool = False) -> str:
     """The rules that decide whether a proposal can be wired at all.
 
-    Scope is the only rule that changes with how much source the run offered, and
-    it inverts twice: with one file the model must stay inside it, with several it
-    must stop retreating into the first one, and with the whole repository it must
+    Scope is the only rule that changes with how much source the run offered: with
+    one file the model must stay inside it, and with the whole repository it must
     go looking for the file that owns the chain.
     """
-    scope = _SCOPE_REPO if repo_scope else (_SCOPE_MULTI if multi_file else _SCOPE_SINGLE)
+    scope = _SCOPE_REPO if repo_scope else _SCOPE_SINGLE
     chain_rule = (
         "- Must be a real contiguous chain in the repository (name the exact files, functions/methods)."
         if repo_scope
@@ -627,21 +601,10 @@ def render_source_files(source_files: Sequence[str], *, model_type: str, framewo
     The path is the label the model answers with in ``source_file``, so it is
     printed exactly as it will have to be matched back.
     """
-    blocks: list[str] = []
-    for path in source_files:
-        text = _read_source(path)
-        if not text:
-            continue
-        blocks.append(f"### {path}\n```python\n{text}\n```")
+    blocks = [f"### {path}\n```python\n{text}\n```" for path in source_files if (text := _read_source(path))]
     if not blocks:
         return ""
-    if len(blocks) == 1:
-        return f"## Model source (`{model_type}` in {framework})\n{blocks[0]}"
-    return (
-        f"## In-scope source files (`{model_type}` in {framework})\n"
-        f"All {len(blocks)} files below are editable. Name the one holding your call "
-        'site in "source_file".\n\n' + "\n\n".join(blocks)
-    )
+    return f"## Model source (`{model_type}` in {framework})\n" + "\n\n".join(blocks)
 
 
 def render_repo_scope_brief(
@@ -676,23 +639,19 @@ def render_repo_scope_brief(
     return "\n".join(lines)
 
 
-def _output_schema_block(model_type: str, *, multi_file: bool = False, repo_scope: bool = False) -> str:
+def _output_schema_block(model_type: str, *, repo_scope: bool = False) -> str:
     """The JSON contract every discovery prompt asks the model to answer in."""
-    if repo_scope:
-        source_field = (
+    source_field = (
+        (
             '  "source_file": "<exact on-disk path of the file holding the call site '
             'you would replace>",\n'
             '  "additional_files": [<exact on-disk path of every OTHER existing file '
             "this fusion must also edit; [] when the call-site file is enough. Do NOT "
             "list the new fused-kernel module here -- it does not exist yet>],\n"
         )
-    elif multi_file:
-        source_field = (
-            '  "source_file": "<exact path, copied from one of the headings above, of '
-            'the file holding the call site you would replace>",\n'
-        )
-    else:
-        source_field = ""
+        if repo_scope
+        else ""
+    )
     return f"""## Output — a single JSON array (and nothing after it). Be TERSE to fit the
 ## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
 ## sentence. Each element:
@@ -740,11 +699,9 @@ def build_discovery_prompt(
 ) -> str:
     """Assemble the discovery prompt from runtime, source, and operator evidence.
 
-    ``source_files`` widens the prompt to every in-scope file; without it the
-    single ``source_text`` block is rendered as before. ``repo_scope`` embeds no
-    source at all and points the agent at the repository instead.
+    ``repo_scope`` embeds no source at all and points the agent at the repository
+    instead, naming ``source_files`` as the entry points to start from.
     """
-    multi_file = len(source_files) > 1
     if repo_scope:
         source_block = render_repo_scope_brief(
             repo_root,
@@ -752,8 +709,6 @@ def build_discovery_prompt(
             model_type=model_type,
             framework=framework,
         )
-    elif multi_file:
-        source_block = render_source_files(source_files, model_type=model_type, framework=framework)
     else:
         source_block = f"## Model source (`{model_type}` in {framework})\n```python\n{source_text}\n```"
     read_verb = (
@@ -837,9 +792,9 @@ that covers a larger boundary as an `integration` candidate and benchmark/wire i
 before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
 runs back-to-back on the decode path.
 
-{fusion_constraints(multi_file, repo_scope=repo_scope)}
+{fusion_constraints(repo_scope=repo_scope)}
 
-{_output_schema_block(model_type, multi_file=multi_file, repo_scope=repo_scope)}
+{_output_schema_block(model_type, repo_scope=repo_scope)}
 
 {source_block}
 """

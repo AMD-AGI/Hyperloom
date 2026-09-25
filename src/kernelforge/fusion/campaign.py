@@ -240,18 +240,16 @@ def build_forge_loop_command(
     agent_backend: str = "",
     agent_sandbox_mode: str = "",
     fused_module: str = "",
-    extra_source_files: tuple[str, ...] = (),
 ) -> list[str]:
     """Assemble the forge-loop invocation for one recipe."""
-    # ``recipe.extra_files`` are the further call-site files discovery itself found;
-    # ``extra_source_files`` are the ones the operator named on the command line.
-    # Both widen the fusion beyond a single call-site file when the correct fix
+    # ``recipe.extra_files`` are the further call-site files discovery found, which
+    # widen the fusion beyond a single call-site file when the correct fix
     # legitimately spans more than one (e.g. a kernel-selector that chooses the
     # output-dtype template). All are TRACKED by the shadow repo so an edit there is
     # kept/revertible like the primary file. Deduplicate while preserving order;
     # never let one displace the primary kernel or fused module.
     source_files = [recipe.source_file]
-    for extra in (*recipe.extra_files, *extra_source_files):
+    for extra in recipe.extra_files:
         if extra and extra not in source_files:
             source_files.append(extra)
     if fused_module and fused_module not in source_files:
@@ -329,7 +327,6 @@ def run_recipe_campaign(
     agent_sandbox_mode: str = "",
     shadow_env: dict[str, str] | None = None,
     fused_module: str = "",
-    extra_source_files: tuple[str, ...] = (),
     repo_scope: bool = False,
     tracked_roots: Sequence[str] = (),
 ) -> CampaignOutcome:
@@ -359,7 +356,6 @@ def run_recipe_campaign(
             harness_path=harness_path,
             experience=experience,
             fused_module=fused_module,
-            extra_source_files=extra_source_files,
             repo_scope=repo_scope,
             tracked_roots=tracked_roots,
         ),
@@ -385,7 +381,6 @@ def run_recipe_campaign(
         agent_backend=agent_backend,
         agent_sandbox_mode=agent_sandbox_mode,
         fused_module=fused_module,
-        extra_source_files=extra_source_files,
     )
 
     env = dict(os.environ)
@@ -442,7 +437,6 @@ def build_campaign_program_md(
     harness_path: str,
     experience: str = "",
     fused_module: str = "",
-    extra_source_files: tuple[str, ...] = (),
     repo_scope: bool = False,
     tracked_roots: Sequence[str] = (),
 ) -> str:
@@ -454,9 +448,7 @@ def build_campaign_program_md(
     # because the correct fix legitimately spans them (e.g. the kernel-selector that
     # picks the output-dtype template). "Tracked" below must reflect them, or the
     # loop would silently revert an edit the fix depends on.
-    extra_editable = [
-        path for path in (*recipe.extra_files, *extra_source_files) if path and path != recipe.source_file
-    ]
+    extra_editable = [path for path in recipe.extra_files if path and path != recipe.source_file]
     if repo_scope:
         tracked_phrase = "this file and every file under the tracked root(s) named below"
     elif extra_editable:

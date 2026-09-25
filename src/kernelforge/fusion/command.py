@@ -798,10 +798,6 @@ def run(
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
-    # Multi-file extras come from discovery under --repo-scope; there is no
-    # --source-file override on this branch.
-    _primary_override = ""
-    extra_source_files: tuple[str, ...] = ()
     if repo_scope and discover_mode == "patterns":
         # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
         # nothing in it that could explore a repository.
@@ -842,7 +838,6 @@ def run(
                     model_type=model_type,
                     framework=framework,
                     source_file=source_file,
-                    extra_source_files=extra_source_files,
                     shapes=shapes,
                     report=anchor_report,
                     framework_root=framework_root,
@@ -853,11 +848,11 @@ def run(
                         discovery_agent,
                         model=discovery_agent.runtime.model,
                         workdir=discovery_root,
-                        # Discovery is read-only, so every file it is shown is
-                        # snapshotted and restored, not just the primary. Under repo
-                        # scope no file is shown and the whole tree is off limits, so
-                        # the session's own read-only spec carries that instead.
-                        protected_files=[p for p in (source_file, *extra_source_files) if p],
+                        # Discovery is read-only, so the file it is shown is snapshotted
+                        # and restored. Under repo scope no file is shown and the whole
+                        # tree is off limits, so the session's own read-only spec
+                        # carries that instead.
+                        protected_files=[source_file] if source_file else [],
                         log_path=str(out / "discovery_llm.txt"),
                     ),
                 )
@@ -1066,7 +1061,6 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
-                extra_source_files=extra_source_files,
                 repo_scope=repo_scope,
                 agent_factory=require_agent_backend,
                 publish=publish,
@@ -1137,7 +1131,6 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
-                extra_source_files=extra_source_files,
                 repo_scope=repo_scope,
             )
             validation = loop_result.best
@@ -1464,7 +1457,6 @@ def _run_multi_patch_nomination(
     block_size: int,
     max_model_len: int,
     agent_factory,
-    extra_source_files: tuple[str, ...] = (),
     repo_scope: bool = False,
     publish=None,
 ) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
@@ -1516,7 +1508,6 @@ def _run_multi_patch_nomination(
             tp=tp,
             block_size=block_size,
             max_model_len=max_model_len,
-            extra_source_files=extra_source_files,
             repo_scope=repo_scope,
             publish=publish,
         )
@@ -1621,16 +1612,15 @@ def _run_fusion_autoloop(
     tp: int = 1,
     block_size: int = 0,
     max_model_len: int = 0,
-    extra_source_files: tuple[str, ...] = (),
     repo_scope: bool = False,
     publish=None,
 ):
     """Try each ranked recipe as one forge-loop campaign."""
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
-    # Every file any recipe edits, plus the ones the operator named: the shadow index has to admit all of them up
-    # front, because it is built once and shared by every campaign below.
-    campaign_files = list(dict.fromkeys([*_recipe_files(loop_recipes), *(p for p in extra_source_files if p)]))
+    # Every file any recipe edits: the shadow index has to admit all of them up front, because it is built once and
+    # shared by every campaign below.
+    campaign_files = list(dict.fromkeys(_recipe_files(loop_recipes)))
     tracked_roots = _tracked_roots(repo_root, campaign_files)
 
     # Per-recipe pristine snapshots for the multi-patch export.
@@ -1739,7 +1729,6 @@ def _run_fusion_autoloop(
             agent_sandbox_mode=agent_sandbox_mode,
             shadow_env=shadow.env,
             fused_module=fused_module_path(recipe),
-            extra_source_files=extra_source_files,
             repo_scope=repo_scope,
             tracked_roots=tracked_roots,
         )

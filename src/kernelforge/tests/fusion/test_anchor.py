@@ -193,32 +193,8 @@ class TestPromptEvidence:
         # The scope constraint is what keeps a proposal wireable; it must survive into this prompt too.
         assert "SCOPE" in prompt
         assert "class DeepseekV4Attention" in prompt
-        # One file must still read as the single-file case, or the model is told to
-        # pick a call-site file when it has no choice to make.
-        assert "EVERY file printed below" not in prompt
-
-    def test_every_in_scope_file_reaches_the_prompt(self, tmp_path):
-        """The anchor's chain usually lives past the model file's opaque call."""
-        trace = _gemm_cast_attention(tmp_path / "d.trace.json")
-        report = resolve_anchor(trace, KernelAnchor(name=ANCHOR))
-        model = tmp_path / "deepseek_v4.py"
-        model.write_text("def forward(x):\n    return backend.forward_core_compressor(x)\n", encoding="utf-8")
-        compressor = tmp_path / "compressor.py"
-        compressor.write_text("def _compute_wkv_gate(x, w):\n    return linear_bf16_fp32(x, w)\n", encoding="utf-8")
-
-        prompt = build_anchored_discovery_prompt(
-            model_type="deepseek_v4",
-            framework="sglang",
-            source_files=[str(model), str(compressor)],
-            report=report,
-            shapes={"hidden_size": 2048},
-        )
-
-        assert "forward_core_compressor" in prompt
-        assert "_compute_wkv_gate" in prompt
-        assert str(compressor) in prompt  # the heading it must copy into "source_file"
-        assert "EVERY file printed below" in prompt
-        assert '"source_file"' in prompt
+        # Without repo scope the chain has to stay inside the one file embedded above.
+        assert "One patch, one file." in prompt
 
     def test_the_description_names_both_sides(self, tmp_path):
         trace = _gemm_cast_attention(tmp_path / "d.trace.json")
