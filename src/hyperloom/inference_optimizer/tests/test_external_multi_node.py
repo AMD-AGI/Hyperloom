@@ -876,6 +876,7 @@ def test_resume_needs_a_cluster_that_still_serves(
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setenv("PD_MODE", "aggregated")
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
     _write_disk_state(
         backend="rayjob",
         head_pod_ip="10.0.2.1",
@@ -894,6 +895,7 @@ def test_resume_needs_a_cluster_that_still_serves(
             "nnodes": 2,
             "pd_mode": "aggregated",
             "extra_args": "",
+            "forward_env": {},
         },
     )
 
