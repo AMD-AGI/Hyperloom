@@ -142,11 +142,7 @@ try:
             "make_entry",
             "make_document",
             "validate_document",
-            # KNOWN_METHODS is read through a getattr fallback below, so a stale
-            # module without it would pass this guard and silently class every
-            # method as unresolved; METHOD_GATE_NON_PATCHABLE is the new-vocab
-            # marker an old contract lacks, so requiring both fails a stale
-            # install loudly instead of degrading.
+            # getattr fallback below means a module missing these would silently pass; require both to catch stale installs.
             "KNOWN_METHODS",
             "METHOD_GATE_NON_PATCHABLE",
         )
@@ -1473,20 +1469,9 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
     Prefers the merged annotated trace over rank/phase shards (the TraceLens
     splitter needs the large trace).
 
-    Splitter output sorts last, and within a bucket the largest file leads.
-    Both parts exist because of the same bug: the fragments used to share the
-    default bucket with the raw capture, so alphabetical order decided, and
-    ``decode_only_steady_state_...`` beats ``rank_0.trace.json.gz`` on the first
-    letter. Every xDiT roofline attempt therefore analysed a 938-byte phase
-    fragment instead of the 910 KB capture beside it: runs whose fragment held
-    no GPU kernels failed the CPU-only preflight outright, and the one model
-    whose fragment happened to hold 512 produced a roofline computed from 2.6%
-    of its own trace, with no ceiling.
-
-    Size is the part that does not depend on recognising a name. A real capture
-    is orders of magnitude larger than a per-phase fragment or a sidecar like
-    ``execution_details.json``, so ordering by descending size puts the right
-    file first even for a fragment shape nobody has seen yet.
+    Sorts by (priority bucket, -size, name). Size is bucket-independent: a real capture is
+    orders of magnitude larger than any phase shard or sidecar, so descending size puts the
+    right file first even for unrecognised fragment names.
 
     Args:
         path: The trace file path to rank.
@@ -3845,14 +3830,8 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
     return entries
 
 
-#: Metadata describing WHICH source a candidate points at, as opposed to facts
-#: about the kernel itself. Every one of these is derived from the old path, so
-#: a rewrite that leaves them in place produces a candidate describing two
-#: different sources at once -- and the downstream readers disagree about which
-#: one wins. Framework resolution consults ``source_framework``
-#: before it ever looks at ``source_file``, and ``classify_patchability`` reads
-#: ``kernel_kind`` to decide a kernel is prebuilt assembly, so a stale value
-#: silently misroutes or skips the new source.
+#: Source-derived metadata fields; a re-resolve pass must restamp all of them atomically,
+#: because downstream readers (framework resolution, classify_patchability) each read different members.
 _SOURCE_DERIVED_METADATA = (
     "kernel_sources",
     "kernel_kind",
@@ -3873,10 +3852,7 @@ _SOURCE_DERIVED_METADATA = (
     "op_to_source_reason",
     "op_to_source_matched_route",
     "source_file_missing_on_disk",
-    # Names the path the playbook anchor displaced. Derived from the old
-    # source_file like the rest, so a review that moves the path leaves it
-    # asserting that some third file was superseded -- and it is restamped in
-    # the same pass, since _stamp_candidate_metadata re-runs the playbook match.
+    # Restamped alongside source_file by _stamp_candidate_metadata; a stale value names a displaced path.
     "source_file_superseded_by_playbook",
 )
 

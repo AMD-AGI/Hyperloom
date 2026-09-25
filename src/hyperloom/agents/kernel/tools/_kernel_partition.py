@@ -41,11 +41,8 @@ def build_kernel_candidates_document(
 ) -> dict[str, Any]:
     """Assemble the ``kernel_candidates.json`` document one way, for both routes.
 
-    The two routes fill their rows differently and pass their own ``header`` and
-    ``task_groups`` and routability predicate, but the emitted shape -- the four
-    top-level lists and the routable/skipped split via :func:`partition_kernels`
-    -- is one contract, so both build it here. Each caller serializes the returned
-    dict itself; bypass mutates it (the idle gate) between build and write.
+    Both routes call this with their own header, task_groups, and routability predicate;
+    the four-list shape (hot_kernels, routable_kernels, skipped_kernels, task_groups) is the contract.
     """
     routable_kernels, skipped_kernels = partition_kernels(candidates, is_routable)
     return {

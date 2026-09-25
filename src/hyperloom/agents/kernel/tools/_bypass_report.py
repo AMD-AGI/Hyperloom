@@ -339,10 +339,7 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution: one call to TraceLens' resolver, keyed on the device
-        # symbol (native kernels under HIP graphs arrive with op_name=""). A
-        # non-patchable kernel can still carry a dispatcher source, so
-        # ``op_to_source_patchable`` -- not source presence -- gates routing below.
+        # Native HIP-graph kernels arrive with op_name=""; op_to_source_patchable, not source presence, gates routing.
         resolution = resolve_source_verdict(
             kname,
             kernel_file=k.get("op_kernel_file", "") or "",
@@ -361,10 +358,6 @@ def build_candidates(
         else:
             skip_reason = ""
 
-        # Shape resolution waterfall (provenance records the source): 1. torch_trace -- this kernel's own cpu_op Input
-        # Dims (precise) 2. capture_backfill -- same-name kernel's capture-time shape 3. launch_grid -- this kernel's
-        # launch grid/block geometry 4. tile_name -- BLOCK_SIZE_* tile embedded in the kernel name 5. unresolved --
-        # none of the above
         _count = k.get("count") or 0
         op_shapes = k.get("op_shapes") or []
         op_dtypes = k.get("op_dtypes") or []
@@ -388,8 +381,6 @@ def build_candidates(
         if not shape_provenance:
             shape_provenance = "unresolved"
 
-        # Benchmark discovery is opt-in; a routable kernel's on-disk test/benchmark can seed downstream harness
-        # generation.
         bench_files: list[str] = []
         kernel_repo = ""
         if discover_benchmarks and kc.reusable and source_file:
@@ -426,26 +417,20 @@ def build_candidates(
             "backend": framework,
             "framework": framework,
             "source_file": source_file,
-            # AST-pinned @triton.jit def line for .py sources (None when unpinned or for native .cu kernels resolved
-            # by the symbol index).
+            # None for native kernels resolved by symbol index.
             "source_line": source_line,
             "source_resolution_method": source_method,
             "source_type": source_type,
             "kernel_kind": kernel_kind,
             "reusable_native_kernel": kc.reusable,
             "skip_reason": skip_reason,
-            # Read per-row by the orchestrator integration layer (writeback,
-            # request_handlers, _kernel_decisions, kernel_stack) for every route.
             "identity_route": "bypass",
             "op_to_source_patchable": resolution.patchable,
             "op_to_source_reason": resolution.reason,
             "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            # Seeds for the GEAK harness + rocprof enrichment (only when discover_benchmarks is set).
             "benchmark_files": bench_files,
             "kernel_repo": kernel_repo,
-            # ``shapes`` / ``input_shapes`` use the downstream contract form (the kernel-opt gate + GEAK harness
-            # require this format).
             "shapes": shape_entries,
             "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,

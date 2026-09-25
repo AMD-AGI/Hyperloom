@@ -75,10 +75,7 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     """Build one candidate row from a task's scalars and a member's fields.
 
     ``gpu_pct := pct_e2e``: the per-kernel %E2E is TraceLens' number, read
-    everywhere but never recomputed here. ``args_shapes`` and ``args_datatypes``
-    are folded back into the pipeline's ``shapes`` strings as ``"(dims) dtype"``,
-    the shape the downstream consumers and the cross-package GEMM extraction read
-    the dtype out of; ``input_dtypes`` is derived from those strings downstream.
+    everywhere but never recomputed here.
     """
     kernel_names = [str(n) for n in (member.get("kernel_name") or []) if str(n).strip()]
     operation = str(task.get("operation") or "").strip()
