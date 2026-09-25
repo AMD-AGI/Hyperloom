@@ -720,6 +720,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     stack = c._stack_entries_for_validation(["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
+        **c.shared_state.pending_stack_validation_result,
         "status": "ok",
         "decision": "KEEP",
         "kernel_id": "k001+k004",
