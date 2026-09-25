@@ -178,6 +178,16 @@ def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
     return None
 
 
+_INPUT_SIDE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _input_side_total(usage: dict[str, Any] | None) -> int:
+    """Sum the prompt-side buckets of one normalized usage block."""
+    if not usage:
+        return 0
+    return sum(int(usage.get(key) or 0) for key in _INPUT_SIDE_KEYS)
+
+
 def _reattach_turn_output(
     usages: list[dict[str, int | None]],
     session_output: int | None,
@@ -203,6 +213,7 @@ def parse_claude_stream_json_turn_usages(
     seen_ids: set[str] = set()
     saw_message_id = False
     session_output: int | None = None
+    session_input = 0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -219,6 +230,10 @@ def parse_claude_stream_json_turn_usages(
                     recovered = _claude_result_output_tokens(obj)
                     if recovered is not None:
                         session_output = recovered
+                    result_usage = obj.get("usage")
+                    session_input = _input_side_total(
+                        normalize_usage(result_usage if isinstance(result_usage, dict) else None)
+                    )
                     continue
                 if obj.get("type") != "assistant":
                     continue
@@ -243,6 +258,14 @@ def parse_claude_stream_json_turn_usages(
         log.warning(
             "parse_usage: stream-json log %s names no message ids; per-turn rows "
             "cannot be de-duplicated, deferring to the cumulative result row",
+            path,
+        )
+        return []
+    if usages and session_input and not any(_input_side_total(usage) for usage in usages):
+        # Some gateways (seen with GLM behind LiteLLM) stream every assistant message with zeroed usage and report the
+        # real counts only on the result row; per-turn rows would then book the whole session at zero.
+        log.warning(
+            "parse_usage: stream-json log %s carries zeroed per-turn usage; deferring to the cumulative result row",
             path,
         )
         return []
