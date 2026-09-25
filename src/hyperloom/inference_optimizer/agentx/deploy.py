@@ -56,6 +56,45 @@ def is_agentx_client_script(name: str | None) -> bool:
     return Path(str(name or "")).name in AGENTX_CLIENT_SCRIPTS
 
 
+# Wall-clock a single agentic trajectory costs, measured on 8xMI355X Kimi-K3 at
+# concurrency 16: 25 trajectories in 629-666s and 150 in 3849-4046s, i.e. ~26s
+# either way, so the workload scales linearly in trajectory count.
+MLPERF_SECONDS_PER_TRAJECTORY = 26
+
+# Server boot, aiter JIT rebuild and drain sit outside the measured window.
+MLPERF_BOOT_ALLOWANCE_SEC = 1800
+
+# A first, cold round runs materially slower than the steady state (measured:
+# 15 req/min against 48 once warm), so the cap is sized for the cold case.
+MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
+
+MLPERF_CANONICAL_TRAJECTORIES = 613
+MLPERF_SMOKE_TRAJECTORIES = 150
+
+
+def mlperf_trajectories(env: Mapping[str, str] | None = None) -> int:
+    """Trajectory count this run will issue, from the flow and its override."""
+    runtime = env or os.environ
+    raw = str(runtime.get("AGENTIC_NUM_TRAJECTORIES") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    flow = str(runtime.get("MLPERF_AGENTIC_FLOW") or "smoke_test").strip()
+    return MLPERF_SMOKE_TRAJECTORIES if flow == "smoke_test" else MLPERF_CANONICAL_TRAJECTORIES
+
+
+def mlperf_benchmark_timeout_sec(env: Mapping[str, str] | None = None, *, floor: float = 0.0) -> float:
+    """Benchmark cap sized for this run's trajectory count.
+
+    The stock cap is sized for the aiperf 3600s measurement window; a full 613
+    trajectory run needs roughly four hours and is killed by it well short of a
+    result. Never returns less than ``floor`` so the derivation can only raise
+    the cap, never tighten one the operator or the default already set.
+    """
+    trajectories = mlperf_trajectories(env)
+    derived = trajectories * MLPERF_SECONDS_PER_TRAJECTORY * MLPERF_TIMEOUT_SAFETY_FACTOR
+    return max(float(floor), derived + MLPERF_BOOT_ALLOWANCE_SEC)
+
+
 def agentx_asset_dir() -> Path:
     """Return the packaged ``assets/agentx`` directory."""
     return Path(__file__).resolve().parent.parent / "assets" / "agentx"
