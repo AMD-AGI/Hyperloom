@@ -235,10 +235,9 @@ class ConversationCollaborator:
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
         try:
-            events = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
+            msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
         except Exception as exc:  # noqa: BLE001
             return f"(inbox unavailable: {exc!r})"
-        msgs = list(events)
         if not msgs:
             return "(no inbox events)"
 
@@ -252,13 +251,13 @@ class ConversationCollaborator:
         except (TypeError, ValueError):
             k = 8
         try:
-            events = self.bus.recent_outcomes_context_sync(limit=k)
+            newest_first = self.bus.recent_outcomes_context_sync(limit=k)
         except Exception as exc:  # noqa: BLE001
             return f"(recent outcomes unavailable: {exc!r})"
-        # Decode newest-first, then flip for chronological reading.
-        msgs = list(events)[::-1]
-        if not msgs:
+        if not newest_first:
             return "(no recent outcomes)"
+        # Flip newest-first query to newest-last for chronological reading.
+        msgs = newest_first[::-1]
 
         header = "=== Recent action outcomes (newest last) ==="
         body_lines: list[str] = []
@@ -279,11 +278,12 @@ class ConversationCollaborator:
             tasks = self.tasks.running_context_sync()
         except Exception as exc:  # noqa: BLE001
             return f"(running tasks unavailable: {exc!r})"
-        now_unix = None
+        if not tasks:
+            return "(no tasks in flight)"
+
+        now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
         for task, lanes, expires_at, gpus in tasks:
-            if now_unix is None:
-                now_unix = time.time()
             params = task.params or {}
             started = _parse_iso_unix(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
@@ -313,7 +313,7 @@ class ConversationCollaborator:
             if hb_age is not None:
                 parts.append(f"heartbeat_age_sec={int(hb_age)}")
             lines.append(" ".join(parts))
-        return "\n".join(lines) if len(lines) > 1 else "(no tasks in flight)"
+        return "\n".join(lines)
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""

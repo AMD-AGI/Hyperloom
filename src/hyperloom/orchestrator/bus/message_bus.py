@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -165,25 +164,21 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
-    def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> Iterator[Message]:
-        """Read an uncapped recipient inbox, including all topics and self-sent events.
-
-        Query now, decode on iteration so callers can distinguish read failures
-        from malformed stored messages.
-        """
+    def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> list[Message]:
+        """Read an uncapped recipient inbox, including all topics and self-sent events."""
         rows = self.db.fetchall_sync(
             "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
             (after_seq, to_agent),
         )
-        return (Message.from_row(row) for row in rows)
+        return [Message.from_row(row) for row in rows]
 
-    def recent_outcomes_context_sync(self, *, limit: int) -> Iterator[Message]:
-        """Read the latest outcomes, decoding lazily in newest-first order."""
+    def recent_outcomes_context_sync(self, *, limit: int) -> list[Message]:
+        """Read the latest outcomes, newest first."""
         rows = self.db.fetchall_sync(
             "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
             (limit,),
         )
-        return (Message.from_row(row) for row in rows)
+        return [Message.from_row(row) for row in rows]
 
     async def replay_for(
         self,
