@@ -138,6 +138,7 @@ def build_launch_evidence(
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
         "observed_server_launch_flags": observed_flags,
+        "observed_server_env": dict(requested_env),
         "observed_server_identity": observed_server_identity,
         "observed_model_binding": observed_model_binding,
         "requested_model_digest": _digest_operand(

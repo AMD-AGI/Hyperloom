@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,11 +32,12 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
+from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
     filter_baseline_noop_variants,
-    observed_launch_flags_from_state,
+    observed_launch_from_state,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
@@ -154,12 +156,34 @@ def test_canonical_fingerprint_distinguishes_envs():
     assert fp_args != fp_args_envs
 
 
+_CANDIDATE = "candidate"
+# Merges to exactly the observed stack argv, so the argv half of the gate
+# matches and the verdict turns on env alone.
+_RESTATES_ARGV = "--max-running-requests 512"
+# A knob a stack genuinely varies: the recipe reads it as
+# ``${HICACHE_IO_BACKEND:-direct}``, so both values below are reachable.
+_TUNED_ENV = "HICACHE_IO_BACKEND"
+# The recipe's own env, minus the argv key. A round's base layers are the stack's,
+# so this rides identically on both sides and the verdict turns on the deltas.
+_RECIPE_ENV = {"KV_OFFLOADING": "1"}
+_BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
+# A stack whose chunked-prefill size arrives through base_extra_args rather than
+# the YAML, so a variant is only judged correctly after the base layer merges.
+_CHUNKED_STACK = {
+    "base_extra_args": "--chunked-prefill-size 32768",
+    "observed_server_launch_flags": "--mem-fraction-static 0.9 --chunked-prefill-size 32768",
+}
+
+
+def _stack_env(**changes: str) -> dict[str, str]:
+    """The env the stack stamped: the recipe's, plus its own tuning."""
+    return {**_RECIPE_ENV, **changes}
+
+
 def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}}}
-        ),
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
         encoding="utf-8",
     )
     kwargs = {
@@ -174,118 +198,158 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         "gpu_type": None,
         "benchmark_script": None,
         "observed_server_launch_flags": "--mem-fraction-static 0.9 --max-running-requests 512",
+        "observed_server_env": _stack_env(),
     }
     kwargs.update(overrides)
     return kwargs
 
 
-def test_filter_baseline_noop_variants_drops_and_records_a_noop(tmp_path):
-    """A noop variant is dropped and recorded."""
-    grid = [GridVariant("noop", extra_server_args="--max-running-requests 512")]
-    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
+    return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
+
+
+def _revalidate() -> GridVariant:
+    gv = _variant()
+    gv.provenance = "resume_stack_revalidate"
+    return gv
+
+
+# Each case below is (id, grid, filter overrides). Every grid holds one variant,
+# so the group a case sits in is the whole expectation: does the launch this
+# variant would produce already match the stack the server is running?
+
+# Merged launch == observed stack, so the measurement would re-run the stack.
+_ALREADY_THE_STACK = (
+    (
+        "same_argv_and_env",
+        [_variant(extra_envs={_TUNED_ENV: "kernel"})],
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+)
+
+# Merged launch differs from the stack, or the stack is not known well enough
+# to prove a match: either way the variant runs.
+_MUST_RUN = (
+    ("different_argv_value", [_variant("--max-running-requests 128")], {}),
+    (
+        # The wrong drop reported on #1579: the stack sits at 32768 through
+        # base_extra_args, so a variant proposing 65536 is a real change.
+        "different_argv_value_carried_by_the_base_layer",
+        [_variant("--chunked-prefill-size 65536")],
+        _CHUNKED_STACK,
+    ),
+    (
+        "different_env_value",
+        [_variant(extra_envs={_TUNED_ENV: "direct"})],
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        "base_layer_adds_an_env_the_stack_lacks",
+        [_variant()],
+        {"base_extra_envs": {_TUNED_ENV: "kernel"}},
+    ),
+    # One half of the stack is unrecorded, so no match can be proven either way.
+    # The argv case restates the stack exactly: only the missing evidence keeps it.
+    ("stack_argv_is_unknown", [_variant()], {"observed_server_launch_flags": ""}),
+    ("stack_env_is_unknown", [_variant(extra_envs={_TUNED_ENV: "kernel"})], {"observed_server_env": {}}),
+    # Restates the stack exactly on both halves, so only the exemption saves it.
+    ("resume_stack_revalidate_is_exempt", [_revalidate()], {}),
+)
+
+
+@pytest.mark.parametrize(
+    ("grid", "overrides"),
+    [case[1:] for case in _ALREADY_THE_STACK],
+    ids=[case[0] for case in _ALREADY_THE_STACK],
+)
+def test_variant_that_is_already_the_stack_is_dropped(tmp_path, grid, overrides):
+    """The server is already running this launch, so measuring it buys nothing."""
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path, **overrides))
     assert kept == []
-    assert len(dropped) == 1
-    name, reason = dropped[0]
-    assert name == "noop"
-    assert reason
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+    assert "baseline noop" in dropped[0][1]
 
 
-def test_filter_baseline_noop_variants_keeps_a_real_stack_change(tmp_path):
-    """A variant that changes the stack is not dropped."""
-    grid = [GridVariant("real_change", extra_server_args="--max-running-requests 128")]
-    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
-    assert [gv.name for gv in kept] == ["real_change"]
+@pytest.mark.parametrize(
+    ("grid", "overrides"),
+    [case[1:] for case in _MUST_RUN],
+    ids=[case[0] for case in _MUST_RUN],
+)
+def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, grid, overrides):
+    """Keep on a real difference, and keep on a guess: only a proven match may drop."""
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path, **overrides))
+    assert [gv.name for gv in kept] == [_CANDIDATE]
     assert dropped == []
 
 
-def test_filter_baseline_noop_variants_keeps_a_resume_stack_revalidate_replay(tmp_path):
-    """A resume_stack_revalidate variant is never dropped, even when it matches observed flags."""
-    grid = [
-        GridVariant(
-            "resume_stack_revalidate",
-            extra_server_args="--max-running-requests 512",
-        )
-    ]
-    grid[0].provenance = "resume_stack_revalidate"
-    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
-    assert [gv.name for gv in kept] == ["resume_stack_revalidate"]
-    assert dropped == []
+def _measurement(flags: str, env: dict[str, str]) -> dict:
+    return {"launch_evidence": {"observed_server_launch_flags": flags, "observed_server_env": env}}
 
 
-def test_filter_baseline_noop_variants_keeps_everything_without_observed_evidence(tmp_path):
-    """Without observed evidence, nothing is dropped."""
-    grid = [
-        GridVariant("noop", extra_server_args="--max-running-requests 256"),
-        GridVariant("real_change", extra_server_args="--max-running-requests 512"),
-    ]
-    kept, dropped = filter_baseline_noop_variants(
-        grid, **_noop_filter_kwargs(tmp_path, observed_server_launch_flags="")
-    )
-    assert [gv.name for gv in kept] == ["noop", "real_change"]
-    assert dropped == []
-
-
-def test_observed_launch_flags_from_state_uses_current_best_when_present():
-    state = SimpleNamespace(
-        current_best_measurement={
-            "launch_evidence": {"observed_server_launch_flags": "--tp 2"},
-        },
-        last_baseline={
-            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
-        },
-    )
-    assert observed_launch_flags_from_state(state) == "--tp 2"
-
-
-def test_observed_launch_flags_from_state_uses_baseline_when_no_current_best():
-    state = SimpleNamespace(
-        current_best_measurement={},
-        last_baseline={
-            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
-        },
-    )
-    assert observed_launch_flags_from_state(state) == "--tp 1"
-
-
-def test_observed_launch_flags_from_state_does_not_fall_back_when_current_best_has_no_flags():
-    """If current_best exists but has no observed flags, do not read last_baseline."""
-    state = SimpleNamespace(
-        current_best_measurement={"launch_evidence": {"observed_server_launch_flags": ""}},
-        last_baseline={
-            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
-        },
-    )
-    assert observed_launch_flags_from_state(state) == ""
-
-
-def test_filter_baseline_noop_variants_keeps_chunked_prefill_change_over_base_extra_args(tmp_path):
-    """Stack at 32768 via base_extra_args; proposing 65536 is not a noop."""
-    grid = [GridVariant("bump_chunked", extra_server_args="--chunked-prefill-size 65536")]
-    kept, dropped = filter_baseline_noop_variants(
-        grid,
-        **_noop_filter_kwargs(
-            tmp_path,
-            base_extra_args="--chunked-prefill-size 32768",
-            observed_server_launch_flags="--mem-fraction-static 0.9 --chunked-prefill-size 32768",
+_OBSERVED_LAUNCH_CASES = (
+    (
+        # Current best carries evidence, so the baseline is not consulted at all
+        # -- not even for the env half that current best left empty.
+        "current_best_wins_field_by_field",
+        SimpleNamespace(
+            current_best_measurement=_measurement("--tp 2", {}),
+            last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"}),
         ),
-    )
-    assert [gv.name for gv in kept] == ["bump_chunked"]
-    assert dropped == []
-
-
-def test_filter_baseline_noop_variants_merges_base_extra_args_before_judging_noop(tmp_path):
-    """A restatement of the YAML only is still a noop once base_extra_args is merged in."""
-    grid = [GridVariant("restates_stack", extra_server_args="")]
-    kept, dropped = filter_baseline_noop_variants(
-        grid,
-        **_noop_filter_kwargs(
-            tmp_path,
-            base_extra_args="--chunked-prefill-size 32768",
-            observed_server_launch_flags="--mem-fraction-static 0.9 --chunked-prefill-size 32768",
+        ("--tp 2", {}),
+    ),
+    (
+        "baseline_when_there_is_no_current_best",
+        SimpleNamespace(
+            current_best_measurement={},
+            last_baseline=_measurement("--tp 1", {_TUNED_ENV: "direct"}),
         ),
+        ("--tp 1", {_TUNED_ENV: "direct"}),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [case[1:] for case in _OBSERVED_LAUNCH_CASES],
+    ids=[case[0] for case in _OBSERVED_LAUNCH_CASES],
+)
+def test_observed_launch_from_state_reads_only_the_current_stack(state, expected):
+    """current_best when it carries evidence, else last_baseline, and never a mix of the two."""
+    assert observed_launch_from_state(state) == expected
+
+
+def test_a_measurement_stamps_its_env_and_the_filter_drops_a_restatement_of_it(tmp_path):
+    """End to end: build_launch_evidence stamps the launched env, and the filter reads it back.
+
+    The stack was measured off the same recipe this round builds from, so the
+    keys the variant never names hold the same values on both sides.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "envs": {**_BASE_ARGS_ENV, **_stack_env(HICACHE_IO_BACKEND="kernel")},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=None,
+        framework="sglang",
+        slot=tmp_path,
+    )
+    assert evidence["observed_server_env"] == _stack_env(HICACHE_IO_BACKEND="kernel")
+    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence}, last_baseline={})
+    kept, dropped = filter_baseline_noop_variants(
+        [_variant(extra_envs={_TUNED_ENV: "kernel"})],
+        **_noop_filter_kwargs(tmp_path, observed_server_env=observed_launch_from_state(state)[1]),
     )
     assert kept == []
-    assert dropped[0][0] == "restates_stack"
+    assert dropped[0][0] == _CANDIDATE
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
