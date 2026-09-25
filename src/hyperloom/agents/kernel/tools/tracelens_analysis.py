@@ -6349,6 +6349,60 @@ def _validate_selected_chunk(
     return []
 
 
+def _run_trace_split(
+    args,
+    analysis_trace_path: "Path",
+    split_dir: "Path",
+    tl_root: "Path",
+    log_path: "Path",
+) -> "tuple[Path, dict, list[dict]]":
+    """Run the TraceLens splitter and return the selected chunk.
+
+    Builds the splitter command, runs it, collects chunks, and validates
+    the selected chunk. This is the complete splitting pipeline extracted
+    from ``main()`` for testability.
+
+    Returns:
+        ``(selected_chunk, split_meta, health_warnings)``
+
+    Raises:
+        RuntimeError: On splitter failure, no chunks, missing mode, or
+            low-quality chunk with a better alternate.
+    """
+    split_dir.mkdir(parents=True, exist_ok=True)
+    split_num_steps = max(8, int(args.split_num_steps or 32))
+    split_input_path = analysis_trace_path
+    split_cmd = _build_split_cmd(
+        args, split_input_path, split_dir, split_num_steps, log_path,
+    )
+    split_rc = run_command(
+        split_cmd,
+        cwd=tl_root,
+        log_path=log_path,
+        timeout_s=max(60, int(getattr(args, "budget_minutes", 60) * 60)),
+    )
+    if split_rc != 0:
+        raise RuntimeError(
+            f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
+            f"see {log_path} for subprocess output."
+        )
+
+    selected_chunk, split_meta, mode_to_chunks = _collect_split_chunks(
+        split_dir, args.steady_state_mode, analysis_trace_path,
+    )
+    split_meta.update({
+        "split_input": str(split_input_path),
+        "split_dir": str(split_dir),
+        "num_steps": split_num_steps,
+        "returncode": split_rc,
+    })
+
+    warnings = _validate_selected_chunk(
+        split_dir, selected_chunk, args.steady_state_mode, mode_to_chunks,
+    )
+    return selected_chunk, split_meta, warnings
+
+
 def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
@@ -6980,34 +7034,10 @@ def main() -> int:
                     started_at=started_at,
                 )
                 split_dir = tracelens_dir / "trace_split"
-                split_dir.mkdir(parents=True, exist_ok=True)
-                split_num_steps = max(8, int(args.split_num_steps or 32))
-                split_input_path = analysis_trace_path
-                split_cmd = _build_split_cmd(
-                    args, split_input_path, split_dir, split_num_steps, log_path,
+                cli_trace_path, split_meta, split_warnings = _run_trace_split(
+                    args, analysis_trace_path, split_dir, tl_root, log_path,
                 )
-                split_rc = run_command(
-                    split_cmd,
-                    cwd=tl_root,
-                    log_path=log_path,
-                    timeout_s=max(60, int(args.budget_minutes * 60)),
-                )
-                if split_rc != 0:
-                    raise RuntimeError(
-                        f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
-                        f"see {log_path} for subprocess output."
-                    )
-
-                cli_trace_path, split_meta, _mode_to_chunks = _collect_split_chunks(
-                    split_dir, args.steady_state_mode, analysis_trace_path,
-                )
-                run_meta["split"].update({
-                    "split_input": str(split_input_path),
-                    "split_dir": str(split_dir),
-                    "num_steps": split_num_steps,
-                    "returncode": split_rc,
-                    **split_meta,
-                })
+                run_meta["split"].update(split_meta)
                 run_meta["selection"].update({
                     "requested_mode": args.steady_state_mode,
                     "chunk_label": split_meta.get("chunk_label"),
@@ -7020,16 +7050,11 @@ def main() -> int:
                     "split_trace",
                     category="split",
                     status="ok",
-                    returncode=split_rc,
-                    num_steps=split_num_steps,
+                    returncode=split_meta.get("returncode"),
+                    num_steps=split_meta.get("num_steps"),
                     chunks_extracted=split_meta["chunks_extracted"],
                 )
-
-                warnings = _validate_selected_chunk(
-                    split_dir, cli_trace_path, args.steady_state_mode, _mode_to_chunks,
-                )
-                trace_health_warnings.extend(warnings)
-
+                trace_health_warnings.extend(split_warnings)
                 _note_step(
                     "select_chunk",
                     category="select",
