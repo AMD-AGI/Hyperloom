@@ -11,6 +11,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
+from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 
@@ -175,7 +176,7 @@ def build_trace_evidence_md(state: Any) -> str:
     analysis = getattr(state, "last_trace_analyze", None)
     analysis = analysis if isinstance(analysis, Mapping) else {}
     candidates_path = _absolute_path(analysis.get("candidates_path"))
-    source_resolution = str(Path(candidates_path).parent / "kernel_source_resolution.json") if candidates_path else ""
+    source_resolution = str(Path(candidates_path).parent / SOURCE_RESOLUTION_FILENAME) if candidates_path else ""
     evidence = (
         ("Profile raw trace", getattr(state, "last_profile_trace", "")),
         ("TraceLens input trace", analysis.get("trace_input")),
