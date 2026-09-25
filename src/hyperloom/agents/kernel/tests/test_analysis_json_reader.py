@@ -138,6 +138,28 @@ def test_finalize_preserves_an_authoritative_zero_gpu_pct():
     assert by_name["collective_b"]["gpu_pct"] == 33.333
 
 
+def test_finalize_stamps_kernel_category_and_carries_device_kernel_names(tmp_path, monkeypatch):
+    """finalize stamps kernel_category and keeps the plural device_kernel_names list.
+
+    The Stage A reader emits device_kernel_name (singular) plus its device_kernel_names
+    list; _finalize_candidates is the only step that adds kernel_category. This pins both
+    finalize-added seams the deleted golden test used to cover, resolver stubbed.
+    """
+    monkeypatch.setattr(
+        ks,
+        "resolve_kernel_source",
+        lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
+    )
+    member = _member(kernel_name=["moe_gemm", "moe_gemm_epilogue"], category="gemm")
+    rows = aj.load_report_tasks(_write_report(tmp_path, [member]))
+    finalized = tla._finalize_candidates(rows)
+    assert len(finalized) == 1
+    cand = finalized[0]
+    assert cand["kernel_category"] == "GEMM"
+    assert cand["device_kernel_name"] == "moe_gemm"
+    assert cand["device_kernel_names"] == ["moe_gemm", "moe_gemm_epilogue"]
+
+
 def test_resolve_result_fields_map_onto_the_candidate(tmp_path, monkeypatch):
     """The six ResolveResult fields map to the six HL candidate keys (patchable case)."""
     monkeypatch.setattr(
