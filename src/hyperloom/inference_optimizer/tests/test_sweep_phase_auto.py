@@ -647,15 +647,15 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         return {
             "status": "ok",
             "decision": "KEEP",
-            "kernel_id": "k001+k004",
-            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
-            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "kernel_id": "+".join(e["kernel_id"] for e in entries),
+            "patch_path": "+".join(e["patch_path"] for e in entries),
+            "target_file": "+".join(e["target_file"] for e in entries),
             "base_tput": 100.0,
             "new_tput": 102.0,
             "gain_pct": 2.0,
             "workspace": str(tmp_path / "integrate-stack"),
             "apply_result": {"status": "ok"},
-            "stack_kernel_ids": ["k001", "k004"],
+            "stack_kernel_ids": [e["kernel_id"] for e in entries],
             "stack_validation": True,
         }
 
@@ -667,8 +667,10 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
 
     await c._maybe_validate_positive_needs_review_stack()
 
+    expected_members = ["k004", "k001"]
+    expected_display_id = "+".join(expected_members)
     assert c.shared_state.current_best["action"] == "integrate"
-    assert c.shared_state.current_best["variant_name"] == "k001+k004"
+    assert c.shared_state.current_best["variant_name"] == expected_display_id
     assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
     assert validation_calls == 1
     resolved_entries = [
@@ -677,7 +679,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         if entry.get("kernel_id") in {"k001", "k004"}
     ]
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
-    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
+    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {expected_display_id}
 
     # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
@@ -687,10 +689,10 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     stack_entries = [
         item
         for item in c.shared_state.optimization_stack
-        if isinstance(item, dict) and item.get("kernel_id") == "k001+k004"
+        if isinstance(item, dict) and item.get("kernel_id") == expected_display_id
     ]
     assert stack_entries
-    assert stack_entries[0].get("stack_kernel_ids") == ["k001", "k004"]
+    assert stack_entries[0].get("stack_kernel_ids") == expected_members
 
 
 @pytest.mark.asyncio
@@ -823,15 +825,15 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
         return {
             "status": "ok",
             "decision": "KEEP",
-            "kernel_id": "k001+k004",
-            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
-            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "kernel_id": "+".join(e["kernel_id"] for e in entries),
+            "patch_path": "+".join(e["patch_path"] for e in entries),
+            "target_file": "+".join(e["target_file"] for e in entries),
             "base_tput": 100.0,
             "new_tput": 102.0,
             "gain_pct": 2.0,
             "workspace": str(tmp_path / "integrate-stack"),
             "apply_result": {"status": "ok"},
-            "stack_kernel_ids": ["k001", "k004"],
+            "stack_kernel_ids": [e["kernel_id"] for e in entries],
             "stack_validation": True,
         }
 
@@ -843,8 +845,8 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
 
     await c._on_enter_sweep(from_phase="KERNEL")
 
-    assert len(validation_calls) == 1
-    assert c.shared_state.current_best["variant_name"] == "k001+k004"
+    assert validation_calls == [["k004", "k001"]]
+    assert c.shared_state.current_best["variant_name"] == "+".join(validation_calls[0])
 
 
 @pytest.mark.asyncio
