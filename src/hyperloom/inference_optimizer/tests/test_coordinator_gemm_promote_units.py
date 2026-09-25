@@ -1780,12 +1780,18 @@ class TestKernelE2EMeasurementPromotion:
         self._assert_measurement(coord, expected)
 
     @pytest.fixture
-    def paired_handler(self, monkeypatch):
+    def paired_handler(self, coord, monkeypatch):
         from hyperloom.orchestrator.actions.executors import _multi_node_env, benchmark_backend
 
         def unexpected(*args, **kwargs):
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
 
+        # This exercises generic kernel P50 grading; native AgentX launchers
+        # cannot apply kernel mutations and are covered by the refusal tests.
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+        coord.shared_state.benchmark_mode = "synthetic"
+        coord.shared_state.save(coord.session_dir)
         monkeypatch.setenv("FRAMEWORK", "sglang")
         monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
         monkeypatch.setattr(krh_mod, "_load_apply_tool", unexpected)
