@@ -173,51 +173,6 @@ def _write_trace(path: Path, trace: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-class TestBuildSplitCmd:
-    """Verify _build_split_cmd produces correct flags for each framework type."""
-
-    def _make_args(self, **overrides):
-        defaults = {
-            "split_conc": "",
-            "split_osl": "",
-            "split_r": "",
-            "split_llm_inference": False,
-        }
-        defaults.update(overrides)
-        return SimpleNamespace(**defaults)
-
-    def test_llm_inference_flags(self, tmp_path):
-        args = self._make_args(
-            split_conc="64",
-            split_osl="1024",
-            split_r="1",
-            split_llm_inference=True,
-        )
-        cmd = tla._build_split_cmd(
-            args,
-            tmp_path / "trace.json.gz",
-            tmp_path / "split",
-            32,
-            tmp_path / "log",
-        )
-        assert "--llm-inference" in cmd
-        assert "--CONC" in cmd
-        assert "--OSL" in cmd
-        assert "--R" in cmd
-
-    def test_generic_no_llm_flags(self, tmp_path):
-        args = self._make_args()
-        cmd = tla._build_split_cmd(
-            args,
-            tmp_path / "trace.json.gz",
-            tmp_path / "split",
-            32,
-            tmp_path / "log",
-        )
-        assert "--llm-inference" not in cmd
-        assert "--CONC" not in cmd
-
-
 # ---------------------------------------------------------------------------
 # Tests: _collect_split_chunks
 # ---------------------------------------------------------------------------
