@@ -208,6 +208,42 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
 EOF
 exit 0
 """
+    elif behavior == "done_with_stream_json":
+        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
+        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        stream = [
+            {"type": "system", "subtype": "init", "model": "glm-5-3"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "m1",
+                    "model": "glm-5-3",
+                    "usage": zeroed,
+                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
+                },
+            },
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 50632,
+                    "cache_read_input_tokens": 291392,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 7542,
+                },
+            },
+        ]
+        stream_lines = "\n".join(json.dumps(row) for row in stream)
+        body += f"""
+cat <<'EOF'
+{stream_lines}
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
     elif behavior == "crash":
         body += "exit 3\n"
     elif behavior == "partial_then_crash":
@@ -366,6 +402,62 @@ async def test_subprocess_path_harvests_done_file(
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "process.log").exists()
     assert (workspace / "worktree").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_run_is_one_specialist_llm_call_on_the_trajectory(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """The subprocess books as a specialist llm.call carrying the result-row totals; its tools hang off that call."""
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+    from hyperloom.orchestrator.trace import trajectory_trace as tt
+
+    fake_claude = _make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(fake_claude),
+            model="",
+            framework_source_roots=(str(fake_framework_repo),),
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    with tt.trajectory_scope(
+        session_dir=session_dir,
+        component="coordinator",
+        task_id="t-spec-traj",
+        parent_span_id="t-spec-traj",
+    ):
+        result = await runner.run(_make_runner_ctx("t-spec-traj"))
+    assert result.status == "succeeded"
+
+    events = tt.load_events(session_dir)
+    calls = [e for e in events if e["event_type"] == tt.EVENT_LLM_CALL]
+    assert [e["status"] for e in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"]) == ("specialist", "serving_specialist", "t-spec-traj")
+    assert call["parent_span_id"] == "t-spec-traj"
+    assert call["attributes"]["input_tokens"] == 50632
+    assert call["attributes"]["cache_read_input_tokens"] == 291392
+    assert call["attributes"]["output_tokens"] == 7542
+    assert call["attributes"]["model"] == "glm-5-3"
+
+    tools = [e for e in events if e["event_type"] == tt.EVENT_TOOL]
+    assert [t["attributes"]["name"] for t in tools] == ["Bash"]
+    assert (tools[0]["component"], tools[0]["agent"]) == ("specialist", "serving_specialist")
+    assert tools[0]["parent_span_id"] == call["span_id"]
+    assert tools[0]["call_id"] == call["call_id"]
+
+    rows = [json.loads(line) for line in llm_calls_path(session_dir).read_text(encoding="utf-8").splitlines() if line]
+    specialist_rows = [r for r in rows if r["component"] == "specialist"]
+    assert len(specialist_rows) == 1
+    assert specialist_rows[0]["call_id"] == call["call_id"]
+    assert specialist_rows[0]["input_tokens"] == 50632
+    assert specialist_rows[0]["output_tokens"] == 7542
 
 
 @pytest.mark.asyncio
