@@ -341,9 +341,12 @@ def _serving_actor_body() -> Any:
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
+                    from ._native_ray_allocation import capture_launch_environment
+
+                    launch_env = capture_launch_environment(env)
                     return _run_subprocess_worker(
                         cmd=cmd,
-                        env=env,
+                        env=launch_env,
                         cwd=cwd,
                         timeout_s=timeout,
                         silence_timeout_sec=silence_timeout_sec,
