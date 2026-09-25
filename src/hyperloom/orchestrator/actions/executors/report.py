@@ -22,7 +22,10 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    AGENTX_PREFLIGHT_STOP_REASON,
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+)
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...state.shared_state import SharedState
 
@@ -311,6 +314,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "than spending its budget in the enablement lane. Fix: run "
         "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
         "the real cause), or point AIPERF_BIN at an existing pinned build."
+    ),
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON: (
+        "A patch lifecycle owed the framework tree a revert and could not finish it, so the tree still "
+        "holds patches nothing measured against. The run stopped instead of attributing later results to "
+        "a baseline that is not on disk. The recovery keeps its checkpoint and retries the teardown on the "
+        "next resume; if that retry also fails, reconcile the tree by hand against the recorded backup "
+        "manifests before resuming."
     ),
     # Host-level terminals: something outside the model ended the run.
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
