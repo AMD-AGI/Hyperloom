@@ -428,8 +428,8 @@ def _build_variant_yaml(
     )
     from ._workload_envs import validate_agentx_workload_overrides
 
-    validate_agentx_workload_overrides(bench, base_extra_envs, base_unset_envs)
-    validate_agentx_workload_overrides(bench, variant.extra_envs, variant.unset_envs)
+    base_extra_envs = validate_agentx_workload_overrides(bench, base_extra_envs, base_unset_envs)
+    variant_extra_envs = validate_agentx_workload_overrides(bench, variant.extra_envs, variant.unset_envs)
     extra_args_env = server_args_env_name(bench.get("framework"))
 
     replacing = str(base_args_mode).strip().lower() == "replace"
@@ -477,7 +477,7 @@ def _build_variant_yaml(
             log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
             continue
         envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
+    for k, v in variant_extra_envs.items():
         envs[str(k)] = str(v)
     # The recipe re-exports these unconditionally, so a value carried here is
     # one the run never used.

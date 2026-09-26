@@ -287,24 +287,28 @@ def validate_agentx_workload_overrides(
     bench: Mapping[str, Any],
     extra_envs: Mapping[str, Any] | None = None,
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-) -> None:
-    """Reject candidate changes to the resolved operator replay protocol.
+) -> dict[str, Any]:
+    """Return candidate envs that preserve the resolved operator replay protocol.
 
     Call after the AgentX switch resolves operator inputs and before merging
-    candidate environments. An inherited identical value is harmless; removing
-    an explicit pin or introducing an unpinned replay input is not.
+    candidate environments. Grace is derived for the current concurrency, so
+    inherited candidate grace is discarded. Other identical values are harmless;
+    removing an explicit pin or introducing an unpinned replay input is not.
     """
+    candidate_envs = dict(extra_envs or {})
     if (bench.get("workload_spec") or {}).get("kind") != "agentx_trace_replay":
-        return
+        return candidate_envs
+    candidate_envs.pop("AGENTX_WARMUP_GRACE_PERIOD", None)
     envs = bench.get("envs") or {}
     changed = {
         key
-        for key, value in (extra_envs or {}).items()
+        for key, value in candidate_envs.items()
         if key in _AGENTX_WORKLOAD_ENV_NAMES and (key not in envs or str(value) != str(envs[key]))
     }
     changed.update(key for key in to_str_list(unset_envs) if key in _AGENTX_WORKLOAD_ENV_NAMES and key in envs)
     if changed:
         raise ValueError("Candidate changes frozen AgentX workload controls: " + ", ".join(sorted(changed)))
+    return candidate_envs
 
 
 def _agentx_model_family(model: str) -> str:
@@ -1432,7 +1436,7 @@ def materialize_config_with_envs(
         explicit_benchmark_script=bool(benchmark_script),
     )
     apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
-    validate_agentx_workload_overrides(bench, extra_envs, unset_envs)
+    extra_envs = validate_agentx_workload_overrides(bench, extra_envs, unset_envs)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.

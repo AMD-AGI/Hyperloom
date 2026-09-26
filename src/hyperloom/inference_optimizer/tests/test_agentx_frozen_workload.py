@@ -133,3 +133,44 @@ def test_cli_operator_warmup_grace_is_scaled_once(operator_config, tmp_path, mon
     bench = yaml.safe_load(candidate.read_text())["benchmark"]
     assert bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"] == "7200"
     assert bench["workload_spec"]["warmup_grace_period_s"] == 7200
+
+
+@pytest.mark.parametrize("layer", ["base", "variant"])
+@pytest.mark.parametrize("conc, expected_grace", [(8, 1800), (64, 14400)])
+def test_grid_rederives_inherited_grace_for_rung_concurrency(
+    operator_config, tmp_path, monkeypatch, layer, conc, expected_grace
+):
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "1800")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    baseline = materialize_config_with_envs(operator_config, tmp_path / "baseline", agentx_mode=True)
+    session = yaml.safe_load(baseline.read_text())["benchmark"]
+    inherited = {"AGENTX_WARMUP_GRACE_PERIOD": session["envs"]["AGENTX_WARMUP_GRACE_PERIOD"]}
+    assert inherited["AGENTX_WARMUP_GRACE_PERIOD"] == "7200"
+    extra = {"CONC": str(conc), **(inherited if layer == "variant" else {})}
+    variant = GridVariant("optimized_rung", extra_envs=extra)
+
+    result = _build_variant_yaml(
+        baseline,
+        "",
+        variant,
+        output_subdir=tmp_path / "rung",
+        base_extra_envs=inherited if layer == "base" else None,
+    )
+
+    bench = yaml.safe_load(result.read_text())["benchmark"]
+    assert bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"] == str(expected_grace)
+    assert bench["workload_spec"]["warmup_grace_period_s"] == expected_grace
+    assert bench["workload_spec"]["concurrency"] == conc
+    assert bench["workload_spec"]["warmup_requests_per_lane"] == 10
+    assert inherited == {"AGENTX_WARMUP_GRACE_PERIOD": "7200"}
+    assert variant.extra_envs == {"CONC": str(conc), **(inherited if layer == "variant" else {})}
+
+
+@pytest.mark.parametrize("path", ["direct", "grid"])
+def test_candidate_grace_cannot_override_fixed_c32_protocol(operator_config, tmp_path, monkeypatch, path):
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "1800")
+    candidate = _candidate(operator_config, tmp_path / "candidate", path, {"AGENTX_WARMUP_GRACE_PERIOD": "60"})
+    bench = yaml.safe_load(candidate.read_text())["benchmark"]
+    assert bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"] == "1800"
+    assert bench["workload_spec"]["warmup_grace_period_s"] == 1800
+    assert bench["workload_spec"]["concurrency"] == 32
