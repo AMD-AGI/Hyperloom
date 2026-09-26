@@ -1862,7 +1862,7 @@ def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> N
 
 def _stub_python_cache_clear(monkeypatch) -> None:
     """Keep the real apply away from this machine's Triton / inductor cache directories."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
 
