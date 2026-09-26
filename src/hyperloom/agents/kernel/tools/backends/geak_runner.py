@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import signal
@@ -55,6 +56,23 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
     runner = _resolve_runner()
+    baseline = handoff.get("baseline_env_spec") or {}
+    if baseline.get("source_snapshots") and "source_materialization" not in baseline:
+        rejected = {
+            "status": "error",
+            "error_class": "unresolved_baseline_source",
+            "error": "Accepted source layers require a complete source materialization before GEAK launches",
+        }
+        result_path.write_text(json.dumps(rejected, indent=2), encoding="utf-8")
+        return rejected
+    if "source_materialization" in baseline and not _supports_source_materialization(Path(runner)):
+        rejected = {
+            "status": "error",
+            "error_class": "unsupported_source_materialization_reader",
+            "error": "GEAK must advertise SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1 for accepted source trees",
+        }
+        result_path.write_text(json.dumps(rejected, indent=2), encoding="utf-8")
+        return rejected
     py = python_bin or sys.executable
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
@@ -125,6 +143,27 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
         }
     )
     return result
+
+
+def _supports_source_materialization(runner: Path) -> bool:
+    """Read the consumer's literal protocol capability without importing it."""
+    try:
+        module = ast.parse(runner.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    values = []
+    for statement in module.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "SOURCE_MATERIALIZATION_SCHEMA_VERSION"
+            for target in statement.targets
+        ):
+            values.append(statement.value)
+    return (
+        len(values) == 1
+        and isinstance(values[0], ast.Constant)
+        and type(values[0].value) is int
+        and values[0].value == 1
+    )
 
 
 def _main(argv: list[str]) -> int:

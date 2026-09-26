@@ -1080,7 +1080,32 @@ class KernelPhase(CoordinatorCollaborator):
 
         cb = state.current_best or {}
         try:
-            env_spec = self.build_env_spec()
+            from ..source_materialization import SourceMaterializationError, materialize_source_stack
+
+            if any(
+                isinstance(entry, Mapping) and entry.get("scope") == "source_patch"
+                for entry in (cb.get("optimization_stack") or [])
+            ):
+                source_best = deepcopy(cb)
+                source = await asyncio.to_thread(
+                    materialize_source_stack, source_best, self.session_dir / "optimization_stack" / "materialized"
+                )
+                if source_best != (state.current_best or {}):
+                    raise SourceMaterializationError(
+                        "current_best_changed", "accepted state changed during source capture"
+                    )
+                env_spec = self.build_env_spec(source_materialization=source)
+            else:
+                env_spec = self.build_env_spec()
+        except SourceMaterializationError as exc:
+            recorder = self._kernel_timeline()
+            if recorder is not None:
+                recorder.finish_failed(stage="geak_handoff", error_class=exc.error_class, message=str(exc))
+            _finish_skip(
+                {"status": "error", "error_class": exc.error_class, "reason": exc.reason, "error": str(exc)},
+                record_delegation=False,
+            )
+            return
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
             recorder = self._kernel_timeline()
