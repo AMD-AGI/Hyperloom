@@ -1605,7 +1605,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return errors
 
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Apply known fields; untrusted calls drop disallowed writes, while PolicyGate rejects whole invalid intents."""
+        """Apply known fields, dropping each write an untrusted caller may not make.
+
+        A core field never reaches here: PolicyGate refuses that whole intent
+        upstream. Everything this method refuses -- a non-core field outside
+        :data:`AGENT_UPDATE_FIELDS`, a wrong value type -- is dropped per key
+        while the rest of the same call is applied, and the caller reports the
+        difference as ``rejected``.
+        """
         if not changes:
             return {}
         errors = {} if allow_core else self.agent_update_errors(changes)

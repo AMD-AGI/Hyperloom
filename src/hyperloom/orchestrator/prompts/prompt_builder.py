@@ -900,9 +900,11 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
         "",
         "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
         *update_fields,
-        "All other known state fields are Coordinator-owned. A forbidden field or a wrong value type",
-        "rejects the entire intent before any assignment. Unknown keys are not applied and appear in",
-        "the observation's `rejected` list; valid fields in that same update still apply.",
+        "A Coordinator-owned core field refuses the whole intent before anything is written. Every other",
+        "key -- a non-core field outside the list above, a wrong value type, an unknown name -- is dropped",
+        "on its own, and the rest of that same update still applies. The observation reports what was",
+        "written in `changes` and every dropped key in `rejected`; re-sending a key from `changes` would",
+        "repeat a write that already landed.",
     ]
 
 
