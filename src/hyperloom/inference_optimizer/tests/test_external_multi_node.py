@@ -585,10 +585,10 @@ def test_a_changed_pd_flag_the_launcher_serves_blocks_a_resume(field: str, chang
     """Every PD flag the launch entrypoint forwards must keep a resume from matching."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
-    reference = mncli._rayjob_topology_fingerprint(argparse.Namespace(**_PD_FINGERPRINT_ARGS), 2)
+    reference = mncli._rayjob_topology_fingerprint(argparse.Namespace(**_PD_FINGERPRINT_ARGS), 2, {})
     changed_args = argparse.Namespace(**{**_PD_FINGERPRINT_ARGS, field: changed})
 
-    assert mncli._rayjob_topology_fingerprint(changed_args, 2) != reference
+    assert mncli._rayjob_topology_fingerprint(changed_args, 2, {}) != reference
 
 
 def test_a_changed_node_count_blocks_a_resume() -> None:
@@ -597,7 +597,40 @@ def test_a_changed_node_count_blocks_a_resume() -> None:
 
     args = argparse.Namespace(**_PD_FINGERPRINT_ARGS)
 
-    assert mncli._rayjob_topology_fingerprint(args, 2) != mncli._rayjob_topology_fingerprint(args, 4)
+    assert mncli._rayjob_topology_fingerprint(args, 2, {}) != mncli._rayjob_topology_fingerprint(args, 4, {})
+
+
+@pytest.mark.parametrize(
+    ("previous", "current"),
+    [
+        ({"SGLANG_MOE_A2A_BACKEND": "mori"}, {"SGLANG_MOE_A2A_BACKEND": "deepep"}),
+        ({"SGLANG_MOE_A2A_BACKEND": "mori"}, {}),
+        ({}, {"SGLANG_MOE_A2A_BACKEND": "mori"}),
+        ({"MORI_X": "1"}, {"MORI_X": "1", "MORI_Y": "2"}),
+    ],
+)
+def test_a_changed_per_round_forward_env_blocks_a_resume(previous: dict, current: dict) -> None:
+    """The per-round env reaches every rank as the launch runtime_env, so it decides what the servers run with.
+
+    A round that changes only these would otherwise resume the prior cluster and benchmark the OLD environment
+    while reporting the new one, with nothing failing.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    args = argparse.Namespace(**_PD_FINGERPRINT_ARGS)
+
+    assert mncli._rayjob_topology_fingerprint(args, 2, current) != mncli._rayjob_topology_fingerprint(args, 2, previous)
+
+
+def test_an_unchanged_per_round_forward_env_still_allows_a_resume() -> None:
+    """Key order is not a change; the fast path must survive re-sending the same overrides."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    args = argparse.Namespace(**_PD_FINGERPRINT_ARGS)
+
+    assert mncli._rayjob_topology_fingerprint(args, 2, {"A": "1", "B": "2"}) == mncli._rayjob_topology_fingerprint(
+        args, 2, {"B": "2", "A": "1"}
+    )
 
 
 _AGGREGATED_STATE = {"service_url": "http://frontend:8000"}
@@ -843,6 +876,7 @@ def test_resume_needs_a_cluster_that_still_serves(
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setenv("PD_MODE", "aggregated")
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
     _write_disk_state(
         backend="rayjob",
         head_pod_ip="10.0.2.1",
@@ -861,6 +895,7 @@ def test_resume_needs_a_cluster_that_still_serves(
             "nnodes": 2,
             "pd_mode": "aggregated",
             "extra_args": "",
+            "forward_env": {},
         },
     )
 

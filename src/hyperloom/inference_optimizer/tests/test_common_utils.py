@@ -518,20 +518,22 @@ def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.Monkey
     """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
+    def runtime_env():
+        return mn_cli._forward_runtime_env(mn_cli.per_round_forward_overrides())
+
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
 
     monkeypatch.setenv(
         "HYPERLOOM_MN_EXTRA_FWD_ENV",
         json.dumps({"SGLANG_USE_AITER": "0", "LD_PRELOAD": "/evil.so"}),
     )
-    payload = mn_cli._forward_runtime_env()
-    assert payload == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
+    assert runtime_env() == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps(["not", "a", "dict"]))
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
 
 
 def _restart_args(**overrides) -> argparse.Namespace:
@@ -840,6 +842,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
 
+    no_overrides = {"set": {}, "unset": []}
     agg_state = {
         "last_restart_framework": "sglang",
         "last_restart_model": "/m",
@@ -847,9 +850,17 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": no_overrides,
     }
     agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
+
+    # A state written before the launch env was recorded cannot show what the running servers were launched with,
+    # so it relaunches rather than benchmarking an environment it cannot account for.
+    pre_upgrade_state = {k: v for k, v in agg_state.items() if k != "last_restart_forward_env"}
+    assert inf._infera_restart_config_matches(pre_upgrade_state, agg_args, "sglang", "aggregated") is False
     assert (
         inf._infera_restart_config_matches(
             agg_state, argparse.Namespace(model="/m", tp=4, ep=8, extra_args="--foo 1"), "sglang", "aggregated"
@@ -866,6 +877,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_extra_args": "",
         "last_restart_pd_prefill_nodes": 1,
         "last_restart_pd_decode_nodes": 1,
+        "last_restart_forward_env": no_overrides,
         "prefill_pod_ips": ["10.0.0.1"],
         "decode_pod_ips": ["10.0.0.2"],
     }
@@ -886,6 +898,64 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
     assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
 
     assert inf._infera_servers_alive({}, [], timeout=5) is False
+
+
+@pytest.mark.parametrize(
+    ("recorded", "extra_fwd", "unset_fwd"),
+    [
+        ({"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": []}, '{"SGLANG_MOE_A2A_BACKEND": "deepep"}', ""),
+        ({"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": []}, "", ""),
+        ({"set": {}, "unset": []}, '{"SGLANG_MOE_A2A_BACKEND": "mori"}', ""),
+        ({"set": {}, "unset": []}, "", '["SGLANG_MOE_A2A_BACKEND"]'),
+    ],
+)
+def test_a_changed_per_round_forward_env_blocks_an_infera_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: dict,
+    extra_fwd: str,
+    unset_fwd: str,
+) -> None:
+    """The SSH path forwards these to the servers it launches, so a round that changes only them must relaunch.
+
+    Without this the prior servers keep running with the previous round's environment and the benchmark reports
+    the new one, with nothing failing.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", extra_fwd)
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", unset_fwd)
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": recorded,
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+
+    assert inf._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_an_unchanged_per_round_forward_env_still_allows_an_infera_resume(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-sending the same overrides is not a change, so the resume fast path must survive it."""
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_MOE_A2A_BACKEND": "mori"}')
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", '["MORI_STALE"]')
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": {"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": ["MORI_STALE"]},
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+
+    assert inf._infera_restart_config_matches(state, args, "sglang", "aggregated") is True
 
     state = {"ssh_key_path": "/tmp/k"}
     targets = [{"podIP": "10.0.0.1", "sshPort": 2222}]
@@ -928,7 +998,10 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "",
+        "last_restart_forward_env": {"set": {}, "unset": []},
     }
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
     monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
