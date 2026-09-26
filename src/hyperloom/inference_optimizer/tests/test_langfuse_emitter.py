@@ -690,6 +690,85 @@ def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
     assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 2}
 
 
+def _append_jsonl(path: Path, *rows: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def _forge_iteration(iteration: int) -> dict:
+    return {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1", "iteration": iteration}
+
+
+def _kernel_decision(task_id: str) -> dict:
+    return {
+        "decision": {
+            "component": "kernel_agent",
+            "operation_kind": "kernel_opt",
+            "outcome": "KEEP",
+            "task_id": task_id,
+        },
+        "phase": "KERNEL",
+        "ts": "2026-06-09T16:00:00Z",
+    }
+
+
+def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeypatch):
+    """A resumed leg flushes into the same trace, so it must push only the rows the last leg did not."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    steps = forge_steps_path(sd)
+    decisions = sd / "reports" / "trace" / "decision_trace.jsonl"
+    _append_jsonl(steps, _forge_iteration(1))
+    _append_jsonl(decisions, _kernel_decision("k1"))
+
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert first.span_named("forge:iter:1") is not None
+    assert first.span_named("optimization_step:kernel_opt") is not None
+
+    _append_jsonl(steps, _forge_iteration(2))
+    _append_jsonl(decisions, _kernel_decision("k2"))
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    forge_spans = [s.kwargs["name"] for s in second.spans if s.kwargs["name"].startswith("forge:iter:")]
+    decision_spans = [s for s in second.spans if s.kwargs["name"] == "optimization_step:kernel_opt"]
+    assert forge_spans == ["forge:iter:2"]
+    assert [s.kwargs["metadata"]["task_id"] for s in decision_spans] == ["k2"]
+
+
+def test_backfill_cursors_advance_only_once_the_client_flush_lands(tmp_path, monkeypatch):
+    """Rows handed to the SDK buffer have not reached Langfuse until the final flush does."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
+
+    failing = _FakeClient()
+
+    def _down():
+        raise RuntimeError("langfuse unreachable")
+
+    failing.flush = _down  # type: ignore[method-assign]
+    _install_fake_sdk(monkeypatch, failing)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert second.span_named("forge:iter:1") is not None
+
+
 def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
     """Two processes reading the same empty receipt must not both emit."""
     _enable_env(monkeypatch)

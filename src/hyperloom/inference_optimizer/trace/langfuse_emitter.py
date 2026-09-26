@@ -66,8 +66,9 @@ def _manifest_path(session_dir: Path) -> Path:
     return session_dir / "manifest.json"
 
 
-#: Session-end reconcile steps, in run order. The names are persisted in the
-#: receipt (``flush_steps_done``), so a restart resumes instead of replaying.
+#: Session-end reconcile steps, in run order. A retry in the same process skips
+#: the steps that already succeeded; across processes the durable unit is the
+#: row, through the ``ext_rows_sent`` / ``backfill_rows_sent`` receipt cursors.
 _FLUSH_STEP_NAMES: tuple[str, ...] = (
     "pending_halves",
     "ext_shards",
@@ -81,9 +82,9 @@ _FLUSH_STEP_NAMES: tuple[str, ...] = (
 )
 
 
-def _persisted_ext_cursors(session_dir: Path) -> dict[str, int]:
-    """Return how far each ext/ shard was drained by a previous process."""
-    persisted = (read_receipt(session_dir) or {}).get("ext_rows_sent")
+def _persisted_cursors(session_dir: Path, key: str) -> dict[str, int]:
+    """Return the per-file row cursors a previous process recorded under ``key``."""
+    persisted = (read_receipt(session_dir) or {}).get(key)
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -354,7 +355,11 @@ class LangfuseEmitter:
         self._flush_steps_done: set[str] = set()
         self._flushed = False
         # How many rows of each ext/ shard have been sent, restored from the receipt.
-        self._ext_rows_sent: dict[str, int] = _persisted_ext_cursors(self.session_dir)
+        self._ext_rows_sent: dict[str, int] = _persisted_cursors(self.session_dir, "ext_rows_sent")
+        # Rows of each session-wide backfill log a flush delivered. A resumed leg reports into the same trace, so it
+        # starts after these; this flush's rows sit in ``_backfill_rows_pending`` until the client flush lands them.
+        self._backfill_rows_sent: dict[str, int] = _persisted_cursors(self.session_dir, "backfill_rows_sent")
+        self._backfill_rows_pending: dict[str, int] = {}
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
         # after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -604,7 +609,7 @@ class LangfuseEmitter:
         steps: dict[str, Any] = {
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
-            **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
+            **{name: functools.partial(self._backfill_kb_spans, name, *spec) for name, spec in kb_backfills.items()},
             "decision_scores": self._flush_decision_scores,
             "close_spans": self._close_spans,
             "client_flush": self._flush_client,
@@ -623,8 +628,16 @@ class LangfuseEmitter:
         self._write_receipt()
 
     def _flush_client(self) -> None:
-        """Hand the SDK's buffered observations to the network."""
+        """Hand the SDK's buffered observations to the network, then commit the backfill rows they carried."""
         self._client.flush()
+        self._backfill_rows_sent.update(self._backfill_rows_pending)
+        self._backfill_rows_pending.clear()
+
+    def _unsent_backfill_rows(self, step: str, path: Path) -> list[dict[str, Any]]:
+        """Rows of one backfill log past what an earlier flush delivered; marks them pending for this one."""
+        rows = _load_jsonl(path)
+        self._backfill_rows_pending[step] = len(rows)
+        return rows[self._backfill_rows_sent.get(step, 0) :]
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins."""
@@ -841,13 +854,14 @@ class LangfuseEmitter:
 
     def _backfill_kb_spans(
         self,
+        step: str,
         path_for: Callable[[Path], Path],
         counter: str,
         agent: str,
         span_for: _SpanBuilder,
     ) -> None:
-        """Backfill every row of one session audit log as a KB span under ``agent``."""
-        for row in _load_jsonl(path_for(self.session_dir)):
+        """Backfill each not-yet-delivered row of one session audit log as a KB span under ``agent``."""
+        for row in self._unsent_backfill_rows(step, path_for(self.session_dir)):
             self._counts[counter] += 1
             name, metadata = span_for(row)
             self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
@@ -860,8 +874,8 @@ class LangfuseEmitter:
         return lfmap.recipe_read_span(row)
 
     def _flush_decision_scores(self) -> None:
-        """Convert each decision_trace row into Langfuse Score(s)."""
-        for drow in _load_jsonl(decision_trace_path(self.session_dir)):
+        """Convert each not-yet-delivered decision_trace row into Langfuse Score(s)."""
+        for drow in self._unsent_backfill_rows("decision_scores", decision_trace_path(self.session_dir)):
             scores = lfmap.decision_to_scores(drow)
             if not scores:
                 continue
@@ -993,6 +1007,7 @@ class LangfuseEmitter:
             # instead of reading as final.
             "flush_steps_done": sorted(self._flush_steps_done),
             "ext_rows_sent": dict(self._ext_rows_sent),
+            "backfill_rows_sent": dict(self._backfill_rows_sent),
         }
 
     def _claim_one_shot(self, marker: str) -> bool:
