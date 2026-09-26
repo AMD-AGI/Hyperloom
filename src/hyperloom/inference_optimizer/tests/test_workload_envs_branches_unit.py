@@ -765,9 +765,11 @@ def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch
 def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatch, tmp_path):
     """metric_basis must follow the grader, in GEAK's own vocabulary.
 
-    An agentic replay is graded on total token throughput, which runs ~140x its
-    output figure on this corpus, so a handoff naming the output axis would aim
-    GEAK's search at a number the session never scores.
+    An agentic replay is graded on interactivity, so a handoff naming the output
+    axis -- which runs ~140x below the total on this corpus -- would aim GEAK's
+    search at a number the session never scores. Naming the total guard instead
+    aims it at one that cannot move: under a ~97% prefix cache the guard is ~99%
+    input tokens that were never computed.
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -775,7 +777,7 @@ def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatc
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     src = _write(tmp_path / "cfg.yaml", envs={})
     bench = _materialize(src, tmp_path / "out")
-    assert bench["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
+    assert bench["workload_spec"]["metric_basis"] == "e2e_norm_intvty_p90"
 
     # An explicit override wins in both directions, and the basis follows it.
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
