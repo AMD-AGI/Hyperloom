@@ -2908,9 +2908,10 @@ async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coor
     empty one, so the sentinel used to be held until someone edited state.json.
     """
     candidate = await pending_candidate(patches=True)
+    pending = coord.shared_state.pending_integrate
     coord.shared_state.pending_integrate = {
-        **coord.shared_state.pending_integrate,
-        "recovery": {"phase": "restored"},
+        **pending,
+        "recovery": {**(pending.get("recovery") or {}), "phase": "restored"},
     }
     await coord.tasks.transition(candidate.task.task_id, "running")
     await coord.tasks.transition(candidate.task.task_id, "failed")
@@ -2932,10 +2933,6 @@ async def test_a_failed_online_restore_is_retried_not_held_forever(coord, pendin
     That discharged nothing: the teardown is still owed and must be retried.
     """
     candidate = await pending_candidate(patches=True)
-    coord.shared_state.pending_integrate = {
-        **coord.shared_state.pending_integrate,
-        "recovery": {"phase": "applied"},
-    }
     await coord.tasks.transition(candidate.task.task_id, "running")
     await coord.tasks.transition(candidate.task.task_id, "succeeded")
     await coord.tasks.append_completion_evidence(
