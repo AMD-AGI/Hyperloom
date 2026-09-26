@@ -859,11 +859,17 @@ ensure_torch_compatible_with_gpu() {
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
-  if ! rocm-smi --showid >/dev/null 2>&1; then
+  # Both probes below touch the GPU, so both hang forever on a wedged driver --
+  # and this gate runs before the session directory exists, so a hang here leaves
+  # no state.json, no breakdown and nothing for the caller to time out on: the
+  # workload just holds its nodes until the scheduler's wall clock kills it
+  # (observed: 14h on 8xMI355X, job 174683, only `PYTHON=` in the log). Both
+  # timeouts degrade into the existing "cannot tell" paths, which skip the gate.
+  if ! timeout 60 rocm-smi --showid >/dev/null 2>&1; then
     return 0
   fi
   local probe
-  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+  probe="$(timeout 180 "$PYTHON" - <<'PY' 2>/dev/null || true
 import json, sys
 out = {"rc": 0}
 try:
@@ -878,7 +884,8 @@ print(json.dumps(out))
 PY
 )"
   if [ -z "$probe" ]; then
-    warn "torch probe produced no output (PYTHON=${PYTHON})"
+    warn "torch probe produced no output (PYTHON=${PYTHON}); it crashed or hit the 180s timeout"
+    warn "a timeout here means \`import torch\` blocked on the GPU -- suspect a wedged driver on this node"
     return 0
   fi
   local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
