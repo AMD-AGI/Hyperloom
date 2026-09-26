@@ -1457,7 +1457,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     monkeypatch,
 ):
     """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     seen: dict[str, object] = {}
 
@@ -1497,7 +1497,7 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     monkeypatch,
 ):
     """Non-KEEP + partial revert must set top-level status='failed'."""
-    import hyperloom.orchestrator.kernel.request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
@@ -1884,7 +1884,7 @@ def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
 
 def _break_backup_restore(monkeypatch, *, target: Path) -> None:
     """Fail one member's backup->target copy; its apply (patch->target) still succeeds."""
-    import hyperloom.agents.kernel.tools.apply_kernel_patch as akp
+    from hyperloom.agents.kernel.tools import apply_kernel_patch as akp
 
     # apply_kernel_patch resolves both paths, so the discriminator has to as well.
     patched = target.with_name(f"{target.stem}_opt{target.suffix}").resolve()
@@ -1990,6 +1990,82 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
     assert not reloaded.pending_stack_validation_apply_results
     assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
     assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
+
+
+def _age_checkpoint_to_the_previous_release(session_dir: Path) -> None:
+    """Rewrite the persisted checkpoint in the shape the current release writes.
+
+    That shape names its members and stamps every ledger row it marked, but
+    carries neither a stamp of its own nor the member identity list.
+    """
+    state = SharedState.load_or_init(session_dir)
+    state.pending_stack_validation_result = {
+        key: value
+        for key, value in state.pending_stack_validation_result.items()
+        if key not in ("stack_member_identities", "stack_validation_started_at")
+    }
+    state.pending_stack_validation_apply_results = [
+        {key: value for key, value in applied.items() if key != "stack_validation_started_at"}
+        for applied in state.pending_stack_validation_apply_results
+    ]
+    state.save(session_dir)
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_written_before_this_build_still_unwinds(tmp_path: Path, monkeypatch):
+    """A session interrupted on the current release has no identities on its record.
+
+    Its members are still named explicitly and every row it marked carries the
+    attempt's stamp, so the unwind binds on those rather than refusing evidence
+    it wrote itself one release earlier.
+    """
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    _age_checkpoint_to_the_previous_release(tmp_path)
+    c = _resumed_stack_coordinator(tmp_path)
+
+    with session_scope(tmp_path):
+        assert await c._recover_interrupted_stack_validation() is True
+
+    assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert not reloaded.pending_stack_validation_result
+    assert not reloaded.pending_stack_validation_apply_results
+    assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
+
+
+@pytest.mark.asyncio
+async def test_an_unbindable_checkpoint_halts_the_resume_rather_than_ending_it(tmp_path: Path, monkeypatch):
+    """The resume pass runs above ``Coordinator.run``'s own guard.
+
+    A raise from here ends the process with the members still on the tree and
+    no stop reason naming why, which is the state this halt exists to report.
+    """
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    _age_checkpoint_to_the_previous_release(tmp_path)
+    c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    # A second row claims the same member under the same stack, which is the
+    # ambiguity the record's identity list used to settle.
+    entries = c.shared_state.kernel_integrate_attempts
+    original = next(entry for entry in entries.values() if entry.get("kernel_id") == "k001")
+    entries["k001-second-attempt"] = {**original, "patch_path": str(tmp_path / "k001_other.py")}
+    report = {"fixes": [], "warnings": []}
+
+    with session_scope(tmp_path):
+        await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert c.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert [w["kind"] for w in report["warnings"]] == ["interrupted_stack_validation_unbindable"]
+    assert report["fixes"] == []
+    # The checkpoints and the patched tree are both left for a human to settle.
+    assert stuck.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE
+    assert SharedState.load_or_init(tmp_path).pending_stack_validation_result
 
 
 @pytest.mark.asyncio

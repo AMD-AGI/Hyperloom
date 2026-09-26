@@ -5681,7 +5681,19 @@ class WritebackCollaborator:
             or getattr(state, "pending_stack_validation_apply_results", None)
         ):
             return
-        if await self._recover_interrupted_stack_validation():
+        try:
+            recovered = await self._recover_interrupted_stack_validation()
+        except ValueError as exc:
+            # The checkpoint cannot be bound to the ledger rows it was written
+            # from, so which patches are on the tree is unknown. Halting says
+            # that and keeps the evidence; raising would leave the resume above
+            # ``Coordinator.run``'s own guard, ending the process with the
+            # patches applied and no stop reason naming why.
+            self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
+            self.shared_state.save(self.session_dir)
+            report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})
+            return
+        if recovered:
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:

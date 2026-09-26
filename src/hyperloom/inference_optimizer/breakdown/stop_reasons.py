@@ -27,7 +27,9 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 #: so the tree still holds patches the session never measured against. Two
 #: independent recoveries -- the integrate sentinel and the kernel stack
 #: checkpoint -- halt on this, and both refuse to continue rather than measure a
-#: tree whose contents they cannot account for.
+#: tree whose contents they cannot account for. The stack checkpoint also halts
+#: when it cannot bind itself to the ledger rows it was written from, which says
+#: the same thing about a tree whose members are no longer identifiable.
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
 #: Terminals that mean the run optimized and closed normally.

@@ -60,6 +60,34 @@ def resolve_stack_members(
     return members
 
 
+def _stack_validation_stamp(
+    record: Mapping[str, Any],
+    entries: Mapping[str, Any],
+    stack_id: str,
+) -> str:
+    """Return the attempt's start stamp, from the record or from the rows it marked.
+
+    A checkpoint written before the stamp was persisted on the record still
+    carries it on every ledger row the attempt marked, from the same machine
+    step. Reading it back from there is what lets a session interrupted on an
+    earlier release finish its unwind instead of refusing its own evidence.
+    """
+    recorded = record.get("stack_validation_started_at")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    stamps = {
+        entry["stack_validation_started_at"]
+        for entry in entries.values()
+        if isinstance(entry, dict)
+        and entry.get("stack_validation_kernel_id") == stack_id
+        and isinstance(entry.get("stack_validation_started_at"), str)
+        and entry["stack_validation_started_at"]
+    }
+    if len(stamps) != 1:
+        raise ValueError("stack members lack matching validation evidence")
+    return stamps.pop()
+
+
 def _matching_stack_entries(
     members: tuple[str, ...],
     entries: Mapping[str, Any],
@@ -71,12 +99,15 @@ def _matching_stack_entries(
     identity_keys = ("kernel_id", "patch_path", "target_file")
     if validation is not None:
         stack_id = validation.get("kernel_id")
-        started = validation.get("stack_validation_started_at")
-        if not isinstance(stack_id, str) or not stack_id or not isinstance(started, str) or not started:
+        if not isinstance(stack_id, str) or not stack_id:
             raise ValueError("stack members lack matching validation evidence")
-        identities = validation.get("stack_member_identities")
-        if not isinstance(identities, list):
-            raise ValueError("stack recovery lacks independent member identities")
+        started = _stack_validation_stamp(validation, entries, stack_id)
+        # A checkpoint predating the identity list still names its members
+        # explicitly and carries the stamp on every row. Binding on that pair
+        # is weaker, so the duplicate-entry check below is what refuses to
+        # guess when it does not single a member's row out.
+        recorded_identities = validation.get("stack_member_identities")
+        identities = recorded_identities if isinstance(recorded_identities, list) else None
     expected = None
     if identities is not None:
         if (
@@ -380,11 +411,15 @@ class KernelStackPhase(CoordinatorCollaborator):
         partial_applies = self.shared_state.pending_stack_validation_apply_results
         if not isinstance(partial_applies, list) or len(partial_applies) > len(stack):
             raise ValueError("stack apply checkpoints do not match its members")
+        started = pending.get("stack_validation_started_at")
+        # An apply row from a checkpoint predating the stamp carries none
+        # either, and the identity triple is what binds those to their member.
+        stamped = isinstance(started, str) and bool(started)
         for entry, applied in zip(stack, partial_applies):
             if (
                 not isinstance(applied, dict)
                 or any(applied.get(key) != entry[key] for key in ("kernel_id", "patch_path", "target_file"))
-                or applied.get("stack_validation_started_at") != pending["stack_validation_started_at"]
+                or (stamped and applied.get("stack_validation_started_at") != started)
                 or not isinstance(applied.get("manifest_path"), str)
                 or not applied["manifest_path"]
             ):
