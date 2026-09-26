@@ -175,6 +175,73 @@ def test_the_lift_carries_the_backend_onto_the_row(session_dir):
         assert row["kernel_id"] == "k-1"
 
 
+@pytest.mark.parametrize(
+    "accepted_config,operation_kind",
+    [
+        ({"flags": "--attention-backend aiter"}, "backend"),
+        ({"flags": "--max-num-batched-tokens 4096"}, "param"),
+        ({"env_map": {"VLLM_ROCM_USE_AITER": "1"}}, "env"),
+    ],
+)
+@pytest.mark.parametrize("overlay_loaded", [None, False])
+def test_geak_config_promotion_records_engine_without_kernel_credit(
+    session_dir, accepted_config, operation_kind, overlay_loaded
+):
+    with session_scope(session_dir):
+        coord = _coord(session_dir)
+        result = {
+            "status": "ok",
+            "accepted_config": accepted_config,
+            "accepted_kernels": ["unloaded_candidate"] if overlay_loaded is False else [],
+        }
+
+        assert coord._promote_geak_from_candidate(result, measured_tput=1100.0, overlay_loaded=overlay_loaded)
+
+        entry = coord.shared_state.optimization_stack[0]
+        assert entry["backend"] == "geak"
+        assert entry["lever_kind"] == "config"
+        assert entry["operation_kind"] == operation_kind
+        assert not entry.get("accepted_kernels")
+        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        row = ext["adoptions"]["rows"][0]
+        assert row["source"] == stack_event.SOURCE_KERNEL
+        assert row["backend"] == "geak"
+        assert row["lever_kind"] == "config"
+        assert row["operation_kind"] == operation_kind
+        assert row["accepted_kernels"] == []
+        assert row["kernel_id"] is None
+        assert row["contribution_pct"] == pytest.approx(10.0)
+        engines = ext["adoptions"]["by_source"][stack_event.SOURCE_KERNEL]["by_backend"]
+        assert engines["geak"] == {"count": 1, "total_gain_pct": 10.0, "unmeasured": 0}
+        assert engines[stack_event.SOURCE_UNATTRIBUTED]["count"] == 0
+
+
+def test_geak_proven_kernel_promotion_retains_kernel_identity_and_engine(session_dir):
+    with session_scope(session_dir):
+        coord = _coord(session_dir)
+        result = {"status": "ok", "accepted_kernels": ["loaded_candidate"]}
+
+        assert coord._promote_geak_from_candidate(result, measured_tput=1100.0, overlay_loaded=True)
+
+        row = _rows()[0]
+        assert row["backend"] == "geak"
+        assert row["lever_kind"] == "kernel"
+        assert row["accepted_kernels"] == ["loaded_candidate"]
+
+
+@pytest.mark.parametrize("measured", [1000.0, 950.0])
+def test_refused_geak_config_promotion_records_no_adoption(session_dir, measured):
+    with session_scope(session_dir):
+        coord = _coord(session_dir)
+        result = {"status": "ok", "accepted_config": {"flags": "--attention-backend aiter"}}
+
+        assert not coord._promote_geak_from_candidate(result, measured_tput=measured)
+
+        assert coord.shared_state.optimization_stack == []
+        assert _rows() == []
+        assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
+
+
 def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
