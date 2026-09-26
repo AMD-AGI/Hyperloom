@@ -1013,17 +1013,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC values (see
-    # orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep.",
+        "On by default, off under AgentX (each rung is a 3600s window); "
+        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",

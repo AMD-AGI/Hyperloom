@@ -25,9 +25,9 @@ def test_shared_state_default_enables_conc_sweep():
     )
 
 
-def test_cli_default_enables_conc_sweep():
-    ns = _parse()
-    assert ns.enable_conc_sweep is True
+def test_cli_omitted_conc_sweep_defers_to_the_benchmark_mode():
+    assert _parse().enable_conc_sweep is None
+    assert _parse("--enable-conc-sweep").enable_conc_sweep is True
 
 
 def test_cli_no_enable_conc_sweep_disables():
@@ -126,3 +126,42 @@ class TestTheLadderFallsBackToTheWorkload:
 
     def test_an_all_garbage_ladder_falls_back_to_the_workload(self):
         assert self._parse("x,y", "agentx") == _EXPECTED_AGENTX_CONCS
+
+
+class TestTheSweepSwitchFallsBackToTheWorkload:
+    """An omitted ``--enable-conc-sweep`` is off under AgentX, where each rung is a 3600s window."""
+
+    @pytest.fixture(autouse=True)
+    def _no_io(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hyperloom.inference_optimizer.cli import bootstrap as cb
+        from hyperloom.orchestrator.policy import gate as policy
+
+        monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+        monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+        monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+        monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+        monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+
+    def _seeded(self, tmp_path, monkeypatch: pytest.MonkeyPatch, *, agentx: bool, extra: tuple[str, ...] = ()):
+        from hyperloom.inference_optimizer.cli import bootstrap as cb
+
+        if agentx:
+            monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        else:
+            monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        args = _parse("--model", "/models/m", *extra)
+        return cb._seed_shared_state(tmp_path, args, session_id="s")
+
+    def test_synthetic_sweeps_by_default(self, tmp_path, monkeypatch):
+        assert self._seeded(tmp_path, monkeypatch, agentx=False).conc_sweep_enabled is True
+
+    def test_agentx_does_not_sweep_by_default(self, tmp_path, monkeypatch):
+        assert self._seeded(tmp_path, monkeypatch, agentx=True).conc_sweep_enabled is False
+
+    def test_agentx_sweeps_when_asked(self, tmp_path, monkeypatch):
+        state = self._seeded(tmp_path, monkeypatch, agentx=True, extra=("--enable-conc-sweep",))
+        assert state.conc_sweep_enabled is True
+
+    def test_synthetic_skips_when_told(self, tmp_path, monkeypatch):
+        state = self._seeded(tmp_path, monkeypatch, agentx=False, extra=("--no-enable-conc-sweep",))
+        assert state.conc_sweep_enabled is False

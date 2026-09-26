@@ -297,7 +297,9 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
+        conc_sweep_enabled=(
+            not _agentx_enabled() if getattr(args, "enable_conc_sweep", None) is None else bool(args.enable_conc_sweep)
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
