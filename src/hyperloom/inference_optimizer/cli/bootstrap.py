@@ -486,7 +486,7 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
             build_kernel_optimization_summary,
         )
 
-        session_dir = _resolve_session_dir_for_summary(state)
+        session_dir = _session_dir_from_env()
         if session_dir is None:
             return
         summary = build_kernel_optimization_summary(state, session_dir)
@@ -592,8 +592,8 @@ def _resolve_reference_recipe(
     return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
 
 
-def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
+def _session_dir_from_env() -> Path | None:
+    """``$HYPERLOOM_SESSION_DIR`` when it names an existing directory, else ``None``."""
     env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
     if env_sd:
         p = Path(env_sd).expanduser()

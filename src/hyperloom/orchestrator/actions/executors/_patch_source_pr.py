@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from hyperloom.common.url_safety import require_http_url
 
-from ._git import _run_git, _run_git_cp
+from ._git import _run_git
 
 log = logging.getLogger(__name__)
 
@@ -23,16 +23,6 @@ log = logging.getLogger(__name__)
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 #: Cap on a downloaded unified-diff body (bytes). Larger payloads are refused.
 DEFAULT_DIFF_MAX_BYTES: int = 32 * 1024 * 1024
-
-
-def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
-    """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``, sha None on failure."""
-    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-    if cp is None:
-        return None, "git rev-parse spawn failed"
-    if cp.returncode != 0:
-        return None, cp.stderr.strip()
-    return cp.stdout.strip() or None, ""
 
 
 def _pr_number_of(candidate: dict[str, Any]) -> int:

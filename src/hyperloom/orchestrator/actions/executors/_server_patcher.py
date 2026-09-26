@@ -655,28 +655,26 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    filtered_patches: list[Path] = list(patches)
-
     # Sentinel: the kernel_shape_profiler patch creates a new file at ``sglang/srt/utils/kernel_shape_profiler.py`` in
     # both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
     # Also verify the annotation pipeline so a partial apply (main sentinel present but annotations missing) is still
     # detected: scheduler callback -> profiler_manager toggle -> io_struct request fields -> step-span aggregates.
-    written = _patch_target_paths(filtered_patches)
+    written = _patch_target_paths(patches)
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = tuple(
         (sglang_pkg.joinpath(*parts), markers)
         for parts, markers in _SGLANG_ANNOTATION_SENTINELS
         if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
-        p.name for p in filtered_patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+        p.name for p in patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
     )
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
-        patches=tuple(filtered_patches),
+        patches=patches,
         sentinel_file=sentinel,
         # Sentinel file alone is insufficient; extra_sentinels require the annotation pipeline.
         sentinel_text=("kernel_shape_profiler",),

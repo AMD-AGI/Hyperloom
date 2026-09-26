@@ -785,7 +785,7 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    reloop, ev = ps.should_reloop_to_explore(
+    reloop, ev = ps.should_open_macro_cycle(
         st,
         now_unix=start_unix + 7200 - remaining_sec,
         min_remaining_sec=7200,

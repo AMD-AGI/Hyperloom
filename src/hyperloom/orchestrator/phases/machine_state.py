@@ -323,7 +323,7 @@ def _cycle_reloop_min_remaining_sec(
     return effective
 
 
-def should_reloop_to_explore(
+def should_open_macro_cycle(
     state: Any,
     *,
     now_unix: float | None = None,
@@ -823,7 +823,7 @@ def phase_status_summary(
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        reloop, evidence = should_reloop_to_explore(state, now_unix=now_unix)
+        reloop, evidence = should_open_macro_cycle(state, now_unix=now_unix)
         feasible = reloop and state.framework_agent_phase_enabled
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
@@ -1813,11 +1813,10 @@ def compute_next_phase(
                 return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: open a new macro-cycle while budget remains and the run hasn't globally converged (R7); wind down to
             # CLOSE only when reloop is blocked (budget, convergence, or max_cycles).
-            reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
+            reloop, reloop_ev = should_open_macro_cycle(state, now_unix=now_unix)
             if reloop and optimize_enabled:
-                reloop_target = PHASE_FRAMEWORK_AGENT
                 return (
-                    reloop_target,
+                    PHASE_FRAMEWORK_AGENT,
                     "cycle_reloop",
                     {
                         **exit_evidence,
@@ -2161,7 +2160,7 @@ __all__ = [
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",
-    "should_reloop_to_explore",
+    "should_open_macro_cycle",
     "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
