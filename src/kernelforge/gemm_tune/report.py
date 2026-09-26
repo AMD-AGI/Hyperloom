@@ -112,9 +112,10 @@ def build_report(
     has_candidate = False
 
     for r in results:
-        # An explicitly forced candidate (r.candidate) is promoted regardless of micro status: split-K tuning yields a
-        # valid deployable artifact whose benefit is e2e-only, so the tuner reports status="no_improvement" /
-        # best_micro==1.0 yet the CSV delivers several % e2e.
+        # An explicitly forced candidate (r.candidate) is promoted regardless of micro status: the aiter dense tuner's
+        # split-K cap yields a valid deployable artifact whose benefit is e2e-only, so it reports
+        # status="no_improvement" with a best_micro of at most 1.0 -- null when no shape had a baseline -- yet the CSV
+        # delivers several % e2e.
         if is_candidate(r):
             has_candidate = True
             if r.env_var and r.env_value:

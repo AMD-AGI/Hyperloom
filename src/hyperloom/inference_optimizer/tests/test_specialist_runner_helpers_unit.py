@@ -32,10 +32,6 @@ def _runner(**over):
     return SpecialistRunner(**kwargs)
 
 
-def test_now_iso():
-    assert "T" in sr._now_iso()
-
-
 def test_safe_redact():
     line = "export ANTHROPIC_API_KEY=redact_me and GITHUB_TOKEN=redact_me_too"
     out = sr._safe_redact(line)

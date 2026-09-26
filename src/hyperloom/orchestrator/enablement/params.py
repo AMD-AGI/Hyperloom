@@ -44,14 +44,14 @@ def _maybe_build_runtime_candidate(
 
         if is_multi_node():
             return None
-        from ..framework.adapters import get_adapter
+        from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
         action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
         if action is None:
             return None
         return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+    except Exception:
         log.debug("enablement: runtime-candidate construction failed", exc_info=True)
         return None
 
@@ -78,7 +78,6 @@ def _maybe_build_localization_candidate(
     capability_gap: Any,
     *,
     framework: str,
-    model: str,
     repo_url: str,
     candidate_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
@@ -98,16 +97,14 @@ def _maybe_build_localization_candidate(
 
         if is_multi_node():
             return None
-        from ..framework.adapters import get_adapter
+        from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
-        action = adapter.build_localization_action(
-            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
-        )
+        action = adapter.build_localization_action(capability_gap, candidate_ref=ref, repo_url=repo_url)
         if action is None:
             return None
         return action.to_state()
-    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+    except Exception:
         log.debug("enablement: localization-candidate construction failed", exc_info=True)
         return None
 
@@ -146,8 +143,8 @@ class EnablementParams(CoordinatorCollaborator):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from hyperloom.agents.framework.enablement import EnablementRequest
-        from hyperloom.agents.framework.enablement_ops import build_search_plan
+        from hyperloom.common.failure_signature import EnablementRequest
+        from .mandate import build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -274,7 +271,7 @@ class EnablementParams(CoordinatorCollaborator):
             )
             notes = (span_note + "\n\n" + notes).strip() if notes else span_note
         gap_cid = f"gap.enablement.{signature.kind}"
-        from hyperloom.agents.framework.enablement import CapabilityGap
+        from hyperloom.common.failure_signature import CapabilityGap
 
         capability_gap = CapabilityGap.from_signature(signature)
 
@@ -291,7 +288,6 @@ class EnablementParams(CoordinatorCollaborator):
         localization_candidate = _maybe_build_localization_candidate(
             capability_gap,
             framework=framework,
-            model=model,
             repo_url=repo_url,
             candidate_refs=tuple(candidate_refs),
         )
@@ -386,7 +382,7 @@ class EnablementParams(CoordinatorCollaborator):
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
         from ..actions.executors._apply_feedback import source_context_for_file
-        from ..framework.paths import resolve_kernel_search_roots
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
         search_roots = [Path(str(r)) for r in resolve_kernel_search_roots()]
         return source_context_for_file(
@@ -515,7 +511,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:  # noqa: BLE001 — auto-facts are best-effort grounding
+        except Exception:
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
@@ -550,7 +546,7 @@ class EnablementParams(CoordinatorCollaborator):
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from hyperloom.agents.framework.enablement_ops import score_enablement_title
+        from .mandate import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
         from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
@@ -593,7 +589,7 @@ class EnablementParams(CoordinatorCollaborator):
                     }
                 )
                 collected.extend(enumerate_candidates(explore_req))
-            except Exception:  # noqa: BLE001 — discovery is best-effort
+            except Exception:
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,

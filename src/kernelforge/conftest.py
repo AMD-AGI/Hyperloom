@@ -165,10 +165,7 @@ def kb_store_run_config(tmp_path: Path, token: str) -> "object":
     guardrails above are installed.
     """
     from kernelforge.config import Config
-    from kernelforge.knowledge.experience_store import (
-        REMOTE_BACKEND_KB_STORE,
-        KnowledgeConfig,
-    )
+    from kernelforge.knowledge.experience_store import KnowledgeConfig
 
     knowledge = KnowledgeConfig.from_env(
         {},
@@ -176,7 +173,6 @@ def kb_store_run_config(tmp_path: Path, token: str) -> "object":
         local_root=tmp_path / "remote-knowledge",
         kb_store_url="http://in-memory",
         kb_store_token=token,
-        remote_backend=REMOTE_BACKEND_KB_STORE,
     )
     return Config.from_env(
         workspace=str(tmp_path),

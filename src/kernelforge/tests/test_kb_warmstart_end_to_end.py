@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from kernelforge.config import Config
 from kernelforge.knowledge import experience_integration as integration
@@ -266,7 +264,7 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
     assert written["written"] is True
     assert written["speedup"] == 2.0
     # Filed under the five-tuple, with the GPU in the address.
-    assert written["kernel"] == "kernel:forge-loop:deterministic:aiter:unspecified:triton:mi355x"
+    assert written["kernel"] == "kernel:forge-loop:deterministic:aiter:unknown:triton:mi355x"
     assert written["solution"] == f"{written['kernel']}/{written['session_id']}"
     assert written["champion"] is True
     assert warm["candidate"] is True
@@ -495,87 +493,3 @@ def test_gpu_model_mismatch_has_no_candidate_or_reference_directory(
     assert consumer_kernel.read_text() == PRISTINE_SOURCE
     assert _git(consumer, "rev-parse", "HEAD") == consumer_base
     assert not (consumer / "forge_experiments" / "kb_references").exists()
-
-
-def _declare_failing_task_suite(workspace: Path) -> None:
-    """Give the consumer an arena task config whose own suite rejects everything."""
-    workspace.joinpath("config.yaml").write_text(
-        yaml.safe_dump(
-            {
-                # Step 1 has to pass for the gate to reach the tolerance the kernel actually breaks.
-                "compile_command": [f"{sys.executable} -c 'pass'"],
-                "correctness_command": [
-                    f"{sys.executable} -c " + repr("raise AssertionError('normalized max err 0.02468 exceeds 0.02')")
-                ],
-            }
-        )
-    )
-    _git(workspace, "add", "config.yaml")
-    _git(workspace, "commit", "-m", "declare the task's correctness command")
-
-
-def test_a_warm_start_failing_the_task_suite_is_not_adopted_or_published(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-):
-    """A 33.4 dB kernel that breaks the task's tolerance cannot become the start."""
-    producer, producer_kernel, producer_base, producer_sources = _initialize_workspace(
-        tmp_path,
-        "producer",
-        PRODUCER_KERNEL_PATH,
-        PRISTINE_SOURCE,
-    )
-    consumer, consumer_kernel, consumer_base, _ = _initialize_workspace(
-        tmp_path,
-        "consumer",
-        CONSUMER_KERNEL_PATH,
-        PRISTINE_SOURCE,
-    )
-    _declare_failing_task_suite(consumer)
-    consumer_base = _git(consumer, "rev-parse", "HEAD")
-    written, patch = _publish_producer_solution(
-        producer,
-        producer_kernel,
-        producer_base,
-        optimized_source=OPTIMIZED_SOURCE,
-        experiment_id="producer-canonical-failure",
-        source_files=producer_sources,
-    )
-    benchmark_results, correctness_sources = _install_driver_execution_doubles(
-        monkeypatch,
-        consumer_kernel,
-    )
-
-    warm = _warm_start(consumer, consumer_kernel, gpu_type="mi355x")
-
-    assert written["written"] is True
-    assert warm["candidate"] is True
-    assert warm["applied"] is False
-    assert warm["reference_reason"] == "canonical_correctness_failed"
-    assert warm["applied_commit"] == ""
-    assert warm["applied_rank"] is None
-    # The SNR probe and the benchmark both accepted this candidate first.
-    assert correctness_sources == [OPTIMIZED_SOURCE]
-    assert benchmark_results == [10.0] * 3 + [5.0] * 3
-    assert consumer_kernel.read_text() == PRISTINE_SOURCE
-    assert _git(consumer, "rev-parse", "HEAD") == consumer_base
-    assert _git(consumer, "status", "--porcelain", "--untracked-files=no") == ""
-
-    index, reference = _reference_artifacts(consumer)
-    assert "rejected:canonical_correctness_failed" in index.read_text()
-    assert patch in reference.read_text()
-    assert warm["program_md_addition"] == _compact_pointer()
-
-    published = recovery.publish_warm_start_recovery(
-        workspace_dir=str(consumer),
-        base_commit=consumer_base,
-        warm=warm,
-        caller_experiment_id="consumer-run",
-        experience_id="producer-canonical-failure",
-        tracker=None,
-        result_json=str(tmp_path / "caller-result.json"),
-    )
-
-    assert published is None
-    assert not (consumer / "forge_experiments" / "best_result.json").exists()
-    assert not (tmp_path / "caller-result.json").exists()

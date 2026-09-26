@@ -291,7 +291,7 @@ def run_controller(
 
     try:
         handoff = read_handoff(handoff_path)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - translated into a controller failure
         _raise_controller_failure(
             layout,
             running,
@@ -328,7 +328,7 @@ def run_controller(
         )
         recovered = list(recover_all_task_results(layout))
         patch_count = len(published_operator_dirs(layout))
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - translated into a controller failure
         _raise_controller_failure(
             layout,
             running,

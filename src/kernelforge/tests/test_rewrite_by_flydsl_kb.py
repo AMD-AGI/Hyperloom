@@ -12,11 +12,20 @@ import pytest
 
 from kernelforge.config import Config
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
     KnowledgeStoreMode,
 )
-from kernelforge.rewrite_by_flydsl import driver_contract, kb, record_store
+from kernelforge.knowledge.kernel_identity import (
+    KernelRecipeIdentity,
+    kernel_recipe_canonical_id,
+)
+from kernelforge.rewrite_by_flydsl import (
+    driver_contract,
+    identity as rewrite_identity,
+    kb,
+    record_store,
+)
+from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 from kernelforge.rewrite_by_flydsl.identity import (
     framework_version,
     segment,
@@ -47,6 +56,46 @@ class InMemoryKBStore:
         if not sessions and canonical_id not in self.champions:
             return None
         return {"sessions": sessions, "champion": self.champions.get(canonical_id, {})}
+
+    def search_identities(
+        self,
+        *,
+        scheme,
+        match=None,
+        offset=0,
+        limit=50,
+    ):
+        names = (
+            "producer",
+            "kernel_name",
+            "framework",
+            "framework_version",
+            "backend",
+            "gpu",
+        )
+        found = []
+        for canonical_id, _session_id in self.order:
+            parts = canonical_id.split(":")
+            if len(parts) != 7 or parts[0] != scheme:
+                continue
+            dimensions = dict(zip(names, parts[1:]))
+            if any(dimensions.get(key) != value for key, value in (match or {}).items()):
+                continue
+            if canonical_id not in {item["canonical_id"] for item in found}:
+                found.append(
+                    {
+                        "canonical_id": canonical_id,
+                        "dimensions": dimensions,
+                        "updated_at": f"{len(found):04d}",
+                    }
+                )
+        page = found[offset : offset + limit]
+        next_offset = offset + len(page)
+        return {
+            "items": page,
+            "total": len(found),
+            "next_offset": next_offset if next_offset < len(found) else None,
+        }
 
     def get_top_sessions(
         self,
@@ -174,7 +223,6 @@ def _remote_config(tmp_path):
         local_root=tmp_path / "knowledge",
         kb_store_url="http://in-memory",
         kb_store_token="token",
-        remote_backend=REMOTE_BACKEND_KB_STORE,
     )
     return Config.from_env(
         workspace=str(tmp_path),
@@ -229,6 +277,86 @@ def _use_in_memory_kb_store(monkeypatch):
     store = InMemoryKBStore()
     monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
     return store
+
+
+def test_rewrite_warmstart_uses_fuzzy_identity_after_exact_miss(
+    tmp_path,
+    monkeypatch,
+):
+    _use_in_memory_kb_store(monkeypatch)
+    spec, _driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    donor = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="1.0.0",
+        backend="flydsl",
+        gpu="mi300x",
+    )
+    KernelRecipeKB.open_identity(donor, config).write_candidate(
+        {"flydsl_kernel": "kernel.py"},
+        files={"kernel.py": spec.flydsl_kernel},
+        speedup=2.0,
+    )
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "2.0.0",
+    )
+
+    plan = kb._read_top_candidates(
+        spec,
+        config,
+        framework="vllm",
+        top_k=3,
+    )
+
+    assert plan.read_reason == "hit"
+    assert [candidate["canonical_id"] for candidate in plan.candidates] == [kernel_recipe_canonical_id(donor)]
+
+
+def test_rewrite_warmstart_keeps_exact_identity_ahead_of_fuzzy_donor(
+    tmp_path,
+    monkeypatch,
+):
+    _use_in_memory_kb_store(monkeypatch)
+    spec, _driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    exact_identity = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version=VLLM_VERSION,
+        backend="flydsl",
+        gpu="mi355x",
+    )
+    fuzzy_identity = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="99.0.0",
+        backend="flydsl",
+        gpu="mi300x",
+    )
+    for identity, tag, speedup in (
+        (exact_identity, "exact", 1.1),
+        (fuzzy_identity, "fuzzy", 9.0),
+    ):
+        KernelRecipeKB.open_identity(identity, config).write_candidate(
+            {"flydsl_kernel": "kernel.py", "tag": tag},
+            files={"kernel.py": spec.flydsl_kernel},
+            speedup=speedup,
+        )
+
+    plan = kb._read_top_candidates(
+        spec,
+        config,
+        framework="vllm",
+        top_k=3,
+    )
+
+    assert [candidate["attrs"]["tag"] for candidate in plan.candidates] == ["exact"]
 
 
 # --------------------------------------------------------------------------- # identity
@@ -302,7 +430,6 @@ def test_the_same_port_on_another_gpu_is_a_different_identity(tmp_path, monkeypa
         local_root=tmp_path / "knowledge",
         kb_store_url="http://in-memory",
         kb_store_token="token",
-        remote_backend=REMOTE_BACKEND_KB_STORE,
     )
     other_gpu = Config.from_env(
         workspace=str(tmp_path),
@@ -1113,8 +1240,8 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     knowledge, config = _local_config(
         tmp_path,
         spec,
-        gbrain_base_url="https://ambient.invalid",
-        gbrain_token="ambient-secret",
+        kb_store_url="https://ambient.invalid",
+        kb_store_token="ambient-secret",
     )
 
     written = kb.write_flydsl_kb_solution(
@@ -1129,8 +1256,8 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     )
 
     assert written["written"] is True
-    assert config.gbrain_url == ""
-    assert config.gbrain_token == ""
+    assert knowledge.kb_store_url == ""
+    assert knowledge.kb_store_token == ""
     session_dir = knowledge.rewrite_root / Path(*SOFTMAX_IDENTITY.split(":")) / "sessions" / written["session_id"]
     document = json.loads((session_dir / "knowledge.json").read_text())
     assert document["value"]["flydsl_kernel"] == "kernel.py"
@@ -1157,8 +1284,6 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
     monkeypatch.delenv("KNOWLEDGE_STORE_MODE", raising=False)
     monkeypatch.delenv("KNOWLEDGE_LOCAL_ROOT", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user-data"))
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://ambient.invalid")
-    monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
     monkeypatch.setenv("KB_STORE_URL", "https://ambient-kb.invalid")
     monkeypatch.setenv("KB_STORE_TOKEN", "ambient-kb-secret")
 
@@ -1187,7 +1312,6 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
     assert written["written"] is True
     assert config.knowledge_config.mode.value == "local"
     assert config.knowledge_config.kb_store_url == ""
-    assert config.gbrain_url == ""
 
 
 # --------------------------------------------------------------------------- # configuration
@@ -1255,13 +1379,10 @@ def test_missing_gpu_type_skips_rewrite_kb_reads_and_writes(tmp_path, monkeypatc
 
 def test_remote_rewrite_asks_for_the_credentials_it_will_actually_use():
     with pytest.raises(ValueError, match="KB_STORE_URL and KB_STORE_TOKEN"):
-        KnowledgeConfig.from_env(
-            {"KNOWLEDGE_STORE_MODE": "remote", "KNOWLEDGE_LOCAL_ROOT": "/tmp/kf"},
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
+        KnowledgeConfig.from_env({"KNOWLEDGE_STORE_MODE": "remote", "KNOWLEDGE_LOCAL_ROOT": "/tmp/kf"})
 
 
-def test_remote_default_accepts_kb_store_without_gbrain():
+def test_remote_accepts_kb_store_credentials():
     config = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "remote",
@@ -1271,57 +1392,12 @@ def test_remote_default_accepts_kb_store_without_gbrain():
         },
     )
     assert config.kb_store_url == "http://kb"
-    assert config.gbrain_base_url == ""
 
 
 def test_an_unrenderable_segment_falls_back_to_a_readable_address():
     """A dimension that folds away must not silently become an empty address."""
     assert segment("", fallback="unknown") == "unknown"
     assert segment(":::", fallback="unknown") == "unknown"
-
-
-def test_kb_store_alone_activates_the_rewrite_path_without_gbrain():
-    config = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KNOWLEDGE_LOCAL_ROOT": "/tmp/kf",
-            "KB_STORE_URL": "http://kb",
-            "KB_STORE_TOKEN": "tok",
-        },
-        remote_backend=REMOTE_BACKEND_KB_STORE,
-    )
-
-    assert config.kb_store_url == "http://kb"
-    assert config.gbrain_base_url == ""
-
-
-def test_gbrain_alone_leaves_the_rewrite_store_unconfigured():
-    config = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KNOWLEDGE_LOCAL_ROOT": "/tmp/kf",
-            "GBRAIN_BASE_URL": "http://gbrain",
-            "GBRAIN_TOKEN": "tok",
-        }
-    )
-
-    assert config.gbrain_base_url == "http://gbrain"
-    assert config.kb_store_url == ""
-    assert record_store.create_rewrite_record_store(config) is None
-
-
-def test_rewrite_validates_its_kb_store_pair_without_using_gbrain():
-    with pytest.raises(ValueError, match="KB_STORE_TOKEN"):
-        KnowledgeConfig.from_env(
-            {
-                "KNOWLEDGE_STORE_MODE": "remote",
-                "KNOWLEDGE_LOCAL_ROOT": "/tmp/kf",
-                "GBRAIN_BASE_URL": "http://gbrain",
-                "GBRAIN_TOKEN": "tok",
-                "KB_STORE_URL": "http://kb",
-            },
-            remote_backend=REMOTE_BACKEND_KB_STORE,
-        )
 
 
 def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):

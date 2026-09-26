@@ -44,11 +44,14 @@ def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
 
-def test_gateway_detected_via_llm_gateway_key(tl_module, monkeypatch):
-    """LLM_GATEWAY_KEY marks a strict gateway on its own, so the dot-form model id is normalized."""
+def test_unmarked_gateway_host_needs_an_explicit_marker(tl_module, monkeypatch):
+    """A retired credential name no longer stands in for gateway detection."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://internal.example.invalid/api/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-test")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
+
+    monkeypatch.setenv("HYPERLOOM_STRICT_GATEWAY_MARKERS", "internal.example.invalid")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
 

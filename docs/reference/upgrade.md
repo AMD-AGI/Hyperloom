@@ -2,12 +2,12 @@
 myst:
     html_meta:
         "description": "Step-by-step migration guide for upgrading Hyperloom. Covers required and recommended changes from 0.5.x to 0.6.0 and the generic upgrade procedure."
-        "keywords": "Hyperloom, upgrade, migration, version, changelog, 0.6.0, USER_DATA_PATH, GEAK, TraceLens, Ray, AMD GPU, ROCm, session, inference optimizer"
+        "keywords": "Hyperloom, upgrade, migration, version, release notes, 0.6.0, USER_DATA_PATH, GEAK, TraceLens, Ray, AMD GPU, ROCm, session, inference optimizer"
 ---
 # Upgrade Hyperloom version
 
 Per-version migration steps. This page is a companion to
-[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): the changelog answers *what
+[Releases](https://github.com/AMD-AGI/Hyperloom/releases): a release answers *what
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
@@ -250,7 +250,7 @@ only automatic storage move.
 
 Use these resources for related reference information:
 
-* [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): Full per-release notes.
+* [Releases](https://github.com/AMD-AGI/Hyperloom/releases): Full per-release notes.
 * [Hyperloom authentication and credentials](authentication.md): Credential and path env reference.
 * [Environment variables](environment-variables.md): Every
   environment variable read by the runtime.

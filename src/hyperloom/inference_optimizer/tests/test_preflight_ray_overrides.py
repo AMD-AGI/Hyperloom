@@ -37,6 +37,9 @@ def ray_packages(tmp_path, monkeypatch):
     [
         (None, None, "2.44.1", "8.2.1"),
         ("", "", "2.44.1", "8.2.1"),
+        (None, None, "2.58.0", "8.5.0"),
+        ("", "", "2.58.0", "8.5.0"),
+        (None, "8.6.0", "2.58.0", "8.5.0"),
         ("2.58.0", None, "2.58.0", "8.2.1"),
         ("2.55.1", "8.6.0", "2.55.1", "8.5.0"),
     ],
@@ -58,7 +61,7 @@ def test_configured_installed_ray_avoids_reinstallation(
     result = preflight._ensure_ray(sys.executable, [])
     assert result["status"] == "already_present"
     assert result["version_after"] == installed_ray
-    assert result["spec"] == f"ray[default]=={installed_ray}"
+    assert result["spec"] == f"ray[default]=={ray_override or preflight._RAY_MIN_VERSION}"
 
 
 @pytest.mark.parametrize("ray_version,click_version", [("2.44.1", "8.2.1"), ("2.58.0", "8.5.0")])
@@ -108,3 +111,47 @@ def test_install_and_recheck_share_overrides(monkeypatch, post_install_returncod
         "ray[default]==2.58.0",
         "click<8.6.0",
     ]
+
+
+def test_explicit_ray_pin_does_not_fall_back_to_another_release(monkeypatch):
+    monkeypatch.setenv("RAY_VERSION", "2.58.0")
+    monkeypatch.delenv("RAY_CLI_CLICK_MAX_VERSION", raising=False)
+    calls = []
+
+    def fail_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No matching distribution found")
+
+    monkeypatch.setattr(preflight.subprocess, "run", fail_run)
+    with pytest.raises(RuntimeError, match=r"Ray install failed for ray\[default\]==2.58.0"):
+        preflight._ensure_ray("/runtime/python", [])
+    assert len(calls) == 2
+    assert calls[1][-2:] == ["ray[default]==2.58.0", "click<8.3.0"]
+
+
+def test_click_override_is_preserved_when_default_ray_pin_cannot_resolve(monkeypatch):
+    monkeypatch.delenv("RAY_VERSION", raising=False)
+    monkeypatch.setenv("RAY_CLI_CLICK_MAX_VERSION", "8.6.0")
+    calls = []
+    results = iter([(1, ""), (1, ""), (0, ""), (0, "2.58.0\n")])
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        code, stdout = next(results)
+        return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="unavailable" if code else "")
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+    result = preflight._ensure_ray("/runtime/python", [])
+    assert calls[0] == calls[3]
+    assert calls[0][-2:] == ["", "8.6.0"]
+    assert calls[1][-2:] == ["ray[default]==2.44.1", "click<8.6.0"]
+    assert calls[2][-2:] == ["ray[default]>=2.44.1", "click<8.6.0"]
+    assert result["spec"] == "ray[default]>=2.44.1 click<8.6.0"
+    assert result["version_after"] == "2.58.0"
+
+
+def test_click_only_override_is_checked_for_newer_ray(ray_packages):
+    ray_packages("2.58.0", "8.5.0")
+    result = preflight._ray_smoke(sys.executable, "", "8.3.0")
+    assert result.returncode != 0
+    assert "click version incompatible" in result.stderr

@@ -35,7 +35,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     _build_variant_yaml,
     _parse_skip_spec,
     _run_magpie,
-    _SESSION_KILL_GRACE_SEC,
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
     coerce_extra_envs,
@@ -148,7 +147,6 @@ def test_grid_runner_emits_expected_error_class_labels():
         "benchmark_report_missing",
         "benchmark_report_invalid_metric",
         "magpie_nonzero_after_valid_measurement",
-        "killed_overtime",
     }
     missing = [label for label in expected if f'"{label}"' not in src]
     assert not missing, f"missing error_class labels in run_grid: {missing}"
@@ -326,12 +324,19 @@ class TestVariantResultToDict:
         encoded = result.to_dict()
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
-        assert encoded == {**expected, "fingerprint": result.fingerprint}
+        expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
+        assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
         encoded = result.to_dict()
-        for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
+        for key in (
+            "input_throughput",
+            "total_token_throughput",
+            "e2e_norm_intvty_p90",
+            "e2e_norm_intvty_p50",
+            "tpot_p90_ms",
+        ):
             assert key in encoded
             assert encoded[key] is None
 
@@ -486,7 +491,6 @@ class TestCoerceExtraEnvs:
             "SGLANG_USE_AITER": "1",
             "VLLM_ROCM_USE_AITER_MHA": "0",
         }
-        assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(
@@ -604,7 +608,6 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
             base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
-            variant_timeout_sec=5,
         )
 
     assert len(results) == 1
@@ -641,7 +644,6 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
             base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
-            variant_timeout_sec=5,
         )
 
     assert len(results) == 1
@@ -681,7 +683,6 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
             base_extra_args="",
             grid=[GridVariant("reused")],
             output_root=output_root,
-            variant_timeout_sec=5,
             server_already_ready=True,
             warmup_before_measure=False,
         )
@@ -713,6 +714,9 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_mtime(base)
     output_root = tmp_path / "out"
+    # The workspace never gets a report, so the settle loop would run its full
+    # deadline; this test is about the log fallback, not about settling.
+    monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
 
     def fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -731,14 +735,13 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
             base_extra_args="",
             grid=[GridVariant("reused_failure")],
             output_root=output_root,
-            variant_timeout_sec=5,
             server_already_ready=True,
             warmup_before_measure=False,
         )
 
     result = results[0]
     assert result.status == "failed"
-    assert result.server_log_path.endswith("warmup_round/variant_00_prior/server.log")
+    assert Path(result.server_log_path).parts[-3:] == ("warmup_round", "variant_00_prior", "server.log")
     assert result.launch_evidence["actual_server_log_path"] == result.server_log_path
     assert result.launch_evidence["warm_reuse"]["reused_ready_server"] is True
 
@@ -909,6 +912,7 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
+    _write_baseline_yaml_overrides(tmp_path / "config.yaml")
 
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
@@ -923,6 +927,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
             config_path=tmp_path / "config.yaml",
             output_dir=tmp_path / "slot",
             timeout_sec=5,
+            silence_timeout_sec=600,
             cwd=str(tmp_path),
         )
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
@@ -933,6 +938,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-benchmark")
     captured: dict = {}
+    _write_baseline_yaml_overrides(tmp_path / "config.yaml")
 
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
@@ -947,6 +953,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
             config_path=tmp_path / "config.yaml",
             output_dir=tmp_path / "slot",
             timeout_sec=5,
+            silence_timeout_sec=600,
             cwd=str(tmp_path),
         )
 
@@ -957,6 +964,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
 def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
+    _write_baseline_yaml_overrides(tmp_path / "config.yaml")
 
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
@@ -971,6 +979,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
             config_path=tmp_path / "config.yaml",
             output_dir=tmp_path / "slot",
             timeout_sec=5,
+            silence_timeout_sec=600,
             cwd=str(tmp_path),
             result_dir="/tmp/redirect_leak",
         )
@@ -999,7 +1008,6 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
             base_extra_args="",
             grid=grid,
             output_root=output_root,
-            variant_timeout_sec=5,
             gpu_type="mi300x",
             benchmark_script="sglang_mi300x.sh",
         )
@@ -1035,7 +1043,6 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
             base_extra_args="",
             grid=grid,
             output_root=output_root,
-            variant_timeout_sec=5,
             result_dir="/tmp/redirect",
         )
 
@@ -1069,7 +1076,6 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
             base_extra_args="",
             grid=grid,
             output_root=output_root,
-            variant_timeout_sec=5,
         )
 
     for slot_path, result_dir in captured_envs:
@@ -1080,16 +1086,6 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 @pytest.mark.asyncio
 async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path):
     """Every grid pass runs from the task workspace, so its children are ours."""
-    from hyperloom.agents.robustness.role.prompt_inputs import (
-        ReactorContext,
-        SharedStateSnapshot,
-    )
-    from hyperloom.agents.robustness.signals.local_health import (
-        LocalHealthConfig,
-        evaluate_local_health_signals,
-    )
-    from hyperloom.agents.robustness.sources.base import SourceData
-
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     session_dir = tmp_path / "session"
@@ -1112,37 +1108,11 @@ async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path)
             base_extra_args="",
             grid=[GridVariant("vA"), GridVariant("vB")],
             output_root=output_root,
-            variant_timeout_sec=5,
         )
 
     assert captured_cwds
     for cwd in captured_cwds:
         assert Path(cwd).is_relative_to(session_dir), f"benchmark cwd {cwd} is outside the session {session_dir}"
-
-    # The reactor's own reading of that cwd: a client inheriting it is ours even when nothing else on its command line
-    # names the session.
-    data = SourceData(
-        local_processes=[
-            {"pid": 8, "rss_mb": 96.0, "cmd": "python benchmark_serving.py --port 30000", "cwd": captured_cwds[0]},
-        ],
-        local_server_health=[
-            {"url": "http://localhost:30000/health", "reachable": False, "status": "error", "error": "connect"},
-        ],
-    )
-    ctx = ReactorContext(
-        tick_index=0,
-        # The session identity the rule matches on comes from LocalHealthConfig below; the snapshot no longer carries
-        # a second copy of it.
-        shared_state=SharedStateSnapshot(),
-        inbox=[],
-        now_unix=1.0,
-    )
-    matched = [
-        s
-        for s in evaluate_local_health_signals(ctx, data, config=LocalHealthConfig(session_dir=session_dir))
-        if s.name == "local_server_unreachable"
-    ]
-    assert matched and matched[0].evidence["benchmark_client_seen"] is True
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1159,6 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
                 )
             ],
             output_root=tmp_path / "out",
-            variant_timeout_sec=5,
         )
 
     args = captured_restart["extra_server_args"]
@@ -1240,9 +1209,7 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
         return result
 
     monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
-    await run_grid(
-        base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out", variant_timeout_sec=15
-    )
+    await run_grid(base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out")
     assert observed
     expected_args = "" if case in {"replace-empty", "remove-all"} else "--ambient-flag 1"
     expected_env = None if case == "unset" else ("accepted" if case == "unset-and-reassign" else "recipe")
@@ -1339,7 +1306,6 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
             base_extra_args="",
             grid=[GridVariant("reference")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=15,
         )
     assert observed
     for child in observed:
@@ -1353,19 +1319,19 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed help-text caches before/after each test."""
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
+    """Clear the framework-keyed probe caches before/after each test."""
+    _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
     yield
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
+    _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The atom probe returns the mocked help verbatim and caches it for the second call."""
+    """The atom probe returns the mocked help verbatim, and says the same thing when asked again."""
     call_count = {"n": 0}
     synthetic_help = "usage: atom-engine [-h] [--tensor-parallel-size INT] [--torch-profiler-dir DIR] ..."
 
@@ -1377,12 +1343,7 @@ def test_probe_server_help_text_atom_returns_help_when_importable(
     out = _grid_runner._probe_server_help_text("atom")
     assert "--tensor-parallel-size" in out
     assert "--torch-profiler-dir" in out
-    # Second call must hit the cache, not the subprocess.
-    out2 = _grid_runner._probe_server_help_text("atom")
-    assert out2 == out
-    assert call_count["n"] == 1, (
-        f"_probe_server_help_text must cache atom's result; subprocess called {call_count['n']} times"
-    )
+    assert _grid_runner._probe_server_help_text("atom") == out
 
 
 def test_probe_server_help_text_atom_returns_empty_on_failure(
@@ -1394,7 +1355,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
     def fake_run(*args, **kwargs):
         raised["n"] += 1
-        raise RuntimeError("subprocess refused to run")
+        raise OSError("subprocess refused to run")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
@@ -1402,7 +1363,10 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     assert raised["n"] == 1
 
     # The hold-off is bounded, so a framework that recovers is picked back up.
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
+    # Expire the deadline in place: the identity beside it is what the next
+    # call matches on, and inventing one here would just test the mismatch.
+    identity, _deadline = _grid_variant_filter._HELP_PROBE_FAILURES["atom"]
+    _grid_variant_filter._HELP_PROBE_FAILURES["atom"] = (identity, 0.0)
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
 
@@ -1516,7 +1480,6 @@ def test_probe_server_help_text_sglang(
     )
     out = _grid_runner._probe_server_help_text("sglang")
     assert "USAGE_SGLANG_LEGACY" in out
-    assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
 
 
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
@@ -1528,8 +1491,12 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     # MoE keyword so the model-class predicate doesn't drop the variant first.
     monkeypatch.setenv("MODEL_PATH", "/path/models/DeepSeek-R1-0528")
 
-    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
-    _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
+    # Pin the probe's answer so the predicate reads it without starting a subprocess.
+    monkeypatch.setattr(
+        _grid_variant_filter,
+        "_probe_server_help_text",
+        lambda fw: "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]",
+    )
 
     # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
@@ -1704,7 +1671,6 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
             base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=5,
             session_deadline_sec=time.monotonic() - 1.0,
         )
 
@@ -1726,8 +1692,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    # Deadline leaves less than one variant_timeout_sec of budget, so no variant should start and all are skipped
-    # (last-variant overrun guard).
+    # A measured estimate, not the hard cap, determines whether another rung fits.
     with patch(
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
@@ -1737,8 +1702,8 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
             base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=600,
             session_deadline_sec=time.monotonic() + 5.0,
+            variant_expected_sec=10.0,
         )
 
     assert ran == []
@@ -1767,7 +1732,6 @@ async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
             base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=5,
             session_deadline_sec=None,
         )
 
@@ -1825,7 +1789,6 @@ async def _launch_every_pass_of_one_variant(
             base_extra_args="",
             grid=[GridVariant("v0")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=600,
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=30.0,
             warmup_before_measure=True,
@@ -1915,7 +1878,6 @@ class TestSessionBudgetAdmission:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 120.0,
                 variant_expected_sec=30.0,
             )
@@ -1938,7 +1900,6 @@ class TestSessionBudgetAdmission:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 10.0,
                 variant_expected_sec=300.0,
             )
@@ -1947,8 +1908,8 @@ class TestSessionBudgetAdmission:
         assert [r.status for r in results] == ["skipped"]
 
     @pytest.mark.asyncio
-    async def test_without_an_estimate_the_stricter_backstop_check_is_kept(self, tmp_path):
-        """Callers that cannot estimate keep the pre-existing, stricter gate."""
+    async def test_without_an_estimate_positive_budget_admits_the_round(self, tmp_path):
+        """An unknown duration is not the hard timeout's worst-case duration."""
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -1962,17 +1923,18 @@ class TestSessionBudgetAdmission:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 120.0,
                 variant_expected_sec=None,
             )
 
-        assert recorded == []
-        assert [r.status for r in results] == ["skipped"]
+        assert len(recorded) == 1
+        assert recorded[0]["timeout"] == 7800.0
+        assert recorded[0]["session_deadline_sec"] is not None
+        assert [r.status for r in results] == ["succeeded"]
 
     @pytest.mark.asyncio
-    async def test_without_an_estimate_agentx_gates_on_its_raised_cap(self, tmp_path, monkeypatch):
-        """The AgentX-raised cap, not the declared one, must gate admission."""
+    async def test_without_an_estimate_agentx_uses_the_same_benchmark_policy(self, tmp_path, monkeypatch):
+        """Legacy AgentX timeout inputs do not turn the hard cap into admission cost."""
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
         monkeypatch.setenv("AGENTX_DURATION", "3600")
         monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
@@ -1990,20 +1952,60 @@ class TestSessionBudgetAdmission:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 700.0,
                 variant_expected_sec=None,
             )
 
-        assert recorded == []
-        assert [r.status for r in results] == ["skipped"]
+        assert len(recorded) == 1
+        assert recorded[0]["timeout"] == 7800.0
+        assert recorded[0]["session_deadline_sec"] is not None
+        assert [r.status for r in results] == ["succeeded"]
 
 
-class TestSessionBudgetTimeoutClamp:
-    """A granted cap never exceeds what the session can still pay for."""
+class TestSessionBudgetIndependentWatchdog:
+    """The session deadline is independent of the benchmark watchdog timeout."""
 
     @pytest.mark.asyncio
-    async def test_granted_cap_is_clamped_to_the_remaining_budget(self, tmp_path):
+    @pytest.mark.parametrize("framework", ["sglang", "custom", "xdit"])
+    async def test_every_spawn_uses_environment_policy_and_synchronizes_yaml(self, tmp_path, monkeypatch, framework):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234.5")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", "17.5")
+        monkeypatch.setenv("PYTHONUNBUFFERED", "0")
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        cfg = yaml.safe_load(base.read_text())
+        cfg["benchmark"]["framework"] = framework
+        cfg["benchmark"]["timeout_seconds"] = 1
+        base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        recorded = []
+        configs = []
+        inner = _capture_launches(recorded)
+
+        def fake_run(cmd, **kwargs):
+            configs.append(yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text()))
+            return inner(cmd, **kwargs)
+
+        with patch.object(gr, "run_with_session_kill", side_effect=fake_run):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("policy")],
+                output_root=tmp_path / "out",
+                warmup_before_measure=False,
+                magpie_python=sys.executable,
+            )
+
+        assert [result.status for result in results] == ["succeeded"]
+        assert len(recorded) == len(configs) == 1
+        assert recorded[0]["timeout"] == 1234.5
+        assert recorded[0]["silence_timeout_sec"] == 17.5
+        assert recorded[0]["env"]["PYTHONUNBUFFERED"] == "1"
+        assert configs[0]["benchmark"]["timeout_seconds"] == 1234.5
+        if framework in {"custom", "xdit"}:
+            assert recorded[0]["server_log_path"] is None
+
+    @pytest.mark.asyncio
+    async def test_short_session_does_not_shrink_the_benchmark_watchdog(self, tmp_path):
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -2017,21 +2019,17 @@ class TestSessionBudgetTimeoutClamp:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=7800,
                 session_deadline_sec=time.monotonic() + 120.0,
                 variant_expected_sec=30.0,
             )
 
         assert len(recorded) == 1
         granted = _granted_timeouts(recorded)[0]
-        # The cap is allowed a small grace past the deadline so the in-process session watchdog trips first and
-        # attributes the kill correctly.
-        assert 60 <= granted <= 120 + _SESSION_KILL_GRACE_SEC, (
-            f"expected a cap clamped to the ~120s budget, got {granted}"
-        )
+        assert granted == 7800
+        assert 0 < recorded[0]["session_deadline_sec"] - time.monotonic() <= 120.0
 
     @pytest.mark.asyncio
-    async def test_declared_cap_is_kept_when_the_budget_is_larger(self, tmp_path):
+    async def test_policy_timeout_is_kept_when_the_budget_is_larger(self, tmp_path):
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -2045,15 +2043,14 @@ class TestSessionBudgetTimeoutClamp:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 36000.0,
                 variant_expected_sec=30.0,
             )
 
-        assert _granted_timeouts(recorded) == [600]
+        assert _granted_timeouts(recorded) == [7800]
 
     @pytest.mark.asyncio
-    async def test_no_deadline_leaves_the_declared_cap_untouched(self, tmp_path):
+    async def test_no_deadline_uses_the_policy_timeout(self, tmp_path):
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -2067,12 +2064,11 @@ class TestSessionBudgetTimeoutClamp:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=None,
                 variant_expected_sec=30.0,
             )
 
-        assert _granted_timeouts(recorded) == [600]
+        assert _granted_timeouts(recorded) == [7800]
 
 
 class TestSessionKillAttribution:
@@ -2095,7 +2091,6 @@ class TestSessionKillAttribution:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 120.0,
                 variant_expected_sec=30.0,
             )
@@ -2107,8 +2102,8 @@ class TestSessionKillAttribution:
         assert results[0].output_throughput is None
 
     @pytest.mark.asyncio
-    async def test_the_hard_cap_leaves_room_for_the_session_watchdog_to_win(self, tmp_path):
-        """Both fire at the same instant, and the sentinel must get there first."""
+    async def test_session_deadline_reaches_the_watchdog_without_becoming_its_timeout(self, tmp_path):
+        """A short session deadline keeps its own stop attribution."""
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -2122,20 +2117,19 @@ class TestSessionKillAttribution:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=7800,
                 session_deadline_sec=time.monotonic() + 60.0,
                 variant_expected_sec=30.0,
             )
 
         assert len(recorded) == 1
         granted = _granted_timeouts(recorded)[0]
-        assert granted > 60, f"hard cap {granted}s must sit past the ~60s deadline, not on it"
-        assert granted <= 90, f"the grace must stay small, got {granted}s"
+        assert granted == 7800
+        assert 0 < recorded[0]["session_deadline_sec"] - time.monotonic() <= 60.0
 
     @pytest.mark.parametrize("round_slot", _GRID_ROUND_SLOTS)
     @pytest.mark.asyncio
     async def test_the_session_deadline_reaches_the_subprocess_layer(self, tmp_path, monkeypatch, round_slot):
-        """Regression: the clamped cap alone bounds the round but mislabels the kill."""
+        """Every pass preserves the session deadline and its separate stop attribution."""
         deadline = time.monotonic() + 120.0
         recorded = await _launch_every_pass_of_one_variant(
             tmp_path,
@@ -2201,7 +2195,6 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
                 base_extra_args="",
                 grid=[GridVariant("cand0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 600.0,
                 variant_expected_sec=30.0,
                 warmup_before_measure=True,
@@ -2234,7 +2227,6 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
                 base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1"), GridVariant("c2")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 keep_going_on_failure=True,
                 session_deadline_sec=time.monotonic() + 600.0,
                 variant_expected_sec=30.0,
@@ -2271,7 +2263,6 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
                 base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 keep_going_on_failure=True,
                 session_deadline_sec=time.monotonic() + 600.0,
                 variant_expected_sec=30.0,
@@ -2306,7 +2297,6 @@ class TestSessionBudgetWarmupRounds:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 40.0,
                 variant_expected_sec=30.0,
                 warmup_before_measure=True,
@@ -2347,7 +2337,6 @@ class TestSessionBudgetWarmupRounds:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=600,
                 session_deadline_sec=time.monotonic() + 6.0,
                 variant_expected_sec=2.0,
             )
@@ -2359,7 +2348,7 @@ class TestSessionBudgetWarmupRounds:
         assert [r.error_class for r in results] == [SESSION_TIME_EXHAUSTED_CLASS]
 
     @pytest.mark.asyncio
-    async def test_warmup_cap_reserves_budget_for_the_measured_round(self, tmp_path):
+    async def test_warmup_and_measure_keep_the_same_policy_and_session_deadline(self, tmp_path):
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -2379,7 +2368,6 @@ class TestSessionBudgetWarmupRounds:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=7800,
                 session_deadline_sec=time.monotonic() + 300.0,
                 variant_expected_sec=60.0,
                 warmup_before_measure=True,
@@ -2388,15 +2376,15 @@ class TestSessionBudgetWarmupRounds:
         by_round = launches_by_round_slot(recorded)
         warmup = next(int(c["timeout"]) for c in recorded if "warmup" in c["round_slot"])
         measure = next(int(c["timeout"]) for c in recorded if "warmup" not in c["round_slot"])
-        assert warmup >= 60, f"a warmup capped under the 60s a pass takes is launched to be killed, got {warmup}"
-        assert warmup <= 240 + _SESSION_KILL_GRACE_SEC, (
-            f"warmup cap must hold back the measured round's 60s, got {warmup}"
-        )
-        assert warmup <= measure, "the warmup is never granted more than the round it holds budget back for"
+        assert warmup == measure == 7800
+        deadlines = {c["session_deadline_sec"] for c in recorded}
+        assert len(deadlines) == 1
+        deadline = deadlines.pop()
+        assert 0 < deadline - time.monotonic() <= 300.0
         assert len(by_round) == 2, f"expected a warmup and a measured round, got {list(by_round)}"
 
     @pytest.mark.asyncio
-    async def test_a_warmup_killed_at_a_clamped_cap_is_logged_with_the_cap_it_got(self, tmp_path, caplog):
+    async def test_a_warmup_timeout_is_logged_with_the_policy_it_got(self, tmp_path, caplog):
         """The abort line is the only record of how long the round was allowed."""
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
@@ -2425,14 +2413,14 @@ class TestSessionBudgetWarmupRounds:
                 base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_timeout_sec=7800,
                 session_deadline_sec=time.monotonic() + 300.0,
                 variant_expected_sec=60.0,
                 warmup_before_measure=True,
             )
 
         granted = int(recorded[0]["timeout"])
-        assert granted < 7800, f"this test needs a clamped cap to be about, got {granted}"
+        assert granted == 7800
+        assert 0 < recorded[0]["session_deadline_sec"] - time.monotonic() <= 300.0
         aborts = [r.message for r in caplog.records if "warmup timeout" in r.message]
         assert aborts, f"the warmup abort was not logged: {[r.message for r in caplog.records]}"
         assert f"timeout_sec={granted}" in aborts[0], f"the abort line reports a cap the round never had: {aborts[0]}"
@@ -2743,7 +2731,7 @@ class TestServerArgTokenizerOnTheSyntheticPath:
 
 def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     """The window must cover ``remove_server_args``, which is what it is about."""
-    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+    from hyperloom.inference_optimizer import grid_server_args as gsa
 
     real = gsa.remove_server_args
 

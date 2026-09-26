@@ -13,7 +13,7 @@ import pytest
 # kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
 # in sys.modules.
 from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
-from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
+from hyperloom.inference_optimizer.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 _LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.load_model_meta"

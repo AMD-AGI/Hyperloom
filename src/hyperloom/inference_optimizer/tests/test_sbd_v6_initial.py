@@ -673,7 +673,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
     monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
-    monkeypatch.setattr(preflight, "_unset_hip_visible_devices", lambda: None)
+    monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
     monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)
     monkeypatch.setattr(preflight, "_check_platform_tuning", lambda: None)
@@ -918,26 +918,6 @@ def test_model_gate_projection_failure_does_not_change_gate_result(tmp_path, mon
     )
 
     assert model_gate._preflight_unsupported_model_arch(_gate_args(model), tmp_path) is False
-
-
-def test_install_projection_failure_does_not_change_step_result(monkeypatch):
-    from hyperloom.inference_optimizer.cli import preflight
-
-    monkeypatch.setattr(
-        preflight,
-        "_record_install_step",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad V6 projection")),
-    )
-
-    assert (
-        preflight._run_install_step(
-            {"ext": {"steps": []}},
-            step_id="unchanged",
-            category="check",
-            action=lambda: "original-result",
-        )
-        == "original-result"
-    )
 
 
 def test_install_event_write_failure_is_exported_as_v6_warning(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source  # noqa: E402
+from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 
 
 def _fake_repo(tmp_path: Path) -> Path:

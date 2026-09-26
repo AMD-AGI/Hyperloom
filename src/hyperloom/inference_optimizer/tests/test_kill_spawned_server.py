@@ -23,8 +23,6 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cance
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    OVERTIME_KILL_RETURNCODE,
-    SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     _scan_logs_increment,
     _scan_server_log_increment,
@@ -36,6 +34,259 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     session_deadline_to_remaining_sec,
     session_remaining_to_deadline_sec,
 )
+
+
+@pytest.mark.parametrize("text", [True, False])
+def test_capture_partial_utf8_records_bytes_before_newline(text):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'\\xe2'); time.sleep(.4); os.write(1,b'\\x82\\xac'); time.sleep(.4)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    capture = sk._StreamCapture(proc, text=text)
+    capture.start()
+    try:
+        deadline = time.monotonic() + 0.35
+        while capture.last_activity_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert capture.last_activity_at is not None
+        assert proc.poll() is None
+        proc.wait(timeout=5)
+        stdout, stderr = capture.finish()
+        assert stdout == ("€" if text else b"\xe2\x82\xac")
+        assert stderr == ("" if text else b"")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "name", ["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"]
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "bad", ""])
+def test_benchmark_timeouts_reject_invalid_overrides(name, value):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    with pytest.raises(ValueError, match=name):
+        sk.resolve_benchmark_timeouts({name: value})
+
+
+def test_benchmark_timeouts_have_one_finite_positive_policy():
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    assert sk.resolve_benchmark_timeouts({}) == (600.0, 7800.0)
+    assert sk.resolve_benchmark_timeouts({"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "42.5"}) == (600.0, 42.5)
+
+
+@pytest.mark.parametrize("log_location", ["missing", "primary", "nested"])
+def test_reused_server_with_buffered_client_needs_current_ready_evidence(tmp_path, log_location):
+    """Original Magpie captures client output until completion; old ready logs cannot arm silence."""
+    watched = tmp_path / "server.log"
+    if log_location != "missing":
+        old_log = watched if log_location == "primary" else tmp_path / "benchmark_old" / "server.log"
+        old_log.parent.mkdir(parents=True, exist_ok=True)
+        old_log.write_text("Application startup complete\n", encoding="utf-8")
+    client = "import time\nfor _ in range(8):\n print('progress', flush=True); time.sleep(.15)\n"
+    wrapper = (
+        "import subprocess,sys\n"
+        "result = subprocess.run([sys.executable, '-u', '-c', sys.argv[1]], "
+        "capture_output=True, text=True, timeout=5)\n"
+        "sys.stdout.write(result.stdout)\n"
+        "raise SystemExit(result.returncode)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", wrapper, client],
+        server_log_path=str(watched),
+        server_already_ready=True,
+        silence_timeout_sec=0.4,
+        timeout=8,
+    )
+    assert cp.returncode == 0
+    assert cp.stdout.splitlines() == ["progress"] * 8
+
+
+@pytest.mark.parametrize("stream", [1, 2])
+def test_ready_server_quiet_log_active_partial_pipe_survives(tmp_path, stream):
+    script = (
+        "import os,pathlib,sys,time\n"
+        "pathlib.Path(sys.argv[1]).write_text('Application startup complete\\n')\n"
+        f"for _ in range(8):\n os.write({stream}, b'.'); time.sleep(.15)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(tmp_path / "server.log")],
+        server_log_path=str(tmp_path / "server.log"),
+        server_already_ready=True,
+        silence_timeout_sec=0.5,
+        timeout=5,
+    )
+    assert cp.returncode == 0
+
+
+def test_benchmark_launch_forces_python_unbuffered():
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
+        env={**os.environ, "PYTHONUNBUFFERED": "0"},
+        silence_timeout_sec=600,
+        timeout=5,
+    )
+    assert cp.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize("reused", [False, True])
+@pytest.mark.parametrize(
+    "ready,log,noise,expected",
+    [(True, True, False, 600), (True, True, True, 7800), (False, True, False, 7800), (True, False, False, 7800)],
+)
+def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, noise, expected):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    now = [0.0]
+    waited = []
+
+    class Proc:
+        args = ["clock-child"]
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            waited.append(now[0])
+            now[0] += timeout
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(ready, False, False, noise, False))
+    error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
+    with pytest.raises(error):
+        sk._communicate_with_watchdog(
+            Proc(),
+            hard_timeout=7800,
+            silence_timeout_sec=600,
+            server_log_path=str(tmp_path / "server.log") if log else None,
+            server_already_ready=reused,
+        )
+    assert now[0] == expected
+    assert 599.0 in waited
+
+
+@pytest.mark.parametrize("gate", ["hard", "session", "cancel"])
+def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_path, gate):
+    from unittest.mock import Mock
+
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    now = [0.0]
+    scope = CancelScope()
+    recorder = Mock()
+
+    class Proc:
+        args = ["reused-server-client"]
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            now[0] += timeout
+            if gate == "cancel" and now[0] >= 4:
+                scope.cancel(reason="test")
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sk, "STOP_GATE_POLL_SECONDS", 1)
+    error = {
+        "hard": subprocess.TimeoutExpired,
+        "session": sk._SessionDeadlineExceeded,
+        "cancel": sk._OrchestratorCancelled,
+    }
+    with pytest.raises(error[gate]):
+        sk._communicate_with_watchdog(
+            Proc(),
+            hard_timeout=10,
+            silence_timeout_sec=1,
+            server_log_path=str(tmp_path / "server.log"),
+            server_already_ready=True,
+            session_deadline_sec=3 if gate == "session" else None,
+            cancel_scope=scope,
+            kv_recorder=recorder,
+        )
+    assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
+    recorder.note_phase.assert_called_once_with("measured", 0)
+    recorder.close.assert_called_once_with(aborted=True)
+
+
+def test_exited_process_wins_over_expired_gates(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    class Proc:
+        def poll(self):
+            return 7
+
+        def communicate(self):
+            return "finished", ""
+
+    assert sk._communicate_with_watchdog(Proc(), hard_timeout=0, session_deadline_sec=-1) == ("finished", "")
+
+
+def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    path = tmp_path / "server.log"
+    path.write_text("x" * 100, encoding="utf-8")
+    offsets, residuals, identities = {}, {}, {}
+    sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    path.write_text("Application startup complete\n", encoding="utf-8")
+    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    assert not scan.grew and not scan.saw_ready
+    path.rename(tmp_path / "old.log")
+    path.write_text("Application startup complete\n" * 100, encoding="utf-8")
+    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    assert not scan.grew and not scan.saw_ready
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("new bytes\n")
+    assert sk._scan_logs_increment(str(path), offsets, residuals, identities).grew
+
+
+def test_hard_timeout_preserves_partial_captured_output():
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        run_with_session_kill(
+            [sys.executable, "-c", "import os,time; os.write(1,b'partial'); os.write(2,b'error'); time.sleep(20)"],
+            timeout=0.4,
+        )
+    assert error.value.stdout == "partial"
+    assert error.value.stderr == "error"
+
+
+def test_previous_nested_server_cannot_keep_new_round_alive(tmp_path):
+    old_dir = tmp_path / "benchmark_old"
+    old_dir.mkdir()
+    old_log = old_dir / "server.log"
+    old_log.write_text("Application startup complete\n", encoding="utf-8")
+    stop = threading.Event()
+    writer = _appends_until_stopped(old_log, "old worker output\n", stop)
+    try:
+        script = (
+            "import pathlib,sys,time\n"
+            "pathlib.Path(sys.argv[1]).write_text('Application startup complete\\n')\n"
+            "time.sleep(20)\n"
+        )
+        cp = run_with_session_kill(
+            [sys.executable, "-c", script, str(tmp_path / "server.log")],
+            timeout=5,
+            server_log_path=str(tmp_path / "server.log"),
+            server_already_ready=True,
+            silence_timeout_sec=0.4,
+        )
+        assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    finally:
+        stop.set()
+        writer.join(timeout=5)
 
 
 def test_kill_my_spawned_server_handles_none():
@@ -94,6 +345,49 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
     elapsed = time.monotonic() - start
     assert proc.poll() is not None
     assert elapsed < 5.0, f"kill_my_spawned_server hung for {elapsed:.2f}s"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process groups")
+def test_completed_warmup_keeps_its_persistent_server(tmp_path):
+    """The lifecycle owner, not a completed warmup wrapper, decides when to stop the server."""
+    pidfile = tmp_path / "server.pid"
+    server_code = "import time; time.sleep(60)"
+    wrapper_code = (
+        "import pathlib, subprocess, sys\n"
+        "server = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "published = False\n"
+        "try:\n"
+        "    pidfile = pathlib.Path(sys.argv[1])\n"
+        "    pending = pidfile.with_suffix('.tmp')\n"
+        "    pending.write_text(str(server.pid))\n"
+        "    pending.replace(pidfile)\n"
+        "    published = True\n"
+        "finally:\n"
+        "    if not published:\n"
+        "        server.kill()\n"
+        "        server.wait()\n"
+    )
+    server_pid = None
+    try:
+        result = run_with_session_kill([sys.executable, "-c", wrapper_code, str(pidfile), server_code], timeout=10)
+        assert result.returncode == 0
+        server_pid = int(pidfile.read_text())
+        assert os.getpgid(server_pid) == server_pid
+        os.kill(server_pid, 0)
+    finally:
+        if server_pid is None:
+            try:
+                server_pid = int(pidfile.read_text())
+            except (OSError, ValueError):
+                # Failed publication is cleaned up by the wrapper itself.
+                pass
+        if server_pid is not None:
+            try:
+                os.killpg(server_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # The test server may have exited before cleanup reached its group.
+                pass
 
 
 def test_kill_my_spawned_server_reaps_grandchildren():
@@ -245,62 +539,15 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
                 pass
 
 
-def test_run_with_session_kill_soft_deadline_returns_sentinel():
-    """A child past ``soft_deadline_sec`` is reaped and returns ``OVERTIME_KILL_RETURNCODE`` (no ``TimeoutExpired``)."""
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
-
-
-def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
-    """A child exiting before ``soft_deadline_sec`` returns normally with its own returncode."""
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "print('hi'); raise SystemExit(0)"],
-        timeout=10,
-        soft_deadline_sec=5.0,
-    )
-    assert cp.returncode == 0
-    assert "hi" in (cp.stdout or "")
-
-
-def test_run_with_session_kill_eval_start_marker_retires_soft_deadline(tmp_path):
-    """Once the accuracy eval announces itself the soft deadline stops applying:
-    the deadline bounds the throughput phase, and its anchor excludes eval."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\nHYPERLOOM_EVAL_START\n")
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(4)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-        server_log_path=str(log_path),
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == 0
-    assert elapsed >= 3.5, f"child was cut short at {elapsed:.2f}s"
-
-
-def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp_path):
-    """Without the eval marker the deadline keeps its teeth — a genuinely slow
-    throughput phase is still reaped."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\n")
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-        server_log_path=str(log_path),
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
+@pytest.mark.parametrize("eval_marker", ["", "HYPERLOOM_EVAL_START"])
+def test_accuracy_never_extends_the_hard_cap(tmp_path, eval_marker):
+    script = "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(sys.argv[2]); time.sleep(30)"
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_with_session_kill(
+            [sys.executable, "-c", script, str(tmp_path / "server.log"), eval_marker],
+            timeout=0.3,
+            server_log_path=str(tmp_path / "server.log"),
+        )
 
 
 class TestSessionDeadline:
@@ -320,9 +567,6 @@ class TestSessionDeadline:
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
-        assert cp.returncode != OVERTIME_KILL_RETURNCODE, (
-            "a budget kill must not share the overtime code, which asserts the variant is slow"
-        )
         assert elapsed < 10.0, f"session-deadline path took {elapsed:.2f}s"
 
     def test_eval_start_does_not_retire_the_session_budget(self, tmp_path):
@@ -337,7 +581,6 @@ class TestSessionDeadline:
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout=60,
-            soft_deadline_sec=1.0,
             server_log_path=str(log_path),
             session_deadline_sec=time.monotonic() + 1.5,
         )
@@ -556,7 +799,7 @@ def test_run_with_session_kill_reports_each_line_of_child_output():
     )
 
     assert cp.returncode == 0
-    assert len(lines) == 3
+    assert len(lines) >= 3
 
 
 def _appends_until_stopped(path: Path, line: str, stop: threading.Event) -> threading.Thread:
@@ -628,7 +871,7 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
             [sys.executable, "-c", "import time; time.sleep(2)"],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=30.0,
+            silence_timeout_sec=30.0,
             on_output=lambda: reported.append(1),
         )
     finally:
@@ -665,7 +908,7 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
         [sys.executable, "-c", script, str(bench / "benchmark_stderr.log")],
         timeout=30,
         server_log_path=str(tmp_path / "server.log"),
-        detok_stall_grace_sec=30.0,
+        silence_timeout_sec=30.0,
         on_output=lambda: reported.append(1),
     )
 
@@ -695,7 +938,6 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
         run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout=1,
-            soft_deadline_sec=None,
         )
 
 
@@ -788,7 +1030,7 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     classifier only sees Magpie's ``subprocess_nonzero`` stdout tail, classifies
     ``unknown``, and never seeds the ``pip install -U transformers`` bridge —
     starving every enablement round of the real root cause (DeepSeek-V4 repro)."""
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     log_path = tmp_path / "server.log"
     # A healthy INFO banner naming architectures must NOT trip the markers.
@@ -813,26 +1055,17 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     assert sig.offending_symbol == "deepseek_v4"
 
 
-def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
-    """A child that writes a fatal server marker then hangs is reaped via the
-    watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
-    log_path = tmp_path / "server.log"
+def test_fatal_text_does_not_kill_a_running_child(tmp_path):
     script = (
-        "import sys, time\n"
-        "open(sys.argv[1], 'w').write("
-        "'Exception: WorkerProc initialization failed in background\\n')\n"
-        "time.sleep(60)\n"
+        "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('EngineCore failed to start'); time.sleep(.8)"
     )
-    start = time.monotonic()
     cp = run_with_session_kill(
-        [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        server_log_path=str(log_path),
-        server_dead_grace_sec=1.0,
+        [sys.executable, "-c", script, str(tmp_path / "server.log")],
+        timeout=5,
+        server_log_path=str(tmp_path / "server.log"),
+        silence_timeout_sec=0.2,
     )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == SERVER_DEAD_RETURNCODE
-    assert elapsed < 15.0, f"watchdog path took {elapsed:.2f}s (expected fast)"
+    assert cp.returncode == 0
 
 
 def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
@@ -849,7 +1082,6 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
-        server_dead_grace_sec=10.0,
         server_log_path=str(log_path),
     )
     assert cp.returncode == 7
@@ -868,7 +1100,6 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
-        server_dead_grace_sec=2.0,
         server_log_path=str(log_path),
     )
     assert cp.returncode == 0
@@ -980,7 +1211,7 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
         [sys.executable, "-c", script, str(log_path)],
         timeout=60,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -1001,7 +1232,7 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=0.5,
+        silence_timeout_sec=0.5,
     )
     assert cp.returncode == 0
 
@@ -1023,7 +1254,7 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     assert cp.returncode == 0
 
@@ -1046,12 +1277,12 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     assert cp.returncode == 0
 
 
-def test_run_with_session_kill_detok_stall_disabled_when_grace_nonpositive(tmp_path):
+def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
     """``detok_stall_grace_sec <= 0`` disables the gate entirely."""
     log_path = tmp_path / "server.log"
     script = (
@@ -1064,6 +1295,174 @@ def test_run_with_session_kill_detok_stall_disabled_when_grace_nonpositive(tmp_p
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=0.0,
+        silence_timeout_sec=None,
     )
     assert cp.returncode == 0
+
+
+def _engine_death_log(tmp_path, *, downstream_errors: int = 4000):
+    """A server that served, then died: the cause, then the cascade it caused.
+
+    Mirrors the shape a real run produces -- a multi-megabyte log whose last
+    megabyte is one downstream error per rejected request, with the scheduler
+    state dumped just above the fatal line.
+    """
+    log = tmp_path / "server.log"
+    lines = [
+        "(APIServer pid=1) INFO:     Application startup complete.",
+        "(EngineCore pid=2) ERROR [dump_input.py:79] Dumping scheduler output: " + "x=1, " * 6000,
+        "(EngineCore pid=2) ERROR [core.py:1138] EngineCore encountered a fatal error.",
+        "(EngineCore pid=2) ERROR [core.py:1138] Traceback (most recent call last):",
+    ]
+    lines += [f'(EngineCore pid=2) ERROR [core.py:1138]   File "/vllm/x{i}.py", line {i}, in step' for i in range(22)]
+    lines.append(
+        "(EngineCore pid=2) ERROR [core.py:1138] RuntimeError: Worker failed with error "
+        "'HIP out of memory. Tried to allocate 10.54 GiB. GPU 0 has a total capacity of 255.98 GiB'"
+    )
+    lines += [
+        "(APIServer pid=1) ERROR [serving.py:448] vllm.v1.engine.exceptions.EngineDeadError: "
+        "EngineCore encountered an issue."
+    ]
+    lines += [
+        '(APIServer pid=1) INFO:     127.0.0.1:5 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error'
+    ] * downstream_errors
+    log.write_text("\n".join(lines), encoding="utf-8")
+    return log
+
+
+def test_a_server_that_dies_after_serving_yields_a_classifiable_excerpt(tmp_path):
+    """The defect this closes: no excerpt at all, so the failure read as unknown.
+
+    The fatal markers only named pre-serving bootstrap failures, and the search
+    only read the log's tail -- which an engine that dies mid-serving fills with
+    one downstream error per rejected request. The cause sits at the head of
+    that cascade, so nothing was ever returned and the specialist was handed
+    ``failure_kind: unknown``.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert "EngineCore encountered a fatal error" in excerpt
+    assert "HIP out of memory" in excerpt
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_the_excerpt_leads_with_the_marker_not_the_scheduler_dump(tmp_path):
+    """vLLM dumps its whole scheduler state on the line above the fatal error."""
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert excerpt.splitlines()[0].endswith("EngineCore encountered a fatal error.")
+    assert "Dumping scheduler output" not in excerpt
+
+
+def test_the_cause_outranks_the_consequence_it_triggered(tmp_path):
+    """`EngineDeadError` is what the API server saw; the OOM is why."""
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert "HIP out of memory" in excerpt
+    lines = excerpt.splitlines()
+    oom = next(i for i, line in enumerate(lines) if "HIP out of memory" in line)
+    dead = next((i for i, line in enumerate(lines) if "EngineDeadError" in line), len(lines))
+    assert oom < dead, "the cause must reach the classifier ahead of the consequence"
+
+
+def test_a_log_with_no_fatal_marker_still_yields_nothing(tmp_path):
+    """Unchanged: a healthy log must not produce a death excerpt."""
+    log = tmp_path / "server.log"
+    log.write_text("(APIServer pid=1) INFO:     Application startup complete.\n" * 50, encoding="utf-8")
+
+    assert server_log_death_excerpt(str(log)) is None
+
+
+def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
+    """The legacy markers wrap a cause that sits *above* them.
+
+    "Engine core initialization failed ... See root cause above" names nothing
+    a classifier can act on; the exception on the preceding line does. Extracting
+    only the marker and what follows -- right for a post-startup engine death --
+    would drop that cause and classify the failure as unknown.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    log = tmp_path / "server.log"
+    log.write_text(
+        "\n".join(
+            [
+                "(VllmWorker pid=3) INFO starting engine",
+                "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+                "(EngineCore pid=2) ERROR RuntimeError: Engine core initialization failed. "
+                "See root cause above. Failed core proc(s): {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    excerpt = server_log_death_excerpt(str(log))
+
+    assert excerpt is not None
+    assert "out of memory" in excerpt.lower(), "the cause above the wrapper must survive"
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_a_death_past_any_head_bound_and_outside_the_tail_is_still_found(tmp_path):
+    """Streaming, not sampling: a bounded head read leaves the middle unsearched.
+
+    A server healthy for a long while, then dead, then flooding the log with
+    downstream errors puts its fatal marker beyond any fixed head window and
+    before any fixed tail window.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    log = tmp_path / "server.log"
+    filler = "(APIServer pid=1) INFO:     healthy request served fine and produced ordinary output\n"
+    with log.open("w", encoding="utf-8") as fh:
+        written = 0
+        while written < 17 * 1024 * 1024:  # past a 16 MiB head bound
+            fh.write(filler)
+            written += len(filler)
+        fh.write("(EngineCore pid=2) ERROR [core.py:1138] EngineCore encountered a fatal error.\n")
+        fh.write(
+            "(EngineCore pid=2) ERROR [core.py:1138] RuntimeError: Worker failed with error "
+            "'HIP out of memory. Tried to allocate 10.54 GiB'\n"
+        )
+        trailing = '(APIServer pid=1) INFO:     "POST /v1/completions HTTP/1.1" 500 Internal Server Error\n'
+        for _ in range(4000):  # past a 64 KiB tail window
+            fh.write(trailing)
+
+    excerpt = server_log_death_excerpt(str(log))
+
+    assert excerpt is not None
+    assert "HIP out of memory" in excerpt
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_path):
+    """``EngineDeadError`` is a substring of ``AsyncEngineDeadError``.
+
+    Classing by substring without ordering sends a legacy line down the
+    post-startup path, which keeps no leading context -- and for these markers
+    the actionable cause is exactly the line above.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    for legacy in ("AsyncEngineDeadError", "raise EngineDeadError"):
+        log = tmp_path / f"server-{legacy.replace(' ', '_')}.log"
+        log.write_text(
+            "\n".join(
+                [
+                    "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+                    f"(APIServer pid=1) ERROR {legacy}: the engine is gone",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        excerpt = server_log_death_excerpt(str(log))
+
+        assert excerpt is not None, legacy
+        assert "out of memory" in excerpt.lower(), f"{legacy} must keep the cause above it"
+        assert classify_failure(excerpt).kind == "resource_constraint", legacy

@@ -8,6 +8,8 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +22,16 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
+def integrated_count(ext: dict) -> int:
+    """How many of the visit's candidates the timeline shows as integrated."""
+    return sum(1 for row in ext["attempts"] if (row.get("e2e") or {}).get("integrated"))
+
+
+def settled_e2e(ext: dict) -> dict:
+    """The e2e block of the candidate GEAK's journey reported on."""
+    return next(row["e2e"] for row in ext["attempts"] if row.get("e2e"))
+
+
 @pytest.fixture
 def promotion(tmp_path, monkeypatch, request):
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -27,13 +39,28 @@ def promotion(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "2")
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
     coord.shared_state = SharedState(
         framework="sglang",
         benchmark_mode="synthetic",
         baseline_tput=100.0,
         baseline_accuracy=0.8,
-        baseline_perf={"total_throughput": 900.0, "e2e_norm_intvty_p90": 100.0},
-        current_best={"action": "explore", "tput": 110.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
+        baseline_perf={
+            "total_throughput": 900.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
+        current_best={
+            "action": "explore",
+            "tput": 110.0,
+            "total_throughput": 1000.0,
+            "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
         model_path="/models/test",
         gpu_type="mi355x",
         isl=1024,
@@ -53,6 +80,9 @@ def promotion(tmp_path, monkeypatch, request):
         "final_overlay": str(overlay),
         "total_throughput": 1500.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
     }
     with session_scope(tmp_path):
@@ -99,15 +129,30 @@ async def test_geak_acceptance_requires_native_retention(
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     result["e2e_norm_intvty_p90"] = claimed_intvty
+    result["e2e_norm_intvty_p50"] = claimed_intvty
+    result["duration_seconds"] = 900.0
+    result["request_error_rate"] = 0.0
     state.geak_result = deepcopy(result)
     coord._record_geak_candidate(result)
     state.resume_pending_revalidation = True
     before_best = deepcopy(state.current_best)
     before_stack = deepcopy(state.optimization_stack)
     before_gain = state.cumulative_gain_validated
-    measurement = {"conc": 64, "output_throughput": 120.0, "accuracy": 0.9, "fingerprint": "candidate"}
+    measurement = {
+        "conc": 64,
+        "output_throughput": 120.0,
+        "accuracy": 0.9,
+        "fingerprint": "candidate",
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     if fresh_intvty is not None:
-        measurement.update(total_throughput=1200.0, input_throughput=1080.0, e2e_norm_intvty_p90=fresh_intvty)
+        measurement.update(
+            total_throughput=1200.0,
+            input_throughput=1080.0,
+            e2e_norm_intvty_p90=fresh_intvty,
+            e2e_norm_intvty_p50=fresh_intvty,
+        )
     sweep_calls = []
 
     async def replay(**kwargs):
@@ -150,12 +195,12 @@ async def test_geak_acceptance_requires_native_retention(
             "graded_comparison_rejected",
             "rebench_did_not_beat_current_best",
         }
-    recorder.finish(verdict="adopted" if accepted else "no_gain", tput_after=state.current_best["tput"])
+    recorder.finish(tput_after=state.current_best["tput"])
     if lane == "2b":
         event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
-        attempts = event["ext"]["geak"]["rebench"]["attempts"]
-        assert len(attempts) == 1
-        assert attempts[0]["decision"] == ("validated" if accepted else "no_promote")
+        rebench = event["ext"]["rebench"]
+        assert len(rebench) == 1
+        assert rebench[0]["decision"] == ("validated" if accepted else "no_promote")
     state.save(coord.session_dir)
     restored = SharedState.load_or_init(coord.session_dir)
     assert restored.current_best == state.current_best
@@ -275,7 +320,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     if journey_missing:
         Path(result["kernel_journey_path"]).unlink()
     if closed:
-        recorder.finish(verdict="pending_rebench", tput_after=110.0)
+        recorder.finish(tput_after=110.0)
 
     async def fresh_replay(**_kwargs):
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
@@ -293,23 +338,23 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert not state.kernel_integrate_attempts
-    recorder.finish(verdict="no_gain", tput_after=110.0)
+    recorder.finish(tput_after=110.0)
     event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
-    assert event["ext"]["outcome"]["adopted"] == []
+    assert event["ext"]["outcome"]["delivered"] == []
     assert event["ext"]["geak"]["rebench"]["final_status"] == "no_promote"
-    assert any(row["decision"] == "no_promote" for row in event["ext"]["geak"]["rebench"]["attempts"])
-    attempt = event["ext"]["geak"]["attempts"]["kernels"][0]
-    assert attempt["e2e"]["decision"] == "REVERT"
-    assert attempt["e2e"]["validated"] is False
-    assert attempt["e2e"]["integrated"] is False
-    assert attempt["e2e"]["e2e_gain_pct"] is None
-    assert event["ext"]["geak"]["attempts"]["counts"]["integrated"] == 0
+    assert any(row["decision"] == "no_promote" for row in event["ext"]["rebench"])
+    e2e = settled_e2e(event["ext"])
+    assert e2e["decision"] == "REVERT"
+    assert e2e["validated"] is False
+    assert e2e["integrated"] is False
+    assert e2e["e2e_gain_pct"] is None
+    assert integrated_count(event["ext"]) == 0
     restored = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK, resumed=True)
     assert restored is not None
     restored.record_geak_attempts(journey)
     refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
-    assert refreshed["ext"]["geak"]["attempts"]["counts"]["integrated"] == 0
-    assert refreshed["ext"]["geak"]["attempts"]["kernels"][0]["e2e"]["decision"] == "REVERT"
+    assert integrated_count(refreshed["ext"]) == 0
+    assert settled_e2e(refreshed["ext"])["decision"] == "REVERT"
 
 
 def test_geak_complete_config_survives_direct_promotion(promotion):
@@ -393,8 +438,8 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     ],
 )
 def test_legacy_readdition_survives_retention_and_rematerialization(promotion, explicit_append, readded, removal):
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
-    from hyperloom.orchestrator.actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
     coord, result, _ = promotion
     state = coord.shared_state

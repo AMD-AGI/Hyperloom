@@ -246,6 +246,8 @@ def test_core_state_fields_contains_v08_new_additions():
         "stop_reason",
         "optimization_stack",
         "current_best",
+        "working_recipe_generation",
+        "validated_recipe_generation",
     }
     missing = must_be_locked - CORE_STATE_FIELDS
     assert not missing, f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"

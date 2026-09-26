@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Configure KernelForge experience storage for durable local files or remote GBrain."
+    "description": "Configure KernelForge experience storage for durable local files or the remote KB Store."
 ---
 
 # Knowledge stores
@@ -20,16 +20,18 @@ authors from scratch and writes only its own output directory.
 |:--|:--|:--|
 | `KNOWLEDGE_STORE_MODE` | `local` | Exactly `local` or `remote`. Other values fail validation. |
 | `KNOWLEDGE_LOCAL_ROOT` | See below | Shared root for local knowledge data. |
-| `GBRAIN_BASE_URL` | none | GBrain base URL; required in `remote` mode. |
-| `GBRAIN_TOKEN` | none | GBrain bearer token; required in `remote` mode. |
+| `KB_STORE_URL` | none | KB Store base URL; required in `remote` mode. |
+| `KB_STORE_TOKEN` | none | KB Store bearer token; required in `remote` mode. |
 
 When `KNOWLEDGE_LOCAL_ROOT` is unset, its default is
 `$USER_DATA_PATH/knowledge` if `USER_DATA_PATH` is present, otherwise
 `~/.cache/hyperloom/knowledge`.
 
-`local` mode never constructs a GBrain client and ignores ambient
-`GBRAIN_BASE_URL` and `GBRAIN_TOKEN` values. In `remote` mode, both GBrain values
+`local` mode never constructs a remote client and ignores ambient
+`KB_STORE_URL` and `KB_STORE_TOKEN` values. In `remote` mode, both KB Store values
 must be non-empty; validation happens before `forge-loop` starts.
+`GBRAIN_BASE_URL` and `GBRAIN_TOKEN` do not configure this store in either mode;
+they belong to the Hyperloom Framework PR client.
 
 ## Local layout
 

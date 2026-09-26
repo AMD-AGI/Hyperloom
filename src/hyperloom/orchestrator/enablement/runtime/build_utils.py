@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Reusable, injectable build utilities for off-loop targeted builds."""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+# Injectable subprocess runner
+
+_RunCallable = Callable[..., Any]
+
+
+@dataclass
+class RunResult:
+    """Outcome of a single subprocess invocation."""
+
+    returncode: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    timed_out: bool = False
+    command: list[str] = field(default_factory=list)
+    cwd: str = ""
+
+
+def run_argv(
+    argv: list[str],
+    *,
+    cwd: str | Path,
+    env: Mapping[str, str] | None = None,
+    timeout_sec: int = 1800,
+    run: _RunCallable = subprocess.run,
+) -> RunResult:
+    """Run *argv* in *cwd* and capture up to 4000 chars of each stream."""
+    try:
+        completed = run(
+            argv,
+            cwd=str(cwd),
+            env=dict(env) if env is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        return RunResult(
+            returncode=int(completed.returncode),
+            stdout_tail=(completed.stdout or "")[-4000:],
+            stderr_tail=(completed.stderr or "")[-4000:],
+            command=list(argv),
+            cwd=str(cwd),
+        )
+    except subprocess.TimeoutExpired:
+        return RunResult(returncode=-1, timed_out=True, command=list(argv), cwd=str(cwd))
+
+
+# ROCm torch constraint file
+
+_TORCH_HIP_PROBE = (
+    "import sys, importlib.metadata; "
+    "import torch; "
+    "hip = getattr(torch.version, 'hip', None); "
+    "sys.exit(0 if hip else 2); "
+)
+_VERSION_PROBE = "import sys, importlib.metadata; pkg=sys.argv[1]; print(importlib.metadata.version(pkg))"
+
+
+class AbiMismatchError(RuntimeError):
+    """Raised when the detected torch is not a ROCm build."""
+
+
+def write_rocm_torch_constraints(
+    python_exe: str,
+    constraint_path: str | Path,
+    *,
+    run: _RunCallable = subprocess.run,
+) -> str:
+    """Write a pip constraint file pinning the installed ROCm torch (and triton)."""
+    # Check ROCm
+    hip_res = run(
+        [python_exe, "-c", _TORCH_HIP_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    rc = int(getattr(hip_res, "returncode", -1))
+    if rc != 0:
+        raise AbiMismatchError(f"installed torch at {python_exe!r} is not a ROCm build (probe rc={rc})")
+    # torch version
+    tv_res = run(
+        [python_exe, "-c", _VERSION_PROBE, "torch"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    torch_ver = (getattr(tv_res, "stdout", "") or "").strip()
+    if not torch_ver:
+        raise RuntimeError(f"could not determine torch version from {python_exe!r}")
+    lines = [f"torch=={torch_ver}"]
+    # triton version (optional)
+    tri_res = run(
+        [python_exe, "-c", _VERSION_PROBE, "triton"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    triton_ver = (getattr(tri_res, "stdout", "") or "").strip()
+    if triton_ver:
+        lines.append(f"triton=={triton_ver}")
+    Path(constraint_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(constraint_path)
+
+
+# ROCm toolchain alignment check
+
+
+def check_rocm_toolchain_alignment(
+    *,
+    env: Mapping[str, str] | None = None,
+    run: _RunCallable = subprocess.run,
+) -> tuple[bool, str]:
+    """Advisory ROCm toolchain probe."""
+    import os
+
+    effective_env = dict(env) if env is not None else dict(os.environ)
+
+    hipcc_res = run(
+        ["which", "hipcc"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=effective_env,
+    )
+    hipcc_path = (getattr(hipcc_res, "stdout", "") or "").strip()
+    if not hipcc_path or getattr(hipcc_res, "returncode", 1) != 0:
+        return True, "hipcc not found; AITER/source builds need a ROCm compiler toolchain (warning only)"
+
+    hipcc_root_res = run(
+        ["sh", "-c", f"cd $(dirname {hipcc_path!r})/.. && pwd"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=effective_env,
+    )
+    hipcc_root = (getattr(hipcc_root_res, "stdout", "") or "").strip()
+
+    rocm_path = effective_env.get("ROCM_PATH", "").strip()
+    if rocm_path and hipcc_root:
+        rocm_real_res = run(
+            ["sh", "-c", f"cd {rocm_path!r} 2>/dev/null && pwd"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=effective_env,
+        )
+        rocm_real = (getattr(rocm_real_res, "stdout", "") or "").strip()
+        if rocm_real and hipcc_root != rocm_real:
+            pass  # warn-only, not fatal
+
+    # hip version from hipcc_root
+    hip_header = Path(hipcc_root) / "include" / "hip" / "hip_runtime_api.h" if hipcc_root else None
+    if hip_header and hip_header.is_file():
+        content = hip_header.read_text(errors="replace")
+        if "hipDeviceAttributePciChipId" not in content:
+            return False, (
+                f"hipcc headers at {hipcc_root} do not look compatible with the installed torch hip version; "
+                "set ROCM_PATH/HIP_PATH/PATH to a ROCm 7.x toolchain before building AITER"
+            )
+    return True, "ok"
+
+
+# Torch ABI probe
+
+_ABI_PROBE = (
+    "import sys, json, importlib.metadata, torch; "
+    "hip=getattr(torch.version,'hip',None); "
+    "print(json.dumps({"
+    "'torch_version': torch.__version__, "
+    "'hip_version': hip or '', "
+    "'python_version': sys.version.split()[0], "
+    "'is_rocm': bool(hip)"
+    "}))"
+)
+
+
+def probe_torch_abi(
+    python_exe: str,
+    *,
+    run: _RunCallable = subprocess.run,
+) -> dict[str, Any]:
+    """Return torch/Python ABI facts from the given interpreter."""
+    import json
+
+    res = run([python_exe, "-c", _ABI_PROBE], capture_output=True, text=True, timeout=30)
+    out = (getattr(res, "stdout", "") or "").strip()
+    if not out or getattr(res, "returncode", 1) != 0:
+        return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
+    try:
+        return json.loads(out)
+    except Exception:  # noqa: BLE001
+        return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
+
+
+# Version-sorted tag list (sort -V -r equivalent for autoselect)
+
+
+def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
+    """Return *tags* in descending version order (newest first)."""
+    import packaging.version  # available via pip; already a transitive dep
+
+    def _key(t: str):
+        try:
+            return (1, packaging.version.Version(t.lstrip("v")))
+        except packaging.version.InvalidVersion:
+            return (0, packaging.version.Version("0"))
+
+    return sorted(tags, key=_key, reverse=True)
+
+
+__all__ = [
+    "AbiMismatchError",
+    "RunResult",
+    "check_rocm_toolchain_alignment",
+    "probe_torch_abi",
+    "run_argv",
+    "sort_tags_desc",
+    "write_rocm_torch_constraints",
+]

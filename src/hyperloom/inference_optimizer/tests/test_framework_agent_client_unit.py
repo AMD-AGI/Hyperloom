@@ -10,15 +10,15 @@ import os
 import subprocess
 import sys
 
-from hyperloom.orchestrator.framework import client as fac
+from hyperloom.agents.framework import repo_map as _repo_map
 
 _FA_MODULE = "hyperloom.agents.framework.runtime.cli"
 
 
 def test_repo_url_for_framework_known_and_unknown() -> None:
-    assert fac.repo_url_for_framework("sglang").endswith("sglang.git")
-    assert fac.repo_url_for_framework("xdit") == "https://github.com/xdit-project/xDiT.git"
-    assert fac.repo_url_for_framework("nope") == ""
+    assert _repo_map.repo_url_for_framework("sglang").endswith("sglang.git")
+    assert _repo_map.repo_url_for_framework("xdit") == "https://github.com/xdit-project/xDiT.git"
+    assert _repo_map.repo_url_for_framework("nope") == ""
 
 
 def test_scriptable_framework_registry_specs() -> None:

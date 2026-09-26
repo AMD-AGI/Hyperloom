@@ -12,7 +12,7 @@ from typing import Any
 
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
@@ -48,16 +48,21 @@ class _StateStub:
         return _ms.append_phase_history_event(self, **kwargs)
 
 
-def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
-    from hyperloom.orchestrator.phases.machine_state import phase_history_event_name
+def _event_name(row: dict[str, Any]) -> str:
+    """Marker name from either a legacy row or a canonical one."""
+    legacy = str(row.get("event") or "").strip()
+    if legacy:
+        return legacy
+    evidence = row.get("evidence")
+    if isinstance(evidence, dict):
+        nested = str(evidence.get("event") or "").strip()
+        if nested:
+            return nested
+    return str(row.get("reason") or "").strip()
 
-    rows: list[dict[str, Any]] = []
-    for row in history:
-        if not isinstance(row, dict):
-            continue
-        if phase_history_event_name(row) == event:
-            rows.append(row)
-    return rows
+
+def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    return [row for row in history if isinstance(row, dict) and _event_name(row) == event]
 
 
 class _CoordinatorStub:
@@ -191,7 +196,7 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
     assert rows[0]["evidence"]["failure_count"] == 3
-    assert rows[0]["evidence"]["retry_limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert rows[0]["evidence"]["retry_limit"] == _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     assert rows[0]["evidence"]["batches_discovered"] == 2
     assert "ts" in rows[0]
     assert rows[0]["ts_unix"] > 0

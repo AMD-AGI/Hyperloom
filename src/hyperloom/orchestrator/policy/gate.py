@@ -15,22 +15,21 @@ second gate, not the first one.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
-from ..framework.paths import (
+from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
+from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
-    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .projection import (
     RULE_GPU_EXCEEDS_CAPACITY,
@@ -53,52 +52,13 @@ from ..specialists.profile import (
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 from ..specialists.patch_safety import parse_patch_targets
+from ..state._shared_state.phase_state import gap_actionability_key
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
 
 
 log = logging.getLogger(__name__)
-
-
-def _value_is_present(value: Any) -> bool:
-    """Present iff a non-empty string OR non-empty container; ``None`` / whitespace count as absent.
-
-    Args:
-        value (Any): the value to test for presence; strings are checked for
-            non-whitespace content and dict/list/tuple/set for non-empty length.
-
-    Returns:
-        bool: True when the value is considered present, False otherwise
-            (``None`` and whitespace-only strings count as absent).
-    """
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (dict, list, tuple, set)):
-        return len(value) > 0
-    return True
-
-
-def _delegate_field_present(payload: dict[str, Any], field_name: str) -> bool:
-    """True iff ``field_name`` is present at the top of ``payload`` OR nested under ``payload["params"]`` (robustness uses params).
-
-    Args:
-        payload (dict[str, Any]): the intent payload dict to inspect.
-        field_name (str): the field name to look for at the top level or nested
-            under ``payload["params"]``.
-
-    Returns:
-        bool: True when the field is present (non-empty) at either location,
-            else False.
-    """
-    if _value_is_present(payload.get(field_name)):
-        return True
-    nested = payload.get("params")
-    if isinstance(nested, dict) and _value_is_present(nested.get(field_name)):
-        return True
-    return False
 
 
 class PolicyDenied(RuntimeError):
@@ -128,21 +88,6 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
-
-# Per-action delegate source allowlist, derived so it cannot drift from
-# ROBUSTNESS_DELEGATE_ONLY_ACTIONS; unlisted actions carry no source restriction.
-DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
-    action: ROBUSTNESS_ONLY_SOURCE_ALLOWLIST for action in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
-}
-
-
-# Per-action delegate required payload fields (minimum evidence for the audit trail; missing/empty raise PolicyDenied).
-DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
-    "recover": ("reason", "evidence"),
-}
-
-
 # Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
 
@@ -161,54 +106,6 @@ BASELINE_ACTION_NAME: str = "baseline"
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
-
-
-def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
-
-    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
-    pinning mask per the repo's GPU runner convention (and the CLI preflight
-    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
-    GPU-specialist capacity scoped to the operator's mask instead of the whole
-    machine.
-
-    Returns:
-        int: the number of visible GPUs derived from the
-            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
-            count parsed from ``rocm-smi``; 0 when nothing can be probed.
-    """
-    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        raw = raw.strip()
-        if raw == "":
-            return 0
-        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
-        if ids:
-            return len(ids)
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
 
 
 def research_lane_ceiling() -> int:
@@ -296,14 +193,13 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
     "critic": frozenset(),
-    "robustness": frozenset(),
 }
 
 #: Convenience superset of every known external tool name (R5 collision check).
 ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 
 
-# REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
+# REQUEST routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
 }
@@ -337,25 +233,6 @@ PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
 
 # Ceiling on a single extend_lease step; repeated extensions are allowed.
 EXTEND_LEASE_MAX_SEC: int = 3600
-
-ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
-    {
-        IntentType.PRUNE_BRANCH,
-        IntentType.ESCALATE_STRATEGY_CHANGE,
-    }
-)
-
-# Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration.
-_ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
-    IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
-    IntentType.ESCALATE_STRATEGY_CHANGE: frozenset(
-        {
-            "robustness",
-            "orchestration",
-        }
-    ),
-}
-
 
 # SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
 # (checked recursively). SOURCE_LIKE_FIELDS are exempt -- they name framework
@@ -436,6 +313,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "working_recipe_generation",
+        "validated_recipe_generation",
         "pending_integrate",
         "resume_pending_revalidation",
         "baseline_tput",
@@ -482,6 +361,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",
+        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
+        # that can.
+        "gpu_trace_unsupported_reason",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -497,7 +379,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        "explore_elapsed_accum_s",
         "phase_elapsed_totals",
         # KERNEL idle-streak bookkeeping. Forging these is how a model could talk
         # the phase machine into winding KERNEL down early, or hold it open while
@@ -542,6 +423,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
+        # per-lever attempt ledger; one Coordinator-side writer per lever.
+        "attempts",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
         # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
         # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.
@@ -596,15 +479,9 @@ class PolicyGate:
     # attempt goes straight to its acquire.
     resources: ResourceFacts = field(default_factory=ResourceFacts)
 
-    def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+    def __post_init__(self) -> None:
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
-        import os as _os
-
-        if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if not self.strict_paths and env_bool("INFERENCE_OPTIMIZER_STRICT_PATHS"):
             self.strict_paths = True
 
     # Public API
@@ -642,14 +519,12 @@ class PolicyGate:
             self._validate_send_message_topic(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
-        elif intent.type == IntentType.RESPONSE:
-            self._validate_response(payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
             self._validate_review_verdict(role, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
-        elif intent.type in ROBUSTNESS_ONLY_INTENTS:
-            self._validate_robustness_only(role, intent.type, payload)
+        elif intent.type == IntentType.PRUNE_BRANCH:
+            self._validate_prune_branch(payload)
         # ALERT carries no extra checks beyond the role gate.
 
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
@@ -794,39 +669,6 @@ class PolicyGate:
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
             self._validate_coordinator_managed_action(action_name, intent_kind="delegate")
-            # Robustness delegates nothing beyond its own declared action set.
-            if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
-                raise PolicyDenied(
-                    f"role={role.name!r} cannot delegate action={action_name!r}; "
-                    f"allowed: {sorted(ROBUSTNESS_DELEGATE_ONLY_ACTIONS)!r}",
-                    rule="role",
-                )
-            allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
-            if allowed_sources is not None and role.name not in allowed_sources:
-                raise PolicyDenied(
-                    f"role={role.name!r} cannot delegate action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
-                    rule="delegate_action_source",
-                    hint=(
-                        "side-effecting actions like `recover` are reserved for "
-                        "the robustness agent; emit an ALERT and let robustness "
-                        "escalate via its action-ladder instead"
-                    ),
-                )
-        # Per-action required-payload guard (e.g. ``recover`` must carry ``reason`` + ``evidence``); top-level or under ``params``.
-        required = DELEGATE_ACTION_REQUIRED_PAYLOAD.get(action_name)
-        if required:
-            missing = [field_name for field_name in required if not _delegate_field_present(payload, field_name)]
-            if missing:
-                raise PolicyDenied(
-                    f"delegate(action_name={action_name!r}) missing required payload field(s): {missing!r}",
-                    rule="delegate_action_evidence",
-                    hint=(
-                        "side-effecting delegates must carry the symptom "
-                        "evidence that justified them (e.g. "
-                        "{'reason': 'gpu_memory_leaked', "
-                        "'evidence': {...}})"
-                    ),
-                )
         # R5 — block a delegate whose action_name invokes an external tool.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -859,18 +701,6 @@ class PolicyGate:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
-        # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
-        allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
-        if allowed_sources is not None and role.name not in allowed_sources:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot propose action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
-                rule="propose_action_source",
-                hint=(
-                    "side-effecting actions like `recover` are reserved for "
-                    "the robustness agent; emit an ALERT and let robustness "
-                    "escalate via its action-ladder instead"
-                ),
-            )
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R5 — defense in depth on propose_action.
         self._validate_tool_whitelist_collision(
@@ -1044,28 +874,6 @@ class PolicyGate:
             intent_kind="request",
         )
 
-    def _validate_response(self, payload: dict[str, Any]) -> None:
-        """Require ``in_reply_to`` and ``kind`` on a ``RESPONSE`` intent.
-
-        Args:
-            payload (dict[str, Any]): the response payload, expected to
-                carry ``in_reply_to`` (the message id being answered) and
-                ``kind``.
-
-        Returns:
-            None: returns silently when both fields are present.
-
-        Raises:
-            PolicyDenied: with ``rule='payload'`` when ``in_reply_to`` or
-                ``kind`` is missing or blank.
-        """
-        in_reply_to = str(payload.get("in_reply_to", "")).strip()
-        if not in_reply_to:
-            raise PolicyDenied("response missing in_reply_to", rule="payload")
-        kind = str(payload.get("kind", "")).strip()
-        if not kind:
-            raise PolicyDenied("response missing kind", rule="payload")
-
     def _validate_review_verdict(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REVIEW_VERDICT`` intent (Critic-only).
 
@@ -1209,8 +1017,7 @@ class PolicyGate:
             hint=(
                 f"Tool {action_name!r} is restricted to "
                 f"specialist sub-agents as an action name. The "
-                f"primary agents (orchestration / kernel / critic / "
-                f"robustness) reach KB / PR Monitor through the "
+                f"primary agents (orchestration / critic) reach KB / PR Monitor through the "
                 f"Coordinator-mediated KnowledgePlane facade instead; "
                 f"orchestration additionally holds WebSearch / WebFetch "
                 f"directly via allowed_tools_for_agent."
@@ -1317,13 +1124,7 @@ class PolicyGate:
                 f"role={role.name!r} cannot dispatch specialists "
                 f"(allowed: {sorted(SPECIALIST_DISPATCH_SOURCE_ALLOWLIST)!r})",
                 rule="specialist_dispatch_source",
-                hint=(
-                    "Only the Orchestration role may dispatch specialists. "
-                    "Robustness should escalate via "
-                    "escalate_strategy_change with "
-                    "hint='need_specialist:<domain>'; the orchestration "
-                    "tick will pick it up."
-                ),
+                hint="Only the Orchestration role may dispatch specialists.",
             )
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1413,11 +1214,7 @@ class PolicyGate:
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu_raw = params.get("needs_gpu", False)
-        if isinstance(needs_gpu_raw, str):
-            needs_gpu = needs_gpu_raw.strip().lower() in ("1", "true", "yes", "y", "on")
-        else:
-            needs_gpu = bool(needs_gpu_raw)
+        needs_gpu = is_truthy(params.get("needs_gpu"))
         reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         if not needs_gpu and reserves_bench_lane:
             needs_gpu = True
@@ -1528,24 +1325,6 @@ class PolicyGate:
         if not candidates:
             return ""
 
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
-
-        def _selection_key(g: dict[str, Any]) -> tuple[int, int, str]:
-            """Sort key ranking gaps by actionability for autofill.
-
-            Args:
-                g (dict[str, Any]): a gaps[] ledger entry.
-
-            Returns:
-                tuple[int, int, str]: ``(-severity_rank, attempt_count,
-                first_seen_ts)`` so the highest-severity, least-attempted,
-                oldest gap sorts first.
-            """
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            return (-sev, attempts, first_seen)
-
         matches = [
             g
             for g in gaps
@@ -1555,7 +1334,7 @@ class PolicyGate:
         ]
         if not matches:
             return ""
-        matches.sort(key=_selection_key)
+        matches.sort(key=gap_actionability_key)
         chosen = str(matches[0].get("canonical_id") or "").strip()
         if chosen:
             params["gap_canonical_id"] = chosen
@@ -1932,144 +1711,22 @@ class PolicyGate:
 
         visit(payload, ())
 
-    def _validate_robustness_only(self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]) -> None:
-        """Enforce that only allowed roles emit robustness-only intents.
-
-        Args:
-            role: The agent role attempting to emit the intent.
-            intent_type: The intent being validated.
-            payload: The intent payload (checked for required fields).
-
-        Raises:
-            PolicyDenied: If the role is not permitted to emit the intent,
-                or a required payload field (e.g. ``family`` for
-                ``PRUNE_BRANCH``) is missing.
-        """
-        # Per-intent source override takes precedence; default is robustness-only.
-        allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
-            intent_type,
-            ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
-        )
-        if role.name not in allowed_sources:
+    def _validate_prune_branch(self, payload: dict[str, Any]) -> None:
+        """Validate the family and scope of an orchestration prune request."""
+        family = str(payload.get("family", "")).strip()
+        if not family:
+            raise PolicyDenied("prune_branch missing family", rule="payload")
+        scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+        if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
             raise PolicyDenied(
-                f"role={role.name!r} cannot emit {intent_type.value} (allowed: {sorted(allowed_sources)!r})",
-                rule="robustness_only_source",
+                f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                rule="prune_scope",
+                hint=(
+                    f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
+                    f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
+                    f"only cancels the queued backlog."
+                ),
             )
-        if intent_type == IntentType.PRUNE_BRANCH:
-            family = str(payload.get("family", "")).strip()
-            if not family:
-                raise PolicyDenied("prune_branch missing family", rule="payload")
-            scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
-            if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
-                raise PolicyDenied(
-                    f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
-                    rule="prune_scope",
-                    hint=(
-                        f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
-                        f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
-                        f"only cancels the queued backlog."
-                    ),
-                )
-
-
-# ---------------------------------------------------------------------------
-# Policy-denial write-owner functions: they take ``state`` first and own the
-# denial-streak bookkeeping + its prompt summary. ``SharedState`` exposes
-# forwarding shims so existing callers reach these.
-# ---------------------------------------------------------------------------
-def record_policy_denial(
-    state,
-    *,
-    action_name: str,
-    rule: str,
-    hint: str,
-    intent_type: str,
-    tick: int,
-    intent_payload: dict[str, Any] | None = None,
-) -> int:
-    """Append a PolicyGate denial row and bump the per-(action, rule) streak.
-
-    Records a capped rolling history entry and increments the
-    consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
-
-    Args:
-        action_name (str): The action the denied intent targeted (empty
-            is normalized to ``"*"`` in the streak key).
-        rule (str): The PolicyGate rule id that fired.
-        hint (str): Human-readable remediation hint surfaced to the LLM.
-        intent_type (str): The denied intent's type.
-        tick (int): The Coordinator tick at which the denial occurred.
-        intent_payload (dict[str, Any] | None): Optional intent payload;
-            when present, its sorted keys are recorded for context.
-
-    Returns:
-        int: The new consecutive-denial streak value for this
-            (action, rule) pair.
-    """
-    from ..state.shared_state import _now_iso
-
-    key = f"{action_name or '*'}:{rule}"
-    streak = int(state.policy_denial_streak.get(key, 0)) + 1
-    state.policy_denial_streak[key] = streak
-    entry = {
-        "tick": int(tick),
-        "action_name": action_name or "",
-        "rule": rule,
-        "hint": hint or "",
-        "intent_type": intent_type,
-        "streak": streak,
-        "ts": _now_iso(),
-    }
-    if intent_payload:
-        entry["intent_payload_keys"] = sorted(intent_payload.keys())
-    history = list(state.policy_denial_history or [])
-    history.append(entry)
-    if len(history) > state._POLICY_DENIAL_HISTORY_CAP:
-        history = history[-state._POLICY_DENIAL_HISTORY_CAP :]
-    state.policy_denial_history = history
-    return streak
-
-
-def reset_policy_denial_streak(state, action_name: str) -> None:
-    """Clear all consecutive-denial streaks for a given action.
-
-    Drops every ``policy_denial_streak`` entry whose key begins with
-    ``"<action_name>:"`` — called when the action finally succeeds so a
-    later denial starts a fresh streak.
-
-    Args:
-        action_name (str): The action whose streaks should be reset; a
-            falsy value is a no-op.
-    """
-    if not action_name:
-        return
-    prefix = f"{action_name}:"
-    state.policy_denial_streak = {
-        k: v for k, v in (state.policy_denial_streak or {}).items() if not k.startswith(prefix)
-    }
-
-
-def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
-    """Render the most recent PolicyGate denials for prompt injection.
-
-    Args:
-        top_k (int): Maximum number of newest denial rows to render.
-
-    Returns:
-        str: A ``=== Recent policy denials ===`` block, or ``""`` when
-            no denials have been recorded.
-    """
-    if not state.policy_denial_history:
-        return ""
-    rows = list(state.policy_denial_history)[-top_k:]
-    lines = [f"=== Recent policy denials (newest last, total={len(state.policy_denial_history)}) ==="]
-    for r in rows:
-        lines.append(
-            f"  tick={r.get('tick')} action={r.get('action_name')!r} "
-            f"rule={r.get('rule')!r} streak={r.get('streak')} "
-            f"hint={str(r.get('hint') or '')[:140]!r}"
-        )
-    return "\n".join(lines)
 
 
 def validate_specialist_max_turns_raw(
@@ -2146,8 +1803,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 __all__ = [
     "CORE_STATE_FIELDS",
-    "DELEGATE_ACTION_REQUIRED_PAYLOAD",
-    "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "KERNEL_AGENT_OWNED_ACTIONS",
@@ -2163,8 +1818,6 @@ __all__ = [
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
-    "ROBUSTNESS_ONLY_INTENTS",
-    "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]

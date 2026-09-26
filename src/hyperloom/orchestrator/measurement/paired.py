@@ -40,7 +40,7 @@ class PairedVerdict:
             "median_delta_pct": self.median_delta_pct,
             "candidate_wins": self.candidate_wins,
             "pairs": [list(p) for p in self.pairs],
-            "deltas_pct": self.deltas_pct,
+            "deltas_pct": list(self.deltas_pct),
         }
 
 

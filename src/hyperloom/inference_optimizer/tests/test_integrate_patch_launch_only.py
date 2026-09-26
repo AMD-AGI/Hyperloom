@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -51,8 +52,8 @@ def _write_minimal_config(path: Path) -> None:
 def _booted_observation(session: Path) -> str:
     """Record the observation a bench that came up and served would leave.
 
-    The gate reads the boot verdict off this artifact rather than off a
-    throughput, so a bench stub that records none has not booted anything.
+    The gate decides runnability from the measurement; this artifact is what
+    the ladder arithmetic and the failure explanation read.
     """
     slot = session / "round"
     slot.mkdir(parents=True, exist_ok=True)
@@ -75,6 +76,7 @@ async def test_launch_only_skips_missing_specialist_task_id(tmp_path):
 
     bench_result = {
         "output_throughput": 100.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -102,6 +104,7 @@ async def test_launch_only_skips_critic_gate(tmp_path):
 
     bench_result = {
         "output_throughput": 50.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -174,6 +177,7 @@ async def test_launch_only_boot_success_returns_kept(tmp_path):
 
     bench_result = {
         "output_throughput": 200.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -339,7 +343,10 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 
     async def _capture_bench(self_inner=None, **kwargs):
         captured.append(dict(kwargs.get("params", {})))
-        return {"output_throughput": 50.0, "status": "succeeded"}, {"enablement_accuracy": None, "timed_out": False}
+        return {"output_throughput": 50.0, "completed_requests": 12, "status": "succeeded"}, {
+            "enablement_accuracy": None,
+            "timed_out": False,
+        }
 
     with patch.object(IntegratePatchExecutor, "_bench_patch", new=_capture_bench):
         await ex(_make_ctx("probe-7", params))
@@ -347,3 +354,220 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
     assert captured, "_bench_patch was not called"
     bench_params = captured[0]
     assert bench_params.get("runtime_override") == _runtime_override()
+
+
+# ---------------------------------------------------------------------------
+# A launch probe inherits what earlier enablement rounds established.
+#
+# ``lane._rearm_on_advanced`` accumulates every advance into
+# ``accepted_config``; a launch that does not read it back walks into a wall an
+# earlier round already cleared. Observed live: build launch probe ac82fc2b
+# booted with an empty EXTRA_VLLM_ARGS and died on "DeepseekV4 only supports
+# fp8 kv-cache format for now, got auto" while accepted_config held
+# ``--kv-cache-dtype fp8``. This probe is emitted by
+# ``EnablementBuild._enqueue_build_launch_probe``, which never passes through
+# the specialist autosubmit bridge, so the inheritance has to live in the
+# executor every path crosses.
+
+
+class _Established:
+    """A SharedState stub carrying only what the inheritance reads."""
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.enablement = SimpleNamespace(accepted_config=dict(cfg))
+
+    def get_specialist_patch_verdict(self, tid):  # never consulted on this lane
+        return "approve"
+
+
+async def _capture_launch(ex, params, ctx_extra):
+    """Run the executor and return what it handed the bench."""
+    captured: dict[str, Any] = {}
+
+    async def _spy(**kwargs):
+        captured.update(kwargs)
+        return (
+            {
+                "output_throughput": 100.0,
+                "status": "succeeded",
+                "boot_observation_path": kwargs["params"].get("_obs_path", ""),
+            },
+            {"enablement_accuracy": None, "timed_out": False},
+        )
+
+    with patch.object(ex, "_bench_patch", new=AsyncMock(side_effect=_spy)):
+        res = await ex(_make_ctx("probe-inherit", params, extra=ctx_extra))
+    return res, captured
+
+
+@pytest.mark.asyncio
+async def test_launch_probe_inherits_the_flag_earlier_rounds_established(tmp_path):
+    """The ac82fc2b regression: a probe that restated nothing still launches with it."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+
+    state = _Established(
+        {
+            "extra_server_args": "--kv-cache-dtype fp8",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+            "args_mode": "append",
+        }
+    )
+    res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    assert captured["extra_server_args_applied"] == "--kv-cache-dtype fp8"
+    assert captured["extra_envs_applied"]["VLLM_ROCM_USE_AITER"] == "1"
+    # The launch-only control flow is untouched: it still benches rather than
+    # reporting no_patches.
+    assert res["status"] != "no_patches"
+
+
+@pytest.mark.asyncio
+async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
+    """The defensive read: a context carrying no SharedState must not abort the round."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+
+    _res, captured = await _capture_launch(ex, params, {})
+    assert captured["extra_server_args_applied"] == ""
+    assert captured["extra_envs_applied"] == {}
+
+
+@pytest.mark.asyncio
+async def test_an_optimization_probe_inherits_nothing(tmp_path):
+    """The rule is the enablement lane's; nothing leaks into an optimization round."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    params["enablement"] = False
+
+    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+    assert captured["extra_server_args_applied"] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_round_arg_still_keeps_the_inherited_flag(tmp_path):
+    """A quoted value with whitespace must not cost the round its inherited flags.
+
+    The deduper cannot parse such a string, and provenance cannot stand in for
+    it: only the autosubmit bridge pre-merges the inheritance, while this
+    executor also serves the build probe, the framework-config bridge, authored
+    proposals and re-queued rows, any of which may carry args of their own.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    # Not bridge-shaped: its own arg, never merged with accepted_config, and
+    # unparseable because the value carries whitespace.
+    params["extra_server_args"] = '--tool-call-parser "my parser"'
+
+    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    args = captured["extra_server_args_applied"]
+    assert "--kv-cache-dtype fp8" in args, args
+    assert "--tool-call-parser" in args, args
+    assert args.count("--kv-cache-dtype") == 1, args
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_round_arg_that_restates_the_flag_does_not_double_it(tmp_path):
+    """The bridge-shaped case of the same input: already inherited, so nothing is added."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    params["extra_server_args"] = '--kv-cache-dtype fp8 --tool-call-parser "my parser"'
+
+    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    args = captured["extra_server_args_applied"]
+    assert args.count("--kv-cache-dtype") == 1, args
+
+
+@pytest.mark.asyncio
+async def test_a_longer_flag_sharing_a_prefix_does_not_satisfy_the_inherited_one(tmp_path):
+    """Option names are compared exactly: --foo is not satisfied by --foo-bar."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    # Unparseable (quoted whitespace) and carrying a flag whose name merely
+    # starts with the inherited one.
+    params["extra_server_args"] = '--kv-cache-dtype-override auto --tool-call-parser "my parser"'
+
+    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    args = captured["extra_server_args_applied"]
+    assert "--kv-cache-dtype fp8" in args, args
+    assert "--kv-cache-dtype-override auto" in args, args
+
+
+@pytest.mark.asyncio
+async def test_the_inherited_name_inside_a_quoted_value_is_not_an_option(tmp_path):
+    """A name that only appears inside a quoted value does not count as present."""
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    params["extra_server_args"] = '--tool-call-parser "uses --kv-cache-dtype internally"'
+
+    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    args = captured["extra_server_args_applied"]
+    assert args.startswith("--kv-cache-dtype fp8"), args
+
+
+@pytest.mark.asyncio
+async def test_an_inherited_quoted_value_survives_the_fallback_intact(tmp_path):
+    """The inherited side may itself carry whitespace inside a quoted value.
+
+    Splitting it on spaces would keep only the first word and emit a malformed
+    option, so the fallback parses it quote-aware and re-serialises what it adds.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = _params_base(session)
+    params["_obs_path"] = _booted_observation(session)
+    # Unparseable, and it does NOT restate the inherited option.
+    params["extra_server_args"] = '--reasoning-parser "some parser"'
+
+    state = _Established({"extra_server_args": '--tool-call-parser "my parser" --kv-cache-dtype fp8'})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": state})
+
+    args = captured["extra_server_args_applied"]
+    # The inherited value must come back whole, not truncated to its first word.
+    assert "parser" in args and '"my' not in args, args
+    import shlex as _shlex
+
+    tokens = _shlex.split(args)
+    assert "my parser" in tokens, tokens
+    assert "--tool-call-parser" in tokens, tokens
+    assert "--kv-cache-dtype" in tokens and "fp8" in tokens, tokens
+    assert "some parser" in tokens, tokens

@@ -185,6 +185,12 @@ def _data_quality_flags(
 
     for note in validation_of(breakdown).get("notes") or []:
         _push(f"[attribution] {note}")
+    metadata = breakdown.get("metadata")
+    if isinstance(metadata, dict):
+        for warning in metadata.get("warnings") or []:
+            text = str(warning).strip()
+            if text:
+                _push(f"[export] {text}")
     return flags
 
 

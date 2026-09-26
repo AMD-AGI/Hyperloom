@@ -69,6 +69,7 @@ def _kernel_row(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict[str
             "pending_review": int(counters.get("needs_review") or 0),
             "reverts": int(counters.get("reverts") or 0),
             "rejected": int(counters.get("rejected") or 0),
+            "failed": int(counters.get("failed") or 0),
             "e2e_gain": counters.get("e2e_gain_pct"),
         },
     }

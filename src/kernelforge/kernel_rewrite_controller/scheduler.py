@@ -142,7 +142,7 @@ def dispatch_prepared_tasks(
         if on_progress is None:
             return
         # Suppressed on purpose.
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(Exception):  # broad-suppress: caller-supplied progress callback
             on_progress(_snapshot())
 
     for index, task in enumerate(tasks):

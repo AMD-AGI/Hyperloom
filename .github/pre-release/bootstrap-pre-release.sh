@@ -115,7 +115,7 @@ agent_turn() {
 # FRESH turn is worse, because the agent then has to rediscover all of that.
 SETUP_RESUME_NUDGE='Your previous turn ended before setup finished. Do NOT restart anything that is already running. Check on the install you launched: if it is still in progress, keep monitoring it and only answer once it has finished. Once it has finished successfully, complete any remaining setup steps and then reply with exactly the completion line the setup instructions asked for. If it has failed, report the failure.'
 
-DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize behind, and nothing has been written under the workspace since, so the work is not progressing. Do NOT fabricate a result. Finish the launch in THIS turn: complete the install if it is still needed, start optimize detached with setsid nohup so it survives the end of this turn, then confirm the nested session run dir and its state.json exist and report their paths.'
+DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize behind, and nothing has been written under the workspace since, so the work is not progressing. Do NOT fabricate a result. Finish the launch in THIS turn: complete the install if it is still needed, start optimize detached the way the skill prescribes (run_in_background=true when CLAW_SESSION_ID is set and your bash tool offers that parameter, otherwise setsid nohup) so it survives the end of this turn, then confirm the nested session run dir and its state.json exist and report their paths.'
 
 # Clean terminal stop_reason values (hyperloom.inference_optimizer.breakdown.stop_reasons.SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {

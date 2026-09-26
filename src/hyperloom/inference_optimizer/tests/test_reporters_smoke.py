@@ -201,6 +201,7 @@ def test_all_renderers_register_in_stable_order() -> None:
         "workload",
         "baseline",
         "final",
+        "enablement",
         "capability_summary",
         "phase_timeline",
         "kernel_lifecycle",
@@ -548,7 +549,7 @@ def test_a_raising_renderer_does_not_lose_the_other_sections(restore_registry) -
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("session")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise TypeError("drifted shape")
 
     r = render_session_report(_fixture_breakdown())
@@ -564,7 +565,7 @@ def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("baseline")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise ValueError("bad row")
 
     r = render_session_report(_fixture_breakdown())

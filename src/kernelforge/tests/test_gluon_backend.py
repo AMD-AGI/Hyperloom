@@ -61,7 +61,7 @@ class TestLanguagePairing:
     def test_an_unpaired_backend_is_unaffected(self, config):
         """The pairing is opt-in per backend, not a change to the default."""
         root = Path(config.local_knowledge_dir)
-        assert resolve_language_dirs("flydsl", root) == ("flydsl",)
+        assert resolve_language_dirs("hip", root) == ("hip",)
         assert resolve_language_dirs("hipblaslt", root) == ()
 
     def test_missing_folder_degrades_instead_of_emitting_a_dead_section(self, tmp_path):

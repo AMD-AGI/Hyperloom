@@ -33,7 +33,8 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
 )
 from hyperloom.orchestrator.enablement.lane import EnablementLane
-from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS, Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
@@ -197,8 +198,9 @@ def _lane(session_dir: Path, **overrides: Any):
         setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
     # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
-        "_refused_argv_is_terminal",
-        "_environment_fault_is_terminal",
+        "_enablement_admitted",
+        "_check_argv_terminal",
+        "_check_environment_terminal",
         "_enablement_in_flight",
         "_round_has_live_work",
         "_open_authoring_round",
@@ -227,6 +229,7 @@ def _writeback(session_dir: Path, **overrides: Any):
     fake = types.SimpleNamespace(
         shared_state=state,
         rounds=overrides.get("rounds") or _rounds(session_dir),
+        session_dir=str(session_dir),
     )
     for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
@@ -275,7 +278,7 @@ async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
 
 
 @pytest.mark.asyncio
-async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
+async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
@@ -290,15 +293,18 @@ async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
         }
     )
 
+    # A KEEP opens the revalidation window, so the lane event stays open until
+    # the revalidation baseline promotes.
     events = _events(_bound_session)
     assert len(events) == 1
-    assert events[0]["status"] == "succeeded"
-    ext = events[0]["ext"]
+    assert events[0]["status"] == "running"
+    ext = _ext()
     assert ext["attempts"]["landed"] == 1
-    assert ext["attempts"]["rows"][0]["failure_kind"] == "missing_model_arch"
-    assert ext["result"]["outcome"] == enablement_event.OUTCOME_SUCCEEDED
-    assert ext["result"]["kept_patches"] == ["/s/patches/arch.diff"]
-    assert ext["result"]["framework_root"] == "/fw/sglang"
+    row = ext["attempts"]["rows"][0]
+    assert row["failure_kind"] == "missing_model_arch"
+    assert row["status"] == "kept"
+    assert row["validation_pending"] is True
+    assert row["landed"] is False
 
 
 @pytest.mark.asyncio
@@ -327,7 +333,7 @@ async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
 @pytest.mark.asyncio
 async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     lane = _lane(_bound_session)
-    for _ in range(_ENABLEMENT_MAX_ATTEMPTS):
+    for _ in range(ENABLEMENT_MAX_ATTEMPTS):
         task_id = await lane._maybe_enqueue_enablement_specialist()
         lane.shared_state.enablement.last_specialist_task_id = task_id
         await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
@@ -337,13 +343,13 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     events = _events(_bound_session)
     assert events[0]["status"] == "failed"
     assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
-    assert events[0]["ext"]["attempts"]["count"] == _ENABLEMENT_MAX_ATTEMPTS
+    assert events[0]["ext"]["attempts"]["count"] == ENABLEMENT_MAX_ATTEMPTS
     assert events[0]["ext"]["attempts"]["landed"] == 0
 
 
 @pytest.mark.asyncio
-async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
-    lane = _lane(_bound_session, origin="eval")
+async def test_a_kept_round_does_not_close_the_lane(_bound_session):
+    lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
     await lane._maybe_rearm_enablement(
@@ -363,8 +369,6 @@ async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
     assert row["status"] == "kept"
     assert row["validation_pending"] is True
     assert row["landed"] is False
-    # Nothing was there to copy, so the row names nothing rather than the
-    # ``runs/`` path the round reported.
     assert row["files"] == []
     assert row["accepted_config_path"] is None
 
@@ -601,4 +605,122 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     await lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
 
     assert task_id
-    assert lane.shared_state.enablement.succeeded is True
+    assert lane.shared_state.enablement.validation_pending is True
+    assert lane.shared_state.enablement.succeeded is False
+
+
+def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
+    """The lane spans the session, so it is open for every coordinator fault.
+
+    That made it the one event that could not use the coordinator's generic
+    handler: a KERNEL visit or a FRAMEWORK entry is only open while its phase
+    runs, so a fault landing there struck the phase that was running, but the
+    lane is open for a reactor turn it has nothing to do with. Stamping those
+    on it reported a lane that did its job as broken, with an ``error_class``
+    from a subsystem it never touched.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    enablement_event.record_trigger(
+        origin=enablement_event.ORIGIN_EVAL,
+        mode="all",
+        kind="accuracy_below_floor",
+    )
+    coordinator = types.SimpleNamespace(_framework_timeline=lambda: None)
+    Coordinator._fault_open_phase_event(
+        coordinator,
+        stage="reactor:optimizer",
+        exc=RuntimeError("boom"),
+    )
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="revalidation promoted",
+    )
+
+    event = _events(_bound_session)[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"].get("failure") is None
+
+
+@pytest.mark.asyncio
+async def test_a_raising_pump_is_named_on_the_event(_bound_session):
+    """The pump must not take the tick down, but it cannot vanish either.
+
+    The lane records this itself rather than leaning on the coordinator's
+    handler, which no longer speaks for it -- see the test above.
+    """
+    enablement_event.record_trigger(
+        origin=enablement_event.ORIGIN_BOOT,
+        mode="all",
+        kind="import_error",
+        evidence="ImportError: cannot import name 'fused_moe'",
+    )
+
+    async def _boom() -> None:
+        raise RuntimeError("task store went away")
+
+    async def _ok() -> None:
+        return None
+
+    crashes: list[dict[str, Any]] = []
+
+    def _record(*, stage: str, exc: BaseException, **_kw: Any) -> None:
+        crashes.append({"stage": stage, "exc": exc})
+
+    fake = types.SimpleNamespace(
+        shared_state=types.SimpleNamespace(phase=PHASE_ENABLEMENT),
+        _maybe_route_build_outcomes=_boom,
+        _maybe_enqueue_enablement_baseline_revalidation=_ok,
+        _maybe_enqueue_enablement_specialist=_ok,
+        _record_coordinator_exception=_record,
+    )
+    await EnablementLane._pump_enablement_safely(fake, caller="tick")
+    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
+
+    event = _events(_bound_session)[0]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom:tick"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
+    assert "task store went away" in event["ext"]["failure"]["message"]
+    assert len(crashes) == 1
+
+
+async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
+    """A KEEP is provisional, so it is not the terminal that judges the stack.
+
+    This used to be the lane's terminal: a KEEP set ``succeeded`` and closed the
+    lane, and the close carried the replay verdict. Upstream made every KEEP open
+    a revalidation window instead -- ``succeeded`` is now set only where the
+    promote happens -- so the round that lands a KEEP closes nothing, and a
+    verdict recorded here would describe a stack no measurement had confirmed.
+
+    The guard that the close still computes a verdict lives on the terminal that
+    remains: :func:`test_the_writeback_close_also_carries_a_replay_verdict`.
+    """
+    lane = _lane(tmp_path)
+
+    await lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "patches_applied": ["/p/1.patch"],
+        }
+    )
+
+    assert lane.shared_state.enablement.validation_pending is True
+    assert lane.shared_state.enablement.succeeded is False
+    assert _ext()["recipe"] is None, "a provisional KEEP must not publish a terminal verdict"
+
+
+@pytest.mark.asyncio
+async def test_the_writeback_close_also_carries_a_replay_verdict(tmp_path):
+    """The second terminal. A guard on one path is a guard on one path."""
+    writeback = _writeback(tmp_path)
+
+    await writeback._close_enablement_lane(
+        outcome=enablement_event.OUTCOME_STALLED,
+        reason="cap reached",
+    )
+
+    assert _ext()["recipe"] is not None

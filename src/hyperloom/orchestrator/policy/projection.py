@@ -33,6 +33,7 @@ __all__ = [
     "ResourceFacts",
     "effective_gpu_specialist_pool_size",
     "gpu_specialist_ceiling",
+    "resource_pools_summary",
     "serving_tp_for_policy",
     "whole_machine_pool_size",
 ]
@@ -104,6 +105,24 @@ def whole_machine_pool_size() -> int:
         int: Number of visible cards.
     """
     return len(resolve_whole_machine_devices())
+
+
+def resource_pools_summary(shared_state: Any) -> str:
+    """Render the GPU pool / lane capacity block for prompt injection."""
+    from ..bus.storage.schema import DEFAULT_LANE_CAPACITIES
+
+    lines = [
+        f"serving_tp={serving_tp_for_policy(shared_state)}",
+        f"gpu_specialist_capacity={gpu_specialist_ceiling(shared_state)}",
+        f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(shared_state)}"
+        "  (non-bench needs_gpu specialists admit against this)",
+        f"whole_machine_gpu_pool={whole_machine_pool_size()}"
+        "  (bench / framework-authoring specialists admit against this)",
+        f"research_lane_capacity={max(0, int(shared_state.research_lane_capacity or 0))}  (concurrent specialists)",
+        f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
+        "  (mutually exclusive with serving / benchmark / profile)",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass

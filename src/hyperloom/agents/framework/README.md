@@ -23,23 +23,23 @@ When a `(model, backend)` combo will not start, or it starts but fails its
 accuracy eval, the enablement building blocks turn the failure into an authored
 bridging patch, gated on *does it run correctly* rather than *is it faster*:
 
-1. **Classify** — `hyperloom.agents.framework.enablement.classify_failure(log)` parses a
+1. **Classify** — `hyperloom.common.failure_signature.classify_failure(log)` parses a
    launch/import/build/eval log into a `FailureSignature`
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
    `capability_disabled` / `accuracy_below_floor` /
    `eval_generation_pathology` / `eval_runtime_failure`)
    with the offending file/symbol and a `bridge_layer`.
-2. **Discover** — `hyperloom.agents.framework.enablement_ops.build_search_plan(...)`
+2. **Discover** — `hyperloom.orchestrator.enablement.mandate.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
    `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
    candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
    `fix` / `port`).
-3. **Author** — `hyperloom.agents.framework.enablement_ops.build_mandate(...)`
+3. **Author** — `hyperloom.orchestrator.enablement.mandate.build_mandate(...)`
    produces the `EnablementMandate` (source roots to search + task description +
    patch invariants) handed to Hyperloom's `enablement_specialist` /
    `SpecialistRunner`, which writes the patch into an isolated worktree.
-4. **Verify** — `hyperloom.agents.framework.enablement.runnable_decision(...)` is the
+4. **Verify** — `hyperloom.common.failure_signature.runnable_decision(...)` is the
    KEEP/REVERT gate: the launch probe must exit 0 (no timeout) and any minimal
    correctness check must pass; the same failure re-appearing is a reject. For an
    eval-origin trigger the gate additionally re-runs the accuracy eval and

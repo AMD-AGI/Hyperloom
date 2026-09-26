@@ -24,6 +24,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
     changed_files_from_base,
+    commit_exists,
     export_patch_from_base,
     operator_workspace,
 )
@@ -52,23 +53,27 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _trusted_manifest(workspace: Path) -> dict[str, Any] | None:
+def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None:
     publisher = BestResultPublisher(str(workspace))
     manifest = _load_json(publisher.manifest_path)
     if not manifest:
+        return None
+    # An in-place campaign shares its experiments directory with every other task in
+    # the same repository, so a manifest found here need not be this task's. The one
+    # thing that settles it is whether the repository can still reach the commit: a
+    # leftover from a released campaign names a commit its branch took with it, and
+    # exporting a patch from it is impossible anyway.
+    if not commit_exists(repo_root, str(manifest.get("commit_hash") or "")):
         return None
     try:
         iteration = int(manifest.get("iteration"))
     except (TypeError, ValueError):
         return None
     commit = str(manifest.get("commit_hash") or "").strip()
-    try:
-        complete = publisher.describes_current_best(
-            iteration=iteration,
-            commit_hash=commit,
-        )
-    except Exception:
-        complete = False
+    complete = publisher.describes_current_best(
+        iteration=iteration,
+        commit_hash=commit,
+    )
     if (
         not commit
         or manifest.get("correctness_passed") is not True
@@ -173,7 +178,8 @@ def recover_task_result(
     # release, which is the one copy a run the host killed still leaves
     # reachable. For a private checkout the two are the same directory.
     manifest, source = _select_trusted_result(
-        _trusted_manifest(workspace) or _trusted_manifest(layout.workspace_dir(task.operator_id)),
+        _trusted_manifest(workspace, task.repo_root)
+        or _trusted_manifest(layout.workspace_dir(task.operator_id), task.repo_root),
         _trusted_result_sidecar(Path(task_dir)),
     )
     if manifest is None:
@@ -237,7 +243,7 @@ def recover_task_result(
             patch_dir=patch_dir,
             best_commit=best_commit,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recovery must not mask the original failure
         log.warning(
             "could not publish result for %s: %s",
             task.operator_id,

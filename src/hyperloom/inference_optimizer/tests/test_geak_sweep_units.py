@@ -17,12 +17,8 @@ from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 from hyperloom.orchestrator.kernel.attempt_summary import _backend_results_dir
-from hyperloom.orchestrator.kernel.conc_sweep import (
-    _budget_limited_without_valid_pair,
-    _point_from_variant,
-)
+from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _parse_server_arg_value,
@@ -478,20 +474,6 @@ async def test_sweep_reads_only_fresh_native_quality(
         variant_timeout_sec=30,
     )
     assert result["promotion_measurement"]["accuracy"] == native_accuracy
-
-
-def test_point_from_variant_defaults_conc_zero_on_bad_env() -> None:
-    """A non-numeric CONC env coerces the row's ``conc`` to 0 rather than raising."""
-    v = VariantResult(
-        name="optimized_concX",
-        extra_server_args="",
-        extra_envs={"CONC": "not-a-number"},
-        status="failed",
-    )
-    point = _point_from_variant(v, arm="optimized")
-    assert point["conc"] == 0
-    assert point["arm"] == "optimized"
-    assert point["status"] == "failed"
 
 
 def test_budget_limited_without_valid_pair_paths() -> None:

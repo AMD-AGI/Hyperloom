@@ -37,6 +37,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.message_bus import Message
 
 
 # fixtures
@@ -64,7 +65,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
@@ -156,6 +157,9 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -175,6 +179,9 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
         "submission_valid": True,
@@ -230,6 +237,9 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -241,6 +251,9 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 110.0,
+        "e2e_norm_intvty_p50": 110.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "completed_requests": 80,
         "submission_valid": True,
         "accuracy": 0.80,
@@ -279,7 +292,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
     assert yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
     assert result["status"] == "ok"
     assert result["decision"] == "KEEP"
-    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result["graded_objective"] == "e2e_norm_intvty_p50"
     assert result["bench_result"] == measurement
     assert result["gain_pct"] == pytest.approx(10.0)
 
@@ -317,6 +330,9 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.reference_server_args = "--disable-cuda-graph --max-running-requests 64"
     state.reference_envs = {"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"}
@@ -344,6 +360,9 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
             "input_throughput": tput * 9,
             "total_token_throughput": tput * 10,
             "e2e_norm_intvty_p90": 100.0,
+            "e2e_norm_intvty_p50": 100.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "completed_requests": 80,
             "submission_valid": True,
         }
@@ -580,12 +599,11 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 @pytest.mark.parametrize(
     "output,total,intvty,stack,accuracy_outcome,decision",
     [
-        pytest.param(90.0, 1100.0, 110.0, False, "pass", "KEEP", id="intvty-win-output-drop"),
-        pytest.param(100.1, 1500.0, 153.0, True, "pass", "KEEP", id="stack-exact-2-percent-floor"),
-        pytest.param(100.1, 1500.0, 154.5, True, "pass", "KEEP", id="stack-above-agentx-floor"),
-        pytest.param(90.0, 1100.0, 110.0, False, "missing", "NEEDS_REVIEW", id="accuracy-missing"),
-        pytest.param(90.0, 1100.0, 110.0, False, "regressed", "REVERT", id="accuracy-regressed"),
-        pytest.param(90.0, 1100.0, 110.0, False, "failed", "NEEDS_REVIEW", id="accuracy-failed"),
+        pytest.param(100.0, 1100.0, 110.0, False, "pass", "KEEP", id="median-win"),
+        pytest.param(100.1, 1500.0, 154.5, True, "pass", "KEEP", id="stack-median-at-the-bar"),
+        pytest.param(100.0, 1100.0, 110.0, False, "missing", "NEEDS_REVIEW", id="accuracy-missing"),
+        pytest.param(100.0, 1100.0, 110.0, False, "regressed", "REVERT", id="accuracy-regressed"),
+        pytest.param(100.0, 1100.0, 110.0, False, "failed", "NEEDS_REVIEW", id="accuracy-failed"),
     ],
 )
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
@@ -622,11 +640,18 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     if stack:
         state.current_best.update(
-            action="integrate", total_throughput=1500.0, input_throughput=1400.0, e2e_norm_intvty_p90=150.0
+            action="integrate",
+            total_throughput=1500.0,
+            input_throughput=1400.0,
+            e2e_norm_intvty_p90=150.0,
+            e2e_norm_intvty_p50=150.0,
         )
         state.optimization_stack = [dict(state.current_best)]
     state.save(session_dir)
@@ -657,6 +682,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
             "input_throughput": round_total - round_output,
             "total_token_throughput": round_total,
             "e2e_norm_intvty_p90": round_intvty,
+            "e2e_norm_intvty_p50": round_intvty,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "tpot_p90_ms": round_tpot,
             "completed_requests": 80,
             "submission_valid": True,
@@ -703,7 +731,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     assert len({bench["envs"]["PORT"] for _, bench in rounds}) == 1
     assert len({bench["server_lifecycle"]["pid_dir"] for _, bench in rounds}) == 1
     assert result["decision"] == decision
-    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result["graded_objective"] == "e2e_norm_intvty_p50"
     reference_intvty = 150.0 if stack else 100.0
     assert result["gain_pct"] == pytest.approx((intvty - reference_intvty) / reference_intvty * 100.0)
     assert result.get("decision_reason") != "stack_positive_increment"
@@ -730,14 +758,13 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
 @pytest.mark.parametrize(
     "output,total,intvty,decision",
     [
-        pytest.param(110.0, 900.0, 90.0, "REVERT", id="both-axes-regress"),
-        pytest.param(110.0, 1100.0, 90.0, "NEEDS_REVIEW", id="interactivity-tradeoff-recorded"),
-        pytest.param(110.0, 1100.0, 100.0, "NEEDS_REVIEW", id="flat-interactivity-recorded"),
-        pytest.param(110.0, 1000.0, 110.0, "KEEP", id="intvty-win"),
-        pytest.param(90.0, 1000.0, 110.0, "KEEP", id="output-loss-intvty-win"),
-        pytest.param(90.0, 950.0, 102.0, "KEEP", id="exact-floor-and-throughput-guard"),
-        pytest.param(110.0, 949.9, 110.0, "NEEDS_REVIEW", id="throughput-guard-breach"),
-        pytest.param(110.0, 1100.0, 101.99, "NEEDS_REVIEW", id="below-agentx-floor"),
+        pytest.param(110.0, 900.0, 90.0, "REVERT", id="median-regresses"),
+        pytest.param(110.0, 1100.0, 100.0, "REVERT", id="median-flat"),
+        pytest.param(110.0, 1100.0, 102.99, "REVERT", id="median-just-below-the-bar"),
+        pytest.param(110.0, 1100.0, 103.0, "KEEP", id="median-exactly-at-the-bar"),
+        pytest.param(110.0, 1000.0, 110.0, "KEEP", id="median-clears-the-bar"),
+        pytest.param(90.0, 1000.0, 110.0, "REVERT", id="output-guard-breach"),
+        pytest.param(110.0, 949.9, 110.0, "KEEP", id="total-no-longer-participates"),
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
@@ -746,13 +773,18 @@ async def test_integrate_handler_grades_full_e2e_measurement(
     _, payload, measurement, target = graded_integrate_case
     if not agentx_env:
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    measurement.update(output_throughput=output, total_token_throughput=total, e2e_norm_intvty_p90=intvty)
+    measurement.update(
+        output_throughput=output,
+        total_token_throughput=total,
+        e2e_norm_intvty_p90=intvty,
+        e2e_norm_intvty_p50=intvty,
+    )
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert result["status"] == "ok"
     assert result["decision"] == decision
-    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result["graded_objective"] == "e2e_norm_intvty_p50"
     assert result["gain_pct"] == pytest.approx(intvty - 100.0)
     assert ("accuracy_gate" in result) is (decision == "KEEP")
     if decision == "REVERT":
@@ -788,7 +820,9 @@ async def test_integrate_handler_requires_requested_axes(
         state.optimization_stack = [dict(state.current_best)]
     incomplete = measurement if missing_from == "candidate" else state.current_best
     total_key = "total_token_throughput" if missing_from == "candidate" else "total_throughput"
-    for axis in ("input_throughput", total_key) if missing_axis == "total" else ("e2e_norm_intvty_p90",):
+    for axis in (
+        ("input_throughput", total_key) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+    ):
         incomplete.pop(axis)
     state.save(session_dir)
 
@@ -846,13 +880,12 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
 @pytest.mark.parametrize(
     "output,total,intvty,decision",
     [
-        pytest.param(100.75, 1350.0, 135.0, "REVERT", id="stack-both-axes-regress"),
-        pytest.param(100.1, 1507.5, 150.75, "NEEDS_REVIEW", id="stack-output-floor-does-not-apply"),
-        pytest.param(100.1, 1507.35, 152.985, "NEEDS_REVIEW", id="stack-under-agentx-floor"),
-        pytest.param(100.1, 1500.0, 153.0, "KEEP", id="stack-exact-agentx-floor"),
-        pytest.param(100.1, 1500.0, 154.5, "KEEP", id="stack-positive-increment"),
-        pytest.param(100.75, 1507.5, 135.0, "NEEDS_REVIEW", id="stack-interactivity-tradeoff-recorded"),
-        pytest.param(100.1, 1424.9, 165.0, "NEEDS_REVIEW", id="stack-throughput-guard-breach"),
+        pytest.param(100.75, 1350.0, 135.0, "REVERT", id="median-regresses"),
+        pytest.param(100.1, 1507.5, 150.75, "REVERT", id="median-below-the-bar"),
+        pytest.param(100.1, 1500.0, 154.5, "KEEP", id="median-exactly-at-the-bar"),
+        pytest.param(100.1, 1560.0, 160.0, "KEEP", id="median-clears-the-bar"),
+        pytest.param(94.0, 1500.0, 165.0, "REVERT", id="output-guard-breach"),
+        pytest.param(100.1, 1424.9, 165.0, "KEEP", id="total-no-longer-participates"),
     ],
 )
 async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
@@ -860,18 +893,27 @@ async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
 ):
     state, payload, measurement, _ = graded_integrate_case
     state.current_best.update(
-        action="integrate", total_throughput=1500.0, input_throughput=1400.0, e2e_norm_intvty_p90=150.0
+        action="integrate",
+        total_throughput=1500.0,
+        input_throughput=1400.0,
+        e2e_norm_intvty_p90=150.0,
+        e2e_norm_intvty_p50=150.0,
     )
     state.optimization_stack = [dict(state.current_best)]
     state.save(session_dir)
-    measurement.update(output_throughput=output, total_token_throughput=total, e2e_norm_intvty_p90=intvty)
+    measurement.update(
+        output_throughput=output,
+        total_token_throughput=total,
+        e2e_norm_intvty_p90=intvty,
+        e2e_norm_intvty_p50=intvty,
+    )
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert result["decision"] == decision
     expected_gain = (intvty - 150.0) / 150.0 * 100.0
     assert result["gain_pct"] == pytest.approx(expected_gain)
-    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result["graded_objective"] == "e2e_norm_intvty_p50"
     assert result.get("decision_reason") != "stack_positive_increment"
     assert "stack_incremental_keep_threshold_pct" not in result
     assert ("accuracy_gate" in result) is (decision == "KEEP")
@@ -985,8 +1027,8 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
     dropped: list[dict] = []
     extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}
 
-    def _drop(envs=None, *, backup_dir=None):
-        dropped.append({"envs": envs, "backup_dir": backup_dir})
+    def _drop(envs=None, *, backup_dir=None, also_modules=()):
+        dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
     monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
@@ -2386,7 +2428,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
 
 # ReportExecutor
 @pytest.mark.asyncio
-async def test_report_executor_writes_md_and_json(session_dir):
+@pytest.mark.parametrize("record_alert", [False, True], ids=["no-alert", "recorded-alert"])
+async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     """Run the report runner against seeded state + bus events; both files parse."""
     state = SharedState(
         session_id=session_dir.name,
@@ -2424,13 +2467,15 @@ async def test_report_executor_writes_md_and_json(session_dir):
                 payload={"action_name": "explore", "predicted_gain_pct": 5.0},
             ),
         )
-        await c._handle_intent(
-            "robustness",
-            Intent(
-                type=IntentType.ALERT,
-                payload={"severity": "low", "summary": "noise"},
-            ),
-        )
+        if record_alert:
+            await c.bus.append_and_seq(
+                Message.new(
+                    from_agent="coordinator",
+                    to_agent="orchestration",
+                    topic="alert",
+                    payload={"severity": "warning", "summary": "Recorded report alert"},
+                )
+            )
         c.shared_state.save(session_dir)
     finally:
         await c.stop()
@@ -2459,9 +2504,14 @@ async def test_report_executor_writes_md_and_json(session_dir):
     assert summary["baseline_tput"] == 800.0
     assert summary["cumulative_gain_validated"] == 12.5
     assert summary["stop_reason"] == "target_reached"
-    assert summary["event_counts_by_topic"].get("proposal", 0) >= 2
-    assert summary["event_counts_by_topic"].get("alert", 0) >= 1
+    assert summary["event_counts_by_topic"].get("proposal", 0) == 2
+    assert summary["event_counts_by_topic"].get("alert", 0) == int(record_alert)
+    alerts = [item for item in summary["highlights"] if item["topic"] == "alert"]
+    assert len(alerts) == int(record_alert)
+    if record_alert:
+        assert alerts[0]["summary"] == "sev=warning Recorded report alert"
     md_text = md.read_text()
+    assert ("Recorded report alert" in md_text) is record_alert
     assert session_dir.name in md_text
     assert "## Throughput" in md_text
     assert "12.50%" in md_text

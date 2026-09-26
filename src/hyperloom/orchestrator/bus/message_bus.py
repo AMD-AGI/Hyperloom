@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. Topics + priorities validated against an allowlist."""
+"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. Topics validated against an allowlist."""
 
 from __future__ import annotations
 
@@ -59,21 +59,7 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "observation",
         }
     ),
-    "robustness": frozenset(
-        {
-            "delegated_result",
-            "review_verdict",
-            "proposal",
-            "observation",
-            "alert",
-            "strategy_change",
-        }
-    ),
-    "kernel_agent": frozenset({"request"}),
 }
-
-
-_now_iso = now_iso
 
 
 @dataclass
@@ -85,9 +71,8 @@ class Message:
     to_agent: str
     topic: str
     payload: dict[str, Any]
-    priority: int = 1
     in_reply_to: str | None = None
-    ts: str = field(default_factory=_now_iso)
+    ts: str = field(default_factory=now_iso)
     seq: int | None = None  # DB-assigned on insert
 
     @classmethod
@@ -98,7 +83,6 @@ class Message:
         topic: str,
         payload: dict[str, Any],
         *,
-        priority: int = 1,
         in_reply_to: str | None = None,
     ) -> "Message":
         """Construct a new message with a fresh ``msg_id``."""
@@ -108,7 +92,6 @@ class Message:
             to_agent=to_agent,
             topic=topic,
             payload=payload,
-            priority=priority,
             in_reply_to=in_reply_to,
         )
 
@@ -121,7 +104,6 @@ class Message:
             to_agent=row["to_agent"],
             topic=row["topic"],
             payload=json.loads(row["payload"]),
-            priority=row["priority"],
             in_reply_to=row["in_reply_to"],
             ts=row["ts"],
             seq=row["seq"],
@@ -136,7 +118,6 @@ class Message:
             self.topic,
             self.in_reply_to,
             json.dumps(self.payload),
-            self.priority,
             self.ts,
         )
 
@@ -152,12 +133,10 @@ class MessageBus:
         """Append one message and return its assigned sequence id."""
         if msg.topic not in TOPIC_ALLOWLIST:
             raise ValueError(f"unknown topic: {msg.topic!r}")
-        if not (0 <= msg.priority <= 3):
-            raise ValueError(f"priority must be 0..3, got {msg.priority}")
         async with self.db.transaction() as cur:
             cur.execute(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
+                "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
                 msg.to_db_row(),
             )
             msg.seq = int(cur.lastrowid)
@@ -185,6 +164,22 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
+    def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> list[Message]:
+        """Read an uncapped recipient inbox, including all topics and self-sent events."""
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
+            (after_seq, to_agent),
+        )
+        return [Message.from_row(row) for row in rows]
+
+    def recent_outcomes_context_sync(self, *, limit: int) -> list[Message]:
+        """Read the latest outcomes, newest first."""
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
+            (limit,),
+        )
+        return [Message.from_row(row) for row in rows]
+
     async def replay_for(
         self,
         to_agent: str,
@@ -194,7 +189,8 @@ class MessageBus:
     ) -> list[Message]:
         """Inbox for one agent: subscribed topics only, never its own messages.
 
-        Raw-DB readers (``lookup_by_id``, ``tail``) bypass both rules.
+        Raw-DB readers (``lookup_by_id``, ``tail``, ``inbox_context_sync``,
+        ``recent_outcomes_context_sync``) bypass both rules.
         """
         subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
         if not subscribed:

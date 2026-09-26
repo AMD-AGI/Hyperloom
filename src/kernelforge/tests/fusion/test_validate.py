@@ -107,6 +107,7 @@ class TestValidateRecipe:
         )
         vr = validate_recipe(_recipe(), runner)
         assert vr.correctness_passed is False
+        assert vr.correctness_measured is False  # nothing compiled, so nothing compared
         assert vr.kept is False
         assert vr.kernel_speedup is None
         assert "COMPILE FAILED" in vr.note
@@ -116,6 +117,7 @@ class TestValidateRecipe:
         runner = _FakeRunner(parity=[ParitySample(snr_db=12.0, max_abs_err=0.5)])
         vr = validate_recipe(_recipe(), runner)
         assert vr.correctness_passed is False
+        assert vr.correctness_measured is True  # the comparison ran and the fused path lost it
         assert vr.kept is False
         assert "PARITY FAILED" in vr.note
 
@@ -166,6 +168,7 @@ class TestValidateRecipe:
         runner = _FakeRunner(parity=[])
         vr = validate_recipe(_recipe(), runner)
         assert vr.correctness_passed is False
+        assert vr.correctness_measured is False  # no samples came back, so nothing was compared
         assert "PARITY UNAVAILABLE" in vr.note
 
 

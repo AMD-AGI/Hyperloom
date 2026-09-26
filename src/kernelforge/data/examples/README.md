@@ -279,8 +279,8 @@ docstring for the replay-safety contract) and reuse the file as-is across tasks.
    cannot break capture by editing the kernel.
 2. **Verify capture.** Pass `dirty`/`verify` closures to `cuda_graph_bench`; after
    capture it corrupts the output, replays, and checks the result is correct. An
-   empty/invalid graph fails the check and the harness falls back to eager timing
-   with a `# bench mode: eager (...)` line instead of reporting bogus numbers.
+   empty/invalid graph fails the check and the harness raises with the reason
+   instead of reporting bogus numbers; it has no eager mode to fall back to.
 
 Keep graph timing on even when an op looks graph-neutral: it costs nothing and
 keeps the numbers honest and comparable. How much it matters scales with host

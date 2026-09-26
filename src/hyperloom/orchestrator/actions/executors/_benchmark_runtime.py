@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Mapping
 
 from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
 
@@ -19,6 +19,7 @@ def apply_runtime_benchmark_overrides(
     benchmark_script: str | None = None,
     conc: Any = None,
     agentx_mode: bool | None = None,
+    grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
     if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
@@ -47,7 +48,7 @@ def apply_runtime_benchmark_overrides(
     # AgentX switch on the shared rebuild path: without this, the gpu_type block above re-pins the synthetic
     # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
     # rebuild via this function).
-    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
+    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode, grading=grading)
 
     envs: dict[str, Any] = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the

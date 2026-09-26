@@ -198,7 +198,7 @@ def test_fingerprint_tolerates_a_storageless_tensor(probe_module, tmp_path):
         dtype = "bfloat16"
         device = "meta"
 
-        def data_ptr(self):  # noqa: ANN201
+        def data_ptr(self):
             raise RuntimeError("meta tensor has no storage")
 
     fingerprint = probe._fingerprint(_MetaTensor(), strict=True)
@@ -387,7 +387,7 @@ def test_aten_level_scalar_conversion_is_a_declared_blind_spot():
 def test_deep_probe_declines_to_displace_an_existing_profiler(probe_module, tmp_path):
     """Tier 2 backs off rather than evicting cProfile or a with_stack profiler."""
 
-    def _other_hook(_frame, _event, _arg):  # noqa: ANN001, ANN202
+    def _other_hook(_frame, _event, _arg):
         return None
 
     probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=(), deep=True)

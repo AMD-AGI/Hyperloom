@@ -59,8 +59,9 @@ def test_cross_minor_fallback_when_no_same_minor(tmp_path: Path):
 
 def test_subdir_name_maps_a_dotted_version(tmp_path: Path):
     assert _versioned_patches_subdir_name("0.5.14") == "sglang_0_5_14"
-    # A dev/local suffix still resolves to its numeric head.
-    assert _versioned_patches_subdir_name("0.5.10.dev4") == "sglang_0_5_10"
+    # A dev/local suffix names a build off the release branch, whose patches live
+    # in the variant subdir; the numeric head still selects the version.
+    assert _versioned_patches_subdir_name("0.5.10.dev4") == "sglang_0_5_10_sgldev"
     assert _versioned_patches_subdir_name("main") is None
 
 

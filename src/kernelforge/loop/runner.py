@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import signal
 import tempfile
 import textwrap
@@ -23,6 +24,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
+
+from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
@@ -129,6 +132,7 @@ from kernelforge.loop.scoring import (
     passes_keep_threshold,
     required_keep_speedup,
     rescaled_sigma,
+    runs_task_suite_acceptance,
 )
 from kernelforge.loop.baseline_reference import (
     BASELINE_DRIFT_TOLERANCE,
@@ -674,7 +678,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.experiment.experiment_id,
                     self.llm_usage,
                 )
-        except Exception:  # noqa: BLE001 - accounting must never break the loop
+        except Exception:
             log.debug("failed to checkpoint LLM usage", exc_info=True)
 
     def _git(self, *args: str) -> str:
@@ -747,6 +751,28 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Return all staged and unstaged tracked changes relative to HEAD."""
         return self._git("diff", "HEAD", "--", ".")
 
+    def _candidate_changes(self, base: str) -> tuple[str, list[str]]:
+        """Snapshot tracked and allowed new sources without changing the real index."""
+        admitted = self._new_paths()[0] if self.ic.commit_new_paths else []
+
+        def read_changes(env=None):
+            patch = git("diff", base, "--", ".", cwd=self.ic.workspace_dir, env=env).stdout
+            names = git("diff", "--name-only", base, "--", ".", cwd=self.ic.workspace_dir, env=env).stdout
+            return patch, [line for line in names.splitlines() if line]
+
+        if not admitted:
+            return read_changes()
+        with tempfile.TemporaryDirectory(prefix="forge-candidate-index-") as temporary:
+            index = Path(self._git("rev-parse", "--git-path", "index"))
+            if not index.is_absolute():
+                index = Path(self.ic.workspace_dir) / index
+            candidate_index = Path(temporary) / "index"
+            # Git uses the index mtime to detect same-size edits with unchanged file timestamps.
+            shutil.copy2(index, candidate_index)
+            env = {"GIT_INDEX_FILE": str(candidate_index)}
+            git("add", "--", *admitted, cwd=self.ic.workspace_dir, env=env)
+            return read_changes(env)
+
     def _persist_pending_keep(self, pending: dict) -> None:
         """Atomically persist a verified candidate before creating its commit."""
         atomic_write_text(
@@ -798,44 +824,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         kernel_source: str,
     ) -> dict:
         """Capture every fact needed to finish a verified KEEP after restart."""
-        patch = self._tracked_diff_from_head()
-        if not patch:
-            raise ValueError("verified KEEP has no tracked candidate diff")
         base_head = self._git("rev-parse", "HEAD").splitlines()[0]
+        patch, changed_files = self._candidate_changes(base_head)
+        # Keep the journal's existing fingerprint convention; export the raw diff below.
+        patch = patch.strip()
+        if not patch:
+            raise ValueError("verified KEEP has no candidate diff")
         validation_text = result.validation_summary or "canonical validation passed"
         if result.error_output:
             validation_text = f"{validation_text}\n\n{result.error_output}".strip()
         benchmark = dict(result.bench_detail or {})
         benchmark.setdefault("median_ms", result.wall_ms)
-        changed_files = [
-            line.strip()
-            for line in self._git(
-                "diff",
-                "--name-only",
-                "HEAD",
-                "--",
-                ".",
-            ).splitlines()
-            if line.strip()
-        ]
         publication_base = self.ic.campaign_base_commit or base_head
-        publication_patch = self._git(
-            "diff",
-            publication_base,
-            "--",
-            ".",
-        )
-        publication_changed_files = [
-            line.strip()
-            for line in self._git(
-                "diff",
-                "--name-only",
-                publication_base,
-                "--",
-                ".",
-            ).splitlines()
-            if line.strip()
-        ]
+        publication_patch, publication_changed_files = self._candidate_changes(publication_base)
         commit_message = f"iter-{result.iteration}: {rationale[:72]}"
         return {
             "schema_version": 2,
@@ -921,7 +922,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         tracked_diff = self._tracked_diff_from_head()
         if current_head == base_head:
-            if tracked_diff and hashlib.sha256(tracked_diff.encode()).hexdigest() != expected_hash:
+            candidate_diff, _ = self._candidate_changes(base_head)
+            if candidate_diff and hashlib.sha256(candidate_diff.strip().encode()).hexdigest() != expected_hash:
                 raise ValueError("pending KEEP working tree mismatch")
             return "uncommitted"
 
@@ -1253,7 +1255,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not p.is_absolute():
                 p = Path(self.ic.workspace_dir) / p
             return p.read_text()
-        except Exception as e:
+        except OSError as e:
             log.debug("could not read source file %s: %s", path, e)
             return ""
 
@@ -1317,8 +1319,8 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not commit_hash:
             return ""
         try:
-            return self._git("diff", f"{commit_hash}~1", commit_hash)
-        except Exception as e:
+            return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
+        except Exception as e:  # noqa: BLE001 - git wrapper does not export its error type here
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
 
@@ -1336,6 +1338,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not isinstance(measurement, dict) or not measurement.get("success"):
             return False
         if not attempt_diff.strip():
+            return False
+        # The gate's tracked-diff fingerprint does not bind untracked source bytes.
+        if self.ic.commit_new_paths and self._new_paths()[0]:
             return False
         if self.ic.build_command:
             return False
@@ -1361,14 +1366,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         import re as _re
 
-        files: list[str] = []
-        for ln in diff.splitlines():
-            if ln.startswith("diff --git "):
-                parts = ln.split()
-                if len(parts) >= 4:
-                    name = parts[3][2:] if parts[3].startswith("b/") else parts[3]
-                    files.append(name)
-        stat_lines = [f"{name} | changed" for name in files[:4]]
+        stat_lines = [f"{name} | changed" for name in touched_paths(diff)[:4]]
         signal = _re.compile(
             r"BLOCK_|VEC_|WARP|WAVE|tile|fastmath|const_expr|num_stage|num_warp|"
             r"occupancy|def |return |Vec\(|\.to\(|=|if ",
@@ -1431,7 +1429,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         base = self.ic.campaign_base_commit
         if not base:
             return self._full_diff(commit_hash)
-        return self._git("diff", base, commit_hash, "--", ".")
+        return git("diff", base, commit_hash, "--", ".", cwd=self.ic.workspace_dir).stdout
 
     def _publish_best_result(
         self,
@@ -1495,7 +1493,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 round_budget=self._round_budget_summary(),
             )
             return True
-        except Exception as error:  # noqa: BLE001 - keep commit remains authoritative
+        except Exception as error:
             first_failure = not self.persistence_degraded
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish best iteration {result.iteration}: {error}")
@@ -1906,10 +1904,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         index = self.archive.load_index()
         metas = []
         for row in index:
-            try:
-                meta = self.archive.load_meta(int(row.get("iter") or 0))
-            except Exception:  # noqa: BLE001 - a damaged record is not a candidate
-                continue
+            meta = self.archive.load_meta(int(row.get("iter") or 0))
             if meta:
                 metas.append(meta)
         return select_merge_pair(
@@ -1942,10 +1937,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self._working_tree_diff().strip():
             return "", self.TREE_ALREADY_DIRTY_OBSTACLE
         for candidate in pair:
-            try:
-                patch = self.archive.read_candidate_file(candidate.iteration, "change.diff")
-            except Exception:  # noqa: BLE001 - an unreadable diff is not stackable
-                patch = ""
+            patch = self.archive.read_candidate_file(candidate.iteration, "change.diff")
             if not str(patch or "").strip():
                 # Reported apart from a conflict because the two ask for opposite responses.
                 self._git_discard_worktree()
@@ -2195,7 +2187,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 result.commit_hash,
                 result=result,
             )
-        except Exception as error:  # noqa: BLE001 - derived view is rebuildable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2323,7 +2315,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 events=events,
                 candidate_metadata=metadata,
             )
-        except Exception as error:  # noqa: BLE001 - structured history remains durable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2398,7 +2390,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: round cost record failed", exc_info=True)
 
     def _round_budget_summary(self) -> dict:
@@ -2451,17 +2443,14 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [budget] round narrowed to {decision.lanes} lane(s): {decision.summary()}")
         else:
             self._refuse_round(iteration, decision.summary())
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "round_admission",
-                    iteration,
-                    admitted=decision.admitted,
-                    **event_fields,
-                )
+        self.state_store.append_event(
+            make_event(
+                "round_admission",
+                iteration,
+                admitted=decision.admitted,
+                **event_fields,
             )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("run_state: round admission append failed", exc_info=True)
+        )
         return decision.lanes if decision.admitted else None
 
     def _admit_dispatch(self, iteration: int) -> bool:
@@ -2470,23 +2459,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             remaining_sec=self._time_remaining(),
             measurement_sec=self._measurement_estimate_sec(),
         )
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "round_dispatch",
-                    iteration,
-                    admitted=decision.admitted,
-                    remaining_sec=round(decision.remaining_sec, 3),
-                    required_sec=round(decision.required_sec, 3),
-                    session_sec=round(decision.session_sec, 3),
-                    measurement_sec=round(decision.measurement_sec, 3),
-                    # Recorded because it is the one case where the parts do not add up to the requirement: this
-                    # campaign estimated less than the external-timeout floor and was held at it.
-                    floored=decision.floored,
-                )
+        self.state_store.append_event(
+            make_event(
+                "round_dispatch",
+                iteration,
+                admitted=decision.admitted,
+                remaining_sec=round(decision.remaining_sec, 3),
+                required_sec=round(decision.required_sec, 3),
+                session_sec=round(decision.session_sec, 3),
+                measurement_sec=round(decision.measurement_sec, 3),
+                # Recorded because it is the one case where the parts do not add up to the requirement: this
+                # campaign estimated less than the external-timeout floor and was held at it.
+                floored=decision.floored,
             )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("run_state: round dispatch append failed", exc_info=True)
+        )
         if decision.admitted:
             return True
         self._refuse_round(iteration, decision.summary())
@@ -2589,7 +2575,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             self.run_state.baseline_case_times = dict(case_times)
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist pristine baseline case timings")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2607,7 +2593,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if self.search_start_mean_case_speedup is not None:
                 self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist scoring state")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -3042,7 +3028,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                 )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort; never break the loop
+        except Exception:
             log.debug("run_state: seed/hydrate failed", exc_info=True)
 
     def _validate_pre_published_warm_start(
@@ -3101,7 +3087,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             wall_ms=self.ic.warm_start_wall_ms,
             mean_case_speedup=self.ic.warm_start_mean_case_speedup,
             commit_hash=head,
-            plan=f"KB warm-start {self.ic.warm_start_solution_slug}".strip(),
+            plan=f"Validated start: {self.ic.warm_start_solution_slug}".strip(),
             source="warm_start",
         )
         self.run_state.head_commit = head
@@ -3139,7 +3125,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             wall_ms=incumbent_wall_ms,
             mean_case_speedup=incumbent_mean_case_speedup,
             commit_hash=head,
-            plan=f"KB warm-start {self.ic.warm_start_solution_slug}".strip(),
+            plan=f"Validated start: {self.ic.warm_start_solution_slug}".strip(),
             source="warm_start",
         )
         self.run_state.head_commit = head
@@ -3174,7 +3160,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             iteration=0,
             duration_sec=0.0,
             validation_passed=True,
-            validation_summary="KB warm-start passed canonical correctness and performance gates",
+            validation_summary=f"Validated start: {self.ic.warm_start_solution_slug}; correctness passed, timings recorded",
             wall_ms=incumbent_wall_ms,
             mean_case_speedup=incumbent_mean_case_speedup,
             kept=True,
@@ -3308,7 +3294,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ):
                     raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
             return True
-        except Exception as error:  # noqa: BLE001 - best-effort unless required
+        except Exception as error:
             if require_durable:
                 raise RuntimeError(f"failed to finalize iteration {result.iteration} checkpoint") from error
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
@@ -3423,7 +3409,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ),
             )
             return self.handoff_store.write(handoff)
-        except Exception as error:  # noqa: BLE001 - handoff is best-effort
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"persist handoff iteration {iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -3536,7 +3522,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     print(
                         f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
                     )
-            except Exception as error:  # noqa: BLE001 - never break the loop
+            except Exception as error:
                 summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
                 log.debug("lessons: summarizer step failed", exc_info=True)
                 print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
@@ -3546,21 +3532,18 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not has_narrative:
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
             # agent ran into.
-            try:
-                fallback = build_fallback_document(
-                    diff_summary=diff_summary,
-                    findings=session_sink.get("findings", ""),
-                    end_reason=result.session_end_reason,
-                    summary_failure=summary_failure,
-                    turns=result.turns,
-                    plan=session_sink.get("plan", ""),
-                    progress_log=session_sink.get("progress_log"),
-                )
-                if fallback and store.write(iteration, fallback) is not None:
-                    has_narrative = True
-                    print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
-            except Exception:  # noqa: BLE001 - best-effort
-                log.debug("lessons: fallback document failed", exc_info=True)
+            fallback = build_fallback_document(
+                diff_summary=diff_summary,
+                findings=session_sink.get("findings", ""),
+                end_reason=result.session_end_reason,
+                summary_failure=summary_failure,
+                turns=result.turns,
+                plan=session_sink.get("plan", ""),
+                progress_log=session_sink.get("progress_log"),
+            )
+            if fallback and store.write(iteration, fallback) is not None:
+                has_narrative = True
+                print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
 
         try:
             scope = self._lesson_scope(
@@ -3603,26 +3586,23 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"  [lesson] scope not recorded for iter {iteration}: "
                     f"the document renders unscoped and closes nothing"
                 )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("lessons: scope append failed", exc_info=True)
 
-        try:
-            store.append_outcome(
-                iteration,
-                format_outcome_line(
-                    decision=decision,
-                    wall_ms=result.wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    snr_db=result.snr_db,
-                    end_reason=result.session_end_reason,
-                    turns=result.turns if not has_narrative else None,
-                    summary_failure=(summary_failure if not has_narrative else ""),
-                ),
-            )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("lessons: outcome append failed", exc_info=True)
+        store.append_outcome(
+            iteration,
+            format_outcome_line(
+                decision=decision,
+                wall_ms=result.wall_ms,
+                best_wall_ms=self.best_wall_ms,
+                mean_case_speedup=result.mean_case_speedup,
+                best_mean_case_speedup=self.best_mean_case_speedup,
+                snr_db=result.snr_db,
+                end_reason=result.session_end_reason,
+                turns=result.turns if not has_narrative else None,
+                summary_failure=(summary_failure if not has_narrative else ""),
+            ),
+        )
 
     async def run_one_iteration(
         self,
@@ -3757,13 +3737,10 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Step 5: Register check (optional — requires build artifacts)
         vgpr = None
-        try:
-            reg_result = await check_registers(build_dir=self.ic.build_dir)
-            vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
-            if vgpr:
-                print(f"  [registers] VGPR={vgpr}")
-        except Exception:
-            log.debug("optional register check failed", exc_info=True)
+        reg_result = await check_registers(build_dir=self.ic.build_dir)
+        vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
+        if vgpr:
+            print(f"  [registers] VGPR={vgpr}")
 
         # Step 6: the mean of the independent pristine-relative scores must clear the current best by the candidate's
         # own measurement noise.
@@ -3774,17 +3751,32 @@ class IterationLoop(AnalysisRuntimeMixin):
             sigma_sample_size=sigma_resolution.sample_size,
         )
 
-        # Step 7: the arena's own verdict.
-        if improved:
+        if improved and self.ic.kernel_backend == "assembly":
+            # A second-stage ASM result must also beat the original caller's aggregate time.
+            source_ms = self.ic.pristine_baseline_wall_ms
+            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
+
+        # Step 7: the numerical contract, which only assembly declares and only it
+        # needs. Every other backend was judged by the driver in Step 4 and measured
+        # through it since; re-running that verdict here would answer the same
+        # question with the same command, while reading a task configuration whose
+        # shape the engine has no business knowing. The predicate is shared with the
+        # gate description every agent is given, so the two cannot disagree.
+        canonical_summary = ""
+        if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,
                 timeout_cap_sec=self.ic.validate_stage_timeout_sec,
                 candidate_label=f"iteration {iteration}",
+                kernel_backend=self.ic.kernel_backend,
             )
             # The suite only runs for a candidate the round produced, so it is part of that round's measurement and
             # has to be priced into the next round's admission alongside the validate-and-bench cycle.
             self._observe_measurement(canonical_started)
+            canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
+            if canonical.numerical_evidence is not None:
+                bench_result["numerical_validation"] = canonical.numerical_evidence
             if not canonical.passed:
                 return IterationResult(
                     iteration=iteration,
@@ -3809,7 +3801,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             iteration=iteration,
             duration_sec=duration,
             validation_passed=True,
-            validation_summary=report.summary(),
+            validation_summary=report.summary() + canonical_summary,
             wall_ms=selected_raw_mean_ms,
             mean_case_speedup=mean_case_speedup,
             snr_db=snr_db,
@@ -3867,7 +3859,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - policy remains available in memory
+        except Exception:
             log.debug("search policy persistence failed", exc_info=True)
         # A window that has not filled yet is the ordinary state of a young campaign.
         fault = window_gain.unavailable
@@ -3961,7 +3953,7 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _record_critic_ruling(self, iteration: int, critic) -> None:
         """Put this round's verdict where the next process can still find it."""
         ruling = CriticRuling()
-        if critic is not None and not critic.error:
+        if critic is not None and not critic.fail_open:
             ruling = CriticRuling(
                 verdict=critic.verdict,
                 review_path=str((self._orchestration_root(iteration) / "critic_review.md").resolve()),
@@ -4332,11 +4324,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Per-iteration lesson documents.
         self.lessons = LessonStore(self.ic.workspace_dir)
-        try:
-            self.handoff_store = HandoffStore(self.ic.workspace_dir)
-        except Exception:
-            self.handoff_store = None
-            log.debug("handoff store initialization failed", exc_info=True)
+        self.handoff_store = HandoffStore(self.ic.workspace_dir)
 
         # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
         # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
@@ -4638,11 +4626,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             # the implementer (prompt history).
             digest = ""
             if getattr(self, "archive", None) is not None:
-                try:
-                    digest = self.archive.render_digest()
-                except Exception as e:
-                    log.debug("could not render lineage digest: %s", e)
-                    digest = ""
+                digest = self.archive.render_digest()
 
             # Check terminal conditions
             if self._is_gate_met():
@@ -4709,14 +4693,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     print(f"\n[supervisor] intervening at iteration {iteration}: {supervisor_reason}")
                     memo = ""
                     try:
-                        try:
-                            evidence_context = self._build_supervisor_evidence_context(iteration)
-                        except Exception:
-                            evidence_context = ""
-                            log.debug(
-                                "could not build supervisor evidence",
-                                exc_info=True,
-                            )
+                        evidence_context = self._build_supervisor_evidence_context(iteration)
                         # A new review attempt supersedes the prior stall episode's ruling even when the backend
                         # returns empty.
                         self._expire_supervisor_ruling()
@@ -4740,7 +4717,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             iteration=iteration,
                             evidence_context=evidence_context,
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - supervisor memo is optional
                         print(f"  [supervisor] failed ({e}); continuing without a memo")
                     finally:
                         self._checkpoint_llm_usage()
@@ -4773,7 +4750,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                     ),
                                 )
                             )
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug("run_state: supervisor event append failed", exc_info=True)
                     else:
                         print("  [supervisor] no new ruling returned; continuing without an active ruling")
@@ -4786,7 +4763,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                 stall_threshold=self.ic.supervise_after,
                             )
                             self.state_store.save(self.run_state)
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug(
                                 "run_state: supervisor reset/save failed",
                                 exc_info=True,
@@ -4810,18 +4787,15 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             # Durable per-iteration marker (facts only; detail lives in files).
             self.run_state.iteration = iteration
-            try:
-                self.state_store.append_event(
-                    make_event(
-                        "iteration_started",
-                        iteration,
-                        best_before_ms=self.best_wall_ms,
-                        best_before_mean_case_speedup=self.best_mean_case_speedup,
-                        phase=self.run_state.phase,
-                    )
+            self.state_store.append_event(
+                make_event(
+                    "iteration_started",
+                    iteration,
+                    best_before_ms=self.best_wall_ms,
+                    best_before_mean_case_speedup=self.best_mean_case_speedup,
+                    phase=self.run_state.phase,
                 )
-            except Exception:  # noqa: BLE001 - best-effort
-                log.debug("run_state: iteration_started append failed", exc_info=True)
+            )
 
             # Agent proposes modification
             session_sink: dict = {}
@@ -5002,13 +4976,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 # holding every past one.
                 lessons_txt = ""
                 if getattr(self, "lessons", None) is not None:
-                    try:
-                        lessons_txt = self.lessons.render_for_prompt(
-                            current_cases=self._scored_case_ids(),
-                            kernel_source=self._kernel_source_for_scope(),
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort
-                        log.debug("lessons: prompt render failed", exc_info=True)
+                    lessons_txt = self.lessons.render_for_prompt(
+                        current_cases=self._scored_case_ids(),
+                        kernel_source=self._kernel_source_for_scope(),
+                    )
 
                 ledger_txt = ""
                 if self.ledger:
@@ -5110,7 +5081,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         **extra_kwargs,
                     )
                     print(f"  [agent] Rationale: {rationale[:200]}")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
                     agent_error = e
                     print(f"  [agent] ERROR: {e}")
                     rationale = f"agent session ended with error after edits: {e}"
@@ -5324,7 +5295,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         plan=session_sink.get("plan", ""),
                         **run_kwargs,
                     )
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
                     # verdict/ledger/archive path.
                     print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
@@ -5388,7 +5359,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             )
                             self._persist_pending_keep(pending_keep)
                             commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
                             result.kept = False
                             result.validation_passed = False
                             result.crashed = True
@@ -5448,20 +5419,17 @@ class IterationLoop(AnalysisRuntimeMixin):
                 on_best_ready(result)
 
             if self.experiment:
-                try:
-                    self.tracker.log_iteration(
-                        self.experiment.experiment_id,
-                        config={"iteration": iteration, "kept": result.kept},
-                        snr_db=result.snr_db,
-                        wall_ms=result.wall_ms,
-                        mean_case_speedup=result.mean_case_speedup,
-                        pmc_diagnosis=result.pmc_diagnosis,
-                        vgpr=result.vgpr,
-                        decision="KEEP" if result.kept else "REVERT",
-                        notes=session_sink.get("plan", ""),
-                    )
-                except Exception:
-                    log.debug("failed to log iteration to experiment tracker", exc_info=True)
+                self.tracker.log_iteration(
+                    self.experiment.experiment_id,
+                    config={"iteration": iteration, "kept": result.kept},
+                    snr_db=result.snr_db,
+                    wall_ms=result.wall_ms,
+                    mean_case_speedup=result.mean_case_speedup,
+                    pmc_diagnosis=result.pmc_diagnosis,
+                    vgpr=result.vgpr,
+                    decision="KEEP" if result.kept else "REVERT",
+                    notes=session_sink.get("plan", ""),
+                )
 
             self.results.append(result)
 
@@ -5505,36 +5473,29 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             # Record this iteration into the cross-iteration experience ledger.
             if getattr(self, "ledger", None) is not None and (commit_hash or attempt_diff):
-                try:
-                    if not result.validation_passed:
-                        last = ""
-                        if result.validation_summary:
-                            lines = [l for l in result.validation_summary.splitlines() if l.strip()]
-                            last = lines[-1][:120] if lines else ""
-                        outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
-                    elif result.kept:
-                        outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
-                    else:
-                        best_txt = (
-                            f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-                        )
-                        speedup_txt = (
-                            f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
-                        )
-                        outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
-                    error_text = (
-                        session_sink.get("findings", "")
-                        or getattr(result, "error_output", "")
-                        or (result.validation_summary if not result.validation_passed else "")
-                    )
-                    self.ledger.record_iteration(
-                        iteration=iteration,
-                        outcome=outcome,
-                        diff_summary=iteration_diff_summary,
-                        error_text=error_text,
-                    )
-                except Exception:
-                    log.debug("postmortem logging failed", exc_info=True)
+                if not result.validation_passed:
+                    last = ""
+                    if result.validation_summary:
+                        lines = [l for l in result.validation_summary.splitlines() if l.strip()]
+                        last = lines[-1][:120] if lines else ""
+                    outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
+                elif result.kept:
+                    outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
+                else:
+                    best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                    speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
+                    outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
+                error_text = (
+                    session_sink.get("findings", "")
+                    or getattr(result, "error_output", "")
+                    or (result.validation_summary if not result.validation_passed else "")
+                )
+                self.ledger.record_iteration(
+                    iteration=iteration,
+                    outcome=outcome,
+                    diff_summary=iteration_diff_summary,
+                    error_text=error_text,
+                )
 
             # Archive the full solution and measurements as a derived view.
             archived_path = None
@@ -5575,7 +5536,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                     if keep_checkpoint_finalized and archived_path is None:
                         raise RuntimeError("candidate archive returned no published path")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     if keep_checkpoint_finalized:
                         self.persistence_degraded = True
                         self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
@@ -5631,7 +5592,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: terminal save failed", exc_info=True)
         self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
         self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
@@ -5641,10 +5602,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._checkpoint_llm_usage()
 
         if self.experiment:
-            try:
-                self.tracker.mark_complete(self.experiment.experiment_id)
-            except Exception:
-                log.debug("failed to mark experiment complete", exc_info=True)
+            self.tracker.mark_complete(self.experiment.experiment_id)
 
         # Final report
         total_time = time.time() - self.start_time
@@ -5728,15 +5686,11 @@ def _long_horizon_header(
 ) -> str:
     """The compact long-horizon header for the Implementer prompt, or \"\"."""
     outcomes = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
-    try:
-        return render_long_horizon_header(
-            state,
-            outcomes,
-            include_handoffs=bool(handoff_store and handoff_store.latest()),
-        )
-    except Exception:  # noqa: BLE001 - best-effort
-        log.debug("run_state: prompt view render failed", exc_info=True)
-        return ""
+    return render_long_horizon_header(
+        state,
+        outcomes,
+        include_handoffs=bool(handoff_store and handoff_store.latest()),
+    )
 
 
 def _compact_history_entry(r: IterationResult) -> str:

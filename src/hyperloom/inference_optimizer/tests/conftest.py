@@ -14,15 +14,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-
-
-@pytest.fixture(autouse=True)
-def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
-    """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
-    mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
+    NoLaunchBackendInstalled,
+    _isolate_session_layout_env,
+    launch_backend,
+    virtual_clock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -233,7 +230,7 @@ def build_lifecycle(build_coord):
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-    from hyperloom.orchestrator.framework import paths as fp
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     real = fp.resolve_kernel_search_roots
 
@@ -316,7 +313,7 @@ class ProgressCadence:
 @pytest.fixture
 def progress_cadence(monkeypatch) -> "ProgressCadence":
     """A :class:`ProgressCadence` with the heartbeat tick on the same timescale."""
-    from hyperloom.orchestrator.trace import task_progress
+    from hyperloom.inference_optimizer.trace import task_progress
 
     monkeypatch.setattr(
         task_progress,
@@ -337,13 +334,6 @@ def chatty_child(cadence: ProgressCadence, inner, *, blocks_for_s: float, line_e
         return inner(cmd, *args, **kwargs)
 
     return _run
-
-
-def suppression_window_s() -> float:
-    """The silence past which robustness accuses an agent of stalling."""
-    from hyperloom.agents.robustness.signals.stall import StallConfig
-
-    return StallConfig().stall_timeout_s
 
 
 class _RayDoubleActorClass:
@@ -381,7 +371,7 @@ class _RayDoubleActorHandle:
 class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
-    class exceptions:  # noqa: N801 — mirrors the ray.exceptions namespace
+    class exceptions:
         class RayActorError(Exception):
             pass
 
@@ -428,57 +418,3 @@ def serving_lease_on_a_ray_double(monkeypatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
     with rs.ServingLease(num_gpus=1) as lease:
         yield lease
-
-
-@pytest.fixture
-def virtual_clock():
-    """A :class:`VirtualClock` for tests whose subject is a deadline.
-
-    :class:`ProgressCadence` measures one path's reporting gaps and blocks for
-    real (scaled) time so a heartbeat driver gets to run; that is the right
-    instrument for cadence and the wrong one for a multi-tick round, where
-    nothing may block at all and the readings production takes have to be the
-    clock's. This one is that clock, and can be handed to ``ProgressCadence``
-    so a test using both keeps one timeline.
-    """
-    from hyperloom.orchestrator.rehearsal import VirtualClock
-
-    return VirtualClock()
-
-
-class NoLaunchBackendInstalled(BaseException):
-    """A test launched a subprocess before installing a launch backend.
-
-    A ``BaseException`` on purpose. Several production launch sites sit inside
-    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
-    interpreter cannot import Magpie" that way -- so an ordinary exception here
-    would be swallowed and the test would carry on against a wrong answer
-    instead of stopping.
-    """
-
-
-@pytest.fixture
-def launch_backend(monkeypatch):
-    """Install a scripted stand-in for ``run_with_session_kill``.
-
-    Call it with any object exposing that function's signature as ``run``. Both
-    the definition and the names the eager importers bound are patched, so a
-    launch made on a worker thread the test never sees is covered too.
-    """
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
-
-    installed: list = []
-
-    def _run(cmd, **kwargs):
-        if not installed:
-            raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
-        return installed[-1].run(cmd, **kwargs)
-
-    for module in (_subprocess_kill, _grid_runner, baseline):
-        monkeypatch.setattr(module, "run_with_session_kill", _run)
-
-    def _install(backend):
-        installed.append(backend)
-        return backend
-
-    return _install

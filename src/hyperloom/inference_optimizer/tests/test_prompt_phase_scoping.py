@@ -33,6 +33,7 @@ ROOFLINE_BLOCK = "### Roofline / profile analysis"
 # One goal block per phase.
 PHASE_GOAL_BLOCKS = {
     _ps.PHASE_PRELUDE: "### PRELUDE — phase goal",
+    _ps.PHASE_ENABLEMENT: "### ENABLEMENT — phase goal",
     _ps.PHASE_FRAMEWORK_AGENT: "### OPTIMIZE — phase goal",
     _ps.PHASE_KERNEL_AGENT: "### KERNEL — phase goal",
     _ps.PHASE_SWEEP: "### SWEEP — phase goal",
@@ -42,6 +43,7 @@ PHASE_GOAL_BLOCKS = {
 # Analysis-driven targeting is unreachable once the levers are gone.
 ROOFLINE_PHASES = {
     _ps.PHASE_PRELUDE,
+    _ps.PHASE_ENABLEMENT,
     _ps.PHASE_FRAMEWORK_AGENT,
     _ps.PHASE_KERNEL_AGENT,
 }
@@ -111,13 +113,13 @@ def test_idea_generation_only_in_explore_phase(registry):
 
 
 def test_baseline_recovery_detail_only_in_prelude(registry):
-    """Only PRELUDE can re-propose baseline, so F1/F2 rules render only there."""
+    """PRELUDE and ENABLEMENT render F1/F2 (the phases where baselines keep failing)."""
     refs_dir = asset_prompt_references_dir()
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         # Detailed fingerprint text lives in the reference doc, not in any prompt.
         assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
-        if phase == _ps.PHASE_PRELUDE:
+        if phase in (_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT):
             assert "RULE F1" in text
             assert "RULE F2" in text
         else:
@@ -473,7 +475,7 @@ def _render_state(phase: str, max_minutes: float = 120.0):
 
 
 def _reloop_line(phase: str) -> str | None:
-    out = _render_state(phase).to_phase_status_summary()
+    out = _ps.phase_status_summary(_render_state(phase))
     return next((line for line in out.splitlines() if line.startswith("reloop")), None)
 
 
@@ -507,7 +509,7 @@ def test_reloop_feasibility_matches_the_transition_decision():
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
     s.framework_agent_phase_enabled = False
-    line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
+    line = next(line for line in _ps.phase_status_summary(s).splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
 
 

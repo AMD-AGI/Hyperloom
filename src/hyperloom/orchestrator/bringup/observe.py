@@ -13,7 +13,7 @@ from hyperloom.common.bringup import BootObservation, failure_digest
 from hyperloom.orchestrator.bringup.persist import LoadedObservation, load_boot_observation
 
 if TYPE_CHECKING:
-    from hyperloom.agents.framework.enablement import FailureSignature
+    from hyperloom.common.failure_signature import FailureSignature
 
 
 def session_root(owner: Any) -> Path | None:
@@ -52,7 +52,7 @@ def observe_bringup(
         BringupVerdict: The observation and the signature of the stream it
         selected.
     """
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     from hyperloom.orchestrator.bringup.ladder import (
         SERVER_LOG,
@@ -83,7 +83,7 @@ def observe_bringup(
 
 def verdict_of(observation: "BootObservation") -> BringupVerdict:
     """Recover a verdict from an observation that was persisted earlier."""
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     excerpt = observation.excerpt
     return BringupVerdict(

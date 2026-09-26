@@ -817,6 +817,11 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     kernel.write_text("VALUE = 1\n")
     driver = tmp_path / "forge_driver.py"
     driver.write_text("print('allclose: True')\n")
+    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "KernelForge Test")
+    _git(tmp_path, "config", "user.email", "kernelforge-test@example.invalid")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "base")
     config = Config(
         workspace=str(tmp_path),
         agent_backend="codex",
@@ -1026,10 +1031,13 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
         program_md="Optimize VALUE.",
         agent_backend="codex",
         driver_script=str(driver),
+        commit_new_paths=["kernels/*.s"],
     )
     asyncio.run(agent_fn(str(kernel), ""))
 
     assert captured["spec"].allow_dirty_baseline is True
+    assert captured["spec"].commit_new_paths == ["kernels/*.s"]
+    assert captured["spec"].allow_untracked is False
 
 
 def test_outer_gate_counts_only_incremental_resume_target_edits(

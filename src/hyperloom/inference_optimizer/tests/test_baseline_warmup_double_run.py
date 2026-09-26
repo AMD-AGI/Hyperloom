@@ -20,7 +20,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import (
-    BASELINE_DEFAULT_TIMEOUT_SEC,
     MEASURE_ROUND_DROPPED_WARNING,
     BaselineExecutor,
 )
@@ -32,7 +31,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
-    _SESSION_KILL_GRACE_SEC,
     run_grid,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -42,13 +40,12 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (
     chatty_child,
     enable_multi_node,
     launches_by_round_slot,
-    suppression_window_s,
 )
 
 
@@ -122,6 +119,7 @@ _HOT_TPUT = 4701.6
 def _cold_then_hot_fake_run(
     captured: list | None = None,
     *,
+    launches: list | None = None,
     clock: _AClockOnlyThePassesMove | None = None,
     boot_sec: float = 0.0,
     benchmark_sec: float = 0.0,
@@ -132,6 +130,8 @@ def _cold_then_hot_fake_run(
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
+        if launches is not None:
+            launches.append(kwargs)
         if captured is not None:
             cfg_idx = cmd.index("--benchmark-config")
             cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
@@ -166,14 +166,16 @@ def _executor(
     )
 
 
-def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch, framework):
     """The double-run reports the HOT second-round throughput."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
+    _write_yaml(base, framework=framework)
     output_dir = tmp_path / "ws"
 
     captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
+    launches: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured, launches=launches)
     executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
@@ -196,9 +198,12 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
     # The hot pass reuses the warmup server, so its identity evidence must be carried from the server-owning warmup
     # slot.
-    assert result["launch_evidence_path"].endswith("warmup_round/launch_evidence.json")
+    assert Path(result["launch_evidence_path"]).parts[-2:] == ("warmup_round", "launch_evidence.json")
     assert result["launch_evidence"]["warm_reuse"]["reused_ready_server"] is True
     assert result["launch_evidence"]["warm_reuse"]["provenance"] == "warmup_round"
+    assert [launch["server_already_ready"] for launch in launches] == [False, True]
+    assert [launch["timeout"] for launch in launches] == [7800, 7800]
+    assert [launch["silence_timeout_sec"] for launch in launches] == [600, 600]
 
     assert len(captured) == 2
     warmup_lc = captured[0]["benchmark"]["server_lifecycle"]
@@ -208,7 +213,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert measure_lc["cleanup"] is True
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
-    assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+    assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
 
 def _run_capturing_rounds(executor, ctx, notes):
@@ -317,7 +322,10 @@ def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_c
         result = _run(executor(_cadence_ctx(tmp_path)))
 
     assert result["status"] == "succeeded"
-    assert progress_cadence.widest_silence() < suppression_window_s()
+    running = [note for note in progress_cadence.notes if note["status"] == "running"]
+    assert len(running) >= 3
+    assert all(note["output_lines"] > 0 for note in running)
+    assert progress_cadence.widest_silence() <= 150.0
 
 
 def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, progress_cadence):
@@ -339,7 +347,10 @@ def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, p
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2  # the discarded warmup pass, then the measured one
-    assert progress_cadence.widest_silence() < suppression_window_s()
+    running = [note for note in progress_cadence.notes if note["status"] == "running"]
+    assert len(running) >= 3
+    assert all(note["output_lines"] > 0 for note in running)
+    assert progress_cadence.widest_silence() <= 150.0
 
 
 def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
@@ -532,7 +543,7 @@ def test_a_rebaseline_that_cannot_cover_its_hot_pass_keeps_the_cold_warmup(tmp_p
     assert result["measure_round_dropped"]["one_more_measurement_sec"] == pytest.approx(0.0)
 
 
-def test_a_rounds_boot_is_priced_even_though_no_cap_bounded_it(tmp_path):
+def test_a_rounds_boot_is_priced_from_elapsed_time_not_the_watchdog_policy(tmp_path):
     """The gate prices the round on what it spent, not on what its cap allowed."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -563,7 +574,8 @@ def test_a_rounds_boot_is_priced_even_though_no_cap_bounded_it(tmp_path):
     assert [c["round_slot"] for c in calls] == ["warmup_round"], (
         f"the measured round ran on a budget the round had already spent: {[c['round_slot'] for c in calls]}"
     )
-    assert float(calls[0]["timeout"]) <= 10.0, "the cap was not the small one this case rests on"
+    assert calls[0]["timeout"] == 7800
+    assert calls[0]["session_deadline_sec"] is not None
     assert result["status"] == "succeeded"
     assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
     dropped = result["measure_round_dropped"]
@@ -899,9 +911,11 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
     captured: list = []
+    launches: list = []
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        launches.append(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         cfg_idx = cmd.index("--benchmark-config")
@@ -943,6 +957,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 3
+    assert [launch["server_already_ready"] for launch in launches] == [False, True, True]
     assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false", "true"]
     assert [cfg["benchmark"]["server_lifecycle"]["cleanup"] for cfg in captured] == [False, False, True]
     assert result["accuracy"] == pytest.approx(0.9)
@@ -962,7 +977,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
     shared.framework = "vllm"
     shared.benchmark_mode = "synthetic"
     shared.baseline_tput = 100.0
-    shared.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    shared.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
     shared.current_best = {"action": "baseline", "tput": 100.0, **shared.baseline_perf}
     shared.optimization_stack = []
     output_dir = tmp_path / "ws"
@@ -983,6 +1005,9 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         "output_throughput": 90.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     captured: list = []
     inner, calls = _cold_then_hot_fake_run(captured)
@@ -994,7 +1019,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         axes = (
             measurement
             if slot.name == "measure_round"
-            else {"output_throughput": 9999.0, "total_token_throughput": 99999.0, "e2e_norm_intvty_p90": 999.0}
+            else {
+                "output_throughput": 9999.0,
+                "total_token_throughput": 99999.0,
+                "e2e_norm_intvty_p90": 999.0,
+                "e2e_norm_intvty_p50": 999.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            }
         )
         report_path = workspace / "benchmark_report.json"
         report = json.loads(report_path.read_text())
@@ -1034,17 +1066,16 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct",
     [
-        pytest.param(90.0, 1100.0, 110.0, False, True, 10.0, id="intvty-win-output-drop"),
-        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-output-floor-does-not-apply"),
-        pytest.param(100.1, 1509.0, 150.9, True, False, 0.6, id="stack-below-primary"),
-        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-below-agentx-floor"),
-        pytest.param(100.1, 1500.0, 153.0, True, True, 2.0, id="stack-exact-agentx-floor"),
-        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="primary-below-agentx-floor"),
-        pytest.param(90.0, 950.0, 102.0, False, True, 2.0, id="exact-floor-and-throughput-guard"),
-        pytest.param(110.0, 949.9, 110.0, False, False, 10.0, id="throughput-guard-breach"),
-        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="interactivity-tradeoff-recorded"),
-        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="flat-interactivity-recorded"),
-        pytest.param(110.0, 900.0, 90.0, False, False, -10.0, id="both-axes-regress"),
+        pytest.param(90.0, 1100.0, 110.0, False, False, 10.0, id="output-guard-breach"),
+        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-median-just-above-flat"),
+        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-median-below-the-bar"),
+        pytest.param(100.1, 1500.0, 154.5, True, True, 3.0, id="stack-median-at-the-bar"),
+        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="median-below-the-bar"),
+        pytest.param(110.0, 1030.0, 103.0, False, True, 3.0, id="median-at-the-bar"),
+        pytest.param(90.0, 950.0, 102.0, False, False, 2.0, id="median-below-bar-and-output-breach"),
+        pytest.param(110.0, 949.9, 110.0, False, True, 10.0, id="total-no-longer-participates"),
+        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="median-regresses"),
+        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="median-flat"),
     ],
 )
 def test_deferred_accuracy_keep_policy_uses_graded_performance(
@@ -1052,11 +1083,19 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
 ):
     case = deferred_accuracy_keep_policy
     case.measurement.update(
-        output_throughput=output_tput, total_token_throughput=total_tput, e2e_norm_intvty_p90=intvty
+        output_throughput=output_tput,
+        total_token_throughput=total_tput,
+        e2e_norm_intvty_p90=intvty,
+        e2e_norm_intvty_p50=intvty,
     )
     reference = 150.0 if stack else 100.0
     if stack:
-        case.shared.current_best.update(action="integrate", total_throughput=1500.0, e2e_norm_intvty_p90=reference)
+        case.shared.current_best.update(
+            action="integrate",
+            total_throughput=1500.0,
+            e2e_norm_intvty_p90=reference,
+            e2e_norm_intvty_p50=reference,
+        )
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
 
     result = case.run()
@@ -1089,9 +1128,9 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
     else:
         assert result.get("accuracy") is None
         assert stage["status"] == "skipped"
-        both_axes_regress = intvty < reference * 0.95 and total_tput < (1500.0 if stack else 1000.0) * 0.95
-        assert stage["reason"] == ("intvty_regression" if both_axes_regress else "performance_keep_not_eligible")
-        assert stage["graded_objective"] == "e2e_norm_intvty_p90"
+        # Every non-KEEP on the graded axis is a revert now, so the skip always names the objective.
+        assert stage["reason"] == "intvty_regression"
+        assert stage["graded_objective"] == "e2e_norm_intvty_p50"
         assert stage["candidate"] == pytest.approx(intvty)
         assert stage["reference"] == pytest.approx(reference)
         assert stage["gain_pct"] == pytest.approx(gain_pct)
@@ -1195,9 +1234,15 @@ def test_deferred_accuracy_skips_incomparable_performance(
         case.shared.current_best["action"] = "integrate"
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
     if missing_from == "candidate":
-        case.measurement.pop("total_token_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_token_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.measurement.pop(_axis, None)
     else:
-        case.shared.current_best.pop("total_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.shared.current_best.pop(_axis, None)
 
     result = case.run()
 
@@ -1493,7 +1538,6 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
             )
         )
@@ -1534,7 +1578,6 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
             )
         )
@@ -1683,41 +1726,6 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     assert result["status"] == "failed"
     assert result["error_class"] == "server_init_dead", result
     assert "Engine core initialization failed" in result["error"]
-
-
-def test_baseline_server_dead_returncode_classifies_server_init_dead(
-    tmp_path,
-    monkeypatch,
-):
-    """When the liveness watchdog reaps a hung server (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead`` even when no server.log marker is independently visible."""
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        SERVER_DEAD_RETURNCODE,
-    )
-
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="sglang")
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
-
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "server_init_dead", result
 
 
 def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
@@ -2048,193 +2056,6 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
     assert result.get("output_throughput") == pytest.approx(4000.0)
 
 
-def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
-    """A checkout already on a local filesystem is returned unchanged."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: False)
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
-    """A checkout on a simulated network mount is mirrored to local disk and the returned path points at the local copy, not the original."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
-    (src / "utils").mkdir()
-    (src / "utils" / "marker.txt").write_text("payload")
-
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    dest = bl._ensure_local_inferencex(str(src))
-
-    assert dest != str(src)
-    assert str(local_root) in dest
-    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == ("# patched lib")
-    assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
-
-
-def test_ensure_local_inferencex_isolates_per_task_mirrors(
-    tmp_path,
-    monkeypatch,
-):
-    """Callers can include a task/output-dir key in the mirror hash so two overlapping baselines sharing one wekafs checkout never rmtree/replace a directory that another server is currently ``cd``-ed into."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    dest_a = bl._ensure_local_inferencex(str(src), mirror_key="task-a")
-    dest_b = bl._ensure_local_inferencex(str(src), mirror_key="task-b")
-
-    assert dest_a != dest_b
-    assert (Path(dest_a) / "benchmarks" / "benchmark_lib.sh").is_file()
-    assert (Path(dest_b) / "benchmarks" / "benchmark_lib.sh").is_file()
-
-
-def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
-    """The relocation can be opted out of via env even on a network mount."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_falls_back_on_copy_failure(
-    tmp_path,
-    monkeypatch,
-):
-    """When the mirror copy itself fails (e.g. local disk full), the helper degrades to the original network-mount path instead of raising, so the run still proceeds rather than aborting."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    def _boom(*_a, **_k):
-        raise OSError("no space left on device")
-
-    monkeypatch.setattr(bl.shutil, "copytree", _boom)
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
-    tmp_path,
-    monkeypatch,
-):
-    """If the copy lands but the mirror is missing the load-bearing ``benchmarks/benchmark_lib.sh``, the helper rejects it and returns the original path rather than handing Magpie a broken ``cd`` target."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "utils").mkdir(parents=True)
-    (src / "utils" / "marker.txt").write_text("payload")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-    assert not [p for p in local_root.iterdir() if p.is_dir()]
-
-
-def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """When INFERENCEX_PATH is on a network mount, the local mirror is what Magpie actually ``cd``-s into."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="sglang")
-    output_dir = tmp_path / "ws"
-
-    ix_src = tmp_path / "wekafs_InferenceX"
-    (ix_src / "benchmarks").mkdir(parents=True)
-    # This test is about which InferenceX dir Magpie cd-s into, but the launch path runs the real patcher, which
-    # refuses to start an eval whose patches cannot be applied.
-    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text(
-        "# patched\n"
-        "run_eval() {\n"
-        '    export EVAL_RESULT_DIR="$results_dir"\n'
-        "}\n"
-        "append_lm_eval_summary() {\n"
-        '    mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2\n'
-        "}\n"
-    )
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    seen: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        seen["env"] = kwargs.get("env")
-        cfg_idx = cmd.index("--benchmark-config")
-        seen["materialized_cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=_HOT_TPUT)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    yaml_ix = seen["materialized_cfg"]["benchmark"]["inferencex_path"]
-    assert yaml_ix != str(ix_src), seen["materialized_cfg"]
-    assert str(local_root) in yaml_ix
-    magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
-    assert magpie_ix != str(ix_src), seen["env"]
-    assert str(local_root) in magpie_ix
-    # Relocation is task-local; process-wide env stays the original source path.
-    assert os.environ["INFERENCEX_PATH"] == str(ix_src)
-
-
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     """The Magpie parent subprocess cwd is anchored to the stable task output_dir (never the default ``/tmp``) as defence-in-depth."""
     base = tmp_path / "base.yaml"
@@ -2301,7 +2122,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
 
 
 def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
-    """The overtime-kill anchor must reflect round 1's FULL run, not round 2's reuse time."""
+    """Runtime accounting keeps the full cold pass distinct from the reused hot pass."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -2340,96 +2161,6 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     assert result["subprocess_runtime_sec"] >= 0.5
     assert "measure_round_runtime_sec" in result
     assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
-
-
-def test_pre_start_cleanup_unlinks_meta_and_kills_unconditionally(tmp_path, monkeypatch):
-    """Pre-start cleanup no longer probes port health: it unconditionally (a) unlinks stale pid/json without sending signals to potentially-recycled PIDs, and (b) invokes _kill_stale_servers() -- Hyperloom's own scheduling (gpu_research_lane, capacity 1) guarantees nothing matching should be alive at this point, so no extra evidence is required before reaping."""
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    pid_file = output_dir / "vllm_8888.pid"
-    meta_file = output_dir / "vllm_8888.json"
-    pid_file.write_text("2147483646")
-    meta_file.write_text("{}")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-
-    assert kill_calls["n"] == 1
-    assert not pid_file.exists()
-    assert not meta_file.exists()
-
-
-def test_pre_start_cleanup_skipped_under_pytest(tmp_path):
-    """Direct guard: _kill_stale_servers must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the same guard on the per-launch preclean in ``_grid_runner.py``."""
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    pid_file = output_dir / "vllm_8888.pid"
-    meta_file = output_dir / "vllm_8888.json"
-    pid_file.write_text("2147483646")
-    meta_file.write_text("{}")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-
-    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"
-    assert not pid_file.exists()
-    assert not meta_file.exists()
-
-
-def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
-    """The pre-start cleanup is best-effort: a raising _kill_stale_servers() must not propagate out of _pre_start_cleanup() itself."""
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-
-    def boom():
-        raise RuntimeError("proc scan blew up")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=boom,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-    # No exception propagated past _pre_start_cleanup: that's the assertion.
 
 
 def test_pre_start_cleanup_skipped_when_round_is_not_affordable(tmp_path):
@@ -2506,14 +2237,14 @@ def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseli
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     """The defensive teardown unlinks stale pid/meta files without raising."""
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    _write_yaml(tmp_path / "base.yaml", framework="vllm")
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     (pid_dir / "vllm_8888.pid").write_text("2147483646")
     (pid_dir / "vllm_8888.json").write_text("{}")
 
-    executor._teardown_lifecycle_server(
+    sl.teardown_lifecycle_server(
         pid_dir=pid_dir,
         framework="vllm",
         port=8888,
@@ -2730,37 +2461,6 @@ def _mn_warmup_cap_sec(calls: list[dict]) -> int | None:
     return None if launch is None else int(launch["timeout"])
 
 
-def _launch_one_grid_variant_under_budget(
-    tmp_path,
-    *,
-    remaining_sec: float,
-    variant_timeout_sec: int,
-    variant_expected_sec: float,
-) -> list[dict]:
-    """Run one grid variant against the same budget a baseline round would get."""
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    fake_run, calls = _capturing_fake_run()
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=tmp_path / "out",
-                magpie_python=sys.executable,
-                variant_timeout_sec=variant_timeout_sec,
-                session_deadline_sec=time.monotonic() + remaining_sec,
-                variant_expected_sec=variant_expected_sec,
-            )
-        )
-    return calls
-
-
 class TestTheSessionBudgetReachesTheBaselineRound:
     """The arm #1146 names as the largest hole, and the one that motivated it."""
 
@@ -2794,17 +2494,40 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         assert remaining is not None, f"the budget did not cross the process boundary: {sorted(launch)}"
         assert 0 < remaining <= 3600.0
 
-    def test_the_hang_backstop_is_clamped_to_what_is_left(self, tmp_path):
-        """A cap larger than the budget outlives the session it belongs to."""
+    def test_the_session_deadline_does_not_shrink_the_benchmark_watchdog(self, tmp_path):
+        """A short session retains its deadline without changing benchmark policy."""
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=120.0, timeout_sec=7200)
 
-        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
+        assert calls[0]["timeout"] == 7800
+        assert 0 < calls[0]["session_deadline_sec"] - time.monotonic() <= 120.0
+
+    @pytest.mark.parametrize("executor_cls", [BaselineExecutor, ProfileExecutor], ids=["benchmark", "profile"])
+    def test_benchmark_policy_does_not_override_profile_timeout(self, tmp_path, monkeypatch, executor_cls):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234.5")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", "17.5")
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=None,
+            timeout_sec=100,
+            executor_cls=executor_cls,
+        )
+
+        assert len(calls) == 1
+        if executor_cls is BaselineExecutor:
+            assert result["status"] == "succeeded"
+            assert calls[0]["timeout"] == 1234.5
+            assert calls[0]["silence_timeout_sec"] == 17.5
+        else:
+            assert result["status"] == "failed"
+            assert result["error_class"] == "no_trace_files"
+            assert calls[0]["timeout"] == 100
+            assert calls[0]["silence_timeout_sec"] is None
 
     def test_an_unbounded_budget_leaves_the_cap_alone(self, tmp_path):
         """No session context means no budget to respect, not a budget of zero."""
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=None, timeout_sec=7200)
 
-        assert calls[0]["timeout"] == 7200
+        assert calls[0]["timeout"] == 7800
         assert calls[0]["session_deadline_sec"] is None
 
     def test_a_budget_kill_is_not_recorded_as_a_broken_model(self, tmp_path):
@@ -2881,7 +2604,6 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         result, calls = _run_baseline_under_budget(
             tmp_path,
             remaining_sec=_DEFAULT_SESSION_MINUTES * 60.0,
-            timeout_sec=BASELINE_DEFAULT_TIMEOUT_SEC,
             pass_duration_sec=pass_sec,
         )
         launches = launches_by_round_slot(calls)
@@ -2939,7 +2661,9 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         )
 
         assert calls[0]["session_deadline_sec"] is not None
-        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
+        assert calls[0]["timeout"] == PROFILE_DEFAULT_TIMEOUT_SEC == 14400
+        assert calls[0]["silence_timeout_sec"] is None
+        assert 0 < calls[0]["session_deadline_sec"] - time.monotonic() <= 120.0
 
 
 # _classify_subprocess_error unit tests
