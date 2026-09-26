@@ -13,30 +13,8 @@ from typing import Any
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.perf_metric import VERDICT_KEEP
-from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
-
-
-# Content-based variant fingerprint (cross-action dedup ledger key).
-def variant_fingerprint(
-    extra_server_args: str | None,
-    extra_envs: dict[str, Any] | None,
-    *,
-    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    args_mode: str = "append",
-    runtime_override: dict[str, Any] | None = None,
-) -> str:
-    """Stable content fingerprint for a (extra_server_args, extra_envs) pair."""
-    return canonical_fingerprint(
-        extra_server_args,
-        extra_envs,
-        remove_args=remove_args,
-        unset_envs=unset_envs,
-        args_mode=args_mode,
-        runtime_override=runtime_override,
-    )
 
 
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
@@ -99,18 +77,6 @@ class GridVariant:
         # Optional runtime override; injected into materialized YAML benchmark.envs by _build_variant_yaml so the
         # server subprocess resolves the attempt runtime.
         self.runtime_override: dict[str, str] = {}
-
-    @property
-    def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc."""
-        return variant_fingerprint(
-            self.extra_server_args,
-            self.extra_envs,
-            remove_args=self.remove_args,
-            unset_envs=self.unset_envs,
-            args_mode=self.args_mode,
-            runtime_override=getattr(self, "runtime_override", None) or None,
-        )
 
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
@@ -195,18 +161,12 @@ class VariantResult:
     launch_evidence: dict[str, Any] = field(default_factory=dict)
     launch_evidence_path: str | None = None
 
-    @property
-    def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`."""
-        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
             "name": self.name,
             "extra_server_args": self.extra_server_args,
             "extra_envs": self.extra_envs,
-            "fingerprint": self.fingerprint,
             "status": self.status,
             "output_throughput": self.output_throughput,
             "request_throughput": self.request_throughput,

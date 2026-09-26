@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +26,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -2035,3 +2038,103 @@ async def test_stack_revert_success_clears_checkpoints(tmp_path: Path, monkeypat
     assert not saved.pending_stack_validation_result
     assert not saved.pending_stack_validation_apply_results
     assert _stack_member_guards(saved) == {"k001": False, "k004": False}
+
+
+@pytest.mark.asyncio
+async def test_the_resume_pass_retries_the_unwind_before_anything_benchmarks(tmp_path: Path, monkeypatch):
+    """The halt promises the next resume retries the teardown.
+
+    Stack recovery used to run only at SWEEP entry, so everything a resumed leg
+    measured before reaching SWEEP measured the still-patched tree.
+    """
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    c = _resumed_stack_coordinator(tmp_path)
+    c.writeback._resumed_from = {"is_resume": True}
+    report: dict[str, Any] = {"skipped": False, "fixes": [], "warnings": []}
+
+    with session_scope(tmp_path):
+        await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert {"kind": "interrupted_stack_validation_recovered"} in report["fixes"]
+    assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert _session_manifest_statuses(tmp_path) == ["reverted", "reverted"]
+
+
+@pytest.mark.asyncio
+async def test_a_settled_session_does_not_pay_the_stack_recovery(tmp_path: Path, monkeypatch):
+    """Nothing pending means nothing to unwind; the resume pass must not report a fix."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    c = _stack_validation_coordinator(tmp_path)
+    c.writeback._resumed_from = {"is_resume": True}
+    report: dict[str, Any] = {"skipped": False, "fixes": [], "warnings": []}
+
+    with session_scope(tmp_path):
+        await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert report["fixes"] == []
+
+
+def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
+    """CLOSE re-benches an unvalidated stack and runs a post-opt roofline on the live tree.
+
+    Under this stop reason that tree is the one the halt declared untrustworthy.
+    """
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    from hyperloom.orchestrator.phases import close as close_phase
+
+    assert PATCH_RECOVERY_INCOMPLETE_STOP_REASON in close_phase._NO_REVALIDATION_STOP_REASONS
+
+    seen: list[str] = []
+    phase = close_phase.ClosePhase.__new__(close_phase.ClosePhase)
+    object.__setattr__(
+        phase,
+        "_coord",
+        SimpleNamespace(
+            shared_state=SimpleNamespace(
+                closing_phase=False,
+                stop_reason=PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+                optimization_stack=[{"action": "integrate"}],
+            ),
+            _internal_analysis_kind=lambda: seen.append("analysis_kind") or "roofline",
+            _enqueue_internal_analysis_task=lambda **_kw: seen.append("enqueued"),
+            _POST_OPT_ROOFLINE_ACTIONS=frozenset({"integrate"}),
+        ),
+    )
+
+    asyncio.run(phase._maybe_run_close_post_opt_roofline())
+
+    assert seen == []
+
+
+def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):
+    """The first revert moves each backup back, so a second would fail on a clean tree.
+
+    An apply that reverted itself and is then unwound by the stack hits exactly that.
+    """
+    from hyperloom.agents.kernel.tools.apply_kernel_patch import revert_kernel_patch
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "reverted",
+                "reverted_at": "2026-01-01T00:00:00Z",
+                "restored_paths": ["/framework/src.py"],
+                # Present and "ok" is what drives the second restore attempt.
+                "jit_build_backup": {"status": "ok", "backup_path": str(tmp_path / "gone")},
+                "artifacts": [{"backup_path": str(tmp_path / "missing.bak"), "path": str(tmp_path / "missing.py")}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = revert_kernel_patch(manifest)
+
+    assert result["status"] == "skipped"
+    assert result["already_reverted"] is True
+    assert result["restored_paths"] == ["/framework/src.py"]
+    assert lifecycle_complete(result)

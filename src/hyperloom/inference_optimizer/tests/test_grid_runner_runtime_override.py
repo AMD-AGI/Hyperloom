@@ -221,28 +221,3 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     assert "/attempt/lib" in envs["LD_LIBRARY_PATH"]
     assert envs["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == str(tmp_path / "jit")
     assert "/attempt/console" in envs["PATH"]
-
-
-# Fingerprint: runtime_override participates but stays back-compatible
-
-
-def test_fingerprint_unchanged_for_empty_override():
-    plain = GridVariant(name="a", extra_server_args="--x 1")
-    with_empty = GridVariant(name="b", extra_server_args="--x 1")
-    with_empty.runtime_override = {}
-    assert plain.fingerprint == with_empty.fingerprint
-
-
-def test_fingerprint_changes_with_runtime_override():
-    base = GridVariant(name="a", extra_server_args="--x 1")
-    overridden = GridVariant(name="a", extra_server_args="--x 1")
-    overridden.runtime_override = {"pythonpath_prefixes": ["/a/pkg"]}
-    assert base.fingerprint != overridden.fingerprint
-
-
-def test_fingerprint_order_independent_for_override():
-    v1 = GridVariant(name="a")
-    v1.runtime_override = {"pythonpath_prefixes": ["/a", "/b"], "runtime_env": {"X": "1", "Y": "2"}}
-    v2 = GridVariant(name="a")
-    v2.runtime_override = {"runtime_env": {"Y": "2", "X": "1"}, "pythonpath_prefixes": ["/b", "/a"]}
-    assert v1.fingerprint == v2.fingerprint

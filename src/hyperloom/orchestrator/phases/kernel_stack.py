@@ -23,7 +23,7 @@ from ..kernel.patch_lifecycle import (
 )
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ def _matching_stack_entries(
     return ordered
 
 
-class KernelStackPhase(PhaseHandler):
+class KernelStackPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def __init__(self, coordinator) -> None:

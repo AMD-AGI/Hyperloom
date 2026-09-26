@@ -567,13 +567,13 @@ def tuned_config_coverage(
             "coverage_pct": None,
             "tuned_rows": len(tuned),
         }
-    covered = [
+    covered = {
         shape for shape in requested if shape in confirmed or any(key in tuned for key in aiter_lookup_keys(shape))
-    ]
+    }
     return {
         "requested": len(requested),
         "covered": len(covered),
         "coverage_pct": round(100.0 * len(covered) / len(requested), 2),
         "tuned_rows": len(tuned),
-        "uncovered_sample": [{"M": m, "N": n, "K": k} for m, n, k in requested if (m, n, k) not in set(covered)][:10],
+        "uncovered_sample": [{"M": m, "N": n, "K": k} for m, n, k in requested if (m, n, k) not in covered][:10],
     }

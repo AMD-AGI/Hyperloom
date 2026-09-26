@@ -502,6 +502,18 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
 
 
+def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
+    """A leg closed by a signal keeps its non-CLOSE phase; the next leg must still close for itself."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="SWEEP")
+    state.set_stop_reason("signal")
+    state.close_sequence_done = True
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase == "SWEEP"
+    assert state.close_sequence_done is False
+
+
 def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:
     """No branch may read how a leg ended, because a killed leg records nothing."""
     killed = SharedState(session_id="killed", start_ts="2026-08-01T00:00:00+00:00", max_minutes=180)

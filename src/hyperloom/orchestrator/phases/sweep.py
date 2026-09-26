@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -26,12 +26,15 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
 
 
-class SweepPhase(PhaseHandler):
+class SweepPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         state = self.shared_state
+        # An unwind a previous leg left owed still has the stack's patches on the
+        # tree, so settle it before the drain below applies anything on top.
+        await self._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()

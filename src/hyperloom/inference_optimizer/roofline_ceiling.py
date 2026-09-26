@@ -429,7 +429,7 @@ def _compute_tag_for_bytes(weight_bytes: float) -> str:
 
 
 def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
-    """Rescale ``meta`` weight bytes to the runtime weight dtype."""
+    """Rescale runtime weights while preserving any explicit expert dtype."""
     import dataclasses as _dc
 
     # Safe degrade for non-dataclass / fake meta (test doubles).
@@ -440,12 +440,18 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     if cfg_b <= 0 or rt_b <= 0 or abs(cfg_b - rt_b) < 1e-9:
         return _dc.replace(meta, weight_dtype_bytes=rt_b or cfg_b)
     scale = rt_b / cfg_b
+    expert_scale = 1.0 if meta.expert_weight_dtype_bytes > 0 else scale
+    non_expert_bytes = int((meta.weight_bytes - meta.expert_weight_bytes) * scale)
+    expert_bytes = int(meta.expert_weight_bytes * expert_scale)
+    active_bytes = int(meta.active_weight_bytes * scale)
+    if meta.num_experts > 0:
+        active_bytes = non_expert_bytes + int(expert_bytes * meta.experts_per_tok / meta.num_experts)
     return _dc.replace(
         meta,
         weight_dtype_bytes=rt_b,
-        weight_bytes=int(meta.weight_bytes * scale),
-        active_weight_bytes=int(meta.active_weight_bytes * scale),
-        expert_weight_bytes=int(meta.expert_weight_bytes * scale),
+        weight_bytes=non_expert_bytes + expert_bytes,
+        active_weight_bytes=active_bytes,
+        expert_weight_bytes=expert_bytes,
     )
 
 
@@ -479,7 +485,7 @@ class ModelMeta:
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
-    # Per-element bytes for the expert (routed FFN) weights.
+    # Explicit expert (routed FFN) bytes per element; 0 inherits weight_dtype_bytes.
     expert_weight_dtype_bytes: float = 0.0
     # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
     hidden_size: int = 0
@@ -689,7 +695,7 @@ def load_model_meta(
         dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
     # Routed experts may be stored at a distinct precision (DeepSeek-V4 ``expert_dtype: fp4`` under fp8 attention).
     expert_dtype_raw = str(cfg.get("expert_dtype") or "").strip()
-    expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else dtype_bytes
+    expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else 0.0
     active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = _compute_expert_decomposition(
         cfg,
         weight_bytes=weight_bytes,
@@ -1184,12 +1190,13 @@ def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | N
 import dataclasses as _dc
 
 
-def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
+def _fused_moe_flops(*, M: int, K: int, N: int, topk: int) -> float:
     """FLOPs for one gated SwiGLU MoE forward (gate+up+down projections)."""
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
 
 def _fused_moe_bytes(
+    *,
     M: int,
     K: int,
     N: int,
@@ -1237,12 +1244,13 @@ class PerfModelBreakdown:
     peak_achievable_tflops: float
 
 
-def _gemm_flops(M: int, N: int, K: int) -> float:
+def _gemm_flops(*, M: int, N: int, K: int) -> float:
     """FLOPs for a bias-free matrix multiply (2*M*N*K)."""
     return 2.0 * M * N * K
 
 
 def _gemm_bytes(
+    *,
     M: int,
     N: int,
     K: int,
@@ -1383,8 +1391,8 @@ def compute_roofline_from_perfmodel(
         op_rows: list[OpBreakdown] = []
         M = batch * s_q
         for name, K, N, rep in linears:
-            fl = _gemm_flops(M, N, K)
-            by = _gemm_bytes(M, N, K, bpe, act_bpe)
+            fl = _gemm_flops(M=M, N=N, K=K)
+            by = _gemm_bytes(M=M, N=N, K=K, weight_bpe=bpe, act_bpe=act_bpe)
             t, side, t_mem, t_cmp = _roofline_time(fl, by)
             total_t += t * rep
             total_mem_t += t_mem * rep
@@ -1404,15 +1412,15 @@ def compute_roofline_from_perfmodel(
         if is_moe and n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
-            fl_moe = _fused_moe_flops(M, moe_hidden, meta.moe_intermediate_size, meta.experts_per_tok)
+            fl_moe = _fused_moe_flops(M=M, K=moe_hidden, N=meta.moe_intermediate_size, topk=meta.experts_per_tok)
             by_moe = _fused_moe_bytes(
-                M,
-                moe_hidden,
-                meta.moe_intermediate_size,
-                meta.num_experts,
-                meta.experts_per_tok,
-                expert_bpe,
-                act_bpe,
+                M=M,
+                K=moe_hidden,
+                N=meta.moe_intermediate_size,
+                num_experts=meta.num_experts,
+                topk=meta.experts_per_tok,
+                weight_bpe=expert_bpe,
+                act_bpe=act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_moe_layers

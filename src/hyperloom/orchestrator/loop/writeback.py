@@ -322,7 +322,7 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
 #: The one owner label a patch KEEP stages under. Explore- and framework-agent
 #: lifts used to route to two separate columns; the three-column layout has a
 #: single ``patch`` column, so both collapse to this marker. Attribution keeps
-#: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
+#: its own explore/framework split on the lever kind -- that is unaffected.
 _PATCH_KEEP_OWNER = "PATCH"
 
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through
@@ -5452,6 +5452,11 @@ class WritebackCollaborator:
                 )
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
+        # (0) Interrupted stack unwind: its members are still applied to the
+        # framework tree. SWEEP entry is where this used to be retried, so
+        # everything a resumed leg benchmarked before reaching SWEEP measured
+        # the patched tree -- the failure the halt exists to prevent.
+        await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
@@ -5662,6 +5667,22 @@ class WritebackCollaborator:
             return True
         except Exception:  # noqa: BLE001 — GC is best-effort
             return False
+
+    async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
+        """Retry an unwind a halted leg left owed, before anything here can benchmark.
+
+        The recovery halts the session again if the tree still cannot be
+        settled, which is the point: the alternative is measuring a tree whose
+        contents no resume can account for.
+        """
+        state = self.shared_state
+        if not (
+            getattr(state, "pending_stack_validation_result", None)
+            or getattr(state, "pending_stack_validation_apply_results", None)
+        ):
+            return
+        if await self._recover_interrupted_stack_validation():
+            report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:
         """Drop a discharged sentinel, and its attempt runtime once nothing runs from it."""

@@ -551,6 +551,27 @@ async def test_enqueue_internal_session_breakdown_task(coord):
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path, monkeypatch):
+    """An earlier leg's signal close already ran both steps; the resumed leg must not keep their stale artifacts."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    for kind in ("report", "session_breakdown"):
+        key = f"internal-{kind}-close_phase_entry"
+        row = _StubTaskRow(task_id=f"earlier-leg-{kind}", kind=kind, state="succeeded", params={}, idempotency_key=key)
+        coord.tasks._by_key[key] = row
+        coord.tasks._by_id[row.task_id] = row
+    coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
+    assert ran == [
+        ("report", "internal-report-close_phase_entry-leg-2026-09-25T09:46:24+00:00"),
+        ("session_breakdown", "internal-session_breakdown-close_phase_entry-leg-2026-09-25T09:46:24+00:00"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
     tmp_path,

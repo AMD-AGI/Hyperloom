@@ -65,7 +65,7 @@ MIN_REPEATS_XDIT = 2
 DEFAULT_NUM_STEPS = 32
 DEFAULT_R = 1.0
 
-#: Iteration-root patterns, verbatim from ``split_inference_trace_annotation``.
+#: Iteration-root patterns, verbatim from ``TraceLens.TraceUtils.split_trace.main``.
 #: The primary vLLM shape wins outright; the backup list (vLLM's older shapes and
 #: SGLang's per-step annotations) is consulted only when the primary matches
 #: nothing. Reproducing that precedence matters -- a looser or differently
