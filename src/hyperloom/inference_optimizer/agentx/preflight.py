@@ -306,3 +306,33 @@ def check_aiperf_capability(
                 "SemiAnalysisAI/aiperf build via install.sh.",
                 repairable=True,
             )
+
+
+def check_mlperf_harness(env: Mapping[str, str]) -> None:
+    """Raise :class:`AgentXPreflightError` unless the MLPerf agentic harness can run."""
+    root = Path(str(env.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints"))
+    script = root / "utility" / "run_agentic.sh"
+    if not script.is_file():
+        raise AgentXPreflightError(
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf but {script} is missing. "
+            "Mount mlperf-endpoints and set MLPERF_ENDPOINTS_DIR.",
+            repairable=False,
+        )
+    dataset = str(env.get("AGENTIC_DATASET_PATH") or "").strip()
+    if not dataset or not Path(dataset).exists():
+        raise AgentXPreflightError(
+            "HYPERLOOM_AGENTIC_BACKEND=mlperf requires AGENTIC_DATASET_PATH to "
+            f"point at agentic_combined_v6.jsonl (got {dataset!r}).",
+            repairable=False,
+        )
+    tokenizer = str(env.get("MLPERF_TOKENIZER_DIR") or "").strip()
+    if not tokenizer or not Path(tokenizer).is_dir():
+        raise AgentXPreflightError(
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf requires MLPERF_TOKENIZER_DIR (got {tokenizer!r}).",
+            repairable=False,
+        )
+    if not shutil.which("inference-endpoint", path=env.get("PATH")) and not shutil.which("uv", path=env.get("PATH")):
+        raise AgentXPreflightError(
+            "HYPERLOOM_AGENTIC_BACKEND=mlperf needs inference-endpoint or uv on PATH.",
+            repairable=False,
+        )

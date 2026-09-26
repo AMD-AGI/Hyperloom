@@ -18,6 +18,16 @@ CANONICAL_ISL = {"avg": 113814, "p50": 94821, "p75": 119126, "p90": 163328, "p99
 CANONICAL_OSL = {"avg": 806, "p50": 333, "p75": 801, "p90": 1874, "p99": 6386}
 CANONICAL_PREFIX_CACHE_HIT = 0.975
 
+# MLPerf agentic v6 corpus (HYPERLOOM_AGENTIC_BACKEND=mlperf). Search uses 150
+# trajectories; KEEP validation uses the full 613-trajectory online set.
+CANONICAL_MLPERF_CORPUS_LOADER = "agentic_combined_v6"
+CANONICAL_MLPERF_CORPUS_ENTRIES = 613
+CANONICAL_MLPERF_SMOKE_ENTRIES = 150
+CANONICAL_MLPERF_CORPUS_DURATION_S = 0
+CANONICAL_MLPERF_ISL: dict[str, int] = {}
+CANONICAL_MLPERF_OSL: dict[str, int] = {}
+CANONICAL_MLPERF_PREFIX_CACHE_HIT = 0.0
+
 # Percentiles carried forward from the aiperf sequence-length distributions.
 _SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
 
@@ -180,4 +190,182 @@ def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
         "prefix_cache_hit": float(result.get("theoretical_prefix_cache_hit") or 0.0),
         "request_error_rate": float(result.get("request_error_rate") or 0.0),
         "source": "measured",
+    }
+
+
+def _ns_to_ms(value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return 0.0
+    if value >= 1_000_000:
+        return float(value) / 1_000_000.0
+    return float(value)
+
+
+def _series_ms(block: Any, percentile: int | None = None, *, avg: bool = False) -> float:
+    if not isinstance(block, dict):
+        if avg and isinstance(block, (int, float)) and not isinstance(block, bool):
+            return _ns_to_ms(block)
+        return 0.0
+    if avg:
+        for key in ("avg", "mean", "average"):
+            if block.get(key) is not None:
+                return _ns_to_ms(block.get(key))
+    perc = block.get("percentiles") if isinstance(block.get("percentiles"), dict) else block
+    if percentile is not None and isinstance(perc, dict):
+        for key in (str(percentile), percentile, f"p{percentile}"):
+            if perc.get(key) is not None:
+                return _ns_to_ms(perc.get(key))
+    return 0.0
+
+
+def _seq_total(block: Any) -> int:
+    if isinstance(block, dict):
+        total = block.get("total")
+        if isinstance(total, (int, float)) and not isinstance(total, bool):
+            return int(total)
+    if isinstance(block, (int, float)) and not isinstance(block, bool):
+        return int(block)
+    return 0
+
+
+def _seq_distribution(block: Any) -> dict[str, int]:
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, int] = {}
+    avg = block.get("avg") or block.get("mean")
+    if isinstance(avg, (int, float)) and not isinstance(avg, bool):
+        out["avg"] = int(avg)
+    perc = block.get("percentiles") if isinstance(block.get("percentiles"), dict) else block
+    if isinstance(perc, dict):
+        for name, key in (("p50", 50), ("p75", 75), ("p90", 90), ("p99", 99)):
+            raw = perc.get(str(key), perc.get(key, perc.get(name)))
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                out[name] = int(raw)
+    return out
+
+
+def _accuracy_score(accuracy: Mapping[str, Any] | None) -> float | None:
+    if not isinstance(accuracy, dict) or not accuracy:
+        return None
+    for key in ("score", "accuracy", "overall_score", "pass_rate", "inline_accuracy"):
+        value = accuracy.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    metrics = accuracy.get("metrics")
+    if isinstance(metrics, dict):
+        for key in ("score", "accuracy", "pass_rate"):
+            value = metrics.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                return float(value)
+    return None
+
+
+def _target_concurrency(summary: Mapping[str, Any]) -> float:
+    """Served concurrency, from the harness's own record of the run.
+
+    ``run_config`` is what the harness actually ran with, so it outranks the
+    flat aliases; those remain for summaries that predate it.
+    """
+    run_config = summary.get("run_config")
+    if isinstance(run_config, dict):
+        load_pattern = run_config.get("load_pattern")
+        if isinstance(load_pattern, dict):
+            value = load_pattern.get("target_concurrency")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return float(value)
+    for key in ("target_concurrency", "concurrency"):
+        value = summary.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value)
+    return 0.0
+
+
+def map_mlperf(
+    summary: Mapping[str, Any],
+    *,
+    accuracy: Mapping[str, Any] | None = None,
+    noncanonical_reasons: "Sequence[str] | None" = None,
+) -> dict[str, Any]:
+    """Convert an MLPerf harness ``result_summary.json`` into the InferenceX result schema."""
+    extra = [str(r) for r in (noncanonical_reasons or []) if str(r).strip()]
+    completed = int(summary.get("n_samples_completed") or summary.get("completed") or 0)
+    failed = int(summary.get("n_samples_failed") or summary.get("failed") or 0)
+    issued = int(summary.get("n_samples_issued") or summary.get("issued") or (completed + failed))
+    duration_ns = summary.get("duration_ns")
+    if isinstance(duration_ns, (int, float)) and duration_ns > 0:
+        duration_s = float(duration_ns) / 1e9
+    else:
+        duration_s = float(summary.get("duration") or 0.0)
+    osl_total = _seq_total(summary.get("output_sequence_lengths"))
+    isl_total = _seq_total(summary.get("input_sequence_lengths"))
+    tps = summary.get("tps")
+    out_tput = (
+        float(tps)
+        if isinstance(tps, (int, float)) and tps
+        else ((osl_total / duration_s) if duration_s > 0 and osl_total else 0.0)
+    )
+    in_tput = (isl_total / duration_s) if duration_s > 0 and isl_total else 0.0
+    req_tput = (completed / duration_s) if duration_s > 0 and completed else 0.0
+    denom = issued if issued > 0 else (completed + failed)
+    error_rate = (100.0 * failed / denom) if denom > 0 else (None if failed else 0.0)
+    complete = bool(summary.get("complete"))
+    interrupted = bool(summary.get("interrupted") or summary.get("error"))
+    # Interactivity is system throughput per concurrent user, the axis AgentX
+    # grades on. The harness publishes no such field -- measured: a v6 summary
+    # carries tps/ttft/tpot/latency/qps and nothing else -- so it is derived,
+    # matching utility/sweep.py's own definition. A run whose concurrency cannot
+    # be read leaves it 0.0, which the graded comparison treats as incomparable
+    # rather than as a perfect score.
+    intvty = summary.get("e2e_avg_interactivity")
+    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
+        intvty = summary.get("interactivity")
+    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
+        conc = _target_concurrency(summary)
+        intvty = (float(out_tput) / conc) if (conc and out_tput) else 0.0
+    ttft = summary.get("ttft") or {}
+    tpot = summary.get("tpot") or summary.get("itl") or {}
+    latency = summary.get("latency") or summary.get("e2e") or {}
+    acc_score = _accuracy_score(accuracy)
+    reasons = list(extra)
+    if not complete:
+        reasons.append("incomplete_run")
+    if interrupted:
+        reasons.append("interrupted")
+    verdict = complete and not interrupted and not extra
+    return {
+        "request_throughput": req_tput,
+        "output_throughput": float(out_tput or 0.0),
+        "input_throughput": float(in_tput or 0.0),
+        "total_token_throughput": float(out_tput or 0.0) + float(in_tput or 0.0),
+        "completed": completed,
+        "total_input_tokens": isl_total,
+        "total_output_tokens": osl_total,
+        "duration": duration_s,
+        "mean_ttft_ms": _series_ms(ttft, avg=True),
+        "median_ttft_ms": _series_ms(ttft, 50),
+        "p99_ttft_ms": _series_ms(ttft, 99),
+        "std_ttft_ms": _ns_to_ms((ttft or {}).get("std") if isinstance(ttft, dict) else 0.0),
+        "mean_tpot_ms": _series_ms(tpot, avg=True),
+        "median_tpot_ms": _series_ms(tpot, 50),
+        "p90_tpot_ms": _series_ms(tpot, 90),
+        "p99_tpot_ms": _series_ms(tpot, 99),
+        "std_tpot_ms": _ns_to_ms((tpot or {}).get("std") if isinstance(tpot, dict) else 0.0),
+        "e2e_norm_intvty_p90": float(intvty or 0.0),
+        "mean_itl_ms": _series_ms(tpot, avg=True),
+        "median_itl_ms": _series_ms(tpot, 50),
+        "p99_itl_ms": _series_ms(tpot, 99),
+        "std_itl_ms": _ns_to_ms((tpot or {}).get("std") if isinstance(tpot, dict) else 0.0),
+        "mean_e2el_ms": _series_ms(latency, avg=True),
+        "median_e2el_ms": _series_ms(latency, 50),
+        "p99_e2el_ms": _series_ms(latency, 99),
+        "std_e2el_ms": _ns_to_ms((latency or {}).get("std") if isinstance(latency, dict) else 0.0),
+        "theoretical_prefix_cache_hit": float(summary.get("prefix_cache_hit") or 0.0),
+        "submission_valid": verdict,
+        "submission_invalid_reasons": reasons,
+        "request_error_rate": error_rate,
+        "corpus_loader": str(summary.get("corpus_loader") or CANONICAL_MLPERF_CORPUS_LOADER),
+        "isl_distribution": _seq_distribution(summary.get("input_sequence_lengths")),
+        "osl_distribution": _seq_distribution(summary.get("output_sequence_lengths")),
+        "accuracy_score": acc_score,
+        "mlperf_complete": complete,
     }

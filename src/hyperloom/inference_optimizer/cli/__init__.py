@@ -938,8 +938,45 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+
+
+def _apply_mlperf_benchmark_timeout() -> None:
+    """Size the benchmark cap to the MLPerf trajectory count, unless pinned.
+
+    The stock cap is sized for the aiperf measurement window and is smaller than
+    a full agentic run takes, so leaving it in place turns a healthy 613
+    trajectory measurement into a kill partway through -- observed: a
+    150-trajectory baseline reaped at 38% by the 7800s default. An operator's own
+    value always wins; this only supplies the default the backend implies.
+    """
+    from hyperloom.inference_optimizer.agentx.deploy import (
+        is_mlperf_backend,
+        mlperf_benchmark_timeout_sec,
+        mlperf_trajectories,
+    )
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+    if not _agentx_enabled() or not is_mlperf_backend():
+        return
+    if os.environ.get(BENCHMARK_TIMEOUT_ENV, "").strip():
+        return
+    stock = resolve_benchmark_timeouts()[1]
+    derived = mlperf_benchmark_timeout_sec(floor=stock)
+    if derived <= stock:
+        return
+    os.environ[BENCHMARK_TIMEOUT_ENV] = str(int(derived))
+    print(
+        f"NOTE: HYPERLOOM_AGENTIC_BACKEND=mlperf with {mlperf_trajectories()} trajectories; "
+        f"raising {BENCHMARK_TIMEOUT_ENV} {int(stock)}s -> {int(derived)}s so the run is not "
+        f"reaped mid-measurement. Set {BENCHMARK_TIMEOUT_ENV} to pin your own cap.",
+        file=sys.stderr,
+    )
+
+
 def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     """Warn when AgentX is enabled without an explicit session budget."""
+    _apply_mlperf_benchmark_timeout()
     if not _agentx_enabled():
         return
     # ``--max-hours`` carries no argparse default, so absence reads as ``None``

@@ -10,6 +10,8 @@ from typing import Mapping
 
 import yaml
 
+from .deploy import MLPERF_CLIENT_SCRIPT, is_agentx_client_script
+
 # aiperf capability preflight is memoized per resolved binary: the probe shells out with a timeout and its result
 # cannot change within a run, so a multi-point grid must not re-probe every round.
 _PREFLIGHTED_BINS: dict[str, bool] = {}
@@ -26,7 +28,8 @@ def maybe_prepare_agentx(
         bench = (yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}).get("benchmark", {}) or {}
     except Exception:  # noqa: BLE001 — config unreadable: let Magpie surface it
         bench = {}
-    if str(bench.get("benchmark_script") or "") != "aiperf_client.sh":
+    script = Path(str(bench.get("benchmark_script") or "")).name
+    if not is_agentx_client_script(script):
         return False
 
     from .deploy import deploy_agentx_assets
@@ -34,6 +37,11 @@ def maybe_prepare_agentx(
 
     # Deploy BEFORE preflight so the client is in place regardless of preflight memoization state.
     deploy_agentx_assets(Path(inferencex_path) / "benchmarks")
+    if script == MLPERF_CLIENT_SCRIPT:
+        from .preflight import check_mlperf_harness
+
+        check_mlperf_harness(env)
+        return True
     aiperf_bin = resolve_aiperf_bin(env)
     bench_envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     profiler = bench.get("profiler") if isinstance(bench.get("profiler"), dict) else {}
