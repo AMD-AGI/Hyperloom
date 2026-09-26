@@ -2914,7 +2914,9 @@ async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coor
     }
     await coord.tasks.transition(candidate.task.task_id, "running")
     await coord.tasks.transition(candidate.task.task_id, "failed")
-    await coord.tasks.append_completion_evidence(candidate.task.task_id, {"outcome": {"result": {}}})
+    await coord.tasks.append_completion_evidence(
+        candidate.task.task_id, {"outcome": {"result": {}}, "cleanup_confirmed": True}
+    )
     report = {"fixes": [], "warnings": []}
 
     await coord.writeback._resume_recover_pending_integrate(report)
@@ -2938,7 +2940,10 @@ async def test_a_failed_online_restore_is_retried_not_held_forever(coord, pendin
     await coord.tasks.transition(candidate.task.task_id, "succeeded")
     await coord.tasks.append_completion_evidence(
         candidate.task.task_id,
-        {"outcome": {"result": {"status": "failed", "error_class": "integrate_restore_incomplete"}}},
+        {
+            "outcome": {"result": {"status": "failed", "error_class": "integrate_restore_incomplete"}},
+            "cleanup_confirmed": True,
+        },
     )
     report = {"fixes": [], "warnings": []}
 

@@ -5747,11 +5747,12 @@ class WritebackCollaborator:
             )
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
-        if phase == "restored":
-            # The attempt put the tree back before it failed, so there is
-            # nothing left to roll back. The verdict above needs a result to
-            # say so, and an attempt that died after the restore records a
-            # failed task with an empty one.
+        if phase == "restored" and outcome is not None:
+            # A confirmed outcome carrying no result: the attempt put the tree
+            # back and then died before recording what it decided. The verdict
+            # table needs a result to call that settled, but the phase already
+            # says the tree is clean. An unconfirmed or absent outcome is a
+            # different case and still falls through to the rollback below.
             report["fixes"].append({"kind": "settled_pending_integrate", "task_id": task_id, "phase": phase})
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
