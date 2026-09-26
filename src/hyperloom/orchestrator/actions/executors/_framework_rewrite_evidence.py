@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 
 log = logging.getLogger(__name__)
 
@@ -177,8 +179,7 @@ def probe_enabled() -> bool:
 
 def deep_probe_enabled() -> bool:
     """Return True when the tier-2 (argument-fingerprinting) hook is requested."""
-    raw = str(os.environ.get(DEEP_ENV, "")).strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return env_bool(DEEP_ENV)
 
 
 def _is_package_root(path: str) -> bool:
@@ -270,23 +271,29 @@ def _merge_host_calls(reports: list[dict[str, Any]]) -> dict[tuple[str, str], di
                     "last_s": None,
                 },
             )
-            entry["ranks"] += 1
-            entry["count"] += int(row.get("count") or 0)
-            entry["wall_s"] += float(row.get("wall_s") or 0.0)
+            _fold_timed_row(entry, row)
             entry["bytes"] += int(row.get("bytes") or 0)
             entry["shape_sigs"].update(str(s) for s in (row.get("shape_sigs") or []))
             entry["callers"].update(str(s) for s in (row.get("callers") or []))
-            first = row.get("first_s")
-            last = row.get("last_s")
-            if isinstance(first, (int, float)) and first >= 0:
-                entry["first_s"] = first if entry["first_s"] is None else min(entry["first_s"], first)
-            if isinstance(last, (int, float)) and last >= 0:
-                entry["last_s"] = last if entry["last_s"] is None else max(entry["last_s"], last)
-    for entry in merged.values():
-        ranks = max(1, int(entry["ranks"]))
-        entry["count_per_rank"] = entry["count"] // ranks
-        entry["wall_s_per_rank"] = _round(entry["wall_s"] / ranks, 6)
     return merged
+
+
+def _fold_timed_row(entry: dict[str, Any], row: dict[str, Any]) -> None:
+    """Add one rank's call count, wall time and first/last call timestamps to a merged entry.
+
+    The per-rank figures are recomputed from the running totals, so they hold once the last rank is folded.
+    """
+    entry["ranks"] += 1
+    entry["count"] += int(row.get("count") or 0)
+    entry["wall_s"] += float(row.get("wall_s") or 0.0)
+    first = row.get("first_s")
+    last = row.get("last_s")
+    if isinstance(first, (int, float)) and first >= 0:
+        entry["first_s"] = first if entry["first_s"] is None else min(entry["first_s"], first)
+    if isinstance(last, (int, float)) and last >= 0:
+        entry["last_s"] = last if entry["last_s"] is None else max(entry["last_s"], last)
+    entry["count_per_rank"] = entry["count"] // entry["ranks"]
+    entry["wall_s_per_rank"] = _round(entry["wall_s"] / entry["ranks"], 6)
 
 
 def _hot_loop_start(*tables: dict[Any, dict[str, Any]]) -> float | None:
@@ -344,24 +351,13 @@ def _merge_framework_calls(reports: list[dict[str, Any]]) -> dict[str, dict[str,
                     "last_s": None,
                 },
             )
-            entry["ranks"] += 1
-            entry["count"] += int(row.get("count") or 0)
-            entry["wall_s"] += float(row.get("wall_s") or 0.0)
+            _fold_timed_row(entry, row)
             entry["arg_samples"] += int(row.get("arg_samples") or 0)
             entry["strict_repeat_sum"] += float(row.get("strict_repeat_rate") or 0.0)
             entry["loose_repeat_sum"] += float(row.get("loose_repeat_rate") or 0.0)
-            first = row.get("first_s")
-            last = row.get("last_s")
-            if isinstance(first, (int, float)) and first >= 0:
-                entry["first_s"] = first if entry["first_s"] is None else min(entry["first_s"], first)
-            if isinstance(last, (int, float)) and last >= 0:
-                entry["last_s"] = last if entry["last_s"] is None else max(entry["last_s"], last)
     for entry in merged.values():
-        ranks = max(1, int(entry["ranks"]))
-        entry["count_per_rank"] = entry["count"] // ranks
-        entry["wall_s_per_rank"] = _round(entry["wall_s"] / ranks, 6)
-        entry["strict_repeat_rate"] = _round(entry["strict_repeat_sum"] / ranks)
-        entry["loose_repeat_rate"] = _round(entry["loose_repeat_sum"] / ranks)
+        entry["strict_repeat_rate"] = _round(entry["strict_repeat_sum"] / entry["ranks"])
+        entry["loose_repeat_rate"] = _round(entry["loose_repeat_sum"] / entry["ranks"])
     return merged
 
 

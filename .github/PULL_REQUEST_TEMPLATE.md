@@ -1,7 +1,9 @@
 - Description: what and why
 - Linked issue(s): close/fix refs
-- Tests: added/updated? commands run?
-- `CHANGELOG.md` entry under `[Unreleased]`: yes/no (if no, why the change is unobservable):
+- Tests: added/updated? commands run? ([what to test](../docs/contributing/style-guide.md#tests-pytest); if a test was replaced, where its assertions live now):
+- [Size/complexity](../docs/contributing/style-guide.md#size-and-complexity) triggers crossed: split, or why the shape is right:
+- If this simplifies or refactors: which mechanism was removed, which contract was preserved, and the tests that show it:
+- Observable effect: what an operator will now see, and what the old behaviour cost them (if none, why the change is unobservable):
 - Breaking changes: yes/no (details if yes)
 - PR addresses single concern: yes/no (details if no):
 - Root cause is upstream (Magpie/TraceLens/GEAK/IntelliKit/AgentKernelArena), ticket filed:

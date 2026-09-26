@@ -25,7 +25,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
     """Bench-capable specialists receive enough time for their advertised rebench."""
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
-    from hyperloom.orchestrator.specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
     budget = coord._specialist_wall_budget_sec(
@@ -64,7 +64,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
         params=params,
     )
 
-    assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
+    assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
     assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 
@@ -121,7 +121,8 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
         kind = "explore"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "RESULT"
 
     async def _fake_release(lease):
@@ -152,8 +153,11 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
         kind = "explore"
         requires_lanes: list = []
 
-    async def _boom(task, *, prebound_lease=None, extra_context=None):
-        raise RuntimeError("subprocess crashed")
+    async def _boom(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        try:
+            raise RuntimeError("subprocess crashed")
+        finally:
+            await release_resources()
 
     async def _fake_release(lease):
         released.append(lease)
@@ -184,7 +188,8 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         kind = "report"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "CPU"
 
     async def _fake_release(lease):
@@ -700,7 +705,7 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
 
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _first_present
+    from hyperloom.orchestrator.loop.conversation import _first_present
 
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
@@ -709,7 +714,7 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _lifecycle_paths
+    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
@@ -717,7 +722,7 @@ def test_lifecycle_paths() -> None:
 
 
 def test_format_inbox_event_variants() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     delegated = Message.new(

@@ -11,7 +11,7 @@ counting only what the model actually said.
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.trace import decision_trace as dc
+from hyperloom.inference_optimizer.trace import decision_trace as dc
 
 
 def test_bucket_rolls_up_reasoning_tokens_separately():

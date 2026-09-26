@@ -167,6 +167,91 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
         assert key not in env
 
 
+def _credential_functions() -> str:
+    """The credential half of ``install_baremetal.sh``, runnable on its own with stubbed log/die helpers."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    return script_text[script_text.index("read_dotenv_var() {") : script_text.index("\nwrite_runtime_dotenv() {")]
+
+
+def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "OPENAI_API_KEY=ak-codex-only",
+                "CODEX_MODEL=glm-5-3",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    text = dotenv.read_text(encoding="utf-8")
+    assert "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1" in text
+    assert "OPENAI_API_KEY=ak-codex-only" in text
+    assert "CODEX_MODEL=glm-5-3" in text
+
+
+def test_baremetal_setup_still_rejects_a_half_configured_openai_side(tmp_path: Path):
+    """A base URL with no key is not a codex deployment; accepting it would trade a clear setup error for a run that
+    fails much later, when the first agent call is made.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL OPENAI_API_KEY",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 99, proc.stdout + proc.stderr
+
+
 def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
@@ -317,43 +402,6 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
         "CLAUDE_MODEL=deepseek-v4-pro\n"
         "DEEPSEEK_API_KEY=\n"
     )
-
-
-def _resolve_backend_order(tmp_path: Path, *, in_dotenv: str | None, in_env: str | None) -> str:
-    """Run install_baremetal.sh's own KERNEL_OPT_BACKEND_ORDER resolution."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    lines = install_script.read_text(encoding="utf-8").splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("read_dotenv_var() {"))
-    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
-    reader = "\n".join(lines[start : end + 1])
-    resolution = "\n".join(line.strip() for line in lines if "export" in line and "KERNEL_OPT_BACKEND_ORDER=" in line)
-    assert resolution, "no KERNEL_OPT_BACKEND_ORDER resolution found in install_baremetal.sh"
-    dotenv = tmp_path / ".env"
-    body = "HYPERLOOM_RUN_MODE=baremetal\n"
-    if in_dotenv is not None:
-        body += f"KERNEL_OPT_BACKEND_ORDER={in_dotenv}\n"
-    dotenv.write_text(body, encoding="utf-8")
-    env = {k: v for k, v in os.environ.items() if k != "KERNEL_OPT_BACKEND_ORDER"}
-    if in_env is not None:
-        env["KERNEL_OPT_BACKEND_ORDER"] = in_env
-    script = f'set -euo pipefail\nDOTENV="{dotenv}"\n{reader}\n{resolution}\nprintf "%s" "$KERNEL_OPT_BACKEND_ORDER"'
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=True)
-    return proc.stdout.strip()
-
-
-def test_setup_keeps_the_forge_backend_the_skill_wrote_to_dotenv(tmp_path: Path):
-    """The setup skill writes the backend to .env before this runs; it must not be clobbered."""
-    assert _resolve_backend_order(tmp_path, in_dotenv="forge", in_env=None) == "forge"
-
-
-def test_setup_backend_order_lets_the_process_env_win(tmp_path: Path):
-    """An explicit export still outranks .env, matching USER_DATA_PATH's precedence."""
-    assert _resolve_backend_order(tmp_path, in_dotenv="forge", in_env="geak") == "geak"
-
-
-def test_setup_backend_order_defaults_to_geak(tmp_path: Path):
-    """With neither source set the default is unchanged."""
-    assert _resolve_backend_order(tmp_path, in_dotenv=None, in_env=None) == "geak"
 
 
 def _baremetal_credential_functions() -> str:
@@ -1145,7 +1193,7 @@ def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
     marker = '\nmain "$@"\n'
     assert marker in text, "install_baremetal.sh must end by invoking main"
     lib = tmp_path / "installer_lib.sh"
-    lib.write_text(text.replace(marker, "\n"), encoding="utf-8")
+    lib.write_text(text.replace(marker, "\n"), encoding="utf-8", newline="\n")
     return lib
 
 
@@ -1167,6 +1215,7 @@ def _fake_python(tmp_path: Path, importable: set[str], hip: str = "7.2.0") -> Pa
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     stub.chmod(0o755)
     return stub
@@ -1179,6 +1228,7 @@ def _drive_installer(
     dotenv: Path,
     body: str,
     install_framework: str = "none",
+    args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess:
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
@@ -1188,26 +1238,100 @@ def _drive_installer(
         "\n".join(
             [
                 "#!/usr/bin/env bash",
-                f"source {lib}",
-                f'DOTENV="{dotenv}"',
-                f'USER_DATA_PATH="{tmp_path}/data"',
+                f'source "{lib.as_posix()}"',
+                f'DOTENV="{dotenv.as_posix()}"',
+                f'USER_DATA_PATH="{tmp_path.as_posix()}/data"',
                 f'INSTALL_FRAMEWORK="{install_framework}"',
                 "FRAMEWORK_ENV=shared",
-                f'VLLM_VENV_ROOT="{tmp_path}/absent"',
+                f'VLLM_VENV_ROOT="{tmp_path.as_posix()}/absent"',
                 "DRY_RUN=0",
                 "CHECK_ONLY=0",
-                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                f'resolve_python() {{ printf "%s" "{py.as_posix()}"; }}',
                 body,
             ]
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
-    return subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+    return subprocess.run(["bash", runner.as_posix(), *args], text=True, capture_output=True)
 
 
 def _dotenv_lines(dotenv: Path) -> list[str]:
     return dotenv.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize(
+    ("importable", "args", "expected_framework"),
+    [
+        pytest.param({"atom"}, (), "atom", id="atom-only"),
+        pytest.param({"sglang", "atom"}, (), "sglang", id="sglang-before-atom"),
+        pytest.param({"vllm", "atom"}, (), "vllm", id="vllm-before-atom"),
+        pytest.param({"sglang", "vllm", "atom"}, ("--frameworks", "atom"), "atom", id="explicit-atom"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("in_dotenv", "in_env", "expected"),
+    [
+        pytest.param(None, None, None, id="unset"),
+        pytest.param(None, "", None, id="empty-env"),
+        pytest.param("", None, "", id="empty-dotenv"),
+        pytest.param("", "", "", id="both-empty"),
+        pytest.param(None, "geak", "geak", id="env-geak"),
+        pytest.param(None, "forge", "forge", id="env-forge"),
+        pytest.param(None, "forge,geak", "forge,geak", id="env-ordered"),
+        pytest.param("geak", None, "geak", id="existing-geak"),
+        pytest.param("forge", None, "forge", id="dotenv-forge"),
+        pytest.param("forge,geak", None, "forge,geak", id="dotenv-ordered"),
+        pytest.param("forge", "geak", "geak", id="env-over-dotenv"),
+        pytest.param("geak", "forge", "forge", id="env-replaces-geak"),
+        pytest.param("forge", "", "forge", id="empty-env-uses-dotenv"),
+    ],
+)
+def test_baremetal_main_persists_only_explicit_backend_selection(
+    tmp_path: Path,
+    monkeypatch,
+    importable: set[str],
+    args: tuple[str, ...],
+    expected_framework: str,
+    in_dotenv: str | None,
+    in_env: str | None,
+    expected: str | None,
+):
+    """Setup records the framework without turning an omitted backend into an explicit choice."""
+    monkeypatch.setenv("REPO_ROOT", tmp_path.as_posix())
+    monkeypatch.delenv("FRAMEWORKS", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    if in_env is not None:
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", in_env)
+    dotenv = tmp_path / ".env"
+    content = "KEEP_ME=1\n"
+    if in_dotenv is not None:
+        content += f"KERNEL_OPT_BACKEND_ORDER={in_dotenv}\n"
+    dotenv.write_text(content, encoding="utf-8", newline="\n")
+
+    res = _drive_installer(
+        tmp_path,
+        importable=importable,
+        dotenv=dotenv,
+        args=args,
+        body="\n".join(
+            [
+                "base_preflight() { DETECTED_GPU=MI300X; }",
+                "install_requested_framework() { :; }",
+                "apply_rocm_profiler_hotfix() { :; }",
+                "resolve_credentials() { :; }",
+                "main",
+            ]
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    lines = _dotenv_lines(dotenv)
+    assert f"FRAMEWORK={expected_framework}" in lines
+    assert "KEEP_ME=1" in lines
+    backend_lines = [line for line in lines if line.startswith("KERNEL_OPT_BACKEND_ORDER=")]
+    assert backend_lines == ([] if expected is None else [f"KERNEL_OPT_BACKEND_ORDER={expected}"])
 
 
 def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
@@ -2164,6 +2288,9 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
     start = script_text.index("install_sglang_framework() {")
     end = script_text.index("\n}\n\n# Verify that the installed vLLM package resolves", start) + 3
     install_sglang_framework = script_text[start:end]
+    # The import probe that decides whether to install lives in this helper, shared with the vLLM route.
+    aiter_start = script_text.index("ensure_aiter_for_python() {")
+    ensure_aiter_for_python = script_text[aiter_start : script_text.index("\n}\n", aiter_start) + 3]
 
     fake_py = tmp_path / "python"
     calls_file = tmp_path / "calls.txt"
@@ -2214,6 +2341,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "sglang_pypi_version_for_extra() { printf '7.2.4\\n'; }",
                 "ensure_rocm_devel_headers() { :; }",
                 f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
+                ensure_aiter_for_python,
                 install_sglang_framework,
                 "install_sglang_framework",
             ]
@@ -2310,12 +2438,10 @@ def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
 def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
-    start = script_text.index("setup_dotenv_is_authoritative() {")
-    end = script_text.index("\nload_dotenv_no_clobber() {", start)
+    start = script_text.index("scrub_stale_workspace_env_for_setup_dotenv() {")
+    end = script_text.index("\n# Load .env before deriving", start)
     helpers = script_text[start:end]
-    load_start = script_text.index("load_dotenv_no_clobber() {")
-    load_end = script_text.index("\n# Load .env before deriving", load_start)
-    loader = script_text[load_start:load_end]
+    loader = install_script.with_name("runtime_env.sh")
 
     workspace = tmp_path / "target"
     workspace.mkdir()
@@ -2336,9 +2462,9 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                f"REPO_ROOT={workspace}",
+                f'REPO_ROOT="{workspace.as_posix()}"',
+                f'. "{loader.as_posix()}"',
                 helpers,
-                loader,
                 "USER_DATA_PATH=/old/workspace/session",
                 "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
                 "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
@@ -2360,10 +2486,11 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
     out = subprocess.run(
-        ["bash", str(runner)],
+        ["bash", runner.as_posix()],
         check=True,
         text=True,
         stdout=subprocess.PIPE,

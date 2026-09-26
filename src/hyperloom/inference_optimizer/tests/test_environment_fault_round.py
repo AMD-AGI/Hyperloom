@@ -100,4 +100,4 @@ def test_a_fault_a_round_already_recorded_is_read_back_rather_than_re_derived(tm
 @pytest.mark.parametrize("reason", sorted(INFRASTRUCTURE_STOP_REASONS))
 def test_the_terminal_is_reported_as_infrastructure(reason):
     """The run ended without judging the model, and says so."""
-    assert outcome_status(reason) != "failed"
+    assert outcome_status(reason, 1.0) != "failed"

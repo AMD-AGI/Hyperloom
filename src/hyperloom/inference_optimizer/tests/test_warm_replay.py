@@ -12,7 +12,11 @@ import subprocess
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
+from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 
 
 @dataclass
@@ -50,6 +54,8 @@ class _StubSharedState:
     current_best: dict = field(default_factory=dict)
     tick: int = 0
     phase: str = "PRELUDE"
+    phase_history: list = field(default_factory=list)
+    macro_cycle: int = 0
     conc: int = 64
     isl: int = 0
     osl: int = 0
@@ -76,6 +82,12 @@ class _StubSharedState:
             ),
             encoding="utf-8",
         )
+
+    def append_phase_history_event(self, **kwargs):
+        """Forward to the production helper, as SharedState does."""
+        from hyperloom.orchestrator.phases import machine_state as _ms
+
+        return _ms.append_phase_history_event(self, **kwargs)
 
     def record_action_failure(self, *, action, task_id, result, **kwargs):
         self.last_action_failures.append(
@@ -314,7 +326,7 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
         lambda: str(framework_root),
     )
     coord = _make_coord(
@@ -489,13 +501,13 @@ async def test_warm_replay_does_not_misclassify_preflight_code_bug(
     tmp_path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator.actions.executors import _grid_server_args
+    from hyperloom.inference_optimizer import grid_server_args
 
     def _bug(*_args, **_kwargs):
         raise AttributeError("preflight implementation bug")
 
     monkeypatch.setattr(
-        _grid_server_args,
+        grid_server_args,
         "validate_warm_replay_context_length",
         _bug,
     )
@@ -1273,7 +1285,7 @@ def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monk
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
         lambda: str(active_root),
     )
 
@@ -1377,7 +1389,7 @@ def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
     existing.write_text("patched\n", encoding="utf-8")
     created.write_text("new\n", encoding="utf-8")
 
-    result = coord.phase_prelude._restore_warm_kernel_snapshots(snapshots)
+    result = restore_warm_kernel_snapshots(snapshots)
 
     assert result == {"ok": True, "errors": []}
     assert existing.read_text(encoding="utf-8") == "original\n"
@@ -1534,16 +1546,19 @@ async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimizat
     state.max_minutes = 180
     state.baseline_runtime_sec = 2705.7
     state.phase_elapsed_totals = {"PRELUDE": 3090.0}
-    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
     state.session_budget_usable_sec = lambda: 7700.0
 
     await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     assert coord.tasks.calls == []
     assert not coord.shared_state.auto_roofline_pending_task_id
-    dropped = state.phase_history[-1]["evidence"]["budget_dropped_arms"]
-    assert dropped[0]["arm"] == "initial_analysis"
-    assert dropped[0]["expected_cost_sec"] == pytest.approx(2705.7)
+    # A marker row, which the phase event exports; evidence appended to the
+    # entry row after entry would never leave ``state``.
+    dropped = state.phase_history[-1]
+    assert dropped["reason"] == PRELUDE_ARM_DROPPED
+    assert not is_phase_transition_row(dropped)
+    assert dropped["evidence"]["arm"] == "initial_analysis"
+    assert dropped["evidence"]["expected_cost_sec"] == pytest.approx(2705.7)
 
 
 @pytest.mark.asyncio
@@ -1685,7 +1700,7 @@ def test_inject_warm_recipe_history_is_idempotent(tmp_path):
 
 def test_inject_warm_recipe_history_dedupes_with_existing_ledger(tmp_path):
     """A ledger row with the same fingerprint is not duplicated."""
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    from hyperloom.inference_optimizer.canonical_fingerprint import (
         canonical_fingerprint,
     )
 
@@ -1867,7 +1882,7 @@ async def test_dirty_kernel_preparation_stops_recipe_enqueue(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
+async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     applied = [{"manifest_path": "/tmp/m"}]
     snapshots = [{"target": "/tmp/kernel.py"}]
@@ -1889,10 +1904,12 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
         lambda got_applied, got_snapshots=None: (
             rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
-        )
+        ),
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
 
@@ -1907,6 +1924,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
 @pytest.mark.asyncio
 async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
     tmp_path,
+    monkeypatch,
 ):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_pending = {
@@ -1926,8 +1944,10 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
         raise RuntimeError("registry unavailable")
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda *_args: {"ok": False, "errors": ["restore failed"]}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
 
@@ -1955,8 +1975,10 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
     coord.shared_state.warm_replay_pending = {
         "recipe_patch_target": "/repo",
@@ -2211,8 +2233,10 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
 
@@ -2286,6 +2310,90 @@ def test_every_patched_tree_is_promoted(tmp_path):
     assert promotion["target_repos"] == [str(sglang), str(tuning)]
 
 
+def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
+    """On a pip-installed framework it is the only status an overlay can land under."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+        lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_current_contract": True,
+            "combined_keep_threshold_pct": 1.0,
+            # The whole recipe is the timeline: nothing else can carry the replay.
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+        }
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 750.0,
+            "warm_patches_applied": [{"patch_file": "p.patch", "status": "applied_nogit"}],
+        },
+        task=task,
+    )
+
+    # The recipe's only content is the timeline, so a filtered-out status leaves the replay
+    # with nothing to carry and it is dropped as "reproduced but no params".
+    assert coord.shared_state.warm_replay_outcome.get("reason") != "reproduced_but_no_params"
+    assert coord.shared_state.optimization_stack, "the reproduced overlay has to reach the stack"
+
+
+def test_a_nogit_tree_promotes_on_the_backups_that_restore_it(tmp_path):
+    """A pip-installed framework has no sha; its backups are the restore channel."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": str(install_root),
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [{"path": "vllm/fp8.py", "backup": str(tmp_path / "b.bin")}],
+                },
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(install_root)]
+
+
+def test_a_tree_that_names_no_checkout_is_still_refused(tmp_path):
+    """A record that cannot say which tree it patched is not promotable."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": "/sglang"}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {"warm_patch_trees": [{"root": "", "pre_sha": "", "snapshot_manifest": None, "nogit_backups": []}]},
+        task,
+    )
+
+    assert ok is False
+    assert promotion["failure"] == "validated_recipe_checkout_incomplete"
+
+
 def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     """The gain came from the whole set, so a half-promoted replay is not a win."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -2315,6 +2423,102 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     assert promotion["failure"] == "validated_recipe_checkout_manifest_mismatch"
 
 
+def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
+    """A pip-installed framework has no manifest; its backups are the way back."""
+    restored: list[list] = []
+    monkeypatch.setattr(
+        prelude_mod,
+        "_revert_warm_patch_state",
+        lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
+            restored.append(nogit_backups) or {"ok": True, "errors": []}
+        ),
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
+    )
+    backups = [{"target": "vllm/fp8.py", "backup": "/tmp/0000.bin"}]
+
+    outcome = coord.phase_prelude._rollback_combined_warm(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": "/usr/local/lib/python3.12/dist-packages",
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": backups,
+                    "mutated": True,
+                },
+            ],
+        },
+        _StubTask(params={}),
+    )
+
+    assert outcome["ok"] is True
+    assert restored == [backups]
+
+
+def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path, monkeypatch):
+    """An overlay already present is applied as a no-op, so there is nothing to undo."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
+    )
+
+    outcome = coord.phase_prelude._rollback_combined_warm(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": "/usr/local/lib/python3.12/dist-packages",
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [],
+                    "mutated": False,
+                },
+            ],
+        },
+        _StubTask(params={}),
+    )
+
+    assert outcome["ok"] is True
+    assert outcome.get("errors") in (None, [])
+
+
+def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_path):
+    """Reaching promotion means every required overlay applied, no-op included."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": str(install_root),
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [],
+                    "mutated": False,
+                },
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(install_root)]
+
+
 def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     """Leaving one tree patched would bank a mutation from a rejected replay."""
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
@@ -2326,8 +2530,10 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
 
     outcome = coord.phase_prelude._rollback_combined_warm(
@@ -2712,6 +2918,77 @@ def test_a_replay_that_lost_still_records_the_config_that_lost(tmp_path):
 
     assert applied["extra_server_args"] == "--attention-backend AITER"
     assert applied["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_a_replay_that_lost_states_which_of_its_patches_landed(tmp_path):
+    """One measurement covers every apply the replay made, so a replay that
+    lost has to say whether what lost was the recipe or a patch that never
+    went into the server that was measured."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    result = {
+        "status": "succeeded",
+        "output_throughput": 606.0,
+        "warm_patch_result": {
+            "patches": [
+                {
+                    "patch_ref": "fix-attn.patch",
+                    "timeline_index": 0,
+                    "status": "git_apply",
+                    "target_repo": "/opt/sglang",
+                },
+                {"patch_ref": "fix-moe.patch", "timeline_index": 1, "status": "failed", "reason": "git_apply_failed"},
+            ]
+        },
+    }
+    with session_scope(tmp_path):
+        coord._promote_warm_replay(result, task=task)
+        items = _replay_ext(tmp_path)["applied"]["items"]
+
+    assert [(row["ref"], row["applied"]) for row in items] == [
+        ("fix-attn.patch", True),
+        ("fix-moe.patch", False),
+    ]
+    assert items[1]["reason"] == "git_apply_failed"
+
+
+def test_the_kernel_plan_is_on_the_event_before_the_ruling_prunes_it(tmp_path):
+    """The keep ruling replaces the plan with the subset it kept, so an item
+    that never applied is recoverable only if the dispatch recorded it. Read
+    back through the recovery a killed replay gets, which is the case that
+    cannot be reconstructed from state afterwards."""
+    from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    coord.shared_state.warm_kernel_kb_plan = [
+        {"column": "fusion", "patch_path": "/kb/fusion.patch", "apply_root": "/opt/sglang", "decision": "PENDING"},
+        {
+            "column": "rewrite",
+            "patch_path": "/kb/rewrite.patch",
+            "decision": "DEFERRED",
+            "apply_result": {"status": "skipped", "reason": "no patch target under the active root"},
+        },
+        # Behind the one that stopped the sequence: never attempted, so it
+        # holds no decision and must leave no row.
+        {"column": "rewrite", "patch_path": "/kb/never-reached.patch"},
+    ]
+    with session_scope(tmp_path):
+        coord.phase_prelude._open_warm_replay_timeline(task=_replay_task(), session_baseline_tput=600.0)
+        finalize_events(tmp_path)
+        items = _replay_ext(tmp_path)["applied"]["items"]
+
+    assert [(row["ref"], row["applied"]) for row in items] == [
+        ("/kb/fusion.patch", True),
+        ("/kb/rewrite.patch", False),
+    ]
+    assert items[1]["reason"] == "no patch target under the active root"
 
 
 def test_a_replay_the_session_declined_is_on_the_timeline_with_a_stable_code(tmp_path):

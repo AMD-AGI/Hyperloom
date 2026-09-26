@@ -362,7 +362,7 @@ class HostProbe:
             return
         probe = self
 
-        def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        def wrapper(*args, **kwargs):
             started = time.perf_counter()
             try:
                 return original(*args, **kwargs)
@@ -405,8 +405,8 @@ class HostProbe:
             if getattr(original, "_hl_host_probe", False):
                 continue
 
-            def make(original=original, api=api):  # noqa: ANN001, ANN202
-                def wrapper(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+            def make(original=original, api=api):
+                def wrapper(self, *args, **kwargs):
                     if self.is_cuda:
                         return original(self, *args, **kwargs)
                     started = time.perf_counter()
@@ -477,7 +477,7 @@ class HostProbe:
 
     # -- tier 2 -----------------------------------------------------------
 
-    def _profile_hook(self, frame, event: str, _arg) -> None:  # noqa: ANN001
+    def _profile_hook(self, frame, event: str, _arg) -> None:
         """``sys.setprofile`` callback counting framework calls and arg repeats."""
         if event != "call" and event != "return":
             return
@@ -513,7 +513,7 @@ class HostProbe:
         except Exception:  # noqa: BLE001 - a profile hook must never raise
             return
 
-    def _sample_args(self, frame, stats: _CallStats) -> None:  # noqa: ANN001
+    def _sample_args(self, frame, stats: _CallStats) -> None:
         """Fingerprint one call's positional arguments into ``stats``."""
         code = frame.f_code
         argcount = int(getattr(code, "co_argcount", 0) or 0)

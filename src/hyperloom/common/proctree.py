@@ -42,6 +42,13 @@ __all__ = [
 ProcessId = tuple[int, int]
 
 
+def _stat_fields(pid: int) -> list[str]:
+    """The ``/proc/<pid>/stat`` fields after the comm, from ``state`` on; raises ``OSError`` when unreadable."""
+    stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    # The comm may itself contain spaces and parentheses, so split after its LAST ')'.
+    return stat_text.rsplit(")", 1)[-1].split()
+
+
 def proc_identity(pid: int) -> tuple[int, int] | None:
     """Read ``(ppid, start_time)`` for one pid.
 
@@ -53,16 +60,9 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
             ``None`` when the process is gone or its stat entry was truncated.
     """
     try:
-        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    # The comm field is parenthesised and may itself contain spaces and
-    # parentheses, so the split has to start after its LAST ')'.
-    closing_paren = stat_text.rfind(")")
-    fields_after_name = stat_text[closing_paren + 2 :].split()
-    try:
-        return int(fields_after_name[1]), int(fields_after_name[19])
-    except (ValueError, IndexError):
+        fields = _stat_fields(pid)
+        return int(fields[1]), int(fields[19])
+    except (OSError, ValueError, IndexError):
         return None
 
 
@@ -136,8 +136,7 @@ def running(pid: int) -> bool:
         # Someone else's process: existence is the answer being asked for.
         return True
     try:
-        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
-            fields = handle.read().rsplit(")", 1)[-1].split()
+        fields = _stat_fields(pid)
     except OSError:
         # No procfs reading to refine the signal with; the signal stands.
         return True
@@ -210,8 +209,7 @@ def group_members(pgid: int) -> list[tuple[int, int, str]]:
         if not entry.name.isdigit():
             continue
         try:
-            stat_text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
-            fields = stat_text[stat_text.rfind(")") + 2 :].split()
+            fields = _stat_fields(int(entry.name))
             if int(fields[2]) != pgid:
                 continue
             members.append((int(entry.name), int(fields[19]), fields[0]))

@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     inject_sglang_context_length,
     resolve_sglang_context_cap,
 )
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     validate_warm_replay_context_length,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (

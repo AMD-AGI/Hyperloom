@@ -59,16 +59,12 @@ def _safe_is_file(value: str) -> bool:
 
 def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     """Parse a serving log into a demand file, or \"\" when it carries no demand."""
-    try:
-        from .evidence import moe_dispatch_keys, parse_log_file, write_demand
+    from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        # Hyperloom sets this for serving runs, making zero hits conclusive.
-        # Operator logs without it remain inconclusive.
-        hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
-        report = parse_log_file(server_log, hit_logging=hit_logging or None)
-    except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
-        log.debug("could not parse %s for demand", server_log, exc_info=True)
-        return ""
+    # Hyperloom sets this for serving runs, making zero hits conclusive.
+    # Operator logs without it remain inconclusive.
+    hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
+    report = parse_log_file(server_log, hit_logging=hit_logging or None)
 
     demands = report.get("demands") or []
     # The dense misses are not the only demand the log carries.
@@ -106,7 +102,7 @@ def _load_demand_report(demand_json: str) -> dict | None:
         from .evidence import load_demand
 
         return load_demand(demand_json)
-    except Exception:  # noqa: BLE001 - evidence must never fail the run
+    except Exception:
         log.debug("could not load demand report", exc_info=True)
         return None
 
@@ -136,7 +132,7 @@ def _coverage_gaps(
                 encoding="utf-8",
             )
         return gaps
-    except Exception:  # noqa: BLE001 - a report must never fail the run
+    except Exception:
         log.debug("could not record coverage gaps", exc_info=True)
         return []
 
@@ -207,7 +203,7 @@ def _attempt_tier3(
             encoding="utf-8",
         )
         return _tier3_result(outcome, decision.gap)
-    except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
+    except Exception:
         log.warning("tier3 attempt failed; tuning continues", exc_info=True)
         return None
 
@@ -218,13 +214,16 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
     Unverified artifacts return nothing. Marking the result as a candidate
     forces normal e2e validation; microbenchmark speedup is not an e2e claim.
     """
-    from .tuners.base import TuneResult
+    from .tuners.base import TuneResult, micro_metrics
 
     if not outcome.ok or not outcome.output_csv:
         return None
-    best = max(
-        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
-        default=1.0,
+    micro = micro_metrics(
+        {
+            "speedup": float(j.best_timing.speedup) if j.best_timing and j.best_timing.usable else None,
+            "improved": j.improved,
+        }
+        for j in outcome.judgements
     )
     return TuneResult(
         tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
@@ -234,8 +233,9 @@ def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
         env_value=outcome.output_csv,
         candidate=True,
         total_shapes=len(outcome.judgements),
-        improved_shapes=outcome.improved_shapes,
-        best_micro_speedup=float(best or 1.0),
+        improved_shapes=micro.improved,
+        best_micro_speedup=micro.best,
+        avg_micro_speedup=micro.avg,
         key_source="runtime_observed",
     )
 
@@ -429,7 +429,8 @@ def run(
                     [g.gpu_id for g in busy],
                 )
 
-    # aiter tune/serve alignment preflight (warn-only, best-effort).
+    # aiter tune/serve alignment preflight.
+    preflight_hard: list[str] = []
     try:
         from .aiter_preflight import collect as _aiter_collect
 
@@ -439,15 +440,18 @@ def run(
             log.warning("aiter preflight: %s", _m)
         for _m in _pf["hard"]:
             log.warning("aiter preflight PROBLEM: %s", _m)
+        preflight_hard = list(_pf["hard"])
         if _pf["aligned"]:
             log.info("aiter preflight: serve aiter aligned with tuner root")
-    except Exception as _exc:  # noqa: BLE001 - preflight must never break tuning
+    except Exception as _exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
         log.debug("aiter preflight skipped: %s", _exc)
+    if preflight_hard:
+        raise click.ClickException("aiter preflight failed: " + "; ".join(preflight_hard))
 
     # Analyze model
     try:
         profile = analyze_model(model_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - model analysis is third-party
         log.error("Model analysis failed: %s", exc)
         report_dict = {
             "status": "failed",
@@ -532,15 +536,25 @@ def run(
             emit_result_json(report_dict)
             raise SystemExit(2)
 
-    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. 0 means
-    # no ceiling was supplied.
-    if max_tuners > 0 and len(tuner_specs) > max_tuners:
-        log.info(
-            "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
-            max_tuners,
-            ", ".join(spec.name for spec in tuner_specs[max_tuners:]),
-        )
-        tuner_specs = tuner_specs[:max_tuners]
+    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. A
+    # tuner the router skipped books no time, so it is not what the share buys: it keeps its place in the plan for
+    # its skip reason but never displaces a tuner that could have run. 0 means no ceiling was supplied.
+    if max_tuners > 0:
+        kept = []
+        dropped = []
+        runnable_so_far = 0
+        for spec in tuner_specs:
+            if spec.should_run:
+                runnable_so_far += 1
+            over_ceiling = spec.should_run and runnable_so_far > max_tuners
+            (dropped if over_ceiling else kept).append(spec)
+        if dropped:
+            log.info(
+                "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
+                max_tuners,
+                ", ".join(spec.name for spec in dropped),
+            )
+        tuner_specs = kept
 
     # Write plan
     plan = {
@@ -665,12 +679,12 @@ def run(
         result = tuner_instance.execute()
         results.append(result)
         log.info(
-            "Tuner %s finished: status=%s, improved=%d/%d, best_speedup=%.3fx, elapsed=%.1fs",
+            "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
             spec.name,
             result.status,
-            result.improved_shapes,
+            "unmeasured" if result.improved_shapes is None else result.improved_shapes,
             result.total_shapes,
-            result.best_micro_speedup,
+            "unmeasured" if result.best_micro_speedup is None else f"{result.best_micro_speedup:.3f}x",
             result.elapsed_s,
         )
 

@@ -210,23 +210,19 @@ auto-detects through `rocm-smi --showproductname`.
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.
 
-**Export credentials from the launching shell.** Preflight refuses to load
-`*_CUSTOM_HEADERS` out of `.env`, so a gateway subscription key only reaches the
-SDK if the launching shell exports it. Without it every catalog probe and every
-orchestration turn returns HTTP 401 and the run idles in `PRELUDE` for the whole
-budget. See [Authentication and credentials](../reference/authentication.md).
+**Load workspace settings through the shared loader.** Existing caller values
+remain authoritative, including gateway keys and custom headers. The loader reads
+`.env` as data rather than executing it; never print credential values. See
+[Authentication and credentials](../reference/authentication.md).
 
 ```bash
-# Run from the workspace holding the hyperloom package; no installer exports REPO_ROOT.
 export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a
-. <(grep -E '^(ANTHROPIC|OPENAI)_(CUSTOM_HEADERS|API_KEY|BASE_URL)=' "$REPO_ROOT/.env")
-set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
 ```
 
 **Sessions.** `USER_DATA_PATH` sets the session root, and each `optimize`

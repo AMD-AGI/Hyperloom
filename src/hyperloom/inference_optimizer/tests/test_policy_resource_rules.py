@@ -135,8 +135,9 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
 
 
 @pytest.mark.asyncio
-async def test_an_open_round_nobody_settled_stops_denying_when_its_lease_runs_out(store, clock):
-    """The exclusion is time-bounded, so no round can hold the machine for good."""
+@pytest.mark.parametrize("elapsed", [_LEASE + 1.0, _LEASE * 100])
+async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(store, clock, elapsed):
+    """Elapsed time cannot release ownership; only the holder's settlement can."""
     facts = ResourceFacts()
     gate = _gate(facts)
     opened = await store.open(
@@ -153,9 +154,42 @@ async def test_an_open_round_nobody_settled_stops_denying_when_its_lease_runs_ou
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
 
-    clock.advance(_LEASE + 1.0)
+    clock.advance(elapsed)
+    await _reread(store, facts, clock.wall())
+    with pytest.raises(PolicyDenied) as denied:
+        gate.validate_intent("orchestration", _baseline())
+    assert denied.value.rule == RULE_ROUND_IN_FLIGHT
+
+    blocked = await store.open(
+        "round-next",
+        holder_task_id="baseline-2",
+        lease_sec=_LEASE,
+        now_unix=clock.wall(),
+        request_id="req-blocked",
+    )
+    assert not blocked.ok
+    assert blocked.reason == EXCLUDED
+
+    settled = await store.settle(
+        "round-1",
+        holder_task_id="baseline-1",
+        fence=opened.fence,
+        outcome=BOOTED,
+        now_unix=clock.wall(),
+        request_id="req-settle",
+    )
+    assert settled.ok
+
     await _reread(store, facts, clock.wall())
     gate.validate_intent("orchestration", _baseline())
+    acquired = await store.open(
+        "round-next",
+        holder_task_id="baseline-2",
+        lease_sec=_LEASE,
+        now_unix=clock.wall(),
+        request_id="req-after-settle",
+    )
+    assert acquired.ok
 
 
 @pytest.mark.asyncio

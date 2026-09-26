@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_report as report  # noqa: E402
+import _bypass_report as report
 
 
 def _analyze(kernels):

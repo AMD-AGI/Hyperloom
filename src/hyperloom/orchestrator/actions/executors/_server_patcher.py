@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from hyperloom.common.unified_diff import parse_unified_diff
+
 from ._file_lock import best_effort_file_lock
 
 log = logging.getLogger(__name__)
@@ -253,6 +255,64 @@ def ensure_sglang_patched_for_tracelens(
     return _ensure_patched(plan)
 
 
+# SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
+# (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
+_SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
+_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
+# No-patch tool location, relative to TRACELENS_ROOT.
+_KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
+
+
+def sglang_shape_mode(version: str) -> str:
+    """Return the shape-discovery mechanism for an SGLang version.
+
+    ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
+    ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
+    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
+    (``auto`` / unset = version-based).
+    """
+    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return "patched"
+    if override == "sitecustomize":
+        return "sitecustomize"
+    vt = _version_tuple(version)
+    if vt is None:
+        # Unparseable version: keep the safe legacy mechanism.
+        return "patched"
+    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
+
+
+def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+    """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
+    root = _resolve_tracelens_root(tracelens_root)
+    if root is None:
+        return None
+    tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
+    return tool if tool.is_dir() else None
+
+
+def _detect_installed_sglang_version() -> str | None:
+    """Return the locally-installed SGLang version, or ``None`` if unimportable."""
+    try:
+        import sglang  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    return (getattr(sglang, "__version__", "") or "").strip() or None
+
+
+def resolve_sglang_shape_mode() -> str:
+    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+
+    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
+    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
+    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    Falls back to ``"patched"`` (legacy) when the version cannot be determined.
+    """
+    version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+    return sglang_shape_mode(version)
+
+
 def ensure_sglang_patched_for_ck_blockscale(
     kernelforge_root: Path | str | None = None,
 ) -> bool:
@@ -308,12 +368,7 @@ def _patch_target_paths(patches: Sequence[Path]) -> frozenset[str]:
         # An unreadable patch would silently shrink the sentinel set, which is the detection hole this derivation
         # exists to close.
         text = patch.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            if not line.startswith("+++ "):
-                continue
-            target = line[4:].split("\t", 1)[0].strip()
-            if target and target != "/dev/null":
-                targets.add(target.replace("\\", "/"))
+        targets.update(change.path.replace("\\", "/") for change in parse_unified_diff(text) if not change.is_deleted)
     return frozenset(targets)
 
 
@@ -445,7 +500,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore  # noqa: I001 - runtime probe
+        import vllm  # type: ignore
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
@@ -546,7 +601,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore  # noqa: I001 - runtime probe
+        import sglang  # type: ignore
     except Exception as e:  # noqa: BLE001
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
@@ -705,7 +760,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore  # noqa: I001 - runtime probe
+        import sglang  # type: ignore
     except Exception as e:  # noqa: BLE001 - any import failure → fail-soft
         log.warning(
             "_server_patcher: sglang not importable (%s); skip CK block-scale patch",

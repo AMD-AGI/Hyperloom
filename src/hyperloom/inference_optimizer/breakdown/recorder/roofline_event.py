@@ -769,7 +769,7 @@ class RooflineEventRecorder:
             payload={
                 "failed_substep": SUBSTEP_ANALYSIS if analysis else SUBSTEP_PROFILE,
                 "failure": _failure_row(
-                    phase=phase,
+                    stage=phase,
                     error_class=error_class or f"{phase}_failed",
                     message=message,
                 ),
@@ -809,18 +809,22 @@ class RooflineEventRecorder:
         if not self._owns_event:
             return
         from .assembler import roofline_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing roofline event {self.event_id}")
 
 
 def assemble_roofline_action(
@@ -956,22 +960,15 @@ def make_roofline_recorder(
     params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed."""
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    try:
-        return RooflineEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            framework=framework,
-            params=params,
-            owns_event=owns_event,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
-        log.warning(
-            "roofline timeline: recorder construction failed; this action's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
+    return RooflineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        params=params,
+        owns_event=owns_event,
+    )

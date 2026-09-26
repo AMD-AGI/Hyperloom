@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import shutil
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -38,9 +39,16 @@ def atomic_write_bytes(
     *,
     make_parents: bool = False,
     fsync: bool = False,
+    fsync_dir: bool = False,
     mode: int | None = None,
+    preserve_mode: bool = False,
 ) -> None:
-    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
+    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
+
+    A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
+    stripped; ``preserve_mode`` instead keeps an existing ``path``'s permission bits
+    and is ignored when ``mode`` is given.
+    """
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +63,11 @@ def atomic_write_bytes(
             # Strip group/other bits: written files may hold sensitive payloads, so never expose them beyond the owner
             # regardless of caller intent.
             os.chmod(tmp, mode & 0o700)
+        elif preserve_mode and path.is_file():
+            shutil.copymode(path, tmp)
         os.replace(tmp, path)
+        if fsync_dir:
+            _best_effort_fsync_dir(path.parent)
     except Exception:
         with suppress(OSError):
             tmp.unlink()
@@ -71,28 +83,18 @@ def atomic_write_text(
     fsync: bool = False,
     fsync_dir: bool = False,
     mode: int | None = None,
+    preserve_mode: bool = False,
 ) -> None:
-    """Atomically write ``text`` to ``path`` (temp file in same dir + ``os.replace``)."""
-    path = Path(path)
-    if make_parents:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as fh:
-            fh.write(text)
-            if fsync:
-                _best_effort_fsync(fh)
-        if mode is not None:
-            # Strip group/other bits: never expose written payloads beyond owner.
-            os.chmod(tmp, mode & 0o700)
-        os.replace(tmp, path)
-        if fsync_dir:
-            _best_effort_fsync_dir(path.parent)
-    except Exception:
-        with suppress(OSError):
-            tmp.unlink()
-        raise
+    """Atomically write ``text`` to ``path``; see :func:`atomic_write_bytes`."""
+    atomic_write_bytes(
+        path,
+        text.encode(encoding),
+        make_parents=make_parents,
+        fsync=fsync,
+        fsync_dir=fsync_dir,
+        mode=mode,
+        preserve_mode=preserve_mode,
+    )
 
 
 def atomic_write_json(

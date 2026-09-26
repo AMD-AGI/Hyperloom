@@ -17,6 +17,9 @@ ENABLEMENT_SEGMENT: str = "enablement"
 
 
 # Top-level files
+BREAKDOWN_FILENAME: str = "session_breakdown.json"
+
+
 def manifest_path(session_dir: Path) -> Path:
     """Compute the path to ``manifest.json`` (the Python-written resume tag)."""
     return Path(session_dir) / "manifest.json"
@@ -30,65 +33,6 @@ def state_path(session_dir: Path) -> Path:
 def optimizer_lock_path(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/optimizer.lock`` — the single-optimizer session lock."""
     return Path(session_dir) / "runtime" / "optimizer.lock"
-
-
-def supervisor_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor`` — the out-of-band supervisor's own store.
-
-    Everything the supervisor writes lives here: it must not be a second
-    writer to ``coordinator.db``, which may sit on a network filesystem.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/runtime/supervisor``.
-    """
-    return Path(session_dir) / "runtime" / "supervisor"
-
-
-def coordinator_tick_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/coordinator_tick.json``.
-
-    Stamped by the coordinator at the top of every tick and read by the
-    supervisor, which uses it to tell a wedged loop from a busy one.
-
-    Schema: ``{pid, hostname, tick, stamped_unix}``.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the tick stamp.
-    """
-    return supervisor_dir(session_dir) / "coordinator_tick.json"
-
-
-def supervisor_status_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/status.json``.
-
-    The supervisor's own view of the session, rewritten every poll: what it
-    observed, what it would do, and what it actually did.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the status snapshot.
-    """
-    return supervisor_dir(session_dir) / "status.json"
-
-
-def supervisor_log_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/supervisor.log``.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: Where the supervisor process's own output is redirected.
-    """
-    return supervisor_dir(session_dir) / "supervisor.log"
 
 
 def pod_history_path(session_dir: Path) -> Path:
@@ -250,7 +194,7 @@ def trace_dir(session_dir: Path) -> Path:
 
 
 def llm_calls_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.orchestrator.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
+    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.inference_optimizer.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
@@ -492,6 +436,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 
 __all__ = [
+    "BREAKDOWN_FILENAME",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",

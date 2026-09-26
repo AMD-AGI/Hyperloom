@@ -175,74 +175,29 @@ def test_ordinary_stop_reason_is_not_an_escalation(sd: Path) -> None:
     assert _close(sd)["robustness"]["escalated"] is False
 
 
-def test_the_close_out_says_what_the_ladder_found_not_just_that_it_escalated(sd: Path) -> None:
+def test_close_does_not_fetch_retired_findings(sd: Path) -> None:
     _write_findings(sd, [_finding()])
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="robustness_escalated")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness["findings_total"] == 1
-    (finding,) = robustness["findings"]
-    assert finding["symptom_name"] == "server_crash_loop"
-    assert finding["severity"] == "high"
-    assert finding["tick_index"] == 4
-    assert finding["rca_text"] == "the flag is unsupported on this build"
-    assert finding["evidence"] == {"crashes": 3}
-    # The payloads are the ladder's working detail; the types are what the close-out reports.
-    assert finding["intents"] == ["alert"]
-
-
-def test_an_unescalated_session_still_reports_what_fired(sd: Path) -> None:
-    _write_findings(sd, [_finding(severity="low")])
-    _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
 
     robustness = _close(sd)["robustness"]
-    assert robustness["escalated"] is False
-    assert [row["severity"] for row in robustness["findings"]] == ["low"]
+    assert robustness == {"escalated": False, "stop_reason": "target_reached"}
 
 
-def test_a_session_whose_ladder_never_wrote_reports_no_findings_key(sd: Path) -> None:
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    assert "findings" not in _close(sd)["robustness"]
-
-
-def test_findings_are_ordered_and_the_total_survives_the_cap(sd: Path) -> None:
-    _write_findings(sd, [_finding(tick_index=n, timestamp_unix=float(2000 - n)) for n in range(60)])
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness["findings_total"] == 60
-    assert len(robustness["findings"]) == 50
-    ticks = [row["tick_index"] for row in robustness["findings"]]
-    assert ticks == sorted(ticks, reverse=True)
-
-
-def test_findings_from_several_sink_files_are_read_together(sd: Path) -> None:
-    _write_findings(sd, [_finding(symptom_name="first", timestamp_unix=1.0)], name="s1")
-    _write_findings(sd, [_finding(symptom_name="second", timestamp_unix=2.0)], name="s2")
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    robustness = _close(sd)["robustness"]
-    assert [row["symptom_name"] for row in robustness["findings"]] == ["first", "second"]
-
-
-def test_the_agents_turns_exist_only_in_top_level_robustness(sd: Path) -> None:
-    from hyperloom.inference_optimizer.breakdown.recorder.robustness_out import record_robustness_turn
-
-    record_robustness_turn(sd, turn_idx=0, outcome="intents", intents=[{"type": "alert"}])
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    assembled = assemble_parts(sd, warnings=[])
-    turns = assembled["robustness"]["turns"]
-    assert [row["turn_idx"] for row in turns] == [0]
-    assert turns[0]["outcome"] == "intents"
-    assert "turns" not in _close(sd)["robustness"]
+def test_historical_close_findings_remain_readable() -> None:
+    finding = _finding()
+    recorded = {
+        "status": "succeeded",
+        "stop_reason": "robustness_escalated",
+        "robustness": {"escalated": True, "findings": [finding], "findings_total": 60},
+    }
+    robustness = collect_v6_close([], recorded=recorded)["robustness"]
+    assert robustness == {
+        "escalated": True,
+        "stop_reason": "robustness_escalated",
+        "findings": [finding],
+        "findings_total": 60,
+    }
 
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:

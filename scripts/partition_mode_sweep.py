@@ -824,12 +824,12 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
     try:
         if read_mode(gpu_id) == entry_mode:
             return False
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - operator script barrier
         print(f"note: could not read GPU {gpu_id}'s mode ({exc}); attempting the restore anyway")
     try:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
         set_mode(gpu_id, entry_mode, sudo=sudo)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - operator script barrier
         print(
             f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
             f"The card is NOT in the mode it started in. Anything that runs on it now "
@@ -892,7 +892,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
+def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
     if args.benchmark_command:
@@ -934,7 +934,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
         # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
         # borrowing that one.
@@ -1009,7 +1009,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
             except (SweepError, PartitionError) as exc:
                 result.error = str(exc)
                 print(f"  failed: {exc}")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 # Everything this script anticipates arrives as a SweepError or a PartitionError.
                 unexpected = f"{type(exc).__name__}: {exc}"
                 result.error = f"unexpected error: {unexpected}"
@@ -1027,7 +1027,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
             encoding="utf-8",
         )
         print(f"wrote {summary}")
-    except Exception as exc:
+    except OSError as exc:
         # A full disk or an unrenderable result must not cost the caller the exit code, which is the one thing it
         # cannot reconstruct for itself -- least of all the code saying the card was left in the wrong mode.
         traceback.print_exc()

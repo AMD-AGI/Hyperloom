@@ -35,7 +35,7 @@ def _run_git_cp(
     *,
     timeout: float = 120.0,
     cwd: str | Path | None = None,
-    input: str | None = None,  # noqa: A002 - mirrors subprocess.run's keyword
+    input: str | None = None,
 ) -> subprocess.CompletedProcess | None:
     """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout."""
     try:

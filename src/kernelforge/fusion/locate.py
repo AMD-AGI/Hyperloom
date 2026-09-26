@@ -196,7 +196,7 @@ def _vendor_priority() -> tuple[str, ...]:
             return ("amd",)
         if getattr(torch.version, "cuda", None):
             return ("nvidia",)
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
     if Path("/opt/rocm").exists():
         return ("amd",)

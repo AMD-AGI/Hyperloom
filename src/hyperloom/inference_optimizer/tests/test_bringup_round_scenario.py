@@ -359,7 +359,7 @@ def coordinator(session_dir):
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
 
     backends: dict[str, Backend] = {
-        name: MockBackend(ScriptedPlan(turns=[]), name=name) for name in ("orchestration", "critic", "robustness")
+        name: MockBackend(ScriptedPlan(turns=[]), name=name) for name in ("orchestration", "critic")
     }
     return Coordinator(session_dir, backends=backends)
 

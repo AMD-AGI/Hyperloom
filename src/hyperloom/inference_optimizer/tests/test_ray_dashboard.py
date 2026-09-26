@@ -16,7 +16,7 @@ _httpx_stub.Client = MagicMock()
 _httpx_stub.Response = MagicMock
 sys.modules.setdefault("httpx", _httpx_stub)
 
-from hyperloom.inference_optimizer.multi_node._internal import ray_dashboard  # noqa: E402
+from hyperloom.inference_optimizer.multi_node._internal import ray_dashboard
 
 
 def test_dashboard_client_sends_bearer_token_when_configured():

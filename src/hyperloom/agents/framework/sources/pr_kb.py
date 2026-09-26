@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import os
+from hyperloom.common.env import env_bool
 
 from ..gbrain_page_client import GbrainPageError, build_gbrain_page_client_from_env
 from ..logging_setup import get_logger
@@ -31,7 +31,7 @@ def _candidate(repo_url: str, repo_n: str, number: int, *, title: str = "", labe
 
 def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
     """Enumerate PR KB candidates for ``request.repo_url`` (index ∪ query)."""
-    if (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() == "0":
+    if not env_bool("PR_KB_ENABLE", True):
         return []
     client = build_gbrain_page_client_from_env()
     if client is None:

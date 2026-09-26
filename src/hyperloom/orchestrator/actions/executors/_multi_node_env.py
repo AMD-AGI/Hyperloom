@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_flag
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,
@@ -33,8 +34,7 @@ def _read_state() -> dict[str, Any]:
 
 def mn_bench_warmup_enabled() -> bool:
     """Whether multi-node runs a discarded client warmup pass before measuring."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_MN_BENCH_WARMUP", "1").strip().lower()
-    return raw not in {"0", "false", "no", "off", ""}
+    return env_flag("INFERENCE_OPTIMIZER_MN_BENCH_WARMUP", default=True)
 
 
 def is_multi_node() -> bool:
@@ -81,7 +81,9 @@ def resolve_kb_topology() -> dict[str, Any]:
     if not pd_mode:
         pd_mode = str(state.get("pd_mode") or state.get("last_restart_pd_mode") or "aggregated").strip().lower()
 
-    def _pd_nodes(env_key: str, *state_keys: str) -> int:
+    # 0 when neither env nor state names a value; kb_hardware_slug reads tp/ep <= 0 as "unspecified" and omits the
+    # suffix.
+    def _int_pref_env(env_key: str, *state_keys: str) -> int:
         raw = (os.environ.get(env_key, "") or "").strip()
         if raw:
             try:
@@ -97,30 +99,12 @@ def resolve_kb_topology() -> dict[str, Any]:
                 return v
         return 0
 
-    pn = _pd_nodes("PD_PREFILL_NODES", "pd_prefill_nodes", "last_restart_pd_prefill_nodes")
-    dn = _pd_nodes("PD_DECODE_NODES", "pd_decode_nodes", "last_restart_pd_decode_nodes")
-
+    pn = _int_pref_env("PD_PREFILL_NODES", "pd_prefill_nodes", "last_restart_pd_prefill_nodes")
+    dn = _int_pref_env("PD_DECODE_NODES", "pd_decode_nodes", "last_restart_pd_decode_nodes")
     # Parallel formation (tp / ep) is fixed at launch, not explored, so it belongs in the KB key: a best_config tuned
     # at one split is invalid at another.
-    def _int_pref_env(env_key: str, *state_keys: str, default: int = 1) -> int:
-        raw = (os.environ.get(env_key, "") or "").strip()
-        if raw:
-            try:
-                return int(raw)
-            except ValueError:
-                pass
-        for sk in state_keys:
-            try:
-                v = int(state.get(sk) or 0)
-            except (TypeError, ValueError):
-                v = 0
-            if v:
-                return v
-        return default
-
-    # Default 0, not 1: kb_hardware_slug reads tp/ep <= 0 as "unspecified" and omits the suffix.
-    tp = _int_pref_env("TP", "tp", "last_restart_tp", default=0)
-    ep = _int_pref_env("EP", "ep", "last_restart_ep", default=0)
+    tp = _int_pref_env("TP", "tp", "last_restart_tp")
+    ep = _int_pref_env("EP", "ep", "last_restart_ep")
 
     # Compute-partition mode. Fixed at launch like tp/ep, and it decides how much card a rank actually gets, so it
     # belongs in the key. State wins on resume; the launch env is the live source. ``kb_hardware_slug`` drops SPX and

@@ -274,7 +274,7 @@ def check_aiperf_capability(
 
     try:
         help_text = probe(aiperf_bin) if probe else _default_probe(aiperf_bin, env=runtime_env)
-    except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
+    except Exception as exc:
         # Repairable like its siblings: a half-installed aiperf whose ``--help``
         # cannot even be read is exactly what reinstalling the pin fixes, and
         # ``ensure_aiperf`` force-reinstalls when the recorded ref does not match.

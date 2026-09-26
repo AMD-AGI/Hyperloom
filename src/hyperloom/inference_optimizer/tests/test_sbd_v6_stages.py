@@ -228,8 +228,13 @@ def _baseline_event(*actions: dict) -> dict:
 #: What ``outcome.baseline.perf`` reads on a round that measured no graded axis.
 _UNMEASURED_AXES = {
     "e2e_norm_intvty_p90": None,
+    "e2e_norm_intvty_p50": None,
     "total_throughput": None,
+    "output_tput_per_gpu": None,
     "input_throughput": None,
+    "ttft_p50_ms": None,
+    "ttft_p90_ms": None,
+    "tpot_p50_ms": None,
     "tpot_p90_ms": None,
 }
 
@@ -245,6 +250,16 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
         # A synthetic anchor measures none of the graded axes, and all four are still published; see
         # test_sbd_v6_grading.py for the axes themselves.
         "perf": _UNMEASURED_AXES,
+    }
+    assert outcome["anchoring_eval"] == {
+        "task_id": "b-1",
+        "action_status": "succeeded",
+        "decision": "",
+        "status": "succeeded",
+        "accuracy": 0.81,
+        "task": "",
+        "metric": "",
+        "source_file": "",
     }
 
 

@@ -90,7 +90,7 @@ class _StubKB:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
 
-    def search(self, *, label_match: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:  # noqa: ARG002
+    def search(self, *, label_match: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
         return list(self._rows)
 
 
@@ -105,7 +105,7 @@ class _BatchKB:
         *,
         label_match: dict[str, Any],
         limit: int = 100,
-    ) -> list[dict[str, Any]]:  # noqa: ARG002
+    ) -> list[dict[str, Any]]:
         return self._batches.pop(0) if self._batches else []
 
 

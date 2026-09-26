@@ -68,3 +68,18 @@ def test_result_reports_the_effective_budget_policy():
 
     assert result.budget_policy == budget.DEFAULT_REWRITE_BUDGET.to_dict()
     assert result.budget_policy["applyback_reserve_sec"] == 1_200
+
+
+def test_without_applyback_returns_only_that_reserve():
+    """Declining the stage frees its reserve and leaves every other bound alone."""
+    base = budget.RewriteBudgetPolicy()
+    declined = base.without_applyback()
+    assert declined.applyback_reserve_sec == 0
+    assert base.applyback_reserve_sec == 20 * 60  # the shared default is not mutated
+    # The search window grows by exactly the reserve that was released.
+    deadline = 1_000_000.0
+    assert base.search_stop_unix(deadline) == deadline - base.applyback_reserve_sec
+    assert declined.search_stop_unix(deadline) == deadline
+    # Bounds that belong to other stages are untouched.
+    for field in ("reference_preflight_timeout_sec", "candidate_probe_timeout_sec", "driver_preflight_reserve_sec"):
+        assert getattr(declined, field) == getattr(base, field)

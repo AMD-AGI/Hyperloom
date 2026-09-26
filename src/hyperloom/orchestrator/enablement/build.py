@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
@@ -19,24 +20,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-
-def _derive_gpu_arch(gpu_type: str) -> str:
-    """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
-    _MAP = {
-        "mi355x": "gfx950",
-        "mi300x": "gfx942",
-        "mi308x": "gfx942",
-        "mi300": "gfx942",
-        "mi250x": "gfx90a",
-        "mi250": "gfx90a",
-        "mi210": "gfx90a",
-    }
-    gt = (gpu_type or "").strip().lower()
-    for key, arch in _MAP.items():
-        if key in gt:
-            return arch
-    return ""
 
 
 def _repo_matches_targeted_build_component(repo_url: str, component: str) -> bool:
@@ -52,6 +35,12 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
         "vllm_source": ("vllm",),
     }
     return any(hint in repo_name for hint in hints.get(component, ()))
+
+
+#: What ``_note_build_routed`` stamps on a row. A manifest entry is a routing
+#: sentinel only if it carries one of these; a ``BuildResult.to_state`` attempt
+#: row never does, and must not answer for a build nobody has routed.
+_ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 
 
 class EnablementBuild(CoordinatorCollaborator):
@@ -175,7 +164,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=reason,
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
@@ -194,7 +183,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     loaded.degraded or "-",
                     task_id,
                 )
-        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
     async def _maybe_enqueue_specialist_requested_build(
@@ -282,7 +271,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=f"specialist request: {reason}",
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
@@ -297,7 +286,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     ref or "(autoselect)",
                     build_task_id,
                 )
-        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
@@ -326,7 +315,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 else:
                     await self._route_failed_build(task)
                 return
-        except Exception:  # noqa: BLE001 — never wedge the tick
+        except Exception:
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
     async def _route_failed_build(self, task: "Task") -> None:
@@ -424,18 +413,36 @@ class EnablementBuild(CoordinatorCollaborator):
         self._note_build_routed(task_id, probe_task_id=probe_tid, probe_generation=generation)
 
     def _build_routing_record(self, build_task_id: str) -> dict[str, Any] | None:
-        """The record of what a build's outcome was already routed to, if any."""
+        """The record of what a build's outcome was already routed to, if any.
+
+        Matched on a routing field as well as the id. ``BuildResult.to_state``
+        writes no ``task_id`` today, so an attempt row cannot answer here by
+        accident -- but that is an invariant of a serializer two packages away,
+        and if it ever gains one, every completed build would read as already
+        routed and its launch probe would never be enqueued. The lookup says
+        what it is looking for instead of relying on what it will not find.
+        """
         for entry in reversed(list(self.shared_state.enablement.build_manifest or [])):
-            if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
+            if not isinstance(entry, dict) or str(entry.get("task_id") or "") != build_task_id:
+                continue
+            if any(field in entry for field in _ROUTING_FIELDS):
                 return entry
         return None
 
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
-        """Record that a build's outcome has been routed, and to what."""
+        """Record that a build's outcome has been routed, and to what.
+
+        ``routed`` is stamped on both paths. The append path always carried it;
+        the merge path took only the caller's fields, so routing a build with
+        nothing to say about it left a row that named the build and no longer
+        said it had been routed. That was legible only because the reader
+        matched on the id alone -- which is what made an attempt row's id, had
+        it ever carried one, answer for a build nobody had routed.
+        """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):
             if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
-                manifest[idx] = {**entry, **fields}
+                manifest[idx] = {**entry, "routed": True, **fields}
                 break
         else:
             manifest.append({"task_id": build_task_id, "routed": True, **fields})

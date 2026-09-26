@@ -19,8 +19,7 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Kernel-owned action name -> the request ``kind`` its handler is registered under in
-# ``request_handlers.KERNEL_REQUEST_HANDLERS``.
+# Kernel-owned action name -> the request ``kind`` that names it.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "gemm_tuning": "run_gemm_tuning",
@@ -81,19 +80,13 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "replay_warm_recipe",
         # Off-loop compiled-component builds; dispatched by the Coordinator, never by an LLM agent.
         "targeted_build",
+        # The KERNEL_AGENT phase's whole pipeline, enqueued once at phase entry.
+        "kernel_agent",
     }
 )
 
 
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
-
-
-# Robustness-only actions (driven via its action-ladder); Orchestration must ALERT instead.
-ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
-    {
-        "recover",
-    }
-)
 
 
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
@@ -242,6 +235,26 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),
+        # typical_runtime_min is a floor, not the expected wall clock: the task runs until the KERNEL phase budget
+        # ends it, so the time-budget gate admits it whenever one benchmark round still fits.
+        "kernel_agent": ActionMetadata(
+            name="kernel_agent",
+            family="deep_kernel",
+            pipeline_phase="deep",
+            verdict_class="exploration",
+            expected_gain_pct=(0.0, 30.0),
+            accuracy_risk=0.05,
+            crash_risk=0.05,
+            typical_runtime_min=1.0,
+            lease_ttl_sec=21600,
+            requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
+            side_effects=("workspace_write", "server_restart", "writes_config"),
+            description=(
+                "Coordinator-internal: the KERNEL_AGENT phase's work as one lane-holding task. Runs the GEAK e2e "
+                "delegation or the Forge pipeline (GEMM tuning, fusion, kernel rewrite controller) per "
+                "kernel_optimizer, so no other benchmark shares the GPUs while it runs."
+            ),
+        ),
         "profile": ActionMetadata(
             name="profile",
             family="analysis",
@@ -257,22 +270,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             description=(
                 "Coordinator-internal: lightweight roofline alternative — torch_profiler trace only, no analysis.md. "
                 "Enqueued when ``--no-enable-roofline``; LLM-proposed delegate is denied."
-            ),
-        ),
-        "recover": ActionMetadata(
-            name="recover",
-            family="resilience",
-            pipeline_phase="support",
-            verdict_class="exploration",
-            expected_gain_pct=(0.0, 0.0),
-            accuracy_risk=0.0,
-            crash_risk=0.1,
-            typical_runtime_min=5.0,
-            lease_ttl_sec=1200,
-            requires_lanes=("server_lifecycle", "workspace_mutation"),
-            side_effects=("workspace_write", "server_restart", "reads_checkpoint"),
-            description=(
-                "Restore the workspace from the last good checkpoint and relaunch the server after a crash or REVERT."
             ),
         ),
         "replay_warm_recipe": ActionMetadata(
@@ -393,5 +390,4 @@ __all__ = [
     "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
-    "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

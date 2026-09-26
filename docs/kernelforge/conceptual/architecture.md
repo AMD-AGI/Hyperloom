@@ -26,7 +26,7 @@ decide whether a change survives.
 | **Implementer** | The only writable agent: reads the plan, edits the kernel sources, compiles and exercises them through Bash. `--lanes` runs several concurrently, each in its own workspace copy |
 | **Validation** | The driver-owned complete correctness suite, run by the loop as an SNR pre-filter |
 | **Benchmark** | The canonical benchmark, scored per case against the current best |
-| **Acceptance** | The arena's own verdict — the task's `compile_command`, then its `correctness_command` — run on any candidate about to become the incumbent — a kept iteration or a knowledge-base warm start alike — under the task's tolerances rather than forge's |
+| **Acceptance** | For the assembly backend only: the task's own verdict — its `compile_command`, then its `correctness_command` — re-run on a candidate about to become the incumbent, carrying the `numerical_validation` evidence that backend requires. Every other backend is judged by the driver above and measured through it, so it is not asked a second time |
 | **Keep or revert** | A measured improvement that the acceptance step passes is committed and becomes the new best; every other candidate is discarded back to the last validated commit |
 | **Supervisor** | When the search stalls, reviews the trajectory and writes a ruling that redirects the next plan instead of ending the run |
 | **Knowledge base** | Hardware, methodology and per-language knowledge injected into the implementer's prompt; lessons from the run are written back |

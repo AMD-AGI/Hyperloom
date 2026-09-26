@@ -1,5 +1,5 @@
 ---
-title: cheap sweeps — one command per data point, and keep the knobs
+title: cheap sweeps — one command per data point, and submit the literal
 kind: technique
 gens: [gfx942, gfx950]
 dtypes: [any]
@@ -16,10 +16,12 @@ expose the constant as `FORGE_SWEEP_<NAME>` with today's value as the default, e
 `sweep_const: <NAME> <value>` on every read, and call
 `python3 -m kernelforge.mcp_server.tools.bench --driver <driver command> --case <CASE_ID> --set <NAME>=<value>`.
 One sweep point is then one command instead of an edit plus a gate cycle, cheap enough to call
-dozens of times inside one iteration. **Keep the knobs in the source, defaulted to the winning
-literals, for the whole search** — collapsing them to bare literals mid-campaign destroys the sweep
-surface every later session would have inherited. Strip them only at final submission, and only if
-the task demands a knob-free deliverable.
+dozens of times inside one iteration. **The knobs last one turn: before you end it, replace each
+read with the literal it selected, so the kernel you submit carries the winning literal, not the
+read that found it.** A knob left in the deliverable is indistinguishable, to everyone downstream,
+from live configuration.
+What carries an axis to the next session is the constant you named in your lesson, not plumbing left
+behind in the shipped file.
 
 ## The primitive
 
@@ -34,8 +36,10 @@ lane's benchmark.
 
 ## Making a constant sweepable
 
-Read it from the host as `FORGE_SWEEP_<NAME>`, defaulting to the value in force today, echo every
-read, and convert the string against the type of the default:
+Instrument the kernel where the task put it. The driver loads the kernel from that path, the one
+the loop measures, so a copy anywhere else is a file no sweep point ever runs. Read the constant from
+the host as `FORGE_SWEEP_<NAME>`, defaulting to the value in force today, echo every read, and
+convert the string against the type of the default:
 
 ```python
 _SWEEP_TRUE = {"1", "true", "yes", "on"}
@@ -87,23 +91,24 @@ Names the measurement itself runs on are refused before any process starts — d
 toolchain paths, cache directories, `PATH`. Those are not knobs of the kernel, and a sweep that set
 one would time something other than the configuration it claims to be timing.
 
-## Keep the knobs through the search
+## The knobs last one turn
 
-A `FORGE_SWEEP_` knob is how the next session re-opens a question this one answered with two data
-points. Rules:
+A `FORGE_SWEEP_` knob is scaffolding for the question you are asking right now. It lives in the
+kernel while you ask it, and is gone before the turn ends. Rules:
 
-1. **Default every knob to the current winning literal.** The default path must reproduce the
-   committed number exactly; the knob changes what is *reachable*, never what is *shipped by
-   default*.
-2. **Do not collapse knobs back to literals mid-campaign.** A knob deleted in iteration 4 is an axis
-   that iteration 12 has to re-author before it can even ask the question, which in practice means
-   it never asks. Shipping a sweepable surface is the cheap half of an optimization; re-authoring it
-   is the expensive half.
-3. **Strip at submission only, and only if required.** If the deliverable must be knob-free, do that
-   as the last edit, replacing each read with its measured winner and re-running the gate to prove
-   the collapse changed nothing.
-4. **A knob is not a result.** Leaving a knob in place does not make the axis "explored"; the number
-   you measured through it does.
+1. **Default every knob to the current winning literal.** The unset path must reproduce the
+   committed number exactly, or every sweep point is measured against a kernel nobody reviewed.
+2. **Collapse before you end the turn.** Replace every read with the literal it selected, delete the
+   echo helper, and re-run the driver on the result: the collapsed kernel must still pass and must
+   time inside the noise band of the winning point. This is the last edit of the turn, not a step
+   left for someone later — a knob still in the file when the turn ends ships with it.
+3. **Submit the literal.** What survives the sweep goes into the kernel you submit as a bare
+   constant. The read that found it does not come across.
+4. **Record the axis in the lesson, not in the file.** The next session inherits your lessons, not
+   your knobs: name the constant, the values you timed, and what each cost. An axis recorded that
+   way is re-opened with one edit; an axis nobody wrote down is one nobody asks about again.
+5. **A knob is not a result.** Having made a constant sweepable does not make the axis "explored";
+   the number you measured through it does.
 
 ## Sweep discipline
 
@@ -125,8 +130,10 @@ points. Rules:
   reports that, with no time attached. Never rank it as a measurement.
 
 ## Pitfalls
-- Collapsing the knobs "to keep the file clean" before the campaign ends — the single most common way
-  a later session loses an axis it already paid for.
+- Ending the turn with the knobs still in the kernel, and handing over a deliverable nobody can read
+  without first working out which knobs are live and which are leftovers.
+- Instrumenting a copy of the kernel instead of the kernel: the driver never loads it, every point
+  fails for want of an echo, and the axis looks unreachable when it is not.
 - A knob whose default does not equal the shipped literal: every un-swept run silently benchmarks a
   different kernel than the one under review.
 - Sweeping one member of a coupled pair and reading the negative as a verdict on the axis.
@@ -140,8 +147,13 @@ points. Rules:
 - Each boolean point actually flipped. The echo proves the read, not the parse, so before you accept
   a flat boolean axis, show that the `0` and the `1` end reach different code — a differing log line,
   a differing build, a time outside the band.
-- The knob-free default path reproduces the committed wall time inside the noise band.
+- The instrumented kernel with nothing set reproduces the committed kernel's wall time inside the
+  noise band — if it does not, a default is wrong and every point taken on it is about a different
+  kernel.
 - The winning literal survives the real gate, not only the sweep.
+- The kernel you submit contains no `FORGE_SWEEP_` read and emits no `sweep_const:` echo, and the
+  driver re-run after the collapse still passes; the axis you explored is named in the iteration's
+  lesson instead.
 
 ## See also
 - `[[optimization/lever_edit_surface.md]]` — which constants and files are in reach at all.

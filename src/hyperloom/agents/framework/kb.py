@@ -366,7 +366,7 @@ def _synthesize_via_llm(
 ) -> str:
     """Distil findings via claude_agent_sdk."""
     try:
-        import claude_agent_sdk as sdk  # type: ignore  # noqa: F401
+        import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via test stub
         raise RuntimeError(
             "claude_agent_sdk not installed; run framework-agent install "
