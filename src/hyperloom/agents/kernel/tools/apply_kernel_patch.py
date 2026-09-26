@@ -1835,6 +1835,19 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest is not a JSON object: {manifest_file}")
+    if str(manifest.get("status") or "") == "reverted":
+        # A completed revert already moved each backup back into place, so
+        # restoring from them again fails -- on a tree that is in fact clean.
+        # An apply that reverted itself (failed JIT invalidation) and is then
+        # unwound again by the stack would otherwise report that failure as an
+        # unfinished teardown, and every retry would repeat it.
+        return {
+            "status": "skipped",
+            "manifest_path": str(manifest_file),
+            "restored_paths": list(manifest.get("restored_paths") or []),
+            "reverted_at": manifest.get("reverted_at"),
+            "already_reverted": True,
+        }
     # The manifest is untrusted at revert time: confine every copy source to
     # the apply-time backup tree (this manifest's own directory).
     backup_root = manifest_file.resolve().parent

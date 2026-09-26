@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo, patch_integrate_patch_roots
 
+from hyperloom.orchestrator.actions.executors._nogit_patch import _revert_patches_no_git
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
@@ -25,7 +26,6 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _resolve_framework_root,
     _resolve_patch_paths,
     _resolve_setup_commands,
-    _revert_patches_no_git,
     _run_setup_commands,
     _with_skipped_setup_reason,
 )
@@ -79,6 +79,37 @@ def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
     patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def _stub_external_integrate_operations(monkeypatch):
+    from types import SimpleNamespace
+
+    from hyperloom.agents.framework.sources import github
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.enablement.runtime import adapters
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("external integration operations must be stubbed by the test")
+
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    monkeypatch.setattr(ip, "run_grid", forbidden)
+    monkeypatch.setattr(ip, "materialize_candidate_patches", forbidden)
+    monkeypatch.setattr(github, "pr_patches", forbidden)
+    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
+    monkeypatch.setattr(
+        adapters,
+        "get_adapter",
+        lambda _framework: SimpleNamespace(
+            provision=forbidden,
+            probe=forbidden,
+            editable_refresh_argv=forbidden,
+            source_import_root=lambda root: root,
+        ),
+    )
+    monkeypatch.setattr(ip.IntegratePatchExecutor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+
+
 def _write_specialist_workspace(
     session_dir: Path,
     task_id: str,
@@ -89,7 +120,7 @@ def _write_specialist_workspace(
     workspace = session_dir / "runs" / "specialist" / task_id
     (workspace / "worktree" / "patches").mkdir(parents=True, exist_ok=True)
     patch_paths: list[str] = []
-    for i, contents in enumerate(patch_contents or [_VALID_PATCH], start=1):
+    for i, contents in enumerate([_VALID_PATCH] if patch_contents is None else patch_contents, start=1):
         path = workspace / "worktree" / "patches" / f"{i:03d}_test.patch"
         path.write_text(contents, encoding="utf-8")
         patch_paths.append(f"patches/{path.name}")
@@ -457,6 +488,172 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reuse_context", [False, True], ids=["new-context", "reused-context"])
+async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path, monkeypatch, reuse_context):
+    from types import SimpleNamespace
+
+    from hyperloom.agents.framework import isolation
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.enablement.runtime import adapters
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+
+    session = tmp_path / "session"
+    _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
+    _write_specialist_workspace(session, "spec-second", done_payload_override={"patches_written": []})
+    runtime = FrameworkRuntime(venv_root=str(tmp_path / "first-runtime" / "venv"))
+    provisioned = []
+    saved = []
+
+    def provision(action, attempt_dir):
+        provisioned.append(attempt_dir)
+        return ProvisionResult(ok=True, runtime=runtime)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("an external operation was reached by an apply-only config attempt")
+
+    monkeypatch.setattr(isolation, "disk_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        adapters, "get_adapter", lambda _framework: SimpleNamespace(provision=provision, probe=lambda *_args: True)
+    )
+    monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
+    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ip, "_run_setup_commands", forbidden)
+    executor = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(executor, "_bench_patch", forbidden)
+    state = SimpleNamespace(
+        current_best={},
+        get_specialist_patch_verdict=lambda _subject: "approve",
+        save=lambda _path: saved.append(json.loads(json.dumps(state.pending_integrate))),
+    )
+    ctx = _make_ctx(
+        "first",
+        {
+            "specialist_task_id": "spec-first",
+            "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+            "extra_envs": {"VLLM_USE_AITER": "1"},
+            "apply_only": True,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    first = await executor(ctx)
+    assert first["status"] == "applied_no_bench"
+    assert saved[0]["attempt_venv_root"] == runtime.venv_root
+    state.pending_integrate = {}
+
+    second_ctx = _make_ctx(
+        "second",
+        {"specialist_task_id": "spec-second", "extra_envs": {"VLLM_USE_AITER": "0"}, "apply_only": True},
+    )
+    if reuse_context:
+        ctx.task = second_ctx.task
+        second_ctx = ctx
+    second_ctx.extra["shared_state"] = state
+    second = await executor(second_ctx)
+
+    assert second["status"] == "applied_no_bench"
+    assert second["specialist_task_id"] == "spec-second"
+    assert len(provisioned) == 1
+    for task_id in ("first", "second"):
+        writes = [row for row in saved if row["task_id"] == task_id]
+        assert writes[0]["recovery"]["phase"] == "before_stash"
+        assert writes[-1]["recovery"]["phase"] == "applied"
+    assert saved[-1]["attempt_venv_root"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("early_exit", ["missing_param", "critic", "multi_node"])
+async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tmp_path, monkeypatch, early_exit):
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session = tmp_path / "session"
+    _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
+    executor = IntegratePatchExecutor(session_dir=session)
+    attempts = []
+    resolve = executor._stage_resolve
+    state = SharedState()
+    state.record_specialist_patch_verdict("spec-first", "approve")
+
+    async def record_attempt(attempt, params, extra):
+        attempts.append(attempt)
+        return await resolve(attempt, params, extra)
+
+    monkeypatch.setattr(executor, "_stage_resolve", record_attempt)
+    first_ctx = _make_ctx("first", {"specialist_task_id": "spec-first"})
+    first_ctx.extra["shared_state"] = state
+    first = await executor(first_ctx)
+    assert first["status"] == "no_patches"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a rejected attempt reached provisioning or localization")
+
+    monkeypatch.setattr(executor, "_stage_provision_attempt_runtime", forbidden)
+    monkeypatch.setattr(executor, "_stage_localize_source", forbidden)
+    state.record_specialist_patch_verdict("spec-first", "reject")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: early_exit == "multi_node")
+    second_ctx = _make_ctx("second", {} if early_exit == "missing_param" else {"specialist_task_id": "spec-first"})
+    second_ctx.extra["shared_state"] = state
+    second = await executor(second_ctx)
+
+    assert (
+        second["status"]
+        == {"missing_param": "failed", "critic": "rejected_by_critic", "multi_node": "skipped"}[early_exit]
+    )
+    first_attempt, second_attempt = attempts
+    assert second_attempt is not first_attempt
+    # A generic RunnerContext carries no integrate-private state, so a second
+    # task reusing the executor cannot read the first one's.
+    for ctx in (first_ctx, second_ctx):
+        assert ctx.extra == {"shared_state": state}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, {"status": "failed", "error_class": "diff_unavailable"}])
+async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_path, monkeypatch, failure):
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.actions.executors._patch_source_pr import PrMaterialization
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    captured = []
+    state = SharedState(current_best={"tput": 200.0, "extra_server_args": "--live"})
+    state.record_specialist_patch_verdict("candidate", "approve")
+    root = tmp_path / "framework"
+    root.mkdir()
+
+    def materialize(**kwargs):
+        captured.append(kwargs)
+        return PrMaterialization(mode="diff_url", failure=failure)
+
+    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(ip, "materialize_candidate_patches", materialize)
+    candidate = {"repo": "ROCm/vllm", "pr_number": 123}
+    ctx = _make_ctx(
+        "upstream",
+        {"patch_source": "upstream_pr", "candidate": candidate, "framework_agent_candidate_id": "candidate"},
+    )
+    ctx.extra["shared_state"] = state
+    result = await IntegratePatchExecutor(session_dir=tmp_path)(ctx)
+
+    assert len(captured) == 1
+    assert captured[0]["candidate"] == candidate
+    assert captured[0]["params"]["base_tput"] == 200.0
+    assert captured[0]["params"]["base_extra_args"] == "--live"
+    if failure is not None:
+        assert result == {
+            **failure,
+            "candidate": candidate,
+            "patches_applied": [],
+            "patches_reverted": [],
+            "patch_source_mode": "diff_url",
+            "workspace": str(captured[0]["output_root"]),
+        }
+    else:
+        assert result["status"] == "no_patches"
+        assert result["specialist_task_id"] == "upstream"
+    assert "base_tput" not in ctx.task.params
+
+
+@pytest.mark.asyncio
 async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     """A bad patch fails ``git apply``; the executor reverses + reports apply_failed."""
     session_dir = tmp_path / "session"
@@ -720,7 +917,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
     expected_error: str,
 ):
     """A non-runnable model-config seed must never reach the E2E benchmark."""
-    from types import SimpleNamespace
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-placeholder"
@@ -754,12 +951,8 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
     monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
-    state = SimpleNamespace(
-        gpu_type="mi355x",
-        current_best={},
-        baseline_accuracy=0.0,
-        get_specialist_patch_verdict=lambda _sid: "approve",
-    )
+    state = SharedState(gpu_type="mi355x")
+    state.record_specialist_patch_verdict("t-spec-placeholder", "approve")
     task = Task(
         task_id="t-int-placeholder",
         kind="integrate_patch",
@@ -1729,7 +1922,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
     assert after_setup != pre_setup
-    assert ctx._ip_base_sha_by_root[str(repo)] == pre_setup
+    assert shared_state.enablement.base_sha_by_root[str(repo)] == pre_setup
 
 
 @pytest.mark.asyncio
@@ -1789,7 +1982,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
     assert after_setup != pre_setup
-    assert ctx._ip_base_sha_by_root[str(explicit_root)] == pre_setup
+    assert shared_state.enablement.base_sha_by_root[str(explicit_root)] == pre_setup
 
 
 def test_candidate_roots_name_the_declared_root_beside_the_session_one(tmp_path: Path, monkeypatch):
@@ -1902,18 +2095,19 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
     workspace.mkdir()
     executor = IntegratePatchExecutor(session_dir=session_dir)
     ctx = _make_ctx("t-int-setup-thread", {"enablement": True})
-    ctx._ip_specialist_workspace = workspace  # type: ignore[attr-defined]
+    attempt = ip_mod.IntegrateAttempt(
+        task_id=ctx.task.task_id,
+        specialist_task_id="t-spec-setup-thread",
+        specialist_workspace=workspace,
+    )
 
     result = await executor._stage_apply(
-        ctx,
+        attempt,
         {
             "enablement": True,
             "enablement_setup_commands": ["pip install -U transformers"],
         },
         {},
-        "t-spec-setup-thread",
-        None,
-        None,
     )
 
     assert "ident" in seen
@@ -2406,6 +2600,7 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
         baseline_accuracy=0.95,
         specialist_patch_verdicts={"t-spec-toctou": "approve"},
         get_specialist_patch_verdict=lambda sid: "approve",
+        save=lambda _path: None,
     )
 
     # Task params frozen at baseline time (stale).

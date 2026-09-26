@@ -23,6 +23,15 @@ SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
 #: spending the budget in the enablement lane.
 AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
+#: A patch lifecycle owed the framework tree a revert and could not complete it,
+#: so the tree still holds patches the session never measured against. Two
+#: independent recoveries -- the integrate sentinel and the kernel stack
+#: checkpoint -- halt on this, and both refuse to continue rather than measure a
+#: tree whose contents they cannot account for. The stack checkpoint also halts
+#: when it cannot bind itself to the ledger rows it was written from, which says
+#: the same thing about a tree whose members are no longer identifiable.
+PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
+
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
     {
@@ -119,6 +128,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # through the terminal artifact the supervisor writes.
         WEDGED_STOP_REASON,
         AGENTX_PREFLIGHT_STOP_REASON,
+        # A restore obligation outlived the attempt that owed it: the framework
+        # tree still carries patches, so every later measurement would be
+        # attributed to a baseline that is not on disk. Deliberately absent from
+        # INFRASTRUCTURE_STOP_REASONS -- the host is healthy and a person has to
+        # settle the tree, which reads as a failure rather than an abort.
+        PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
     }
 )
 
@@ -157,6 +172,7 @@ __all__ = [
     "ENV_FAULT",
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
+    "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",
     "STOP_REASON_VOCAB",
     "SUCCESS_STOP_REASONS",
     "SUPERVISOR_RESTART_REASON",
