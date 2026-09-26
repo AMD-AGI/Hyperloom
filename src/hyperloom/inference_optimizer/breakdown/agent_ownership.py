@@ -8,22 +8,6 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-#: Phase label -> owning agent. A phase is the weakest evidence of ownership
-#: available, used only when the producer recorded nothing better.
-AGENT_BY_PHASE = {
-    "FRAMEWORK": "framework_agent",
-    "FRAMEWORK_AGENT": "framework_agent",
-    "EXPLORE": "explore",
-    "KERNEL": "kernel_agent",
-    "KERNEL_AGENT": "kernel_agent",
-}
-
-#: Returned when there is no evidence of an owner. A reportable gap, not a
-#: guess: crediting the phase that happened to be active is how a delayed
-#: patch ends up on the wrong agent's total.
-UNATTRIBUTED = "unattributed"
-
-
 #: What kind of lever a unit of work moved. This is the attribution key that
 #: survives the phase machine: a phase says *when* work ran, which stops being
 #: evidence the moment two lanes share one phase, while the lever says *what
@@ -41,17 +25,6 @@ LEVER_KINDS = (
     LEVER_ENABLEMENT,
     LEVER_KERNEL,
 )
-
-#: Lever -> owning agent. Stronger evidence than the phase: once both arms run
-#: inside one phase, what a unit of work delivered is the only thing that still
-#: separates their owners.
-AGENT_BY_LEVER = {
-    LEVER_CONFIG: "explore",
-    LEVER_SOURCE_PATCH: "framework_agent",
-    LEVER_UPSTREAM_PR: "framework_agent",
-    LEVER_ENABLEMENT: "framework_agent",
-    LEVER_KERNEL: "kernel_agent",
-}
 
 #: Lever kinds whose phase is not in doubt. ``source_patch`` and ``config`` are
 #: absent on purpose: either can be dispatched from more than one phase, so the
@@ -91,16 +64,6 @@ def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
     return ""
 
 
-def agent_from_phase(value: Any) -> str:
-    """Map a phase label to its owning agent, or ``""`` when unknown."""
-    return AGENT_BY_PHASE.get(str(value or "").strip().upper(), "")
-
-
-def agent_from_lever(value: Any) -> str:
-    """Map a lever kind to its owning agent, or ``""`` when unknown."""
-    return AGENT_BY_LEVER.get(str(value or "").strip().lower(), "")
-
-
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     """Resolve the immutable authoring phase from recorded ownership evidence."""
     evidence = evidence or {}
@@ -118,24 +81,13 @@ def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     return ""
 
 
-def patch_author(evidence: Mapping[str, Any] | None) -> str:
-    """Name who wrote a patch, from the markers its applier left behind."""
-    return agent_from_phase(patch_owner_phase(evidence)) or UNATTRIBUTED
-
-
 __all__ = [
-    "AGENT_BY_LEVER",
-    "AGENT_BY_PHASE",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
     "LEVER_KERNEL",
     "LEVER_KINDS",
     "LEVER_SOURCE_PATCH",
     "LEVER_UPSTREAM_PR",
-    "UNATTRIBUTED",
-    "agent_from_lever",
-    "agent_from_phase",
-    "patch_author",
     "patch_lever_kind",
     "patch_owner_phase",
 ]

@@ -214,7 +214,7 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
 #: The one owner label a patch KEEP stages under. Explore- and framework-agent
 #: lifts used to route to two separate columns; the three-column layout has a
 #: single ``patch`` column, so both collapse to this marker. Attribution keeps
-#: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
+#: its own explore/framework split on the lever kind -- that is unaffected.
 _PATCH_KEEP_OWNER = "PATCH"
 
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through

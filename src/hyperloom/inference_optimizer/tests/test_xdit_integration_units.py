@@ -267,12 +267,63 @@ class TestConfigResolvers:
 
 
 class TestExploreGrid:
-    def test_xdit_grid_non_empty_and_safe(self):
-        grid = ex._default_grid_for_framework("xdit", model_class="dit", conc=1)
-        assert grid, "xdit cold-start grid must be non-empty"
+    @pytest.mark.parametrize(
+        "framework,model_class,hints",
+        [
+            ("xdit", "dit", {}),
+            ("xdit", "moe_mla", {}),
+            ("xdit", "dit", {"conc": 32}),
+            ("xdit", "dit", {"isl": 2048}),
+            ("xdit", "dit", {"osl": 256}),
+            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+        ],
+    )
+    def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
+        expected = [
+            ("xdit_buffer_ops", {"AMDGCN_USE_BUFFER_OPS": "1"}),
+            ("xdit_compile_reduce_overhead", {"XDIT_USE_TORCH_COMPILE": "1"}),
+            ("xdit_no_compile", {"XDIT_USE_TORCH_COMPILE": "0"}),
+            ("xdit_attn_aiter", {"XDIT_ATTENTION_BACKEND": "aiter"}),
+        ]
+        grid = ex._default_grid_for_framework(framework, model_class=model_class, **hints)
+        assert [(v.name, v.extra_envs) for v in grid] == expected
         for v in grid:
-            assert v.name.startswith("xdit_")
+            assert v.extra_server_args == ""
+            assert v.note == v.provenance == "default_grid"
+            assert v.remove_args == v.unset_envs == []
+            assert v.args_mode == "append"
             assert gr.xdit_blacklist_reason(v.extra_envs) is None
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
+    def test_other_frameworks_have_no_default_grid(self, framework):
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+
+    @pytest.mark.parametrize(
+        "model_class,conc,model_variants",
+        [
+            ("dense", 0, []),
+            ("moe_fp8", 32, [("atom_kv_fp8", "--kv_cache_dtype fp8"), ("atom_ep", "--enable-expert-parallel")]),
+            (
+                "moe_mla",
+                32,
+                [
+                    ("atom_ep", "--enable-expert-parallel"),
+                    ("atom_dp_attn", "--enable-dp-attention"),
+                    ("atom_mtp_3", "--method mtp --num-speculative-tokens 3"),
+                    ("atom_mtp_1", "--method mtp --num-speculative-tokens 1"),
+                ],
+            ),
+        ],
+    )
+    def test_atom_grid_keeps_model_and_concurrency_variants(self, model_class, conc, model_variants):
+        expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
+        if conc:
+            expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        assert [(v.name, v.extra_server_args) for v in grid] == expected
+        for v in grid:
+            assert v.extra_envs == {}
+            assert v.note == v.provenance == "default_grid"
 
 
 class TestRegistryRepoUrlConsistency:
