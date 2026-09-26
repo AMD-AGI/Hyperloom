@@ -466,7 +466,7 @@ def _render_state(phase: str, max_minutes: float = 120.0):
 
 
 def _reloop_line(phase: str) -> str | None:
-    out = _render_state(phase).to_phase_status_summary()
+    out = _ps.phase_status_summary(_render_state(phase))
     return next((line for line in out.splitlines() if line.startswith("reloop")), None)
 
 
@@ -500,7 +500,7 @@ def test_reloop_feasibility_matches_the_transition_decision():
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
     s.framework_agent_phase_enabled = False
-    line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
+    line = next(line for line in _ps.phase_status_summary(s).splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
 
 

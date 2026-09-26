@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
@@ -40,11 +41,56 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from ..state.shared_state import inject_stack_base_params
+from ..state.shared_state import (
+    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    inject_stack_base_params,
+    is_valid_escalate_hint,
+)
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 from ..collaborator import CoordinatorCollaborator
+
+# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
+_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
+    "trace_input",
+    "trace_dir",
+    "candidates_path",
+    "analysis_md_path",
+    "kernel_candidates",
+    "best_artifact_path",
+    "patch_path",
+    "target_file",
+    "workspace",
+    "workspace_path",
+    "out_dir",
+    "output_dir",
+    "run_dir",
+    "report_path",
+    "json_path",
+    "md_path",
+    "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler.
+    "trace_report_path",
+    "analysis_report_path",
+    "tracelens_summary_path",
+    "kernel_roofline_path",
+    "cli_log_path",
+)
+
+
+def _lifecycle_paths(payload: Any) -> dict[str, str]:
+    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _LIFECYCLE_PATH_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
 
 log = __import__("logging").getLogger(__name__)
 
@@ -530,7 +576,7 @@ class IntentRouter(CoordinatorCollaborator):
             {**payload, "needs_review": True},
         )
         await self.bus.append_and_seq(msg)
-        from .coordinator_shared import PendingProposal
+        from .proposals import PendingProposal
 
         pending = PendingProposal(
             proposal_msg_id=msg.msg_id,
@@ -1033,8 +1079,6 @@ class IntentRouter(CoordinatorCollaborator):
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
-        from .coordinator import _lifecycle_paths
-
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
         denied = self._sequence_denial_for_request(target_agent, kind)
@@ -1146,6 +1190,37 @@ class IntentRouter(CoordinatorCollaborator):
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
+                    # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
+                    # kernel_agent task instead of sharing the GPUs with it.
+                    action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+                    lanes, ttl = self._registry_lanes_ttl(action)
+                    handler_lease = None
+                    if lanes:
+                        handler_lease = await self.locks.try_acquire_many(
+                            lanes,
+                            holder_id=request_msg.msg_id,
+                            task_id=request_msg.msg_id,
+                            action=action,
+                            ttl_sec=ttl or 60,
+                        )
+                        if handler_lease is None:
+                            await self.bus.append_and_seq(
+                                Message.new(
+                                    "kernel_agent",
+                                    source,
+                                    "response",
+                                    {
+                                        "in_reply_to": request_msg.msg_id,
+                                        "kind": f"{kind}_done",
+                                        "status": "deferred",
+                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
+                                        "source": "lanes_busy",
+                                    },
+                                    in_reply_to=request_msg.msg_id,
+                                )
+                            )
+                            return
+
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
@@ -1173,10 +1248,9 @@ class IntentRouter(CoordinatorCollaborator):
                             "error_class": "handler_exception",
                             "error": repr(exc),
                         }
-                    # A block-FP8 GEMM run may have executed an inline Roofline whose refreshed profile fields only
-                    # live in state.json.
-                    if kind == "run_gemm_tuning":
-                        self._sync_profile_state_after_gemm_roofline(result)
+                    finally:
+                        if handler_lease is not None:
+                            await self.locks.release(handler_lease)
                     _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                     _lc_detail = " ".join(
                         str(p)
@@ -1223,8 +1297,6 @@ class IntentRouter(CoordinatorCollaborator):
                     result=result,
                     cache_hit=cache_hit_source is not None,
                 )
-            if kind == "run_gemm_tuning":
-                await self._handle_gemm_tuning_result(result)
             if kind == "integrate":
                 if result.get("status") != "skipped":
                     self.shared_state.record_kernel_integrate_result(result)
@@ -1337,20 +1409,6 @@ class IntentRouter(CoordinatorCollaborator):
             cancelled = await self._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
-        # A pruned explore family can take the GEAK 2b rebench with it; settle the slot so KERNEL is not held open
-        # waiting on a task that will never run.
-        if cancelled:
-            from ..phases.geak_rebench import settle_dangling_geak_pending
-
-            try:
-                if await settle_dangling_geak_pending(
-                    self.tasks,
-                    self.shared_state,
-                    reason=f"prune_branch:{family}",
-                ):
-                    self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -1379,12 +1437,9 @@ class IntentRouter(CoordinatorCollaborator):
             )
         )
         from ..phases.machine_state import (
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_valid_escalate_hint,
         )
 
         hint = str(payload.get("next_action_hint") or "").strip()

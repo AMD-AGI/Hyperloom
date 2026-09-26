@@ -32,6 +32,9 @@ def _clear_env(monkeypatch):
         "BENCHMARK_BASE_URL",
         "VLLM_VENV_ROOT",
         "FRAMEWORK_ENV",
+        "PYTHON",
+        "VIRTUAL_ENV",
+        "HYPERLOOM_RUN_MODE",
         "HYPERLOOM_MN_EXT_SERVICE_URL",
         "INFERENCE_OPTIMIZER_NODES",
         "KUBERNETES_SERVICE_HOST",
@@ -566,16 +569,113 @@ def test_in_container_prefers_container_when_no_signal_is_readable(monkeypatch):
 _SETUP_INSTALLER = "inference_optimizer/assets/install_baremetal.sh"
 
 
-def test_a_framework_setup_cannot_install_is_not_blocked(monkeypatch, capsys):
-    """atom is a serving framework with no installer path."""
+def test_atom_missing_build_is_blocked_without_an_install_remedy(monkeypatch, capsys):
+    """ATOM must be usable in its existing environment, not installed by setup."""
     _probe_result(monkeypatch, importable=False)
-    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+    monkeypatch.setattr(preflight.shutil, "which", lambda _name: sys.executable)
 
-    preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
 
-    out = capsys.readouterr().out
-    assert "atom" in out
-    assert "--install-framework atom" not in out
+    assert failure.value.code == 2
+    output = capsys.readouterr()
+    assert "atom" in output.err.lower()
+    assert "--install-framework atom" not in output.out + output.err
+
+
+@pytest.fixture
+def atom_runtime(monkeypatch, tmp_path):
+    """Run the real child probes against CPU-only fixture packages."""
+    root = tmp_path / "runtime modules"
+    atom = root / "atom"
+    atom.mkdir(parents=True)
+    (atom / "__init__.py").write_text("", encoding="utf-8")
+    (root / "torch.py").write_text(
+        "from types import SimpleNamespace\nversion = SimpleNamespace(hip='test-rocm')\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    monkeypatch.setenv("PYTHON", sys.executable)
+    # python3 is a Windows Store shim on this host; substitute only OS lookup, not the probe or verdict.
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: sys.executable if name == "python3" else None)
+    return root
+
+
+def test_atom_checks_the_actual_server_python_not_the_benchmark_python(atom_runtime):
+    result = preflight._check_serving_framework(_args("atom"), "/unrelated/benchmark-python")
+
+    assert result["status"] == "applied"
+    assert result["detail"]["probe_interpreter"] == sys.executable
+    assert os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] == sys.executable
+
+
+def test_atom_import_failure_cannot_pass_a_find_spec_check(atom_runtime, capsys):
+    (atom_runtime / "atom" / "__init__.py").write_text(
+        "raise ImportError('atom runtime dependency is broken')\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "atom runtime dependency is broken" in capsys.readouterr().err
+
+
+def test_atom_cpu_torch_is_rejected_by_the_real_probe(atom_runtime, capsys):
+    (atom_runtime / "torch.py").write_text(
+        "from types import SimpleNamespace\nversion = SimpleNamespace(hip=None)\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "torch.version.hip" in capsys.readouterr().err
+
+
+def test_atom_explicit_bad_python_pin_is_not_ignored(atom_runtime, monkeypatch, capsys):
+    monkeypatch.setenv("PYTHON", str(atom_runtime / "missing-python"))
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "PYTHON" in capsys.readouterr().err
+    assert os.environ["PYTHON"] == str(atom_runtime / "missing-python")
+
+
+def test_atom_rejects_a_different_python3_prefix(atom_runtime, monkeypatch, tmp_path, capsys):
+    import venv
+
+    environment = tmp_path / "other-python"
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(environment)
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    monkeypatch.setenv("PYTHON", str(python))
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "prefix" in capsys.readouterr().err
+
+
+def test_atom_rejects_an_unrelated_virtual_env(atom_runtime, monkeypatch, capsys):
+    monkeypatch.setenv("VIRTUAL_ENV", str(atom_runtime / "unrelated-venv"))
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "VIRTUAL_ENV" in capsys.readouterr().err
+
+
+def test_atom_missing_python3_is_not_replaced_by_driver_python(atom_runtime, monkeypatch, capsys):
+    monkeypatch.setattr(preflight.shutil, "which", lambda _name: None)
+
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), sys.executable)
+
+    assert failure.value.code == 2
+    assert "python3" in capsys.readouterr().err
 
 
 def test_the_installable_set_matches_the_installer():
@@ -594,13 +694,14 @@ def test_the_installable_set_matches_the_installer():
     )
 
 
-def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch, capsys):
-    """The refuted branch is the other way into the same dead end."""
+def test_atom_cuda_build_is_blocked_without_an_install_remedy(monkeypatch, capsys):
     _probe_result(monkeypatch, importable=True, rocm=False)
-    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+    monkeypatch.setattr(preflight.shutil, "which", lambda _name: sys.executable)
 
-    preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
+    with pytest.raises(SystemExit) as failure:
+        preflight._check_serving_framework(_args("atom"), "/usr/bin/python3")
 
+    assert failure.value.code == 2
     combined = capsys.readouterr()
     assert "--install-framework atom" not in combined.out + combined.err
 

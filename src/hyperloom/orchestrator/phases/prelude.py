@@ -32,12 +32,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 )
 
 from . import machine_state as _phase_state
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
 )
+from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
-from ..loop.coordinator_shared import _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE
 from ..loop.coordinator_helpers import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
@@ -45,7 +45,11 @@ from ..loop.coordinator_helpers import (
 from ..collaborator import CoordinatorCollaborator
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
+# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
+_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
+
 log = _logging.getLogger(__name__)
+
 
 # The ``parse_eval_results`` reasons that prove an eval produced output: a results file it could not decode, and one
 # carrying no metric it recognises.
@@ -77,7 +81,7 @@ def _merge_named_current_recipe_configs(
     owners: list[tuple[str, Mapping[str, Any]]],
 ) -> tuple[str, dict[str, str]]:
     """Merge named config snapshots with exact duplicate conflict checks."""
-    from ..actions.executors._grid_server_args import (
+    from hyperloom.inference_optimizer.grid_server_args import (
         tokenize_server_args_preserving_json,
     )
 
@@ -201,7 +205,8 @@ class PreludePhase(CoordinatorCollaborator):
         appended to it afterwards reaches ``state`` and never the breakdown --
         where a refused arm then reads identically to one never considered.
         """
-        self.shared_state.append_phase_history_event(
+        _phase_state.append_phase_history_event(
+            self.shared_state,
             reason=PRELUDE_ARM_DROPPED,
             evidence={"arm": arm, **evidence},
         )
@@ -254,7 +259,7 @@ class PreludePhase(CoordinatorCollaborator):
             state.warm_history_injected = True
             return 0
 
-        from ..actions.executors._canonical_fingerprint import (
+        from hyperloom.inference_optimizer.canonical_fingerprint import (
             canonical_fingerprint,
         )
 
@@ -496,7 +501,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
         """Land one champion's file on disk without measuring it."""
-        from ..kernel.request_handlers import (
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             materialize_unified_patch_snapshot,
         )
@@ -567,62 +572,6 @@ class PreludePhase(CoordinatorCollaborator):
             session_dir=self.session_dir,
             kernel_id=kernel_id,
         )
-
-    @staticmethod
-    def _restore_warm_kernel_snapshots(
-        snapshots: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Restore exact kernel target bytes captured before each mutation."""
-        errors: list[str] = []
-        for snapshot in reversed(snapshots):
-            target = Path(str(snapshot.get("target") or ""))
-            try:
-                if snapshot.get("existed"):
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(Path(str(snapshot.get("backup") or "")).read_bytes())
-                    if snapshot.get("mode") is not None:
-                        target.chmod(int(snapshot["mode"]))
-                elif target.exists() or target.is_symlink():
-                    target.unlink()
-                if snapshot.get("existed"):
-                    expected = Path(str(snapshot.get("backup") or "")).read_bytes()
-                    if not target.is_file() or target.read_bytes() != expected:
-                        raise OSError("kernel restore verification failed")
-                elif target.exists() or target.is_symlink():
-                    raise OSError("kernel target still exists after restore")
-            except OSError as exc:
-                errors.append(f"{target}:{type(exc).__name__}:{exc}")
-        return {"ok": not errors, "errors": errors}
-
-    @staticmethod
-    def _revert_warm_kernel_patches(
-        applied: list[dict[str, Any]],
-        snapshots: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Rollback kernels exactly, reporting every failure."""
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
-
-        errors: list[str] = []
-        for apply_result in reversed(applied):
-            if not apply_result.get("manifest_path"):
-                continue
-            try:
-                reverted = _maybe_revert_kernel_patch(apply_result)
-                if reverted.get("status") != "ok":
-                    raise RuntimeError(
-                        str(
-                            reverted.get("error")
-                            or reverted.get("reason")
-                            or f"kernel revert status={reverted.get('status')}"
-                        )
-                    )
-            except Exception as exc:
-                log.warning("warm-kernel KB: revert failed", exc_info=True)
-                errors.append(f"{type(exc).__name__}:{exc}")
-        if snapshots:
-            restored = PreludePhase._restore_warm_kernel_snapshots(snapshots)
-            errors.extend(restored.get("errors") or [])
-        return {"ok": not errors, "errors": errors}
 
     def _snapshot_warm_kernel_target(
         self,
@@ -923,7 +872,7 @@ class PreludePhase(CoordinatorCollaborator):
         pending = [entry for entry in plan if entry.get("decision") == "PENDING"]
         columns = sorted({str(e.get("column")) for e in plan})
         if errors:
-            rollback = self._revert_warm_kernel_patches(
+            rollback = revert_warm_kernel_patches(
                 applied,
                 kernel_snapshots,
             )
@@ -980,7 +929,7 @@ class PreludePhase(CoordinatorCollaborator):
                 "warm-kernel KB: prepared state save failed",
                 exc_info=True,
             )
-            persist_rollback = self._revert_warm_kernel_patches(
+            persist_rollback = revert_warm_kernel_patches(
                 applied,
                 kernel_snapshots,
             )
@@ -1179,7 +1128,7 @@ class PreludePhase(CoordinatorCollaborator):
         if str(kernel.get("status") or "") in {"error", "rollback_failed"} and preparation_dirty:
             rollback = dict(kernel.get("rollback") or {}) if isinstance(kernel.get("rollback"), dict) else {}
             if not rollback:
-                rollback = self._revert_warm_kernel_patches(
+                rollback = revert_warm_kernel_patches(
                     list(preparation_pending.get("kernel_apply_results") or []),
                     list(preparation_pending.get("kernel_snapshots") or []),
                 )
@@ -1341,7 +1290,7 @@ class PreludePhase(CoordinatorCollaborator):
             unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
             if not all(recorded_roots) or unusable:
                 rollback = (
-                    self._revert_warm_kernel_patches(
+                    revert_warm_kernel_patches(
                         kernel_applied,
                         kernel_snapshots,
                     )
@@ -1426,7 +1375,7 @@ class PreludePhase(CoordinatorCollaborator):
             combined_envs = dict(bc_envs)
             combined_envs.update(kernel_envs)
         try:
-            from ..actions.executors._grid_server_args import (
+            from hyperloom.inference_optimizer.grid_server_args import (
                 validate_warm_replay_context_length,
             )
 
@@ -1441,7 +1390,7 @@ class PreludePhase(CoordinatorCollaborator):
                 raise RuntimeError("warm replay context preflight must not mutate config")
         except (ValueError, RuntimeError) as exc:
             rollback = (
-                self._revert_warm_kernel_patches(
+                revert_warm_kernel_patches(
                     kernel_applied,
                     kernel_snapshots,
                 )
@@ -1516,7 +1465,7 @@ class PreludePhase(CoordinatorCollaborator):
                 lease_ttl_sec=ttl,
             )
         except Exception as exc:
-            rollback = self._revert_warm_kernel_patches(
+            rollback = revert_warm_kernel_patches(
                 kernel_applied,
                 kernel_snapshots,
             )
@@ -1651,8 +1600,6 @@ class PreludePhase(CoordinatorCollaborator):
         task: "Task | None",
     ) -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        from ..actions.executors.baseline import _revert_warm_patch_state
-
         restores: list[dict[str, Any]] = []
         pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
         trees = [
@@ -1699,7 +1646,7 @@ class PreludePhase(CoordinatorCollaborator):
             or pending.get("kernel_apply_results")
             or []
         )
-        kernel_restore = self._revert_warm_kernel_patches(
+        kernel_restore = revert_warm_kernel_patches(
             list(kernel_applied),
             list(
                 result.get("warm_kernel_snapshots")
@@ -2544,7 +2491,7 @@ class PreludePhase(CoordinatorCollaborator):
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
                 journal = self._ensure_journal()
-                from ..state.optimization_journal import KIND_OTHER, OUTCOME_KEEP
+                from hyperloom.inference_optimizer.session.optimization_journal import KIND_OTHER, OUTCOME_KEEP
 
                 journal.append_entry(
                     JournalEntry(
@@ -2657,47 +2604,10 @@ class PreludePhase(CoordinatorCollaborator):
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
         internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
-
-        state = self.shared_state
-        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
-        if unsupported:
-            log.error(
-                "internal-analysis (%s): not enqueued -- %s; relying on static-source evidence for the rest of "
-                "the session",
-                reason,
-                unsupported,
-            )
-            self._record_prelude_arm_dropped(
-                "internal_analysis",
-                {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
-            )
+        params = self._internal_analysis_params(reason=reason, inline_event=inline_event)
+        if params is None:
             return None
         kind = self._internal_analysis_kind()
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
-        if inline_event:
-            params[INLINE_EVENT_PARAM] = str(inline_event)
-        if reason != "prelude_initial":
-            inject_stack_base_params(params, state)
-        else:
-            # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
-            # a later warm-replay can't swap in flags that skew the baseline ceiling.
-            try:
-                from ..kernel.roofline_ceiling import read_baseline_server_args
-
-                bl_args = read_baseline_server_args(state).strip()
-            except Exception:  # noqa: BLE001 — best-effort; empty falls through
-                bl_args = ""
-            if bl_args:
-                params["base_extra_args"] = bl_args
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
         lanes, ttl = self._registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
@@ -2716,3 +2626,46 @@ class PreludePhase(CoordinatorCollaborator):
                 task.state,
             )
         return task
+
+    def _internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
+        """Params for a Coordinator-internal analysis run, or None when the stack cannot produce a GPU trace."""
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+
+        state = self.shared_state
+        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
+        if unsupported:
+            log.error(
+                "internal-analysis (%s): not run -- %s; relying on static-source evidence for the rest of the session",
+                reason,
+                unsupported,
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
+            )
+            return None
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        if inline_event:
+            params[INLINE_EVENT_PARAM] = str(inline_event)
+        if reason != "prelude_initial":
+            inject_stack_base_params(params, state)
+        else:
+            # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
+            # a later warm-replay can't swap in flags that skew the baseline ceiling.
+            try:
+                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
+
+                bl_args = read_baseline_server_args(state).strip()
+            except Exception:  # noqa: BLE001 — best-effort; empty falls through
+                bl_args = ""
+            if bl_args:
+                params["base_extra_args"] = bl_args
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        return params

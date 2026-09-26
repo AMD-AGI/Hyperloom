@@ -3953,7 +3953,7 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _record_critic_ruling(self, iteration: int, critic) -> None:
         """Put this round's verdict where the next process can still find it."""
         ruling = CriticRuling()
-        if critic is not None and not critic.error:
+        if critic is not None and not critic.fail_open:
             ruling = CriticRuling(
                 verdict=critic.verdict,
                 review_path=str((self._orchestration_root(iteration) / "critic_review.md").resolve()),

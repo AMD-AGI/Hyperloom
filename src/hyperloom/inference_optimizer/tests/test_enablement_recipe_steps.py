@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
 from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
 

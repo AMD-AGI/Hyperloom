@@ -402,7 +402,19 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
         assert res.env_var == "AITER_CONFIG_ODD" and res.env_value == "/work/tier3/out.csv"
         assert res.total_shapes == 2 and res.improved_shapes == 1
         assert res.best_micro_speedup == pytest.approx(1.5)
+        assert res.avg_micro_speedup == pytest.approx(1.2)
         assert res.key_source == "runtime_observed"
+
+    def test_a_shape_the_referee_could_not_time_is_in_no_micro_figure(self):
+        """All three figures describe the shapes that were timed, so they cover the same set."""
+        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.tier3.referee import Judgement
+
+        out = self._outcome(judgements=[self._judgement(1.5), Judgement(shape="8x1536x7168")])
+        res = _tier3_result(out, _gap())
+        assert res.total_shapes == 2 and res.improved_shapes == 1
+        assert res.best_micro_speedup == pytest.approx(1.5)
+        assert res.avg_micro_speedup == pytest.approx(1.5)
 
     def test_it_is_a_candidate_so_e2e_still_has_to_agree(self):
         from kernelforge.gemm_tune.candidates import is_candidate, per_tuner_candidates

@@ -32,6 +32,7 @@ from kernelforge.knowledge.experience_integration import (
 )
 from kernelforge.loop.recovery import (
     atomic_write_json,
+    load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
@@ -1874,11 +1875,8 @@ def forge_loop(
         best_commit = getattr(state_best, "commit_hash", "")
         # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
-            try:
-                published = json.loads((campaign_root / "best_result.json").read_text())
-            except (OSError, ValueError):
-                published = {}
-            if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
+            published = load_published_best(workspace_dir) or {}
+            if int(published.get("iteration", -1)) == 0:
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")

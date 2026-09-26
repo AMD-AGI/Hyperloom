@@ -95,9 +95,10 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
         lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", "/recipes/kimi.sh", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-1")
@@ -140,9 +141,10 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(tmp_path, _args(framework="custom"), session_id="s-custom")
@@ -156,9 +158,10 @@ def _neutralize_seed_io(monkeypatch):
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
 
@@ -226,9 +229,10 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 1)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
     state = cb._seed_shared_state(session_dir, _args(model="/models/Model-A"), session_id="session-arch")
@@ -252,9 +256,10 @@ def test_seed_shared_state_preserves_quantized_model_identity(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
@@ -282,9 +287,10 @@ def test_seed_shared_state_falls_back_to_path_basename(
         lambda _args: ("", {}, "", "", {}),
     )
 
+    from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
-    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(
@@ -494,6 +500,18 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     # The budget survives the boundary; only an operator extend can move it.
     assert state.elapsed_charged_sec == 120 * 60.0
     assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
+
+
+def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
+    """A leg closed by a signal keeps its non-CLOSE phase; the next leg must still close for itself."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="SWEEP")
+    state.set_stop_reason("signal")
+    state.close_sequence_done = True
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase == "SWEEP"
+    assert state.close_sequence_done is False
 
 
 def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:

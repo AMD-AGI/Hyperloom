@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -131,7 +132,7 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     coord.shared_state.current_best = {
         "extra_server_args": "--enable-torch-compile --quantization fp8",
     }
-    import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+    import hyperloom.inference_optimizer.roofline_ceiling as rc
 
     monkeypatch.setattr(
         rc,
@@ -344,31 +345,36 @@ async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
 
 
 class _StubSub:
-    """Records tasks handed to ``run_task``; optionally lands a fresh snapshot to simulate a completed reprofile."""
+    """Records tasks handed to ``execute_covered``; optionally lands a fresh snapshot to simulate a completed reprofile."""
 
     def __init__(self, state: Any = None, landed_tput: float | None = None) -> None:
         self.tasks_run: list[Any] = []
         self._state = state
         self._landed_tput = landed_tput
 
-    async def run_task(self, task: Any, **_kwargs: Any) -> None:
+    async def execute_covered(self, task: Any) -> dict[str, Any]:
         self.tasks_run.append(task)
         if self._state is not None and self._landed_tput is not None:
             self._state.roofline_snapshots.append(
                 {"achieved_tok_per_sec": self._landed_tput},
             )
+        return {}
+
+
+def _kernel_agent_ctx() -> Any:
+    return SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"}))
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypatch):
-    """KERNEL entry (no-GEMM path) reprofiles inline when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
+async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch):
+    """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
-    monkeypatch.setattr(coord, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord, "_geak_enabled", lambda: False)
     monkeypatch.setattr(coord, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+    await coord._run_kernel_agent(_kernel_agent_ctx())
 
     assert len(coord.sub.tasks_run) == 1
     # The reason carries a profile fingerprint suffix so repeated kernel entries at the same gain stack are
@@ -378,10 +384,9 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinator, monkeypatch):
+async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator, monkeypatch):
     """Disabling GEMM tuning must not disable the independently gated fusion stage."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord, "_kernel_enabled", lambda: True)
     monkeypatch.setattr(coord, "_geak_enabled", lambda: False)
     monkeypatch.setattr(coord, "_fusion_required_before_kernel_opt", lambda: True)
     assert coord._gemm_tuning_required_before_kernel_opt() is False
@@ -398,7 +403,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
     monkeypatch.setattr(coord, "_run_forge_fusion", _run_fusion)
     monkeypatch.setattr(coord, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+    await coord._run_kernel_agent(_kernel_agent_ctx())
 
     assert fusion_calls == 1
 
@@ -612,7 +617,7 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
     class _RaisingSub:
-        async def run_task(self, _task: Any, **_kwargs: Any) -> None:
+        async def execute_covered(self, _task: Any) -> dict[str, Any]:
             raise RuntimeError("profile crashed")
 
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]

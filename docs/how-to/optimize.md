@@ -45,7 +45,7 @@ Before launch, run exactly:
 export REPO_ROOT="$(pwd -P)"
 export USER_DATA_PATH='/path/to/hyperloom-run'
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+# The optimizer preflight loads the generated runtime environment in process.
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.

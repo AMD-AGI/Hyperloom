@@ -116,7 +116,7 @@ The optimizer should:
    `rule='phase_incompatible'`. Concurrent GPU work is serialised by the lane /
    GPU lease rather than a policy deny, so explore / kernel dispatches keep
    flowing while analysis refreshes. Each analysis also stamps a decode roofline
-   ceiling (`orchestrator/kernel/roofline_ceiling.py`) for the report's
+   ceiling (`inference_optimizer/roofline_ceiling.py`) for the report's
    `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
    `last_trace_analyze`.

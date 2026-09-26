@@ -315,6 +315,8 @@ def _default_lesson(vr: ValidationResult) -> str:
     marker = note.split("LESSON:", 1)
     if len(marker) == 2:
         return marker[1].strip()[:200]
+    if not vr.correctness_measured:
+        return "Nothing compared this fusion against eager, so the attempt establishes nothing about its numerics."
     if not vr.correctness_passed:
         return (
             "Fix correctness first: compile a ROCm-native kernel and match the "
@@ -387,6 +389,7 @@ def run_fusion_loop(
                 fused_us=None,
                 kept=False,
                 note=f"CAMPAIGN FAILED: {type(e).__name__}: {e}",
+                correctness_measured=False,
             )
 
         # Export + gate the keeper BEFORE recording it, so a hook that demotes the sibling (e.g. a serving-smoke

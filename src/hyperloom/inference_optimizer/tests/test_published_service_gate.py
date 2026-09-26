@@ -13,6 +13,7 @@ import types
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
 
@@ -137,16 +138,22 @@ def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> N
         ("2", 2),  # explicit
         ("0", 1),  # clamped to the minimum (never a self-defeating 0)
         ("-3", 1),  # negative -> clamped
-        ("junk", 4),  # junk -> default
     ],
 )
-def test_env_int_clamps_and_survives_junk(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
-    """_env_int floors at the minimum and never crashes on junk."""
+def test_env_int_clamps_to_the_minimum(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
+    """_env_int floors at the minimum: one poll is the smallest streak that is still a gate."""
     monkeypatch.delenv("HYPERLOOM_MN_TEST_KNOB", raising=False)
     if raw is not None:
         monkeypatch.setenv("HYPERLOOM_MN_TEST_KNOB", raw)
 
     assert life._env_int("HYPERLOOM_MN_TEST_KNOB", 4, minimum=1) == expected
+
+
+def test_an_unreadable_knob_does_not_pass_as_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streak of 2 where the operator asked for 20 is a weaker gate than the one they wrote."""
+    monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", "lots")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK"):
+        life._env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
 
 
 def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,16 +201,22 @@ def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypat
         ("0", 0),  # explicit skip (honored as <=0 by the gate, not a 0s wait)
         ("-5", -5),  # negative -> also skip
         ("600", 600),  # explicit budget
-        ("abc", 300),  # junk -> default, never crashes the restart
     ],
 )
 def test_published_ready_timeout_env_parse(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
-    """The env parse honors 0/negatives as skip and survives junk."""
+    """The env parse honors 0/negatives as skip."""
     monkeypatch.delenv("HYPERLOOM_MN_PUBLISHED_READY_S", raising=False)
     if raw is not None:
         monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_S", raw)
 
     assert life._published_ready_timeout_s() == expected
+
+
+def test_an_unreadable_budget_does_not_quietly_become_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A budget of 300s where the operator asked for something else is a gate they did not configure."""
+    monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_S", "abc")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_PUBLISHED_READY_S"):
+        life._published_ready_timeout_s()
 
 
 @pytest.mark.parametrize(

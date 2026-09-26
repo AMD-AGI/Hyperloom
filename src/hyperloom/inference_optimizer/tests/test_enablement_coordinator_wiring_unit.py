@@ -23,7 +23,8 @@ from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, create_in_cursor
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_shared import PendingProposal, _extract_enablement_launch_log
+from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
 
 
 _MISSING_ARCH_LOG = (
@@ -1248,7 +1249,7 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
 @pytest.mark.asyncio
 async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     """After _AUTHORED_LANE_MAX_ATTEMPTS, the next call stamps a terminal row."""
-    from hyperloom.orchestrator.loop.coordinator_shared import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
 
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/100"

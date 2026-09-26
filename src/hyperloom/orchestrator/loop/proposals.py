@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""PendingProposal and the Critic-approved path: materializing an approved proposal into a dispatched task, and writing its KEEP into the recipe KB."""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
@@ -17,13 +18,25 @@ from ..state.task_registry import TERMINAL_STATES
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
-from .coordinator_shared import PendingProposal
 import logging as _logging
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
+
+
+@dataclass
+class PendingProposal:
+    """A propose_action intent waiting for Critic Review."""
+
+    proposal_msg_id: str
+    from_agent: str
+    action_name: str
+    predicted_gain_pct: float
+    payload: dict[str, Any]
+    decided: bool = False
+    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
 
 
 def apply_critic_grid_filter(

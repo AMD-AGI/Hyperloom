@@ -26,6 +26,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
@@ -551,6 +552,27 @@ async def test_enqueue_internal_session_breakdown_task(coord):
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path, monkeypatch):
+    """An earlier leg's signal close already ran both steps; the resumed leg must not keep their stale artifacts."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    for kind in ("report", "session_breakdown"):
+        key = f"internal-{kind}-close_phase_entry"
+        row = _StubTaskRow(task_id=f"earlier-leg-{kind}", kind=kind, state="succeeded", params={}, idempotency_key=key)
+        coord.tasks._by_key[key] = row
+        coord.tasks._by_id[row.task_id] = row
+    coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
+    assert ran == [
+        ("report", "internal-report-close_phase_entry-leg-2026-09-25T09:46:24+00:00"),
+        ("session_breakdown", "internal-session_breakdown-close_phase_entry-leg-2026-09-25T09:46:24+00:00"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
     tmp_path,
@@ -891,7 +913,8 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
         {"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"},
     ]
-    coord.shared_state.record_phase_transition(
+    machine_state.record_phase_transition(
+        coord.shared_state,
         to_phase="CLOSE",
         reason="sweep_done",
         evidence={"trigger": "test_e2e"},
@@ -971,7 +994,8 @@ class TestEveryTerminalReachesAWrittenReport:
     @pytest.mark.asyncio
     async def test_the_close_sequence_runs_once_and_not_again(self, tmp_path: Path):
         coord = self._coordinator(tmp_path / "session")
-        coord.shared_state.record_phase_transition(
+        machine_state.record_phase_transition(
+            coord.shared_state,
             to_phase="CLOSE",
             reason="sweep_done",
             evidence={"trigger": "test"},
@@ -1028,7 +1052,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     )
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
-    coord.shared_state.record_phase_transition(to_phase="CLOSE", reason="sweep_done", evidence={})
+    machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
 
     await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 

@@ -14,11 +14,6 @@ from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator_shared import (
-    FORCE_STALLED_KEEP_ROUNDS,
-    FORCE_STALLED_SPECIALIST_ROUNDS,
-    SPECIALIST_AUTO_RETRY_MAX,
-)
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
@@ -36,6 +31,14 @@ log = _logging.getLogger(__name__)
 __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
+
+# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
+SPECIALIST_AUTO_RETRY_MAX: int = 2
+
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
+# Coordinator force-dispatches one.
+FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
+FORCE_STALLED_KEEP_ROUNDS: int = 12
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
@@ -91,7 +94,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+                from hyperloom.inference_optimizer.framework_paths import (
+                    resolve_framework_tree,
+                    resolve_kernel_search_roots,
+                )
 
                 roots = resolve_kernel_search_roots()
                 if roots:
@@ -131,7 +137,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
-            from ..state.shared_state import render_model_arch_compact
+            from ..state._shared_state.render import render_model_arch_compact
 
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
@@ -161,7 +167,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if "research_hints" not in params:
             try:
-                from ..knowledge import research_hints as _research_hints
+                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
                 _hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
@@ -227,7 +233,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
         )
         if has_evidence and "roofline_evidence" not in params:
-            from ..kernel.roofline_snapshot import extract_workload_summary
+            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
             executive_summary: dict[str, Any] = {}

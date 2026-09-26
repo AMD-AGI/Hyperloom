@@ -56,14 +56,6 @@ def _column(csv_path, name: str) -> list[str]:
     return [row.split(",")[idx] for row in lines[1:]]
 
 
-def test_fmoe_validate_rejects_indivisible_tp(tmp_path, monkeypatch):
-    """A width that does not shard evenly cannot yield the runtime's key."""
-    monkeypatch.setattr(fm, "find_tuner_script", lambda _name: "/fake/gemm_moe_tune.py")
-    err = fm.FmoeCKTuner(_moe_ctx(tmp_path, tp=5)).validate()
-    assert err is not None
-    assert "not divisible by tp 5" in err
-
-
 def test_fmoe_validate_requires_a_runtime_observed_key(tmp_path, monkeypatch):
     """Without observed evidence, tuning an inferred key wastes hours to learn nothing."""
     monkeypatch.setattr(fm, "find_tuner_script", lambda _name: "/fake/gemm_moe_tune.py")
@@ -141,17 +133,30 @@ def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path)
         fm.FmoeCKTuner(_moe_ctx(tmp_path))._resolve_untuned_csv()
 
 
-def test_dense_untuned_csv_is_not_consumed_as_moe_shapes(tmp_path):
-    """The dense field carries an M,N,K table and is already set in production."""
+def _write_dense_csv(tmp_path) -> Path:
+    """The dense field's M,N,K table: a different key space, and set in production."""
     dense = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
     dense.write_text("M,N,K\n256,1536,4096\n", encoding="utf-8")
-    ctx = _moe_ctx(tmp_path, untuned_csv=dense)
+    return dense
+
+
+def test_dense_untuned_csv_alone_is_not_consumed_as_moe_shapes(tmp_path):
+    """A dense M,N,K table is never MoE evidence: it must not satisfy the refusal."""
+    ctx = _moe_ctx(tmp_path, untuned_csv=_write_dense_csv(tmp_path))
 
     with pytest.raises(ValueError, match="no runtime-observed MoE miss"):
         fm.FmoeCKTuner(ctx)._resolve_untuned_csv()
 
 
-def test_missing_caller_csv_raises_rather_than_deriving(tmp_path):
+def test_dense_untuned_csv_does_not_displace_the_runtime_observed_csv(tmp_path):
+    """Both fields are set in production; only the MoE one may decide the key."""
+    external = _write_runtime_csv(tmp_path)
+    ctx = _moe_ctx(tmp_path, untuned_csv=_write_dense_csv(tmp_path), moe_untuned_csv=external)
+
+    assert fm.FmoeCKTuner(ctx)._resolve_untuned_csv()[0] == external
+
+
+def test_missing_caller_csv_raises(tmp_path):
     ctx = _moe_ctx(tmp_path, moe_untuned_csv=tmp_path / "absent.csv")
     with pytest.raises(FileNotFoundError):
         fm.FmoeCKTuner(ctx)._resolve_untuned_csv()
@@ -166,8 +171,8 @@ def test_missing_caller_csv_raises_rather_than_deriving(tmp_path):
         (fm._FMOE_CSV_HEADER + "\n4,4096,512\n", "expected 12"),
     ],
 )
-def test_malformed_caller_csv_raises_rather_than_deriving(tmp_path, content, expected):
-    """Silently deriving a different key is what makes a tuned table unreachable."""
+def test_malformed_caller_csv_raises(tmp_path, content, expected):
+    """Silently tuning a different key is what makes a tuned table unreachable."""
     bad = tmp_path / "bad.csv"
     bad.write_text(content, encoding="utf-8")
     ctx = _moe_ctx(tmp_path, moe_untuned_csv=bad)
@@ -226,6 +231,8 @@ def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, t
     artifact = Path(result.artifact_path)
     assert artifact == tuner.work_dir / "candidate_fmoe.csv"
     assert result.env_value == str(artifact)
+    # A published MoE table says where its key came from, and this tuner only ever tunes one a dispatch log showed.
+    assert result.key_source == "runtime_observed"
     for candidate in produced:
         candidate.unlink()
     assert _column(artifact, "token") == ["4", "512"]

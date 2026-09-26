@@ -13,13 +13,12 @@ import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
 from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
-
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
 MAINTENANCE_INTERVAL_SEC: int = 1800
@@ -29,7 +28,7 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 from ..phases import machine_state as _phase_state
-from ..state.optimization_journal import Journal
+from hyperloom.inference_optimizer.session.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -82,12 +81,11 @@ from .proposals import ProposalsCollaborator
 from .conversation import ConversationCollaborator
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
-from ..trace.orchestration_trace import (
+from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from .coordinator_shared import _AUTHORED_LANE_MAX_ATTEMPTS, PendingProposal
 from .coordinator_helpers import (
     _infer_model_class_from_config,
     format_exc_brief,
@@ -98,85 +96,8 @@ from .coordinator_helpers import (
 log = logging.getLogger(__name__)
 
 
-def _resolvable_artifacts_from_done(
-    done_payload: dict[str, Any] | None,
-    resolve_bases: list[Path],
-) -> list[dict[str, Any]]:
-    """Return ``artifacts_written`` entries whose ``source`` file exists on disk."""
-    if not isinstance(done_payload, dict):
-        return []
-    arts = done_payload.get("artifacts_written")
-    if not isinstance(arts, list):
-        return []
-    out: list[dict[str, Any]] = []
-    # Sandbox bases are invariant across entries — resolve once.
-    bases_resolved = [base.resolve() for base in resolve_bases]
-    for entry in arts:
-        if not isinstance(entry, dict):
-            continue
-        src = str(entry.get("source") or "").strip()
-        tgt = str(entry.get("target") or "").strip()
-        if not src or not tgt:
-            continue
-        raw = Path(src)
-        # An absolute ``source`` is checked as-is; a relative one is resolved under each base.
-        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
-        for cand in cands:
-            resolved = cand.resolve()
-            if not resolved.is_file():
-                continue
-            contained = False
-            for base in bases_resolved:
-                try:
-                    resolved.relative_to(base)
-                except ValueError:
-                    continue
-                contained = True
-                break
-            if contained:
-                out.append(entry)
-                break
-    return out
-
-
-# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
-_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input",
-    "trace_dir",
-    "candidates_path",
-    "analysis_md_path",
-    "kernel_candidates",
-    "best_artifact_path",
-    "patch_path",
-    "target_file",
-    "workspace",
-    "workspace_path",
-    "out_dir",
-    "output_dir",
-    "run_dir",
-    "report_path",
-    "json_path",
-    "md_path",
-    "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler.
-    "trace_report_path",
-    "analysis_report_path",
-    "tracelens_summary_path",
-    "kernel_roofline_path",
-    "cli_log_path",
-)
-
-
-def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
-    if not isinstance(payload, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key in _LIFECYCLE_PATH_KEYS:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            out[key] = val
-    return out
+if TYPE_CHECKING:
+    from .proposals import PendingProposal
 
 
 @dataclass
@@ -364,9 +285,6 @@ class Coordinator(
 
         # Medium-intensity soft restart at each macro-cycle boundary.
         self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -597,9 +515,6 @@ class Coordinator(
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Max re-author rounds per candidate on a needs_review verdict.
-    _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
 
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
@@ -956,10 +871,6 @@ class Coordinator(
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
-            try:
-                await self._await_kernel_entry_task()
-            except (asyncio.CancelledError, Exception):
-                log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
                 final_signals = self._signals.close()
@@ -1207,7 +1118,6 @@ class Coordinator(
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "PendingProposal",
     "SharedState",
     # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
     "_infer_model_class_from_config",

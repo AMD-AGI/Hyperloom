@@ -45,8 +45,6 @@ class ModelProfile:
     qk_rope_head_dim: int = 0
     o_lora_rank: int = 0
     o_groups: int = 0
-    # Activation
-    hidden_act: str = "silu"
     # Quantization (from config or CLI override)
     quant_method: str = ""  # "", "fp8", "awq", "gptq", "compressed-tensors"
     quant_bits: int = 0
@@ -155,9 +153,6 @@ def analyze_model(model_path: str) -> ModelProfile:
     moe_intermediate_size = int(llm_cfg.get("moe_intermediate_size", 0))
     num_hidden_layers = int(llm_cfg.get("num_hidden_layers", 0))
 
-    # Activation
-    hidden_act = str(llm_cfg.get("hidden_act", "silu")).lower()
-
     # Model dtype
     model_dtype = str(llm_cfg.get("torch_dtype", config.get("torch_dtype", "bfloat16"))).replace("torch.", "")
 
@@ -199,7 +194,6 @@ def analyze_model(model_path: str) -> ModelProfile:
         qk_rope_head_dim=qk_rope_head_dim,
         o_lora_rank=o_lora_rank,
         o_groups=o_groups,
-        hidden_act=hidden_act,
         quant_method=quant_method,
         quant_bits=quant_bits,
         quant_group_size=quant_group_size,

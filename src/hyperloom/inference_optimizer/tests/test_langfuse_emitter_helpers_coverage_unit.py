@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
 
 def test_to_ns_none_and_non_datetime() -> None:

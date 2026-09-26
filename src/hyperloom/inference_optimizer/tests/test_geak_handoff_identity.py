@@ -253,7 +253,7 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _stop_after_handoff,
     )
 
@@ -299,7 +299,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _stop_after_handoff,
     )
 
@@ -340,7 +340,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _stop_after_handoff,
     )
 
@@ -373,7 +373,7 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
         raise RuntimeError("stop after handoff write")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         _stop_after_handoff,
     )
 
@@ -413,7 +413,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
     )
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
@@ -449,7 +449,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
     )
     await coord._run_geak_kernel_phase(from_phase="KERNEL")

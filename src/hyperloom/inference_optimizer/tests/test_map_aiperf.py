@@ -36,7 +36,7 @@ def _sample():
         "total_isl": {"unit": "tok", "avg": 4200.0},
         "total_output_tokens": {"unit": "tok", "avg": 2100.0},
         "benchmark_duration": {"unit": "s", "avg": 14.0},
-        "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
+        "time_to_first_token": _metric(120.0, p50=110.0, p90=170.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
         # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
         "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
@@ -182,6 +182,20 @@ def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
     s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
     r = map_aiperf(s)
     assert r["e2e_norm_intvty_p90"] == 0.0, f"expected 0.0 (no p10 present), got {r['e2e_norm_intvty_p90']!r}"
+
+
+def test_e2e_norm_intvty_p50_reads_the_median_rate():
+    """The median needs no slow-tail inversion, so it is the rate's own P50 -- not 1/ITL's."""
+    r = map_aiperf(_sample())
+    assert r["e2e_norm_intvty_p50"] == pytest.approx(55.0)  # not 84.1, the per-user 1/ITL p50
+
+
+def test_e2e_norm_intvty_p50_is_zero_when_export_has_no_p50():
+    """An export where e2e_output_token_throughput carries no p50 must emit 0.0, not the mean."""
+    s = _sample()
+    s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
+    r = map_aiperf(s)
+    assert r["e2e_norm_intvty_p50"] == 0.0, f"expected 0.0 (no p50 present), got {r['e2e_norm_intvty_p50']!r}"
 
 
 def test_map_accepts_metrics_wrapped():
@@ -335,3 +349,10 @@ def test_deployed_mapper_honours_noncanonical_reasons(deployed_mapper, tmp_path)
     result = _run_deployed(deployed_mapper, tmp_path, export, AGENTX_NONCANONICAL_REASONS="entries=50, ,duration=120s")
     assert result["submission_valid"] is False
     assert result == map_aiperf(export, noncanonical_reasons=["entries=50", "duration=120s"])
+
+
+def test_ttft_p90_is_mapped():
+    """The detail view reports TTFT at p50 and p90; only p50 and p99 used to be carried."""
+    r = map_aiperf(_sample())
+    assert r["p90_ttft_ms"] == pytest.approx(170.0)
+    assert r["median_ttft_ms"] == pytest.approx(110.0)

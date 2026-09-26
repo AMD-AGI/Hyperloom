@@ -1329,6 +1329,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 40.0,
+                "e2e_norm_intvty_p50": 40.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1345,6 +1348,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1401,6 +1407,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 42.0,
+                "e2e_norm_intvty_p50": 42.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1414,6 +1423,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {
         "action": "baseline",
@@ -1422,6 +1434,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(
@@ -1475,6 +1490,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 30.0,
+                "e2e_norm_intvty_p50": 30.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1490,6 +1508,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "input_throughput": 1300.0,
         "total_throughput": 1450.0,
         "e2e_norm_intvty_p90": 40.0,
+        "e2e_norm_intvty_p50": 40.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(

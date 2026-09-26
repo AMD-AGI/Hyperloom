@@ -1785,11 +1785,17 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
     state.compute_partition = {"mode": "CPX", "partitions": 8}
     state.baseline_perf = {
         "e2e_norm_intvty_p90": 20.0,
+        "e2e_norm_intvty_p50": 20.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "total_throughput": 1000.0,
     }
     state.current_best.update(
         {
             "e2e_norm_intvty_p90": 24.0,
+            "e2e_norm_intvty_p50": 24.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "total_throughput": 960.0,
         }
     )
@@ -1837,10 +1843,18 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
 def test_agentx_selection_rejects_incomplete_baseline_axes(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.benchmark_mode = "agentx"
-    state.baseline_perf = {"e2e_norm_intvty_p90": 20.0}
+    state.baseline_perf = {
+        "e2e_norm_intvty_p90": 20.0,
+        "e2e_norm_intvty_p50": 20.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     state.current_best.update(
         {
             "e2e_norm_intvty_p90": 24.0,
+            "e2e_norm_intvty_p50": 24.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "total_throughput": 960.0,
         }
     )

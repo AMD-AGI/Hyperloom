@@ -10,7 +10,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
     variant_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 def test_fingerprint_ignores_name() -> None:

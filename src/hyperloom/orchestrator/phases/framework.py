@@ -21,9 +21,12 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_o
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
-from ..loop.coordinator_shared import PendingProposal, _AUTHORED_LANE_MAX_ATTEMPTS, _framework_config_levers_from_done
+from ..loop.proposals import PendingProposal
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..actions.executors._grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    merge_server_args,
+    tokenize_server_args_preserving_json,
+)
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
@@ -37,6 +40,136 @@ log = _logging.getLogger(__name__)
 
 # Specialist attempts a local-exploration candidate gets before the phase moves on.
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
+# Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
+_AUTHORED_LANE_MAX_ATTEMPTS: int = 3
+
+
+def _framework_config_levers_from_done(
+    done_payload: dict[str, Any] | None,
+    *,
+    levers_ride_with_patches: bool = False,
+) -> dict[str, Any]:
+    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
+
+    Args:
+        done_payload: The specialist's ``specialist_done`` payload.
+        levers_ride_with_patches: Whether a lever delivered alongside a patch
+            belongs to the patch's round. True for ENABLEMENT, where the pair is
+            jointly what makes the model boot; False while optimizing, where a
+            patch is its own outcome and a lever is judged on its own.
+    """
+    if not isinstance(done_payload, dict):
+        return {}
+    proposals = done_payload.get("proposal_set") or []
+    if not isinstance(proposals, list):
+        return {}
+    # A patch deliverable otherwise takes precedence: a lever that merely
+    # *accompanies* a patch is not a config-only outcome. ``atomic`` remains the
+    # specialist's own way to say the two are inseparable, but it cannot be the
+    # only way -- it is a model-authored boolean, and the same specialist has
+    # emitted ``atomic: false`` on a lever whose own reason read "required to
+    # boot at all once the patch lands". Enablement therefore decides this from
+    # the lane it is running, not from the deliverable's self-description.
+    patches = done_payload.get("patches_written") or []
+    if isinstance(patches, list) and patches and not levers_ride_with_patches:
+        proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
+        if not proposals:
+            return {}
+    for entry in proposals:
+        if not isinstance(entry, dict):
+            continue
+        extra_envs: dict[str, str] = {}
+        envs = entry.get("extra_envs")
+        if isinstance(envs, dict):
+            for k, v in envs.items():
+                key = str(k).strip()
+                if key:
+                    extra_envs[key] = str(v)
+        args = entry.get("extra_args")
+        extra_server_args = ""
+        if isinstance(args, str) and args.strip():
+            parsed_args = tokenize_server_args_preserving_json(args)
+            if parsed_args is None:
+                log.warning(
+                    "FRAMEWORK config lever %r has server args unsupported by "
+                    "Magpie's unquoted argv transport; dropping the args%s",
+                    entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
+                )
+                if not extra_envs:
+                    continue
+            else:
+                extra_server_args = parsed_args[0]
+        elif isinstance(args, (list, tuple)):
+            arg_tokens = [str(a) for a in args if str(a).strip()]
+            if any(any(ch.isspace() for ch in token) for token in arg_tokens):
+                log.warning(
+                    "FRAMEWORK config lever %r has a whitespace-bearing argv token; dropping the args%s",
+                    entry.get("name"),
+                    " while preserving its environment overrides" if extra_envs else "",
+                )
+                if not extra_envs:
+                    continue
+            else:
+                parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
+                if parsed_args is None:
+                    log.warning(
+                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
+                        entry.get("name"),
+                        " while preserving its environment overrides" if extra_envs else "",
+                    )
+                    if not extra_envs:
+                        continue
+                else:
+                    extra_server_args = parsed_args[0]
+        if extra_server_args or extra_envs:
+            return {
+                "extra_server_args": extra_server_args,
+                "extra_envs": extra_envs,
+            }
+    return {}
+
+
+def _resolvable_artifacts_from_done(
+    done_payload: dict[str, Any] | None,
+    resolve_bases: list[Path],
+) -> list[dict[str, Any]]:
+    """Return ``artifacts_written`` entries whose ``source`` file exists on disk."""
+    if not isinstance(done_payload, dict):
+        return []
+    arts = done_payload.get("artifacts_written")
+    if not isinstance(arts, list):
+        return []
+    out: list[dict[str, Any]] = []
+    # Sandbox bases are invariant across entries — resolve once.
+    bases_resolved = [base.resolve() for base in resolve_bases]
+    for entry in arts:
+        if not isinstance(entry, dict):
+            continue
+        src = str(entry.get("source") or "").strip()
+        tgt = str(entry.get("target") or "").strip()
+        if not src or not tgt:
+            continue
+        raw = Path(src)
+        # An absolute ``source`` is checked as-is; a relative one is resolved under each base.
+        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
+        for cand in cands:
+            resolved = cand.resolve()
+            if not resolved.is_file():
+                continue
+            contained = False
+            for base in bases_resolved:
+                try:
+                    resolved.relative_to(base)
+                except ValueError:
+                    continue
+                contained = True
+                break
+            if contained:
+                out.append(entry)
+                break
+    return out
+
 
 #: Consecutive empty discovery rounds tolerated before the source arm declines.
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
@@ -1453,7 +1586,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             if advisory:
                 log.warning("FRAMEWORK advisory: %s", advisory)
 
-            state.append_phase_history_event(
+            _phase_state.append_phase_history_event(
+                state,
                 reason=reason,
                 evidence={
                     "event": "framework_agent_phase_done",
@@ -1901,7 +2035,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             attempts = {}
             self.shared_state.specialist_reauthor_attempts = attempts
         prior = int(attempts.get(cand_id, 0) or 0)
-        if prior >= self._MAX_REAUTHOR_ATTEMPTS:
+        if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1919,7 +2053,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 batch_id=batch_id,
                 status="reauthor_cap",
                 kept=False,
-                rationale=f"reauthor attempts >= cap ({self._MAX_REAUTHOR_ATTEMPTS})",
+                rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
                 provenance="pump",
             )
             return
@@ -2205,7 +2339,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         # (``artifacts_written`` with a real source file) is a FULL result — autosubmit routes it to integrate_patch,
         # which owns the terminal row.
         try:
-            from ..loop.coordinator import _resolvable_artifacts_from_done
             from hyperloom.inference_optimizer.session.session_paths import (
                 runs_dir as _runs_dir,
             )
@@ -2620,7 +2753,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # Resolve patches_written; submit only when >=1 real file exists.
         from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
-        from ..loop.coordinator import _resolvable_artifacts_from_done
 
         resolve_bases: list[Path] = []
         if self.session_dir is not None:
@@ -2944,7 +3076,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
         """
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
         try:
             from hyperloom.agents.framework.kb import read_pr_ledger

@@ -223,7 +223,7 @@ def build_coord(tmp_path):
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-    from hyperloom.orchestrator.framework import paths as fp
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     real = fp.resolve_kernel_search_roots
 
@@ -306,7 +306,7 @@ class ProgressCadence:
 @pytest.fixture
 def progress_cadence(monkeypatch) -> "ProgressCadence":
     """A :class:`ProgressCadence` with the heartbeat tick on the same timescale."""
-    from hyperloom.orchestrator.trace import task_progress
+    from hyperloom.inference_optimizer.trace import task_progress
 
     monkeypatch.setattr(
         task_progress,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator action dispatch: admission, launch, reaping and cancellation of lane tasks."""
 
 from __future__ import annotations
 import asyncio
@@ -58,7 +58,7 @@ from .coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 
-from .coordinator_shared import _format_inbox_event
+from .conversation import _format_inbox_event
 import logging as _logging
 from ..collaborator import CoordinatorCollaborator
 
@@ -122,9 +122,10 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
 #: Kinds the pump dispatches but does not join: it drains what it joins before
-#: returning, and an off-loop compile there would hold every reactor turn for
-#: its duration. Admission is unchanged — same budget, lane and lease gates.
-_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
+#: returning, and an off-loop compile or the KERNEL phase's whole pipeline there
+#: would hold every reactor turn for its duration. Admission is unchanged — same
+#: budget, lane and lease gates.
+_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
 class _InflightAction(NamedTuple):
@@ -288,13 +289,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         )
         for _task_id, entry in victims:
             entry.scope.cancel(reason=reason)
+        # A caller that gave up on its action stays registered; when that caller is running
+        # this cancel, its action is reached through the scope and the execution drain only.
+        current = asyncio.current_task()
+        callers = [(task_id, entry) for task_id, entry in victims if entry.atask is not current]
         try:
-            await self._wait_for_cooperative_stop(victims)
+            await self._wait_for_cooperative_stop(callers)
         finally:
-            for _task_id, entry in victims:
+            for _task_id, entry in callers:
                 if not entry.atask.done():
                     entry.atask.cancel()
-        await asyncio.gather(*(entry.atask for _task_id, entry in victims), return_exceptions=True)
+        await asyncio.gather(*(entry.atask for _task_id, entry in callers), return_exceptions=True)
         return [task_id for task_id, _entry in victims]
 
     async def _wait_for_cooperative_stop(self, victims: list[tuple[str, _InflightAction]]) -> None:

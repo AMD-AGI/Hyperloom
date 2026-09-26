@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool, env_str, is_truthy
+from hyperloom.common.env import env_bool, env_float, env_str
 
 INTVTY_V1 = "intvty_v1"
 
@@ -23,33 +22,57 @@ _AGENTX_MODE = "agentx"
 # with interactivity on x and per-chip throughput on y, and no fixed interactivity target, so trading one for the
 # other moves a point along the frontier rather than violating a constraint.
 GRADED_INTVTY = "e2e_norm_intvty_p90"
+GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
 
-# The axes ``graded_axes_of`` can carry, for a consumer that must publish all four including the ones a measurement
-# did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader unable to tell
-# an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it was zero".
-GRADED_AXIS_KEYS = (GRADED_INTVTY, GRADED_TOTAL, "input_throughput", "tpot_p90_ms")
+# Every percentile of the interactivity family. A consumer asking "was this graded on interactivity" must read this
+# rather than one axis name, or it silently answers no the next time the graded percentile moves.
+INTVTY_OBJECTIVES = (GRADED_INTVTY, GRADED_INTVTY_P50)
+
+# The y axis InferenceX plots the frontier on. Reported, not graded: tensor parallelism is fixed for a session, so
+# dividing both sides of a ratio by it leaves the guard's verdict unchanged.
+GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
+
+# Comparability inputs: a pair is comparable only when both replayed a window of the same length, and a rate that
+# rose because more requests failed is not a win.
+GRADED_DURATION = "duration_seconds"
+GRADED_ERROR_RATE = "request_error_rate"
+
+# A trace replay slices a different part of the corpus when the window moves, so the two rounds stop measuring the
+# same work. Sized to catch a truncated round, not the few percent a full round drifts by.
+DURATION_DRIFT_PCT = 5.0
+
+# The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
+# measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
+# unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
+# was zero".
+GRADED_AXIS_KEYS = (
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_TOTAL,
+    GRADED_OUTPUT_PER_GPU,
+    "input_throughput",
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "tpot_p50_ms",
+    "tpot_p90_ms",
+)
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
-# Floor under ``keep_threshold_pct`` for AgentX: the slow-tail percentile's own variance is unmeasured, so the
-# default 1% threshold sits inside the noise band.
-AGENTX_KEEP_THRESHOLD_FLOOR_PCT = 2.0
+# The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
+AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
 
-# RECORDED exists because a point that loses at the measured concurrency can still be the frontier winner at another
-# rung, so discarding it costs more than storing it.
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
-VERDICT_RECORDED = "RECORDED"
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    raw = (env or os.environ).get(_AGENTX_ENV, "")
-    return is_truthy(raw)
+    return env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
@@ -88,13 +111,7 @@ def graded_metric_key(*, benchmark_mode: str = "") -> str:
 
 def parse_intvty_noise_pct() -> float:
     """Noise band in percent from ``HYPERLOOM_PERF_NOISE_PCT``."""
-    raw = env_str("HYPERLOOM_PERF_NOISE_PCT").strip()
-    if not raw:
-        return _DEFAULT_INTVTY_NOISE_PCT
-    try:
-        return float(raw)
-    except ValueError:
-        return _DEFAULT_INTVTY_NOISE_PCT
+    return env_float("HYPERLOOM_PERF_NOISE_PCT", _DEFAULT_INTVTY_NOISE_PCT)
 
 
 def _positive(value: Any) -> float | None:
@@ -105,25 +122,49 @@ def _positive(value: Any) -> float | None:
     return coerced if coerced > 0 else None
 
 
+def _non_negative(value: Any) -> float | None:
+    """Coerce to a float of zero or more, else None.
+
+    Zero is a measured error rate, not a missing one, so ``_positive`` would read a flawless run as unreported.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    coerced = float(value)
+    return coerced if coerced >= 0 else None
+
+
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
-    """Both graded axes from a measurement or a ``current_best``; None unless both are positive."""
-    # Returning None unless both are present is what stops a lane half-applying the objective. A total that is
-    # absent, null or non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+    """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
+    # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
+    # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
     if not isinstance(source, Mapping):
         return None
     intvty = _positive(source.get(GRADED_INTVTY))
+    intvty_p50 = _positive(source.get(GRADED_INTVTY_P50))
+    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     inp = _positive(source.get("input_throughput"))
     out = _positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput"))
     total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
     if total is None and inp is not None and out is not None:
         total = inp + out
-    if intvty is None or total is None:
+    if intvty is None or intvty_p50 is None or total is None:
         return None
-    snap: dict[str, float] = {GRADED_INTVTY: intvty, GRADED_TOTAL: total}
+    snap: dict[str, float] = {
+        GRADED_INTVTY: intvty,
+        GRADED_INTVTY_P50: intvty_p50,
+        GRADED_TOTAL: total,
+    }
     for key, value in (
         ("input_throughput", inp),
         (GRADED_OUTPUT, out),
         ("tpot_p90_ms", _positive(source.get("tpot_p90_ms"))),
+        ("ttft_p50_ms", _positive(source.get("ttft_p50_ms"))),
+        ("ttft_p90_ms", _positive(source.get("ttft_p90_ms"))),
+        ("tpot_p50_ms", _positive(source.get("tpot_p50_ms"))),
+        (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
+        (GRADED_DURATION, duration),
+        (GRADED_ERROR_RATE, error_rate),
     ):
         if value is not None:
             snap[key] = value
@@ -137,18 +178,21 @@ def output_tput_of(source: Mapping[str, Any] | None) -> float:
     return float(_positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput")) or 0.0)
 
 
-def intvty_of(snapshot: Mapping[str, float] | None) -> float:
-    """Interactivity from a perf snapshot; 0.0 when unavailable."""
+def axis_of(snapshot: Mapping[str, float] | None, key: str) -> float:
+    """One axis from a perf snapshot; 0.0 when unavailable."""
     if not isinstance(snapshot, Mapping):
         return 0.0
-    return float(snapshot.get(GRADED_INTVTY) or 0.0)
+    return float(snapshot.get(key) or 0.0)
+
+
+def intvty_of(snapshot: Mapping[str, float] | None) -> float:
+    """Slow-tail interactivity from a perf snapshot; 0.0 when unavailable."""
+    return axis_of(snapshot, GRADED_INTVTY)
 
 
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     """Total token throughput from a perf snapshot; 0.0 when unavailable."""
-    if not isinstance(snapshot, Mapping):
-        return 0.0
-    return float(snapshot.get(GRADED_TOTAL) or 0.0)
+    return axis_of(snapshot, GRADED_TOTAL)
 
 
 def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
@@ -164,10 +208,24 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
     if total is not None:
         axes[GRADED_TOTAL] = total
-    for key in ("input_throughput", "tpot_p90_ms"):
+    for key in (
+        "input_throughput",
+        "ttft_p50_ms",
+        "ttft_p90_ms",
+        "tpot_p50_ms",
+        "tpot_p90_ms",
+        GRADED_INTVTY_P50,
+        GRADED_OUTPUT_PER_GPU,
+    ):
         value = _positive(source.get(key))
         if value is not None:
             axes[key] = value
+    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    if duration is not None:
+        axes[GRADED_DURATION] = duration
+    error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
+    if error_rate is not None:
+        axes[GRADED_ERROR_RATE] = error_rate
     return axes
 
 
@@ -194,35 +252,57 @@ def _within_band(candidate: float, anchor: float, band_pct: float) -> bool:
     return candidate >= anchor * (1.0 - band_pct / 100.0)
 
 
-def passes_intvty_gate(
+def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
+    """Derive the frontier's y axis onto *measurement* in place; a non-positive chip count leaves it unstamped.
+
+    The chip count is the tensor-parallel degree, the same stand-in the roofline ceiling and the competitor gap
+    already divide by. It undercounts a deployment that spreads over data or pipeline parallelism, disaggregated
+    prefill, or several nodes; correcting it belongs with those callers, since a second denominator here would
+    publish two different per-GPU figures for one session.
+    """
+    if not isinstance(measurement, dict):
+        return
+    chips = _positive(tp)
+    out = _positive(measurement.get(GRADED_OUTPUT)) or _positive(measurement.get("tput"))
+    if chips is None or out is None:
+        return
+    measurement[GRADED_OUTPUT_PER_GPU] = out / chips
+
+
+def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
+    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+
+    Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
+    evidence" as "comparable" is what lets one KEEP on a window it never ran.
+    """
+    for side in (candidate, anchor):
+        if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
+            return False
+    ref_duration = axis_of(anchor, GRADED_DURATION)
+    if ref_duration <= 0:
+        return False
+    if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
+        return False
+    return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
+
+
+def holds_within_band(
     candidate: Mapping[str, float],
     anchor: Mapping[str, float],
+    key: str,
     *,
     noise_pct: float | None = None,
 ) -> bool:
-    """Whether candidate interactivity holds within the band below *anchor*."""
+    """Whether candidate *key* holds within the noise band below *anchor*."""
     band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
-    return _within_band(intvty_of(candidate), intvty_of(anchor), band)
-
-
-def passes_tput_guard(
-    candidate: Mapping[str, float],
-    anchor: Mapping[str, float],
-    *,
-    noise_pct: float | None = None,
-) -> bool:
-    """Whether candidate throughput holds within the band below *anchor*."""
-    # ``total_throughput`` is the raw aggregate; a caller comparing configurations of differing tensor-parallel
-    # degree must normalise by the chip count first.
-    band = float(noise_pct if noise_pct is not None else parse_intvty_noise_pct())
-    return _within_band(total_tput_of(candidate), total_tput_of(anchor), band)
+    return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
 
-    ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry the guard axis and are 0.0 off
+    ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
     """
 
@@ -247,32 +327,39 @@ class GradedComparison:
     @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
-        return self.objective == GRADED_INTVTY
+        return self.objective in INTVTY_OBJECTIVES
 
 
 __all__ = [
-    "AGENTX_KEEP_THRESHOLD_FLOOR_PCT",
+    "AGENTX_KEEP_P50_THRESHOLD_PCT",
+    "DURATION_DRIFT_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
+    "GRADED_DURATION",
+    "GRADED_ERROR_RATE",
     "GRADED_INTVTY",
+    "GRADED_INTVTY_P50",
     "GRADED_OUTPUT",
+    "GRADED_OUTPUT_PER_GPU",
     "GRADED_TOTAL",
+    "INTVTY_OBJECTIVES",
     "INTVTY_V1",
     "VERDICT_KEEP",
-    "VERDICT_RECORDED",
     "VERDICT_REVERT",
     "agentx_active",
+    "axis_of",
     "graded_axes_of",
     "graded_metric_key",
+    "holds_within_band",
     "intvty_grading_enabled",
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
     "output_tput_of",
     "parse_intvty_noise_pct",
-    "passes_intvty_gate",
-    "passes_tput_guard",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
+    "rounds_are_comparable",
+    "stamp_output_per_gpu",
     "total_tput_of",
 ]
