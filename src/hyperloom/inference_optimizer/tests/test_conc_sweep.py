@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
@@ -33,6 +34,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _has_optimization,
     _order_concs_desc,
     _point_from_variant,
+    _SweepRun,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -1708,29 +1710,37 @@ def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
     result = _fake_variant(
         "baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"}
     )
-    _flush_partial_conc_sweep_report(
-        results=[result],
+    run = _SweepRun(
         state=state,
         session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=[4, 8],
+        workspace=session_dir / "ws",
+        base_yaml_path=session_dir / "base.yaml",
+        model_path="/models/m",
+        gpu_type="mi300x",
+        benchmark_script=None,
         isl=512,
         osl=512,
+        concs_desc=[8, 4],
+        num_prompts_factor=5,
         opt_args="--x",
         opt_envs={},
-        workspace=session_dir / "ws",
+        benchmark_timeout_sec=600.0,
+        session_deadline_sec=None,
+        variant_expected_sec=None,
+        deadline_stop=STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
         started_at=0.0,
         total_budget_sec=9000,
-        has_budget=True,
-        budget_exhausted=False,
-        budget_skip_reason="",
-        budget_remaining_sec=None,
-        partial=True,
+        json_path=json_path,
+        csv_path=csv_path,
+        results=[result],
     )
+    _flush_partial_conc_sweep_report(run)
     assert json_path.exists()
     loaded = json.loads(json_path.read_text())
     assert loaded["status"] == "in_progress"
+    assert loaded["concs_requested"] == [8, 4]
+    assert loaded["total_budget_sec"] == 9000
+    assert [p["conc"] for p in loaded["baseline"]["points"]] == [4]
 
 
 # ───────────────────────────────────────────────────────────────────────────── Change 3: plotting
