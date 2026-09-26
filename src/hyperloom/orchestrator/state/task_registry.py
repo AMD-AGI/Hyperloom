@@ -16,6 +16,7 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 
+
 TASK_STATES = (
     "queued",
     "running",
@@ -329,6 +330,31 @@ class TaskRegistry:
                 (json.dumps(history), task_id),
             )
 
+    async def append_completion_evidence(self, task_id: str, evidence: dict[str, Any] | None = None) -> None:
+        """Append durable completion evidence without changing state or updated_at.
+
+        This is not progress and must survive progress-history pruning. A
+        repeated completion appends again; a missing row remains an error.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            history = json.loads(cur.fetchone()["history"])
+            history.append({"ts": now_iso(), "evidence": evidence or {}})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+
+    async def integrate_reconcile_child_exists(self, base_key: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether an integrate-patch reconcile child exists in these states."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
+            (prefix, *states),
+        )
+        return row is not None
+
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
         """Return the task registered under ``idempotency_key``, or None."""
         row = await self.db.fetchone(
@@ -346,6 +372,43 @@ class TaskRegistry:
         """Return all running tasks ordered least-recently-updated-first."""
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
+
+    def running_context_sync(self) -> list[tuple[Task, list[str], str, list[int]]]:
+        """Read running tasks with the lanes, soonest lease expiry and GPUs each holds.
+
+        The three statements are separate reads, not one transactional snapshot.
+        """
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+            (),
+        )
+        if not rows:
+            return []
+        lanes_by_task: dict[str, list[str]] = {}
+        # Soonest lane expiry: the first one to lapse is when reclaim starts.
+        expiry_by_task: dict[str, str] = {}
+        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+            tid = str(row["task_id"])
+            lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
+            expires = str(row["expires_at"])
+            prev = expiry_by_task.get(tid)
+            if prev is None or expires < prev:
+                expiry_by_task[tid] = expires
+        gpus_by_task: dict[str, list[int]] = {}
+        for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+            gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
+        projected: list[tuple[Task, list[str], str, list[int]]] = []
+        for row in rows:
+            task = Task.from_row(row)
+            projected.append(
+                (
+                    task,
+                    lanes_by_task.get(task.task_id, []),
+                    expiry_by_task.get(task.task_id, ""),
+                    gpus_by_task.get(task.task_id, []),
+                )
+            )
+        return projected
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""

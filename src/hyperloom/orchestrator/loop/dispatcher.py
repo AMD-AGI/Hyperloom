@@ -509,12 +509,12 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self._integrate_reconcile_child_exists(
+            if await self.tasks.integrate_reconcile_child_exists(
                 base_key,
                 states=("succeeded",),
             ):
                 continue
-            if await self._integrate_reconcile_child_exists(
+            if await self.tasks.integrate_reconcile_child_exists(
                 base_key,
                 states=("queued", "running"),
             ):
@@ -540,24 +540,6 @@ class DispatcherCollaborator:
                 if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
-
-    async def _integrate_reconcile_child_exists(
-        self,
-        base_key: str,
-        *,
-        states: tuple[str, ...],
-    ) -> bool:
-        """Return whether a reconcile child idempotency key exists in any of ``states``."""
-        if not states:
-            return False
-        prefix = f"{base_key}-reconcile%"
-        placeholders = ",".join("?" for _ in states)
-        row = await self.tasks.db.fetchone(
-            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
-            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
-            (prefix, *states),
-        )
-        return row is not None
 
     async def _spawn_fitting_queued(
         self,

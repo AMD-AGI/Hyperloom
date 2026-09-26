@@ -235,16 +235,12 @@ class ConversationCollaborator:
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
         try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
-                (int(since_seq or 0), "orchestration"),
-            )
+            msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
         except Exception as exc:  # noqa: BLE001
             return f"(inbox unavailable: {exc!r})"
-        if not rows:
+        if not msgs:
             return "(no inbox events)"
 
-        msgs = [Message.from_row(r) for r in rows]
         lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
 
@@ -255,17 +251,14 @@ class ConversationCollaborator:
         except (TypeError, ValueError):
             k = 8
         try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
-                (k,),
-            )
+            newest_first = self.bus.recent_outcomes_context_sync(limit=k)
         except Exception as exc:  # noqa: BLE001
             return f"(recent outcomes unavailable: {exc!r})"
-        if not rows:
+        if not newest_first:
             return "(no recent outcomes)"
-
         # Flip newest-first query to newest-last for chronological reading.
-        msgs = [Message.from_row(r) for r in rows][::-1]
+        msgs = newest_first[::-1]
+
         header = "=== Recent action outcomes (newest last) ==="
         body_lines: list[str] = []
         body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
@@ -282,33 +275,15 @@ class ConversationCollaborator:
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources."""
         try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
-                (),
-            )
+            tasks = self.tasks.running_context_sync()
         except Exception as exc:  # noqa: BLE001
             return f"(running tasks unavailable: {exc!r})"
-        if not rows:
+        if not tasks:
             return "(no tasks in flight)"
-
-        lanes_by_task: dict[str, list[str]] = {}
-        # Soonest lane expiry: the first one to lapse is when reclaim starts.
-        expiry_by_task: dict[str, str] = {}
-        for r in self.bus.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
-            tid = str(r["task_id"])
-            lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
-            expires = str(r["expires_at"])
-            prev = expiry_by_task.get(tid)
-            if prev is None or expires < prev:
-                expiry_by_task[tid] = expires
-        gpus_by_task: dict[str, list[int]] = {}
-        for r in self.bus.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
-            gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
 
         now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
-        for row in rows:
-            task = Task.from_row(row)
+        for task, lanes, expires_at, gpus in tasks:
             params = task.params or {}
             started = _parse_iso_unix(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
@@ -326,15 +301,12 @@ class ConversationCollaborator:
             parts.append(f"idempotency_key={task.idempotency_key!r}")
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
-            expires_at = expiry_by_task.get(task.task_id, "")
             if expires_at:
                 exp_unix = _parse_iso_unix(expires_at)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
-            lanes = lanes_by_task.get(task.task_id)
             if lanes:
                 parts.append(f"lanes={sorted(lanes)}")
-            gpus = gpus_by_task.get(task.task_id)
             if gpus:
                 parts.append(f"gpu_ids={sorted(gpus)}")
             hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
