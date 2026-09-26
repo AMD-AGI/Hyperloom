@@ -15,11 +15,18 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from kernelforge.fusion.driver_shim import write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH
-from kernelforge.fusion.validate import DEFAULT_TARGET_SPEEDUP
+from kernelforge.fusion.harness_contract import trace_kernels_block
+from kernelforge.fusion.validate import (
+    DEFAULT_TARGET_SPEEDUP,
+    launch_count,
+    launch_gate_unverified,
+    launch_regression_reason,
+)
 from kernelforge.llm.git import git
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
@@ -157,8 +164,20 @@ def _to_validation_result(
     max_abs_err, snr_db = _worst_parity(report)
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
+    # The loop scores on time alone, so a candidate that got faster while issuing
+    # MORE launches can win its campaign. Fusion is bought in launches, and that
+    # verdict is forge-fuse's to make -- the loop keeps the commit either way, and
+    # this decides whether it leaves as a patch.
+    eager_launches = launch_count(report.get("eager_launches"))
+    fused_launches = launch_count(report.get("fused_launches"))
+    regression = launch_regression_reason(eager_launches, fused_launches)
     verified = committed and measured
-    kept = verified and speedup is not None and speedup >= target_speedup
+    kept = (
+        verified
+        and speedup is not None
+        and speedup >= target_speedup
+        and not regression
+    )
     if not committed:
         note = "forge-loop produced no validated candidate"
     elif not measured:
@@ -172,7 +191,12 @@ def _to_validation_result(
             f"forge-loop best iteration {payload.get('best_iteration')}: "
             f"{payload.get('best_ms')} ms vs {payload.get('baseline_ms')} ms baseline"
             + (f", worst-shape SNR {snr_db:.2f} dB" if snr_db is not None else "")
+            + (f" — REJECTED: {regression}" if regression else "")
         )
+    if regression:
+        log.warning("rejecting the loop's keeper: %s", regression)
+    elif committed and measured and launch_gate_unverified(eager_launches, fused_launches):
+        log.warning("harness reported no launch counts; the launch gate is unverified for this candidate")
     return ValidationResult(
         correctness_passed=verified,
         max_abs_err=max_abs_err,
@@ -184,6 +208,8 @@ def _to_validation_result(
         kept=kept,
         note=note,
         correctness_measured=measured,
+        eager_launches=eager_launches,
+        fused_launches=fused_launches,
     )
 
 
@@ -216,7 +242,18 @@ def build_forge_loop_command(
     fused_module: str = "",
 ) -> list[str]:
     """Assemble the forge-loop invocation for one recipe."""
-    source_files = [recipe.source_file] + ([fused_module] if fused_module else [])
+    # ``recipe.extra_files`` are the further call-site files discovery found, which
+    # widen the fusion beyond a single call-site file when the correct fix
+    # legitimately spans more than one (e.g. a kernel-selector that chooses the
+    # output-dtype template). All are TRACKED by the shadow repo so an edit there is
+    # kept/revertible like the primary file. Deduplicate while preserving order;
+    # never let one displace the primary kernel or fused module.
+    source_files = [recipe.source_file]
+    for extra in recipe.extra_files:
+        if extra and extra not in source_files:
+            source_files.append(extra)
+    if fused_module and fused_module not in source_files:
+        source_files.append(fused_module)
     cmd = _forge_loop_argv() + [
         "forge-loop",
         "--workspace",
@@ -290,6 +327,8 @@ def run_recipe_campaign(
     agent_sandbox_mode: str = "",
     shadow_env: dict[str, str] | None = None,
     fused_module: str = "",
+    repo_scope: bool = False,
+    tracked_roots: Sequence[str] = (),
 ) -> CampaignOutcome:
     """Author and validate one recipe by running a forge-loop campaign."""
     out = Path(output_dir)
@@ -317,6 +356,8 @@ def run_recipe_campaign(
             harness_path=harness_path,
             experience=experience,
             fused_module=fused_module,
+            repo_scope=repo_scope,
+            tracked_roots=tracked_roots,
         ),
         encoding="utf-8",
     )
@@ -391,22 +432,118 @@ def run_recipe_campaign(
 
 
 def build_campaign_program_md(
-    recipe: Recipe, *, harness_path: str, experience: str = "", fused_module: str = ""
+    recipe: Recipe,
+    *,
+    harness_path: str,
+    experience: str = "",
+    fused_module: str = "",
+    repo_scope: bool = False,
+    tracked_roots: Sequence[str] = (),
 ) -> str:
     """The task document handed to the loop's implementer for one recipe."""
     hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
     shapes = json.dumps(recipe.shapes or {}, indent=2, sort_keys=True)
     experience_block = f"\n## What earlier attempts established\n{experience}\n" if experience else ""
+    # Files beyond the single call-site file that are ALSO tracked/keepable, named
+    # because the correct fix legitimately spans them (e.g. the kernel-selector that
+    # picks the output-dtype template). "Tracked" below must reflect them, or the
+    # loop would silently revert an edit the fix depends on.
+    extra_editable = [path for path in recipe.extra_files if path and path != recipe.source_file]
+    if repo_scope:
+        tracked_phrase = "this file and every file under the tracked root(s) named below"
+    elif extra_editable:
+        tracked_phrase = "this file, the framework source file above, and the additional in-scope file(s) listed below"
+    else:
+        tracked_phrase = "this file and the framework source file above"
+    # Under repo scope a new helper may legitimately have to sit somewhere else (a
+    # shared package several call sites can import), so the blanket ban becomes a
+    # default plus the one rule that actually binds: the loop commits new files only
+    # where it was told to look.
+    other_modules_rule = (
+        "You MAY add further helper modules when several call sites need to import "
+        "them; put each one inside a tracked root below, and be aware that a KEEP "
+        "commits a new file only alongside a tracked edit."
+        if repo_scope
+        else "Do NOT create any other new module."
+    )
     module_block = (
         f"""
 ## Where the fused kernel goes (MANDATORY)
 Write the fused kernel into exactly this file, which already exists and is empty:
     {fused_module}
-Do NOT create any other new module. Only this file and the framework source file
-above are tracked, and the loop can neither keep nor revert anything else — a
-kernel written elsewhere scores as a validated candidate that then vanishes.
+{other_modules_rule} Only {tracked_phrase} are tracked, and the
+loop can neither keep nor revert anything else — a kernel written elsewhere scores
+as a validated candidate that then vanishes.
+
+## Wiring it in is HALF THE DELIVERABLE (MANDATORY)
+A fused module that nothing calls is not a fusion. You are not done when the kernel
+is fast in the harness; you are done when the framework's own forward path runs it.
+So the change you leave behind must be a patch that applies to the framework tree
+and is complete on its own:
+  1. REPLACE the original call site. Find where the framework's forward path issues
+     the chain you fused and make it call your entry point under {recipe.env_flag},
+     falling back to the untouched chain when the flag is off. Edit the framework
+     source above (and the additional in-scope files, if the fix spans them).
+  2. Move EVERY part of the fusion into the framework. If the fusion needs its
+     input produced differently — a GEMM that stops casting its output, a tensor
+     left in its original dtype or layout — that change belongs at the producing
+     call site in the framework, not in the harness and not in a caller's head.
+     Whatever the harness would have to do to set up your kernel is, by definition,
+     part of the fusion you have not delivered yet.
+  3. Leave the flag-off path byte-identical to what it was.
+The loop reverts anything outside the tracked files, so a wiring edit written
+elsewhere disappears along with the score it earned.
+
+## The single entry point (MANDATORY)
+Export exactly ONE public function from the fused module, and have both the
+framework call site and the harness call THAT SAME function. It must take the
+values available at the call site and return what the original chain returned, so
+that wiring it in is a one-line substitution and the harness's fused arm is a
+single call with no preparation around it. If the harness has to run part of your
+fusion before calling you, the entry point is drawn at the wrong boundary: pull
+that work inside it.
+
+Name it in a module-level attribute so the harness can find it:
+    __forge_fused_entry__ = "<name of that function>"
+The harness was written before your module existed and resolves the function
+through this attribute, so a module without it is a module the harness cannot
+call — it will score your fusion as absent.
 """
         if fused_module
+        else ""
+    )
+    repo_block = (
+        (
+            "\n## Repo scope: the framework tree is yours to edit (tracked & keepable)\n"
+            "This fusion was NOT localized to one file. The call sites it replaces may\n"
+            "sit in several modules, and you may edit any file under the tracked root(s)\n"
+            "below — edits there are kept and reverted with the fusion like the call-site\n"
+            "file itself. Anything OUTSIDE them is untracked: the loop can neither keep\n"
+            "nor revert it, so an edit there vanishes along with the score it earned.\n"
+            "Tracked root(s):\n"
+            + "\n".join(f"    {root}" for root in tracked_roots)
+            + "\nChange only what the fusion needs, leave the flag-off path byte-identical,\n"
+            "and do not touch unrelated call sites.\n"
+        )
+        if (repo_scope and tracked_roots)
+        else ""
+    )
+    extra_block = (
+        (
+            "\n## Additional in-scope files you MAY edit (tracked & keepable)\n"
+            "The single call-site file is not always enough: a downstream consumer may\n"
+            "derive a property of its result (e.g. its output dtype, layout, or a kernel\n"
+            "instantiation) from the value you feed it, so a change at the call site alone\n"
+            "can LOOK correct in isolation yet shift that downstream property and regress\n"
+            "end-to-end. When that happens, prefer to leave the consumer's contract intact\n"
+            "and change only the producer; touch these files solely to keep the consumer's\n"
+            "observable output identical to eager. They are tracked by the loop, so edits\n"
+            "are kept/reverted with the fusion. Change ONLY what the fusion needs, and do\n"
+            "not alter unrelated call sites:\n"
+            + "\n".join(f"    {e}" for e in extra_editable)
+            + "\n"
+        )
+        if extra_editable
         else ""
     )
     harness_block = (
@@ -421,18 +558,28 @@ the in-session gate — any attempt to edit it will be rejected.
         if harness_path
         else ""
     )
+    call_site_line = (
+        f"- Primary call site to edit: {recipe.source_file}"
+        if extra_editable
+        else f"- Framework source file to edit: {recipe.source_file}"
+    )
+    localize_intro = (
+        "Grep these files for the anchors below and fuse the chain they mark:"
+        if extra_editable
+        else "Grep the file for these anchors and fuse the chain they mark:"
+    )
     return f"""# Fuse the {recipe.pattern_id} chain
 
 ## Target
-- Framework source file to edit: {recipe.source_file}
+{call_site_line}
 - Env flag gating the fusion: {recipe.env_flag}
 - {recipe.description}
-{module_block}{harness_block}
+{trace_kernels_block(recipe.trace_kernels)}{module_block}{repo_block}{extra_block}{harness_block}
 ## What to fuse
 {recipe.fusion_math}
 
 ## How to localize it in the source
-Grep the file for these anchors and fuse the chain they mark:
+{localize_intro}
 {hints}
 
 ## Representative decode shapes

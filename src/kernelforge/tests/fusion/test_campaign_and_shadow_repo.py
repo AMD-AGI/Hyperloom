@@ -731,6 +731,42 @@ class TestCampaignCommand:
 
         assert "harness" not in program.lower()
 
+    def test_the_task_document_carries_the_traced_kernel_names(self):
+        """Source names are a guess; the recorded launches settle which path ran."""
+        recipe = _recipe(
+            trace_kernels={
+                "anchor": "void bf16_to_fp32_copy(int)",
+                "before": ["void tgemm_bf16(int)"],
+                "after": ["void sglang::flash_c4_prefill<512l>(Params)"],
+                "span": [
+                    {"name": "void tgemm_bf16(int)", "is_anchor": False},
+                    {"name": "void bf16_to_fp32_copy(int)", "is_anchor": True},
+                ],
+            }
+        )
+        program = build_campaign_program_md(recipe, harness_path="")
+
+        assert "GROUND TRUTH" in program
+        assert "void tgemm_bf16(int)" in program
+        assert "void sglang::flash_c4_prefill<512l>(Params)" in program
+        # The anchor is marked inside the span so its position is unambiguous.
+        assert ">> void bf16_to_fp32_copy(int)" in program
+
+    def test_unanchored_discovery_renders_no_trace_section(self):
+        """An empty heading would read as "the trace recorded nothing"."""
+        assert "GROUND TRUTH" not in build_campaign_program_md(_recipe(), harness_path="")
+
+    def test_the_task_document_demands_the_call_site_be_rewired(self):
+        """A fused module nothing calls is the failure this text exists to stop."""
+        program = build_campaign_program_md(
+            _recipe(),
+            harness_path="/out/kernel_harness.py",
+            fused_module="/sgl/models/lfm2_fused.py",
+        )
+
+        assert "REPLACE the original call site" in program
+        assert "__forge_fused_entry__" in program
+
     def test_a_campaign_writes_its_driver_and_task_document(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             campaign_module.subprocess,
@@ -923,6 +959,59 @@ class TestCampaignCommand:
         # fused_us/eager_us from this one report.
         assert outcome.result.kernel_speedup == 1.25
         assert outcome.result.rtol is None
+
+    def _campaign_won_on_time(self, tmp_path, monkeypatch, *, eager_launches, fused_launches):
+        """A campaign the loop kept on timing alone, with the given launch counts."""
+        recipe, commit = _committed_candidate(tmp_path)
+        return self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.25,
+                "baseline_ms": 0.120,
+                "best_ms": 0.096,
+                "improved": True,
+                "best_iteration": 3,
+                "best_commit": commit,
+                "experiment_id": "exp-1",
+            },
+            reports=[
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 96.0,
+                    "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"}],
+                    "eager_launches": eager_launches,
+                    "fused_launches": fused_launches,
+                    "tracked_tree": committed_tree_id(str(tmp_path), commit),
+                }
+            ],
+            recipe=recipe,
+        )
+
+    def test_a_loop_keeper_that_added_launches_is_refused(self, tmp_path, monkeypatch):
+        """The loop scores on time, so it can keep a candidate that costs a launch."""
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=6, fused_launches=7)
+
+        assert outcome.result.kept is False
+        assert outcome.result.kernel_speedup == 1.25  # it really was faster
+        assert "REJECTED" in outcome.result.note
+        assert "ADDS launches: 6 -> 7" in outcome.result.note
+
+    def test_a_loop_keeper_that_removed_launches_is_kept(self, tmp_path, monkeypatch):
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=6, fused_launches=1)
+
+        assert outcome.result.kept is True
+        assert (outcome.result.eager_launches, outcome.result.fused_launches) == (6, 1)
+        assert "REJECTED" not in outcome.result.note
+
+    def test_a_harness_that_reported_no_counts_still_keeps(self, tmp_path, monkeypatch):
+        """Older harnesses predate the field; unverified must not mean failed."""
+        outcome = self._campaign_won_on_time(tmp_path, monkeypatch, eager_launches=None, fused_launches=None)
+
+        assert outcome.result.kept is True
+        assert outcome.result.fused_launches is None
 
     def test_a_crashed_campaign_does_not_report_the_previous_runs_keep(self, tmp_path, monkeypatch):
         """The result file outlives the run that wrote it."""

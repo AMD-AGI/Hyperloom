@@ -48,12 +48,79 @@ kernelforge forge-fuse ... --dry-run
 That writes the manifest with the localized recipe skeleton so you can see which
 chain would be attempted and where in the framework source it lives.
 
+## Naming the kernel yourself
+
+Ranking picks the chain by default, which is the wrong answer when you already
+know which kernel is interesting. `--fuse-kernel` takes the full GPU kernel name,
+exactly as the trace spells it, and fixes what the fusion is built around. What to
+fuse it *with* is still discovered: the run reads what the trace shows running
+before and after that kernel and hands the agent that neighbourhood.
+
+```bash
+kernelforge forge-fuse ... --dry-run \
+    --fuse-kernel 'void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(...)>'
+```
+
+With `--dry-run` this resolves and stops, writing `fusion_anchor.json` without
+reaching an agent, so you can confirm the selection before spending anything:
+
+```
+gemm -> cast -> attention   (1456/1488 = 97.8%)
+  immediately before (gemm), distinct kernels:
+       496x  hgemm_bf16_32x64x128x4_SPK4_W1x4x1_BLDS1_TN_AS1_0
+       ...
+```
+
+Neighbours are aggregated **by category**, not by name. Kernels that differ only
+in template parameters -- `SPK2`/`SPK4`/`SPK7` above -- are one pattern, and
+counting them separately would report a stable GEMM epilogue as three unrelated
+coincidences. The concrete names are listed underneath so nothing is hidden.
+
+A name the trace does not contain is a usage error that lists the closest ones; a
+fragment is not a name.
+
+Naming a kernel also overrides the diagnosis. `is_candidate: false` normally ends
+the run, but a trace-wide verdict is not an argument about the kernel you picked.
+
+When the anchor's neighbours turn out to live outside the model file -- which is
+common, since attention and GEMM kernels are usually called from a backend the
+model file only delegates to -- the agent is asked to say so and propose the
+largest fusion that is reachable and still contains the anchor, rather than
+returning nothing.
+
+## Giving it the whole repository
+
+Everything above assumes one implementation file: the run resolves the model's
+source, embeds it in the discovery prompt, and the author may edit that file
+plus the fused module. When the interesting chain is not in that file,
+`--repo-scope` removes the assumption:
+
+```bash
+kernelforge forge-fuse ... --discover anchored --repo-scope \
+    --fuse-kernel '...'
+```
+
+Discovery is then given the framework checkout and its read and search tools
+rather than a pre-selected file, and must locate the call site itself; nothing
+is embedded in the prompt. A proposal names the call site it found in
+`source_file`, and any further files the same fusion has to change -- a runtime
+and the selector that routes to it, say -- in `additional_files`. Every path it
+returns is checked against the tree, and a proposal naming a file that does not
+exist is dropped rather than quietly retargeted at the model file. Authoring
+receives that whole set as editable and the wiring gate accepts the call
+reached from any of them.
+
+It costs discovery turns, since the agent is searching instead of reading, and
+it only applies to `--discover llm` and `--discover anchored`; pattern
+discovery has no agent to give a repository to.
+
 ## What happens
 
 1. **Diagnose** the trace into a launch-bound share and a predicted gain.
-2. **Discover** which chain to fuse, either by matching the pattern library
-   (`--discover patterns`, the default) or by letting an agent read the trace
-   and the real source (`--discover llm`).
+2. **Discover** which chain to fuse: by matching the pattern library
+   (`--discover patterns`, the default), by letting an agent read the trace and
+   the real source (`--discover llm`), or around a kernel you named yourself
+   (`--fuse-kernel`).
 3. **Claim an existing pass.** If a vLLM compile pass already covers the chain,
    flipping its default on and running a serving A/B is cheaper than authoring
    anything, so that shortcut runs before the loop.
@@ -88,10 +155,17 @@ your own checkout keeps its history and its branches untouched. Only the
 framework package is indexed — not the wheels installed beside it — and the run
 restores the tree to the state it found before exporting its patch.
 
+Under `--repo-scope` the indexed set is the union of the top-level trees the
+recipe's files live in, which for an SGLang checkout is `python/` and not the
+multi-gigabyte gateway and Rust trees beside it. Indexing is what makes a file
+keepable and revertible, so an edit outside those trees would be neither, and
+export sweeps the whole changed set rather than the files named on the recipe.
+
 Because the loop can only commit files that were already tracked, the pipeline
 also decides where the fused kernel goes: it creates that module empty, commits
-it into the baseline, and names it in the task document as the only file the
-author may write. A kernel written anywhere else would be scored and then lost.
+it into the baseline, and names it in the task document as the file to write the
+kernel into. A kernel written to a path created mid-campaign would be scored and
+then lost. Repo scope changes which *other* files may be edited, not this.
 
 ## What the agent is told
 
@@ -121,6 +195,7 @@ against the fused arm whenever eager is timed first.
 | `serving_smoke_<pattern>.log` | The server log from the final gate |
 | `fusion.patch` | The fusion, exported before the smoke so a killed run still hands one over |
 | `kernel_keep_checkpoint.json` | Written after that patch exists; marks a KEEP as salvageable |
+| `fusion_anchor.json` | With `--fuse-kernel`: the resolved kernel, its neighbours and any warnings |
 
 The serving gate boots the model once, with the session's own tensor-parallel
 size, KV block size and max model length -- a sparse-attention model rejects the
@@ -133,8 +208,11 @@ and its patch in place for e2e integrate to judge, and the run still exits zero
 so the caller does not read a deferral as a failure.
 
 The manifest is the stable machine-readable output; `verdict` is one of
-`candidate`, `no_opportunity` or `llm_unavailable`, and exit code 3 means the
-run never reached the model. Each history entry carries the `experiment_id` of
+`candidate`, `no_opportunity`, `llm_unavailable` or `anchor_resolved`, and exit
+code 3 means the run never reached the model. The last two both mean the run has
+no opinion about the kernel rather than a negative one: `llm_unavailable` because
+the model was never reached, `anchor_resolved` because a `--fuse-kernel --dry-run`
+located the kernel and stopped before discovery. Each history entry carries the `experiment_id` of
 the forge-loop run behind it, and `best_experiment_id` names the one that
 produced the kept result.
 

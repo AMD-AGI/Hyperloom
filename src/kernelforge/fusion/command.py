@@ -17,12 +17,13 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import click
 
 from hyperloom.common.io import atomic_write_json
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+from kernelforge.agent_backends.base import AgentProviderUnavailableError
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -44,6 +45,7 @@ from .campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
+from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
 from .discover import discover_recipes, registered_agent_llm_fn
 from .emit import _git_tracks, _is_fused_module_name, export_artifacts, restore_exported_changes
@@ -54,12 +56,20 @@ from .locate import build_recipes, resolve_framework_source_file
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
-from .report import LLM_UNAVAILABLE_VERDICT, build_manifest, write_manifest
+from .report import (
+    ANCHOR_REPORT_NAME,
+    ANCHOR_RESOLVED_VERDICT,
+    LLM_UNAVAILABLE_VERDICT,
+    build_manifest,
+    write_anchor_report,
+    write_manifest,
+)
 from .shapes import load_model_config, resolve_decode_shapes
 from .validate import (
     DEFAULT_TARGET_SPEEDUP,
     KERNEL_KEEP_CHECKPOINT,
     HarnessKernelRunner,
+    eager_trace_alignment,
     fused_symbol_invocation_evidence,
     serving_smoke,
     serving_smoke_verdict,
@@ -105,6 +115,22 @@ def _resolve_agent_choice(
     # about which model a box is configured for.
     model = str(llm_model or "").strip() or resolve_agent_model(provider) or registration.default_model
     return provider, model
+
+
+def _campaign_agent_provider(agent_backend: str, llm_model: Optional[str]) -> str:
+    """The provider forge-loop is handed, or the requested spelling when no provider is installed.
+
+    forge-loop rejects the literal ``auto``, this command's own spelling, so the choice is
+    resolved here rather than forwarded. An unresolvable choice is not fatal at this point:
+    a run that only replays a compile pass authors nothing, and a run that does author still
+    fails on its own when it asks the registry for the backend it actually needs.
+    """
+    try:
+        provider, _model = _resolve_agent_choice(agent_backend, llm_model)
+    except AgentProviderUnavailableError as exc:
+        log.debug("no agent provider resolved for the campaign (%s); forwarding %r", exc, agent_backend)
+        return agent_backend
+    return provider
 
 
 def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
@@ -187,6 +213,42 @@ def _author_module_dirs(source_files: list[str]) -> list[str]:
         if parent not in dirs:
             dirs.append(parent)
     return dirs
+
+
+def _discovery_root(source_file: str, framework_root: str) -> str:
+    """The directory a discovery session runs in, and repo scope searches within."""
+    return (
+        _framework_repo_root(source_file, framework_root)
+        or framework_root
+        or str(Path(source_file).parent if source_file else Path.cwd())
+    )
+
+
+def _recipe_files(recipes) -> list[str]:
+    """Every framework file the given recipes edit, order-stable and de-duplicated."""
+    files: list[str] = []
+    for recipe in recipes:
+        for path in recipe.edit_files:
+            if path and path not in files:
+                files.append(path)
+    return files
+
+
+def _tracked_roots(repo_root: str, source_files: list[str]) -> list[str]:
+    """The top-level trees the shadow repo indexes, as the author is told them."""
+    if not repo_root:
+        return []
+    root = Path(repo_root).resolve()
+    roots: list[str] = []
+    for source_file in source_files:
+        with contextlib.suppress(OSError, ValueError):
+            rel = Path(source_file).resolve().relative_to(root)
+            if not rel.parts:
+                continue
+            entry = str(root / rel.parts[0])
+            if entry not in roots:
+                roots.append(entry)
+    return roots
 
 
 def _prepare_author_harness(
@@ -280,6 +342,47 @@ def _finish_author_harness(
     return ok, reason
 
 
+def _harness_alignment_attempts() -> int:
+    """How many times the harness may be re-authored onto the right code path."""
+    raw = os.environ.get("FORGE_HARNESS_ALIGN_ATTEMPTS", "3")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        log.warning("bad FORGE_HARNESS_ALIGN_ATTEMPTS=%r; using 3", raw)
+        return 3
+
+
+def _probe_eager_alignment(
+    recipe,
+    *,
+    harness_path: str,
+    repo_root: str,
+    gpu: str,
+) -> tuple[Optional[bool], str, list[str]]:
+    """Run the fresh harness once and check its eager arm against the trace.
+
+    This costs one harness run before the campaign starts, which buys the only
+    chance to catch a baseline measured against the wrong implementation. Once
+    the loop is running, every number it produces is relative to this arm and
+    nothing re-examines it.
+    """
+    runner = HarnessKernelRunner(
+        harness_path=harness_path,
+        workdir=repo_root or ".",
+        framework_root=repo_root,
+        gpu=gpu,
+        env_flags={f: "1" for f in recipe.env_flag.split()},
+    )
+    report = runner.report(recipe)
+    observed = [str(k) for k in (report.get("eager_kernels") or []) if str(k).strip()]
+    aligned, reason = eager_trace_alignment(observed, getattr(recipe, "trace_kernels", {}))
+    if aligned is None and report.get("eager_matches_trace") is False:
+        # The harness could not name the kernels but knows it did not match. Its own
+        # verdict is worth more than our inability to check it.
+        return False, "harness reported eager_matches_trace=false", observed
+    return aligned, reason, observed
+
+
 def _author_baseline_harness(
     recipe,
     *,
@@ -291,36 +394,100 @@ def _author_baseline_harness(
     max_turns: int,
     backend,
 ) -> tuple[bool, str]:
-    """Write the harness ``recipe``'s campaign benchmarks, before it starts."""
-    Path(harness_path).unlink(missing_ok=True)
-    staging = _author_harness_target(repo_root, out)
-    ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
-    if not ready:
-        return False, reason
-    target = staging or harness_path
-    prompt = (
-        build_campaign_program_md(recipe, harness_path="")
-        + harness_contract(target, recipe.env_flag)
-        + "\nWrite ONLY that harness. Do not edit the framework source and do "
-        "not create any other file; the fused kernel is authored after this.\n"
-    )
-    (out / "harness_prompt.md").write_text(prompt, encoding="utf-8")
-    rc = run_author(
-        prompt,
-        workdir=repo_root or ".",
-        log_path=str(out / "harness_author.log"),
-        gpu=gpu,
-        model=llm_model,
-        max_turns=max_turns,
-        backend=backend,
-        timeout_s=_agent_timeout_sec(),
-        target_files=[target],
-        new_module_dirs=[],
-    )
-    published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
-    if rc != 0:
-        return False, f"harness author exited {rc}"
-    return published, error
+    """Write the harness ``recipe``'s campaign benchmarks, before it starts.
+
+    The harness is re-authored while its eager arm demonstrably runs a different
+    code path from the one the trace recorded: a wrong baseline is not a smaller
+    version of a right one, and every later stage inherits it.
+    """
+    attempts = _harness_alignment_attempts()
+    feedback = ""
+    published, error = False, "harness was never authored"
+
+    for attempt in range(1, attempts + 1):
+        Path(harness_path).unlink(missing_ok=True)
+        staging = _author_harness_target(repo_root, out)
+        ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
+        if not ready:
+            return False, reason
+        target = staging or harness_path
+        prompt = (
+            build_campaign_program_md(recipe, harness_path="")
+            + harness_contract(target, recipe.env_flag)
+            + "\nWrite ONLY that harness. Do not edit the framework source and do "
+            "not create any other file; the fused kernel is authored after this.\n"
+            + feedback
+        )
+        suffix = "" if attempt == 1 else f".retry{attempt}"
+        (out / f"harness_prompt{suffix}.md").write_text(prompt, encoding="utf-8")
+        rc = run_author(
+            prompt,
+            workdir=repo_root or ".",
+            log_path=str(out / "harness_author.log"),
+            gpu=gpu,
+            model=llm_model,
+            max_turns=max_turns,
+            backend=backend,
+            timeout_s=_agent_timeout_sec(),
+            target_files=[target],
+            new_module_dirs=[],
+        )
+        published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
+        if rc != 0:
+            return False, f"harness author exited {rc}"
+        if not published:
+            return published, error
+
+        aligned, why, observed = _probe_eager_alignment(
+            recipe,
+            harness_path=harness_path,
+            repo_root=repo_root,
+            gpu=gpu,
+        )
+        if aligned is None:
+            log.info("harness eager-arm alignment unchecked: %s", why)
+            return published, error
+        if aligned:
+            log.info("harness eager arm matches the trace: %s", why)
+            return published, error
+
+        log.warning(
+            "harness attempt %d/%d measured the wrong code path: %s",
+            attempt,
+            attempts,
+            why,
+        )
+        feedback = _alignment_feedback(recipe, why, observed)
+
+    return False, f"harness eager arm never matched the traced kernels after {attempts} attempts"
+
+
+def _alignment_feedback(recipe, why: str, observed: list[str]) -> str:
+    """Tell the next harness attempt exactly which code path it actually hit."""
+    evidence = getattr(recipe, "trace_kernels", {}) or {}
+    expected = [str(evidence.get("anchor") or "")]
+    for key in ("before", "after"):
+        expected += [str(n) for n in (evidence.get(key) or [])]
+    expected = [e for e in expected if e]
+    seen = "\n".join(f"    {k}" for k in observed[:20]) or "    (the harness named none)"
+    want = "\n".join(f"    {k}" for k in expected[:20])
+    return f"""
+## Your previous harness measured the WRONG code path — rewrite it
+{why}
+
+Kernels your eager arm actually launched:
+{seen}
+
+Kernels the trace recorded for this fusion:
+{want}
+
+The functions you called are not the ones that run in the served model. Do not
+adjust the ones you picked: go back to the model's forward pass and follow the
+calls through to whatever issues the kernels above — the module the layer really
+instantiates, the mixin the attention backend really inherits, the branch this
+configuration really takes. Symbols that merely look right are how the previous
+attempt got here. Verify with the profiler before you report anything.
+"""
 
 
 def _author_rc_after_harness(rc: int, *, harness_ok: bool) -> int:
@@ -358,6 +525,23 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     root.handlers.clear()
     root.addHandler(fh)
     root.addHandler(sh)
+
+
+def _verdict_override(
+    llm_error: Optional[LlmUnavailableError],
+    anchor_report: Optional[AnchorReport],
+    dry_run: bool,
+) -> str:
+    """Name the outcomes that are not a judgement about the kernel.
+
+    A run that never asked the model must not report ``no_opportunity``: that reads
+    as "there is nothing to fuse here" when nothing was ever looked at.
+    """
+    if llm_error is not None:
+        return LLM_UNAVAILABLE_VERDICT
+    if anchor_report is not None and dry_run:
+        return ANCHOR_RESOLVED_VERDICT
+    return ""
 
 
 @click.command("forge-fuse")
@@ -408,6 +592,16 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     default="",
     help="Explicit framework source root (else auto-detect the installed package).",
 )
+@click.option(
+    "--repo-scope/--no-repo-scope",
+    "repo_scope",
+    default=False,
+    help="Give discovery and authoring the whole framework repository instead of one "
+    "resolved model file. Discovery embeds no source and explores the tree with its own "
+    "read/search tools, may return a fusion whose call sites span several files, and "
+    "authoring may edit all of them. Use when the chain is not in the arch-class model "
+    "file and you do not want to name its location.",
+)
 @click.option("--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes.")
 @click.option(
     "--decode-steps",
@@ -418,9 +612,17 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 @click.option(
     "--discover",
     "discover_mode",
-    type=click.Choice(["patterns", "llm"]),
+    type=click.Choice(["patterns", "llm", "anchored"]),
     default="patterns",
-    help="Recipe discovery: 'patterns' (template library) or 'llm' (LLM reads trace+source, autonomous).",
+    help="Recipe discovery: 'patterns' (template library), 'llm' (LLM reads trace+source, autonomous), "
+    "or 'anchored' (fuse around the kernel named by --fuse-kernel).",
+)
+@click.option(
+    "--fuse-kernel",
+    "fuse_kernel",
+    default="",
+    help="Full GPU kernel name, exactly as the trace spells it. Fusion is then built around "
+    "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
 )
 @click.option(
     "--dry-run",
@@ -515,9 +717,11 @@ def run(
     harness_noise_repeat: int,
     harness_noise_env: tuple[str, ...],
     framework_root: str,
+    repo_scope: bool,
     decode_batch: int,
     decode_steps: int,
     discover_mode: str,
+    fuse_kernel: str,
     dry_run: bool,
     author: bool,
     validate: bool,
@@ -565,6 +769,12 @@ def run(
     if missing:
         raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
 
+    fuse_kernel = fuse_kernel.strip()
+    if fuse_kernel:
+        discover_mode = "anchored"
+    elif discover_mode == "anchored":
+        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
+
     out = Path(output_dir)
     _setup_logging(out, verbose)
 
@@ -605,8 +815,74 @@ def run(
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
+    if repo_scope and discover_mode == "patterns":
+        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
+        # nothing in it that could explore a repository.
+        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
     llm_error: LlmUnavailableError | None = None
-    if discover_mode == "llm":
+    anchor_report = None
+    if discover_mode == "anchored":
+        try:
+            anchor_report = resolve_anchor(trace_path, KernelAnchor(name=fuse_kernel))
+        except AnchorResolutionError as exc:
+            raise click.UsageError(str(exc)) from exc
+        write_anchor_report(anchor_report, out)
+        log.info(
+            "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
+            anchor_report.category,
+            anchor_report.occurrences,
+            anchor_report.total_us,
+            anchor_report.share * 100,
+            anchor_report.signature,
+            anchor_report.consistency * 100,
+        )
+        for text in anchor_report.warnings:
+            log.warning("anchor: %s", text)
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
+        source_file, _source_note = resolve_framework_source_file(
+            model_path, framework, framework_root=framework_root, model_type=model_type
+        )
+        discovery_root = _discovery_root(source_file, framework_root)
+        if dry_run:
+            # Resolution is the whole point of a dry run here: the operator has to see which launches were
+            # selected before an agent or a GPU is paid for.
+            recipes = []
+            log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
+        else:
+            try:
+                discovery_agent = require_agent_backend()
+                recipes = discover_anchored_recipes(
+                    model_type=model_type,
+                    framework=framework,
+                    source_file=source_file,
+                    shapes=shapes,
+                    report=anchor_report,
+                    framework_root=framework_root,
+                    category_shares=diagnosis.category_shares,
+                    repo_scope=repo_scope,
+                    repo_root=discovery_root,
+                    llm_fn=registered_agent_llm_fn(
+                        discovery_agent,
+                        model=discovery_agent.runtime.model,
+                        workdir=discovery_root,
+                        # Discovery is read-only, so the file it is shown is snapshotted
+                        # and restored. Under repo scope no file is shown and the whole
+                        # tree is off limits, so the session's own read-only spec
+                        # carries that instead.
+                        protected_files=[source_file] if source_file else [],
+                        log_path=str(out / "discovery_llm.txt"),
+                    ),
+                )
+            except LlmUnavailableError as exc:
+                llm_error = exc
+                recipes = []
+                log.error(
+                    "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
+                    exc.kind,
+                    exc.attempts,
+                    exc,
+                )
+    elif discover_mode == "llm":
         # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
         # chains itself (not capped to templates).
         shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
@@ -615,9 +891,7 @@ def run(
         )
         try:
             discovery_agent = require_agent_backend()
-            discovery_workdir = _framework_repo_root(source_file, framework_root) or str(
-                Path(source_file).parent if source_file else Path.cwd()
-            )
+            discovery_workdir = _discovery_root(source_file, framework_root)
             recipes = discover_recipes(
                 diagnosis,
                 model_type=model_type,
@@ -628,6 +902,8 @@ def run(
                 # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
                 # compile-pass config, and that verdict rewrites the pattern id.
                 framework_root=framework_root,
+                repo_scope=repo_scope,
+                repo_root=discovery_workdir,
                 llm_fn=registered_agent_llm_fn(
                     discovery_agent,
                     model=discovery_agent.runtime.model,
@@ -669,6 +945,11 @@ def run(
             "(verdict: %s) — this is NOT a no_opportunity result",
             LLM_UNAVAILABLE_VERDICT,
         )
+    elif anchor_report is not None and dry_run:
+        log.info(
+            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
+            ANCHOR_RESOLVED_VERDICT,
+        )
     else:
         log.info("no fusion recipe located (verdict: no_opportunity)")
 
@@ -698,6 +979,7 @@ def run(
             diagnosis=diagnosis,
             recipe=top_recipe,
             candidates=recipes,
+            anchor=anchor_report.to_dict() if anchor_report is not None else None,
             validation=validation,
             artifacts=artifacts,
             loop=loop,
@@ -743,7 +1025,9 @@ def run(
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
         # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
         # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
-        pristine_dir = _snapshot_fusion_source(repo_root, top_recipe.source_file, out)
+        pristine_dir = _snapshot_fusion_source(
+            repo_root, top_recipe.source_file, out, extra_files=top_recipe.extra_files
+        )
         # combine folds every recipe into one unit; multi-patch authors each non-claim recipe as its own sibling and
         # runs any claims separately.
         authored = recipes if fuse_all_confirmed else (deferred if multi_patch else [top_recipe])
@@ -779,7 +1063,7 @@ def run(
                 target_speedup=target_speedup,
                 model_path=model_path,
                 run_arch=run_arch,
-                agent_backend=agent_backend,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -790,6 +1074,7 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
+                repo_scope=repo_scope,
                 agent_factory=require_agent_backend,
                 publish=publish,
             )
@@ -848,7 +1133,7 @@ def run(
                 combine=fuse_all_confirmed,
                 model_path=model_path,
                 gpu_arch=run_arch,
-                agent_backend=agent_backend,
+                agent_backend=_campaign_agent_provider(agent_backend, llm_model),
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -859,6 +1144,7 @@ def run(
                 tp=tp,
                 block_size=block_size,
                 max_model_len=max_model_len,
+                repo_scope=repo_scope,
             )
             validation = loop_result.best
             loop_manifest = loop_result.to_dict()
@@ -885,7 +1171,9 @@ def run(
                 log.error("author harness preparation failed: %s", harness_error)
             else:
                 prompt_harness_path = author_harness_path or harness_path
-                author_sources = [r.source_file for r in authored if r.source_file]
+                # Every call-site file, not just the primary: the author transaction treats this list as its exact
+                # write allowlist, so a multi-file fusion whose second file is missing here cannot be delivered.
+                author_sources = _recipe_files(authored)
                 prompt = build_multi_author_prompt(
                     [r.to_dict() for r in authored],
                     framework=framework,
@@ -931,7 +1219,14 @@ def run(
         # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
         # serving survived).
         if repo_root and exported_ok and compile_pass_outcome is None and not did_multi_patch:
-            artifacts = export_artifacts(repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir)
+            artifacts = export_artifacts(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir=pristine_dir,
+                extra_files=top_recipe.extra_files,
+                repo_scope=repo_scope,
+            )
 
         # The exported patch is taken back out of the framework.
         if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None and not did_multi_patch:
@@ -947,7 +1242,13 @@ def run(
         ):
             # Nothing usable came out, so leave the framework exactly as found rather than carrying unvalidated code
             # into whatever runs next.
-            _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
+            _discard_failed_attempt(
+                repo_root,
+                top_recipe.source_file,
+                out,
+                pristine_dir,
+                extra_files=top_recipe.extra_files,
+            )
 
     manifest, path = publish(
         patches_out,
@@ -955,7 +1256,7 @@ def run(
         artifacts=artifacts,
         loop=loop_manifest,
         compile_pass=compile_pass_outcome,
-        verdict_override=(LLM_UNAVAILABLE_VERDICT if llm_error is not None else ""),
+        verdict_override=_verdict_override(llm_error, anchor_report, dry_run),
         error=(llm_error.to_dict() if llm_error is not None else None),
         nomination=nomination_summary,
     )
@@ -1169,6 +1470,7 @@ def _run_multi_patch_nomination(
     block_size: int,
     max_model_len: int,
     agent_factory,
+    repo_scope: bool = False,
     publish=None,
 ) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
     """Run BOTH pipelines and collect every keeper as an independent sibling."""
@@ -1219,6 +1521,7 @@ def _run_multi_patch_nomination(
             tp=tp,
             block_size=block_size,
             max_model_len=max_model_len,
+            repo_scope=repo_scope,
             publish=publish,
         )
         for patch in loop_result.patches:
@@ -1282,6 +1585,10 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
         description="; ".join(r.description for r in recipes),
         env_flag=" ".join(flags),
         source_file=base.source_file,
+        # The union, minus whichever file became the combined call site: every folded
+        # recipe's files must stay tracked or combining would silently narrow the
+        # edit scope to the first recipe's.
+        extra_files=[path for path in _recipe_files(recipes) if path != base.source_file],
         source_hints=[h for r in recipes for h in r.source_hints],
         fusion_math="\n".join(f"[{r.pattern_id}] {r.fusion_math}" for r in recipes),
         eager_reference_hint="; ".join(r.eager_reference_hint for r in recipes),
@@ -1318,11 +1625,16 @@ def _run_fusion_autoloop(
     tp: int = 1,
     block_size: int = 0,
     max_model_len: int = 0,
+    repo_scope: bool = False,
     publish=None,
 ):
     """Try each ranked recipe as one forge-loop campaign."""
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
+    # Every file any recipe edits: the shadow index has to admit all of them up front, because it is built once and
+    # shared by every campaign below.
+    campaign_files = list(dict.fromkeys(_recipe_files(loop_recipes)))
+    tracked_roots = _tracked_roots(repo_root, campaign_files)
 
     # Per-recipe pristine snapshots for the multi-patch export.
     multi_patch = not combine
@@ -1330,7 +1642,11 @@ def _run_fusion_autoloop(
     if multi_patch and repo_root:
         for r in loop_recipes:
             snap = _snapshot_fusion_source(
-                repo_root, r.source_file, out, subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}"
+                repo_root,
+                r.source_file,
+                out,
+                subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}",
+                extra_files=r.extra_files,
             )
             if snap:
                 recipe_pristine[r.pattern_id] = snap
@@ -1349,6 +1665,9 @@ def _run_fusion_autoloop(
             loop_recipes[0].source_file,
             git_dir=str(out / "shadow.git"),
             extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
+            # A fusion whose call sites span packages is keepable only if every one of
+            # those packages is in the index.
+            scope_files=campaign_files,
         )
         if shadow is None:
             log.error(
@@ -1423,6 +1742,8 @@ def _run_fusion_autoloop(
             agent_sandbox_mode=agent_sandbox_mode,
             shadow_env=shadow.env,
             fused_module=fused_module_path(recipe),
+            repo_scope=repo_scope,
+            tracked_roots=tracked_roots,
         )
         if outcome.experiment_id:
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id
@@ -1451,6 +1772,8 @@ def _run_fusion_autoloop(
             pristine_dir=pristine,
             patch_name=patch_name,
             fused_module=fused_module_path(recipe),
+            extra_files=recipe.extra_files,
+            repo_scope=repo_scope,
         )
         if not (arts and arts.patch):
             log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
@@ -1640,7 +1963,10 @@ def _run_serving_smoke(
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Cheapest gate first, and the only one that catches a fusion nothing calls: the smoke would boot, decode and
     # PASS, because stock code is what ran.
-    wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
+    wiring = fused_symbol_invocation_evidence(
+        getattr(recipe, "source_file", ""),
+        getattr(recipe, "extra_files", ()),
+    )
     if wiring.verdict == "not_wired":
         log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
         note = (
@@ -2030,12 +2356,20 @@ def _needs_discard(exported_ok: bool, artifacts) -> bool:
     return not (artifacts and artifacts.patch)
 
 
-def _discard_failed_attempt(repo_root: str, source_file: str, out: Path, pristine_dir: str) -> None:
+def _discard_failed_attempt(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    pristine_dir: str,
+    extra_files: Sequence[str] = (),
+) -> None:
     """Put the framework back as it was after a run that produced nothing usable."""
     if not repo_root or not source_file or not pristine_dir:
         return
-    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed")
-    _reset_fusion_source(repo_root, source_file, pristine_dir=pristine_dir)
+    _snapshot_fusion_source(repo_root, source_file, out, subdir=".failed", extra_files=extra_files)
+    for path in [source_file, *extra_files]:
+        if path:
+            _reset_fusion_source(repo_root, path, pristine_dir=pristine_dir)
 
     for candidate in _author_created_modules(source_file, pristine_dir):
         with contextlib.suppress(OSError):
@@ -2066,8 +2400,19 @@ def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
     return found
 
 
-def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir: str = ".pristine") -> str:
-    """Copy the pristine model source (pre-authoring) into ``out/<subdir>/<rel>``."""
+def _snapshot_fusion_source(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    subdir: str = ".pristine",
+    extra_files: Sequence[str] = (),
+) -> str:
+    """Copy the pristine framework source (pre-authoring) into ``out/<subdir>/<rel>``.
+
+    ``extra_files`` are the further call-site files a multi-file fusion edits. They
+    are snapshotted too so the non-git export can diff them; without a snapshot
+    such a file diffs against nothing and exports as a bogus whole-file creation.
+    """
     if not source_file or not Path(source_file).is_file():
         return ""
     pdir = out / subdir
@@ -2094,6 +2439,12 @@ def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir:
     src = Path(source_file)
     if not _snap(src):
         return ""
+
+    # The same reasoning applies to every other file this fusion edits, but one of them failing is not fatal: the
+    # primary is what decides whether a patch can be produced at all.
+    for path in extra_files:
+        if path and Path(path).is_file() and Path(path).resolve() != src.resolve():
+            _snap(Path(path))
 
     # Also snapshot any pre-existing *_fused*/*_fusion* module beside it, so export can tell an author-created NEW
     # module from a pre-existing framework file that merely matches the marker.
