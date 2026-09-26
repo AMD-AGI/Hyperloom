@@ -86,36 +86,13 @@ def test_multi_node_flag_in_non_leading_position_is_detected(_multi_node, monkey
     assert "CONC=64" in dropped[0]["reason"]
 
 
-def test_conc_unset_defaults_to_64(_multi_node, monkeypatch):
-    """CONC env var absent → the os.environ.get default of '64' applies."""
-    monkeypatch.delenv("CONC", raising=False)
-    grid = [
-        _v("below-default", args="--cuda-graph-max-bs 32"),
-        _v("at-default", args="--cuda-graph-max-bs 64"),
-    ]
-    kept, dropped = apply_multi_node_invalid_variants(grid)
-    assert [v.name for v in kept] == ["at-default"]
-    assert [row["name"] for row in dropped] == ["below-default"]
-    assert "CONC=64" in dropped[0]["reason"]
-    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
-
-
-def test_conc_empty_string_defaults_to_64(_multi_node, monkeypatch):
-    """CONC='' → the `or 64` branch applies (empty string is falsy)."""
-    monkeypatch.setenv("CONC", "")
-    grid = [
-        _v("below-default", args="--cuda-graph-max-bs 32"),
-        _v("at-default", args="--cuda-graph-max-bs 64"),
-    ]
-    kept, dropped = apply_multi_node_invalid_variants(grid)
-    assert [v.name for v in kept] == ["at-default"]
-    assert [row["name"] for row in dropped] == ["below-default"]
-    assert "CONC=64" in dropped[0]["reason"]
-    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
-
-
-def test_unparseable_conc_falls_back_to_64(_multi_node, monkeypatch):
-    monkeypatch.setenv("CONC", "not-an-int")
+@pytest.mark.parametrize("conc", [None, "", "not-an-int"], ids=["unset", "empty", "unparseable"])
+def test_a_conc_that_yields_no_number_falls_back_to_64(_multi_node, monkeypatch, conc):
+    """Absent, empty and unparseable all reach the same default, and the reason says which."""
+    if conc is None:
+        monkeypatch.delenv("CONC", raising=False)
+    else:
+        monkeypatch.setenv("CONC", conc)
     grid = [
         _v("below-default", args="--cuda-graph-max-bs 32"),
         _v("at-default", args="--cuda-graph-max-bs 64"),
