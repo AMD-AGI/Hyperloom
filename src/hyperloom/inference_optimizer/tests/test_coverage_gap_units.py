@@ -683,6 +683,9 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
     # No prior launch recorded -> never a match.
     assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
 
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    no_overrides = {"set": {}, "unset": []}
     agg_state = {
         "last_restart_framework": "sglang",
         "last_restart_model": "/m",
@@ -690,6 +693,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": no_overrides,
     }
     agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
     assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
@@ -711,6 +715,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_extra_args": "",
         "last_restart_pd_prefill_nodes": 1,
         "last_restart_pd_decode_nodes": 1,
+        "last_restart_forward_env": no_overrides,
         "prefill_pod_ips": ["10.0.0.1"],
         "decode_pod_ips": ["10.0.0.2"],
     }
@@ -777,7 +782,10 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "",
+        "last_restart_forward_env": {"set": {}, "unset": []},
     }
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
     monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -190,7 +191,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+        await c._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts

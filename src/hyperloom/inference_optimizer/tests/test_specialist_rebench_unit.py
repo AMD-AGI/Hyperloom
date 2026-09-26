@@ -80,7 +80,6 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     assert "w1" in res["warnings"]
     assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
     assert seen["grid"][0].extra_server_args == ""
-    assert seen["preclean_before_run"] is False
 
 
 @pytest.mark.asyncio

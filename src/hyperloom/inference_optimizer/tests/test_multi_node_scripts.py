@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1518,3 +1520,224 @@ def test_bootstrap_renders_env_file_path_only_no_credentials(tmp_path):
         assert key not in rendered
         assert val not in rendered
     assert (env_file.stat().st_mode & 0o777) == 0o644
+
+
+def _isolated_patch_fixture(tmp_path):
+    aiter = tmp_path / "site-packages" / "aiter"
+    jit = aiter / "jit"
+    build = jit / "build"
+    build.mkdir(parents=True)
+    (aiter / "__init__.py").write_text("", encoding="utf-8")
+    (jit / "__init__.py").write_text("", encoding="utf-8")
+    (jit / "module_gemm.so").write_bytes(b"baseline module")
+    (build / "baseline.o").write_bytes(b"baseline build")
+    target = aiter / "kernel.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    backup = tmp_path / "backups"
+    env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "AITER_JIT_DIR"}}
+    env["HYPERLOOM_MN_KERNEL_BACKUP_DIR"] = str(backup)
+    env["INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"] = str(aiter)
+    return target, jit, backup, env
+
+
+def _run_isolated_pod(script, argv, env, *, ray_stub=None):
+    runner = "import runpy, sys; "
+    if ray_stub is not None:
+        runner += f"sys.path.insert(0, {str(ray_stub)!r}); "
+    runner += "script = sys.argv.pop(1); runpy.run_path(script, run_name='__main__')"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", runner, str(script), *argv],
+        cwd=script.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    return json.loads(result.stdout), result.stderr
+
+
+@pytest.mark.parametrize("action", ["revert", "finalize"])
+def test_infera_bundle_executes_without_repository_pythonpath(tmp_path, action):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    script = tmp_path / "kernel_node_ops_bundle.py"
+    script.write_text(mn_cli._read_bundled_pod_python_script("kernel_node_ops.py"), encoding="utf-8")
+    target, jit, backup, env = _isolated_patch_fixture(tmp_path)
+    record, _ = _run_isolated_pod(
+        script,
+        [
+            "apply",
+            "--target-path",
+            str(target),
+            "--patch-b64",
+            base64.b64encode(b"value = 2\n").decode(),
+            "--backup-dir",
+            str(backup),
+            "--jit-build-dir",
+            str(jit / "build"),
+        ],
+        env,
+    )
+    assert record["status"] == "ok"
+    assert not (jit / "module_gemm.so").exists()
+    assert not (jit / "build").exists()
+    (jit / "module_new.so").write_bytes(b"candidate module")
+    (jit / "build").mkdir()
+    (jit / "build" / "candidate.o").write_bytes(b"candidate build")
+
+    result, _ = _run_isolated_pod(script, [action, "--records-json", json.dumps([record])], env)
+
+    _assert_isolated_patch_result(action, result, record, target, jit)
+
+
+def _assert_isolated_patch_result(action, result, record, target, jit):
+    if action == "revert":
+        assert result["status"] == "restored"
+        assert result["jit_restore"]["status"] == "restored"
+        assert (jit / "module_gemm.so").read_bytes() == b"baseline module"
+        assert not (jit / "module_new.so").exists()
+        assert (jit / "build" / "baseline.o").read_bytes() == b"baseline build"
+        assert target.read_text(encoding="utf-8") == "value = 1\n"
+    else:
+        assert result["status"] == "finalized"
+        assert not Path(record["jit_backup"]["modules_backup_path"]).exists()
+        assert not Path(record["jit_backup"]["backup_path"]).exists()
+        assert not Path(record["backup_path"]).exists()
+        assert (jit / "module_new.so").read_bytes() == b"candidate module"
+        assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+
+_RAY_PATCH_STUB = """import json
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_working_dir = None
+
+def init(**kwargs):
+    global _working_dir
+    _working_dir = Path(kwargs["runtime_env"]["working_dir"]).resolve()
+    assert _working_dir == Path(sys.argv[0]).resolve().parent
+    assert kwargs["ignore_reinit_error"] is True
+    assert kwargs["log_to_driver"] is True
+    assert (_working_dir / "aiter_jit_cache.py").is_file()
+    assert (_working_dir / "patch_path_safety.py").is_file()
+    print("RUNTIME_ENV_CONNECTED", file=sys.stderr)
+
+def nodes():
+    return [{"Alive": True, "NodeID": "test-node", "NodeManagerHostname": socket.gethostname()}]
+
+def get(ref, timeout=None):
+    return ref
+
+class Remote:
+    def __init__(self, fn):
+        self.fn = fn
+    def options(self, *, scheduling_strategy):
+        assert scheduling_strategy.node_id == "test-node"
+        assert scheduling_strategy.soft is False
+        return self
+    def remote(self, *args):
+        assert _working_dir is not None
+        with tempfile.TemporaryDirectory() as temp:
+            worker = Path(temp) / "worker"
+            shutil.copytree(_working_dir, worker)
+            runner = (
+                "import sys, json; "
+                f"sys.path[:0] = {[str(worker), str(Path(__file__).resolve().parent.parent)]!r}; "
+                "import kernel_patch_multinode as m; "
+                f"result = getattr(m, {self.fn.__name__!r})(*json.loads(sys.argv[1])); "
+                "print(json.dumps(result))"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", runner, json.dumps(args)],
+                cwd=worker, capture_output=True, text=True, timeout=20,
+            )
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            print("ACTOR_EXECUTED " + self.fn.__name__, file=sys.stderr)
+            return json.loads(proc.stdout)
+
+def remote(**kwargs):
+    assert kwargs == {"num_cpus": 0, "num_gpus": 0}
+    return Remote
+"""
+
+
+def _stage_ray_patch_entrypoint(entrypoint, destination):
+    destination.mkdir(exist_ok=True)
+    payloads = re.findall(r'cat > "\$WORK_DIR/([^"/]+)" <<\'([^\']+)\'\n(.*?)\2\n', entrypoint, re.DOTALL)
+    assert {name for name, _, _ in payloads} == {
+        "aiter_jit_cache.py",
+        "patch_path_safety.py",
+        "kernel_patch_multinode.py",
+    }
+    core = _repo_root().parent / "common" / "aiter_jit_cache.py"
+    for name, _, source in payloads:
+        if name == "aiter_jit_cache.py":
+            assert source == core.read_text(encoding="utf-8")
+        (destination / name).write_text(source, encoding="utf-8")
+    return destination / "kernel_patch_multinode.py"
+
+
+@pytest.mark.parametrize("action", ["revert", "finalize"])
+def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, action):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    target, jit, backup, env = _isolated_patch_fixture(tmp_path)
+    stub = tmp_path / "ray-dependency"
+    (stub / "ray" / "util").mkdir(parents=True)
+    (stub / "ray" / "__init__.py").write_text(_RAY_PATCH_STUB, encoding="utf-8")
+    (stub / "ray" / "util" / "__init__.py").write_text("", encoding="utf-8")
+    (stub / "ray" / "util" / "scheduling_strategies.py").write_text(
+        "class NodeAffinitySchedulingStrategy:\n"
+        "    def __init__(self, node_id, soft):\n"
+        "        self.node_id, self.soft = node_id, soft\n",
+        encoding="utf-8",
+    )
+    encoded = base64.b64encode(b"value = 2\n").decode()
+    entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
+        str(target), encoded, str(backup), "gemm", 20, str(jit / "build")
+    )
+    script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
+    applied, log = _run_isolated_pod(
+        script,
+        [
+            "apply",
+            "--target-path",
+            str(target),
+            "--patch-b64",
+            encoded,
+            "--backup-dir",
+            str(backup),
+            "--jit-build-dir",
+            str(jit / "build"),
+        ],
+        env,
+        ray_stub=stub,
+    )
+    assert "RUNTIME_ENV_CONNECTED" in log
+    assert "ACTOR_EXECUTED _apply_remote" in log
+    assert applied["status"] == "ok"
+    record = applied["per_node"][0]
+    assert not (jit / "module_gemm.so").exists()
+    assert not (jit / "build").exists()
+    (jit / "module_new.so").write_bytes(b"candidate module")
+    (jit / "build").mkdir()
+    (jit / "build" / "candidate.o").write_bytes(b"candidate build")
+    records = json.dumps({record["host"]: [record]})
+    if action == "revert":
+        entrypoint = mn_cli._build_multinode_revert_patch_entrypoint(str(target), "{}", 20, records)
+    else:
+        entrypoint = mn_cli._build_multinode_finalize_patch_entrypoint(records, 20)
+    script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
+
+    result, log = _run_isolated_pod(script, [action, "--records-json", records], env, ray_stub=stub)
+
+    assert "RUNTIME_ENV_CONNECTED" in log
+    assert f"ACTOR_EXECUTED _{action}_remote" in log
+    assert result["status"] == "ok"
+    _assert_isolated_patch_result(action, result["per_node"][0], record, target, jit)

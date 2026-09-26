@@ -309,10 +309,10 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
 
         a = str(action or "").strip().lower()
         if a in {
-            # ``kernel_opt`` names the lane, not a request kind: it is still in
-            # KERNEL_LANE_TASK_KINDS and still what a gap row calls kernel work,
-            # so it keeps classifying to the kernel layer.
+            # ``kernel_opt`` names the lane, not a request kind: it is still what
+            # a gap row calls kernel work, so it keeps classifying to the kernel layer.
             "kernel_opt",
+            "kernel_agent",
             "integrate",
             "trace_analyze",
             "run_gemm_tuning",

@@ -96,7 +96,7 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
 async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validation(coordinator) -> None:
     c = coordinator
     state = c.shared_state
-    summary = await c._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench", include_geak=False)
+    summary = await c._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench")
     task = await c.tasks.get(summary["task_id"])
     assert task.params["recipe_generation"] == 1
     assert c._lift_to_current_best(

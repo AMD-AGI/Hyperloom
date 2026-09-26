@@ -12,7 +12,6 @@ transitions the row to its terminal state.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict, dataclass, field
@@ -21,7 +20,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import logging
 
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..actions.cancel_channel import current_cancel_scope
 from ..bus.resource_lock import (
@@ -247,12 +245,7 @@ class SubAgentRunner:
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
         except IllegalTransition:
-            # An outcome is durable evidence, not a prunable progress heartbeat.
-            async with self.tasks.db.transaction() as cur:
-                cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
-                history = json.loads(cur.fetchone()["history"])
-                history.append({"ts": now_iso(), "evidence": evidence or {}})
-                cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+            await self.tasks.append_completion_evidence(task_id, evidence)
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",
@@ -350,17 +343,7 @@ class SubAgentRunner:
             # Workspace prep is inside the terminal-writing block: an ENOSPC
             # there is a task that failed, not a task still running.
             try:
-                workspace = self._pre_mkdir_workspace(task)
-                extra: dict = {}
-                if workspace is not None:
-                    extra["workspace"] = str(workspace)
-                if self.session_dir is not None:
-                    extra["session_dir"] = str(self.session_dir)
-                if self.shared_state is not None:
-                    extra["shared_state"] = self.shared_state
-                if extra_context:
-                    extra.update(dict(extra_context))
-                ctx = RunnerContext(task=task, lease=lease, extra=extra)
+                ctx = self._context_for(task, lease=lease, extra_context=extra_context)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -450,6 +433,37 @@ class SubAgentRunner:
                         raise ExecutionCleanupUnconfirmed(
                             f"task={task.task_id}: physical cleanup unconfirmed", result=outcome
                         ) from cleanup_error
+
+    def _context_for(self, task: Task, *, lease: Lease | None, extra_context: dict | None) -> RunnerContext:
+        """Build the executor context: workspace, session dir, live state, then the caller's extras."""
+        workspace = self._pre_mkdir_workspace(task)
+        extra: dict = {}
+        if workspace is not None:
+            extra["workspace"] = str(workspace)
+        if self.session_dir is not None:
+            extra["session_dir"] = str(self.session_dir)
+        if self.shared_state is not None:
+            extra["shared_state"] = self.shared_state
+        if extra_context:
+            extra.update(dict(extra_context))
+        return RunnerContext(task=task, lease=lease, extra=extra)
+
+    async def execute_covered(self, task: Task) -> dict:
+        """Run ``task``'s executor as a step of the task running this call.
+
+        The caller's lease, cancel scope and progress sink cover the step.
+        ``task`` is never written to the registry: a queued row would be visible
+        to the pump in the await gaps, and a lane claim of its own would
+        conflict with the lanes the caller already holds.
+
+        Args:
+            task: An unpersisted task naming the executor and its params.
+
+        Returns:
+            The executor's result payload.
+        """
+        ctx = self._context_for(task, lease=None, extra_context=None)
+        return await self.executor_registry[task.kind](ctx)
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

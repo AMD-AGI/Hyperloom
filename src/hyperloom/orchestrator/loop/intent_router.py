@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
@@ -1198,6 +1199,37 @@ class IntentRouter:
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
+                    # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
+                    # kernel_agent task instead of sharing the GPUs with it.
+                    action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+                    lanes, ttl = self._registry_lanes_ttl(action)
+                    handler_lease = None
+                    if lanes:
+                        handler_lease = await self.locks.try_acquire_many(
+                            lanes,
+                            holder_id=request_msg.msg_id,
+                            task_id=request_msg.msg_id,
+                            action=action,
+                            ttl_sec=ttl or 60,
+                        )
+                        if handler_lease is None:
+                            await self.bus.append_and_seq(
+                                Message.new(
+                                    "kernel_agent",
+                                    source,
+                                    "response",
+                                    {
+                                        "in_reply_to": request_msg.msg_id,
+                                        "kind": f"{kind}_done",
+                                        "status": "deferred",
+                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
+                                        "source": "lanes_busy",
+                                    },
+                                    in_reply_to=request_msg.msg_id,
+                                )
+                            )
+                            return
+
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
@@ -1225,10 +1257,9 @@ class IntentRouter:
                             "error_class": "handler_exception",
                             "error": repr(exc),
                         }
-                    # A block-FP8 GEMM run may have executed an inline Roofline whose refreshed profile fields only
-                    # live in state.json.
-                    if kind == "run_gemm_tuning":
-                        self._sync_profile_state_after_gemm_roofline(result)
+                    finally:
+                        if handler_lease is not None:
+                            await self.locks.release(handler_lease)
                     _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                     _lc_detail = " ".join(
                         str(p)
@@ -1275,8 +1306,6 @@ class IntentRouter:
                     result=result,
                     cache_hit=cache_hit_source is not None,
                 )
-            if kind == "run_gemm_tuning":
-                await self._handle_gemm_tuning_result(result)
             if kind == "integrate":
                 if result.get("status") != "skipped":
                     self.shared_state.record_kernel_integrate_result(result)
@@ -1389,20 +1418,6 @@ class IntentRouter:
             cancelled = await self._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
-        # A pruned explore family can take the GEAK 2b rebench with it; settle the slot so KERNEL is not held open
-        # waiting on a task that will never run.
-        if cancelled:
-            from ..phases.geak_rebench import settle_dangling_geak_pending
-
-            try:
-                if await settle_dangling_geak_pending(
-                    self.tasks,
-                    self.shared_state,
-                    reason=f"prune_branch:{family}",
-                ):
-                    self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
                 source,

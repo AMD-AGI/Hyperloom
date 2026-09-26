@@ -221,7 +221,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", launch_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
-    await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+    await ExploreExecutor(session_dir=coordinator.session_dir)(
         RunnerContext(task=rebench, lease=None, extra={"shared_state": state})
     )
     assert len(child_receipts) == 1

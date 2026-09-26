@@ -360,11 +360,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
     comparison = summary.get("performance_comparison")
     if comparison is not None:
-        from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, INTVTY_V1
+        from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
 
-        # The objective is the interactivity axis; total throughput is the guard the verdict also consulted, so it is
-        # rendered as a second axis rather than as the figure the session was scored on.
-        graded_on_intvty = comparison["objective"] == GRADED_INTVTY
+        # Read the family, not one percentile: the graded axis is the median while the session marker still names
+        # the tail, and pinning either one here prints the wrong mode for the other.
+        graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
         lines.extend(["## Performance comparison", ""])
         lines.append(f"- objective           : `{comparison['objective']}`")
         lines.append(f"- reference           : `{comparison['reference']:.1f}`")
@@ -378,8 +378,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append(f"- verdict             : `{comparison['verdict']}`")
         lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
         if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
+            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
         return
 
     from hyperloom.common.gain_math import gain_pct
@@ -409,7 +409,7 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
             lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (diagnostic, neither objective nor guard)")
     grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
     objective = str(grading.get("objective") or "").strip()
     if objective == GRADED_INTVTY:
@@ -444,8 +444,7 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     comparison = summary["performance_comparison"]
     if not comparison["comparable"] or comparison["gain_pct"] is None:
         return "unavailable"
-    # Anything short of KEEP -- a REVERT, or a RECORDED point the frontier neither promotes nor discards -- disagrees
-    # with a stamp claiming the stack's gain was validated.
+    # Anything short of KEEP disagrees with a stamp claiming the stack's gain was validated.
     if comparison["verdict"] != VERDICT_KEEP or not math.isclose(
         summary["cumulative_gain_validated"], comparison["gain_pct"], abs_tol=1e-9
     ):
@@ -496,8 +495,8 @@ def _build_summary_dict(
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,
-            # The guard axis is snapshotted alongside the objective so a re-rendered report can say what the 2-D
-            # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
+            # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
+            # actually measured, instead of a ``current_best`` that has since moved on.
             "tput_reference": graded.tput_reference,
             "tput_candidate": graded.tput_candidate,
         },
@@ -1196,6 +1195,46 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     return {"topic": topic, "from_agent": from_agent, "summary": summary, "payload": payload}
 
 
+def _write_final_json(json_path: Path, summary: dict[str, Any]) -> None:
+    """Write ``summary`` to ``json_path`` atomically."""
+    # A kill mid-flush must never leave a non-empty but invalid final.json on disk (issue #464 —
+    # downstream keys off it, and the crash-safe fallback would otherwise see garbled JSON).
+    _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
+
+
+def _write_final_report(output_dir: Path, summary: dict[str, Any]) -> tuple[Path, Path]:
+    """Write ``summary`` as ``final.json`` and ``final.md`` under ``output_dir``."""
+    json_path = output_dir / "final.json"
+    md_path = output_dir / "final.md"
+    _write_final_json(json_path, summary)
+    md_path.write_text(_format_md(summary), encoding="utf-8")
+    return json_path, md_path
+
+
+def write_stop_report(session_dir: Path, state: SharedState, *, stop_detail: str) -> None:
+    """Write the final report of a session a gate stopped before its ``report`` action ran."""
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir
+
+    summary = _build_summary_dict(state, {}, [], external_baseline=None)
+    summary["stop_detail"] = stop_detail
+    output_dir = reports_dir(session_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_final_report(output_dir, summary)
+
+
+def reconcile_final_crash_count(session_dir: Path, crash_count: int) -> None:
+    """Raise ``final.json``'s ``crash_count`` to ``crash_count`` when the report exists and records fewer."""
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir
+
+    json_path = reports_dir(session_dir) / "final.json"
+    if not json_path.exists():
+        return
+    summary = json.loads(json_path.read_text(encoding="utf-8"))
+    if int(summary.get("crash_count") or 0) < crash_count:
+        summary["crash_count"] = crash_count
+        _write_final_json(json_path, summary)
+
+
 # ---------------------------------------------------------------------------
 class ReportExecutor:
     """ActionRunner for the ``report`` action."""
@@ -1295,12 +1334,7 @@ class ReportExecutor:
             except ValueError:
                 summary["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
 
-        json_path = output_dir / "final.json"
-        md_path = output_dir / "final.md"
-        # Atomic write: a kill mid-flush must never leave a non-empty but invalid final.json on disk (issue #464 —
-        # downstream keys off it, and the crash-safe fallback would otherwise see garbled JSON).
-        _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
-        md_path.write_text(_format_md(summary), encoding="utf-8")
+        json_path, md_path = _write_final_report(output_dir, summary)
 
         log.info(
             "report_executor: wrote %s and %s (cumulative_gain_validated=%.2f%%)",
@@ -1381,4 +1415,4 @@ class ReportExecutor:
 report_executor = ReportExecutor()
 
 
-__all__ = ["ReportExecutor", "report_executor"]
+__all__ = ["ReportExecutor", "reconcile_final_crash_count", "report_executor", "write_stop_report"]

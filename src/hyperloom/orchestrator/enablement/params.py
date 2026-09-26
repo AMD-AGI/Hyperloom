@@ -78,7 +78,6 @@ def _maybe_build_localization_candidate(
     capability_gap: Any,
     *,
     framework: str,
-    model: str,
     repo_url: str,
     candidate_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
@@ -101,9 +100,7 @@ def _maybe_build_localization_candidate(
         from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
-        action = adapter.build_localization_action(
-            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
-        )
+        action = adapter.build_localization_action(capability_gap, candidate_ref=ref, repo_url=repo_url)
         if action is None:
             return None
         return action.to_state()
@@ -291,7 +288,6 @@ class EnablementParams(CoordinatorCollaborator):
         localization_candidate = _maybe_build_localization_candidate(
             capability_gap,
             framework=framework,
-            model=model,
             repo_url=repo_url,
             candidate_refs=tuple(candidate_refs),
         )

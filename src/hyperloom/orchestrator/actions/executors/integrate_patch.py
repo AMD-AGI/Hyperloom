@@ -4367,8 +4367,8 @@ class IntegratePatchExecutor:
         elif graded.verdict == VERDICT_KEEP:
             delta_pct = gain_pct(graded.candidate, graded.reference)
         else:
-            # A REVERT or RECORDED verdict has no promotable delta; the reason
-            # travels to the ledger so the agent can tell it from a failed run.
+            # A REVERT has no promotable delta; the reason travels to the
+            # ledger so the agent can tell it from a failed run.
             log.info(
                 "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
                 graded.verdict,

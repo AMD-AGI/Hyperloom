@@ -279,9 +279,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Medium-intensity soft restart at each macro-cycle boundary.
         self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -363,7 +360,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kernel_enabled": "phase_machine",
         "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
-        "_await_kernel_entry_task": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
@@ -376,6 +372,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
+        "_internal_analysis_params": "phase_prelude",
         "_on_enter_sweep": "phase_sweep",
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_record_session_budget_conc_sweep_skip": "phase_sweep",
@@ -384,7 +381,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
         "_revalidate_stack_for_close": "phase_close",
-        "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
         "_enqueue_internal_report_task": "phase_close",
@@ -418,6 +414,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
+        "_run_kernel_agent": "phase_kernel",
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
         "_kernel_timeline": "phase_kernel",
@@ -449,7 +446,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_cycle_strategy_block": "phase_macro_cycle",
         "_apply_macro_cycle_reloop": "phase_macro_cycle",
         "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_restart_inference_servers": "phase_macro_cycle",
         "_on_cycle_start_reprofile": "phase_macro_cycle",
         "_capture_cycle_memory": "cycle_memory",
         "_cycle_directive_fallback": "cycle_memory",
@@ -626,6 +622,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resume_rollback_pending_integrate": "writeback",
         "_resume_recover_pending_integrate": "writeback",
         "_resume_recover_orphaned_keeps": "writeback",
+        "_geak_rebench_params": "writeback",
         "_enqueue_internal_stack_rebench": "writeback",
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
@@ -1357,10 +1354,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
-            try:
-                await self._await_kernel_entry_task()
-            except (asyncio.CancelledError, Exception):
-                log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
                 final_signals = self._signals.close()
