@@ -415,6 +415,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.closing_phase = False
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
+    state.close_sequence_done = False
     state.crash_count = 0
     state.teardown_timings_sec = {}
     state.begin_leg()

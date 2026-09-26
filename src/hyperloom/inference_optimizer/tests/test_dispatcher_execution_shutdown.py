@@ -263,7 +263,7 @@ def test_a_caller_that_gave_up_on_its_action_can_still_stop_the_dispatcher(tmp_p
     monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
     monkeypatch.setattr(dispatcher_module, "_COOPERATIVE_CANCEL_GRACE_SEC", 0)
     outcome: dict = {}
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     async def run():
         entered = asyncio.Event()
@@ -286,7 +286,7 @@ def test_a_caller_that_gave_up_on_its_action_can_still_stop_the_dispatcher(tmp_p
             watcher = asyncio.create_task(cancel_once_entered(me))
             with pytest.raises(asyncio.CancelledError):
                 await dispatcher.run_task_registered(task)
-            await watcher
+            assert watcher.done()
             if hasattr(me, "uncancel"):
                 me.uncancel()
             return await dispatcher.cancel_inflight_actions(reason="coordinator_stop")
@@ -306,7 +306,7 @@ def test_a_caller_that_gave_up_on_its_action_can_still_stop_the_dispatcher(tmp_p
     def target():
         try:
             asyncio.run(run())
-        except BaseException as exc:  # noqa: BLE001 - surfaced on the test thread
+        except Exception as exc:  # noqa: BLE001 - surfaced on the test thread
             errors.append(exc)
 
     thread = threading.Thread(target=target, daemon=True)
