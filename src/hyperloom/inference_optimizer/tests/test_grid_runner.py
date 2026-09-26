@@ -1319,10 +1319,12 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed probe cooldown before/after each test."""
+    """Clear the framework-keyed probe caches before/after each test."""
     _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
     yield
     _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
@@ -1361,7 +1363,10 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     assert raised["n"] == 1
 
     # The hold-off is bounded, so a framework that recovers is picked back up.
-    _grid_variant_filter._HELP_PROBE_FAILURES["atom"] = 0.0
+    # Expire the deadline in place: the identity beside it is what the next
+    # call matches on, and inventing one here would just test the mismatch.
+    identity, _deadline = _grid_variant_filter._HELP_PROBE_FAILURES["atom"]
+    _grid_variant_filter._HELP_PROBE_FAILURES["atom"] = (identity, 0.0)
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
 
