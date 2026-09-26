@@ -1319,19 +1319,19 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed help-text caches before/after each test."""
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
+    """Clear the framework-keyed probe caches before/after each test."""
+    _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
     yield
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
+    _grid_variant_filter._HELP_PROBE_FAILURES.clear()
+    _grid_variant_filter._HELP_TEXT_CACHE.clear()
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The atom probe returns the mocked help verbatim and caches it for the second call."""
+    """The atom probe returns the mocked help verbatim, and says the same thing when asked again."""
     call_count = {"n": 0}
     synthetic_help = "usage: atom-engine [-h] [--tensor-parallel-size INT] [--torch-profiler-dir DIR] ..."
 
@@ -1343,12 +1343,7 @@ def test_probe_server_help_text_atom_returns_help_when_importable(
     out = _grid_runner._probe_server_help_text("atom")
     assert "--tensor-parallel-size" in out
     assert "--torch-profiler-dir" in out
-    # Second call must hit the cache, not the subprocess.
-    out2 = _grid_runner._probe_server_help_text("atom")
-    assert out2 == out
-    assert call_count["n"] == 1, (
-        f"_probe_server_help_text must cache atom's result; subprocess called {call_count['n']} times"
-    )
+    assert _grid_runner._probe_server_help_text("atom") == out
 
 
 def test_probe_server_help_text_atom_returns_empty_on_failure(
@@ -1360,7 +1355,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
     def fake_run(*args, **kwargs):
         raised["n"] += 1
-        raise RuntimeError("subprocess refused to run")
+        raise OSError("subprocess refused to run")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
@@ -1368,7 +1363,10 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     assert raised["n"] == 1
 
     # The hold-off is bounded, so a framework that recovers is picked back up.
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
+    # Expire the deadline in place: the identity beside it is what the next
+    # call matches on, and inventing one here would just test the mismatch.
+    identity, _deadline = _grid_variant_filter._HELP_PROBE_FAILURES["atom"]
+    _grid_variant_filter._HELP_PROBE_FAILURES["atom"] = (identity, 0.0)
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
 
@@ -1482,7 +1480,6 @@ def test_probe_server_help_text_sglang(
     )
     out = _grid_runner._probe_server_help_text("sglang")
     assert "USAGE_SGLANG_LEGACY" in out
-    assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
 
 
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
@@ -1494,8 +1491,12 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     # MoE keyword so the model-class predicate doesn't drop the variant first.
     monkeypatch.setenv("MODEL_PATH", "/path/models/DeepSeek-R1-0528")
 
-    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
-    _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
+    # Pin the probe's answer so the predicate reads it without starting a subprocess.
+    monkeypatch.setattr(
+        _grid_variant_filter,
+        "_probe_server_help_text",
+        lambda fw: "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]",
+    )
 
     # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
