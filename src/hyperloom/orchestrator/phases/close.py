@@ -660,6 +660,11 @@ class ClosePhase(PhaseHandler):
             )
         return task  # type: ignore[return-value]  # loop body always binds it
 
+    def _close_leg_idem_suffix(self) -> str:
+        """Idempotency-key suffix scoping a close-step task to the current run leg; empty before any resume."""
+        resumed_ts = str(getattr(self.shared_state, "resumed_ts", "") or "").strip()
+        return f"-leg-{resumed_ts}" if resumed_ts else ""
+
     async def _enqueue_internal_report_task(
         self,
         *,
@@ -700,7 +705,7 @@ class ClosePhase(PhaseHandler):
         task = await self._enqueue_runnable_internal_task(
             kind="report",
             params=params,
-            idempotency_key=f"internal-report-{reason}",
+            idempotency_key=f"internal-report-{reason}{self._close_leg_idem_suffix()}",
         )
         # Mirror onto closing_report_task_id.
         if not self.shared_state.closing_report_task_id:
@@ -725,7 +730,7 @@ class ClosePhase(PhaseHandler):
         return await self._enqueue_runnable_internal_task(
             kind="session_breakdown",
             params=params,
-            idempotency_key=f"internal-session_breakdown-{reason}",
+            idempotency_key=f"internal-session_breakdown-{reason}{self._close_leg_idem_suffix()}",
         )
 
     def _close_step_wait_sec(self, task: Task) -> float:

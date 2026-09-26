@@ -256,6 +256,75 @@ def test_cancelled_shutdown_drain_retains_live_execution(tmp_path, monkeypatch):
         dispatcher.db.close()
 
 
+def test_a_caller_that_gave_up_on_its_action_can_still_stop_the_dispatcher(tmp_path, monkeypatch):
+    """A caller that timed out like ``asyncio.timeout`` / 3.12 ``wait_for`` stays registered as the handle,
+    and must not cancel or await itself when it later stops the dispatcher."""
+    dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
+    monkeypatch.setattr(dispatcher_module, "_COOPERATIVE_CANCEL_GRACE_SEC", 0)
+    outcome: dict = {}
+    errors: list[BaseException] = []
+
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def execute(_ctx):
+            entered.set()
+            await release.wait()
+            return {"status": "ok"}
+
+        async def cancel_once_entered(target):
+            await entered.wait()
+            target.cancel()
+
+        dispatcher.sub.register_executor("shutdown_test", execute)
+        task = await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="abandoned-caller")
+
+        async def caller():
+            me = asyncio.current_task()
+            watcher = asyncio.create_task(cancel_once_entered(me))
+            with pytest.raises(asyncio.CancelledError):
+                await dispatcher.run_task_registered(task)
+            await watcher
+            if hasattr(me, "uncancel"):
+                me.uncancel()
+            return await dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+
+        stopper = asyncio.create_task(caller())
+        done, _pending = await asyncio.wait({stopper}, timeout=5)
+        outcome["finished"] = stopper in done
+        if stopper in done:
+            outcome["stopped_is_this_task"] = stopper.result() == [task.task_id]
+            outcome["state_at_stop"] = (await dispatcher.tasks.get(task.task_id)).state
+        release.set()
+        await asyncio.gather(*dispatcher._executions)
+        outcome["final_state"] = (await dispatcher.tasks.get(task.task_id)).state
+        outcome["registered"] = dict(dispatcher._inflight_actions)
+        await _close(dispatcher)
+
+    def target():
+        try:
+            asyncio.run(run())
+        except BaseException as exc:  # noqa: BLE001 - surfaced on the test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(20)
+    assert not thread.is_alive(), "shutdown deadlocked waiting on the caller's own registration"
+    if errors:
+        raise errors[0]
+    assert outcome == {
+        "finished": True,
+        "stopped_is_this_task": True,
+        "state_at_stop": "running",
+        "final_state": "succeeded",
+        "registered": {},
+    }
+    dispatcher.db.close()
+
+
 def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypatch):
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
