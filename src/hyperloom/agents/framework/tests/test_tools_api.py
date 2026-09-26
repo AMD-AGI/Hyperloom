@@ -29,7 +29,7 @@ def test_find_relevant_prs_smart_pr_monitor_only(monkeypatch: pytest.MonkeyPatch
         del repo_url, base_url, limit, state, label, timeout_sec
         return [GitHubPr(number=1, title="a", html_url="u1")]
 
-    def boom_github(repo_url, *, gap_description, limit):  # noqa: ARG001
+    def boom_github(repo_url, *, gap_description, limit):
         raise AssertionError("github backend must not be called when include_github=False")
 
     monkeypatch.setattr(tools_api, "list_perf_prs", fake_pr_monitor)
@@ -52,13 +52,13 @@ def test_find_relevant_prs_smart_unions_pr_monitor_and_github(
 ) -> None:
     """Both backends contribute; pr_monitor wins ties when dedup-by-(repo,ref)."""
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, state, label, timeout_sec):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, state, label, timeout_sec):
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit):
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -87,7 +87,7 @@ def test_find_relevant_prs_smart_github_only_when_pr_monitor_url_missing(
     def boom_pr_monitor(*a, **kw):
         raise AssertionError("pr_monitor must not be called without a URL")
 
-    def fake_github(repo_url, *, gap_description, limit):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit):
         return [GitHubPr(number=9, title="g", html_url="u9")]
 
     monkeypatch.setattr(tools_api, "list_perf_prs", boom_pr_monitor)

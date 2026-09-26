@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 
 # ---- coerce_optional_int ----
@@ -478,6 +478,6 @@ def test_parse_codex_error_redacts_credentials_and_ignores_request_payload(tmp_p
 
 
 def test_parse_codex_error_is_exported_from_trace_package(tmp_path):
-    from hyperloom.orchestrator.trace import parse_codex_jsonl_error
+    from hyperloom.inference_optimizer.trace import parse_codex_jsonl_error
 
     assert parse_codex_jsonl_error(tmp_path / "missing.jsonl") is None

@@ -51,11 +51,8 @@ ALREADY_SETTLED = "already_settled"
 #: Default for an attempt that records nothing beyond the operation itself.
 _NO_EVIDENCE: Mapping[str, Any] = MappingProxyType({})
 
-#: The admission predicate: a round holds the machine while it is open and its
-#: lease is live. Time-bounded on purpose -- an exclusion that outlived every
-#: reader is what trapped a session before, and the repair pass settles an open
-#: round at the top of a tick, before anything asks to acquire.
-_LIVE_EXCLUSION = f"state = '{OPEN}' AND expires_unix > ?"
+#: Ownership ends at explicit settlement, never at a budget timestamp.
+_LIVE_EXCLUSION = f"state = '{OPEN}'"
 
 __all__ = [
     "ABANDONED",
@@ -135,7 +132,7 @@ class Round:
         Returns:
             bool: ``True`` when an acquire must be denied.
         """
-        return self.state == OPEN and self.expires_unix > float(now_unix)
+        return self.state == OPEN
 
 
 @dataclass(frozen=True)
@@ -277,7 +274,6 @@ class RoundStore:
                     now,
                     now,
                     expires,
-                    now,
                     round_id,
                 ),
             )
@@ -631,7 +627,6 @@ class RoundStore:
         """
         rows = await self.db.fetchall(
             f"SELECT * FROM bringup_rounds WHERE {_LIVE_EXCLUSION} ORDER BY opened_unix ASC",  # nosec B608 - a fixed predicate constant, no caller input.
-            (float(now_unix),),
         )
         return [Round.from_row(r) for r in rows]
 

@@ -97,7 +97,7 @@ def test_history_block_failure_does_not_drop_canonical_write() -> None:
     assert len(state.roofline_snapshots) == 1
 
     with patch(
-        "hyperloom.orchestrator.kernel.roofline_snapshot.build_roofline_snapshot",
+        "hyperloom.inference_optimizer.roofline_snapshot.build_roofline_snapshot",
         side_effect=RuntimeError("boom"),
     ):
         _record(state, "second")

@@ -15,49 +15,19 @@ propagates to the caller.
 
 from __future__ import annotations
 
-import logging
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z
 
+from ..session_facts import architecture_block, grading_block, recovery_block, workload_signature
 from .recorder import Recorder, recorder_for
 from .trace import trace_skip
 
-log = logging.getLogger(__name__)
-
 SECTION = "metadata"
 PRODUCER_COORDINATOR = "coordinator"
-
-# Structural model fields carried verbatim from ``summarize_model_config``.
-# ``model_class`` is derived (see :func:`_architecture`) and is not on this
-# list; everything else is a straight lift so the exported architecture block
-# is the parsed config rather than a five-field digest of it.
-_ARCHITECTURE_FIELDS = (
-    "model_family",
-    "model_type",
-    "architectures",
-    "attention_type",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "hidden_size",
-    "intermediate_size",
-    "max_position_embeddings",
-    "vocab_size",
-    "torch_dtype",
-    "kv_cache_dtype",
-    "quantization",
-    "is_moe",
-    "num_experts",
-    "num_experts_per_tok",
-    "has_shared_expert",
-    "num_shared_experts",
-)
 
 _LANGFUSE_FIELDS = ("enabled", "disabled_reason", "trace_id", "session_id", "trace_url")
 
@@ -72,18 +42,17 @@ def _image_id(image: str) -> str:
 
 
 def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, producer: str) -> None:
-    """Deep-merge ``payload`` into the ``metadata`` singleton. Never raises."""
+    """Deep-merge ``payload`` into the ``metadata`` singleton.
+
+    Spool failures are parked by :class:`Recorder`. Projection bugs raise.
+    """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
     if not payload:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    try:
-        recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record metadata failed", exc_info=True)
-        trace_skip(reason="writer raised", section=SECTION, error=exc)
+    recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
 
 
 def record_metadata_identity(
@@ -131,7 +100,7 @@ def record_metadata_identity(
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(manifest.get("objective") or {}),
     }
-    signature = _workload_signature(task_config)
+    signature = workload_signature(task_config)
     if signature:
         task_config["workload_signature"] = signature
     _write(session_dir, {"session": session, "task_config": task_config}, producer=producer)
@@ -180,88 +149,20 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
         "elapsed_minutes": round(leg_seconds / 60.0, 2),
         "total_elapsed_minutes": round(total_seconds / 60.0, 2),
         "tick_count": int(getattr(state, "tick", 0) or 0),
-        "recovery": _recovery(state),
+        "recovery": recovery_block(state),
     }
     payload: dict[str, Any] = {
         "session": session,
         "task_config": _launch_config(state),
-        "grading": _grading(state),
+        "grading": grading_block(state),
     }
-    architecture = _architecture(
+    architecture = architecture_block(
         getattr(state, "model_info", None) or {},
         model_class=_text(getattr(state, "model_class", "")),
     )
     if architecture:
         payload["task_config"]["architecture"] = architecture
     rec.record_upsert_singleton(SECTION, payload)
-
-
-def _grading(state: Any) -> dict[str, Any]:
-    """Declare the axis this session was configured to grade on, and the band it grades under.
-
-    An AgentX replay is ranked on the slow-tail interactivity percentile with throughput held as a guard; a synthetic
-    run is ranked on output throughput alone. On the canonical corpus the two axes differ by roughly two orders of
-    magnitude, so a consumer that cannot tell them apart will happily sort one against the other -- and nothing else
-    in this document carries the distinction, because every throughput field in it is the output axis by
-    construction and ``benchmark_mode`` never reaches the breakdown at all.
-
-    This is the session-level setting and only that. What a promotion was actually decided on is a different fact,
-    recorded on the promotion itself and published as ``outcome.validation.graded_on``. On a session that promoted
-    anything the two agree, because a comparison that cannot supply the configured axis pair fails rather than
-    settling for another axis. Resolving one of the two from the other would still put a label on a figure it does
-    not describe: a session can be configured for an axis and promote nothing on it.
-
-    Read from the live state rather than resolved here, which is why this reaches the export with no environment read
-    anywhere on the path: ``SharedState.grading`` was resolved once at seed, where the run could still see its own
-    configuration.
-    """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
-    from hyperloom.orchestrator.state.shared_state import resolved_grading
-
-    on_intvty, noise_pct = resolved_grading(state)
-    return {
-        "benchmark_mode": _text(getattr(state, "benchmark_mode", "")) or "synthetic",
-        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
-        # The throughput guard that rides along with the interactivity objective. ``noise_pct`` is null on a session
-        # seeded before the band was recorded: the band it applied is unknown, and today's default is not evidence
-        # of it.
-        "tput_guard": {"enabled": on_intvty, "noise_pct": noise_pct},
-    }
-
-
-def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
-    """The structural model block, or ``{}`` when nothing is known."""
-    info = dict(model_info or {}) if isinstance(model_info, Mapping) else {}
-    resolved_class = _text(model_class)
-    if not resolved_class and info:
-        resolved_class = "moe" if bool(info.get("is_moe")) else "dense"
-    if not info and not resolved_class:
-        return {}
-    architecture: dict[str, Any] = {"model_class": resolved_class}
-    for field in _ARCHITECTURE_FIELDS:
-        if field in info:
-            architecture[field] = info[field]
-    return architecture
-
-
-def _workload_signature(config: Mapping[str, Any]) -> str:
-    """The workload contract digest for ``config``, empty when it is unknown.
-
-    A pure function of ``conc`` / ``isl`` / ``osl`` / ``precision`` / ``tp``,
-    which makes it session-level rather than per-variant. An all-unknown
-    contract still digests to a stable string, which the leaf-by-leaf singleton
-    merge would treat as a real value and never replace, so the 12-char digest
-    is only returned once at least one of the five is known.
-    """
-    fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
-    if not any(str(value or "").strip() for value in fields.values()):
-        return ""
-    try:
-        from hyperloom.orchestrator.actions.executors._canonical_fingerprint import workload_signature
-
-        return workload_signature(**{name: value for name, value in fields.items() if value is not None})
-    except Exception:  # noqa: BLE001 — metadata must not cost the session
-        return ""
 
 
 def _launch_config(state: Any) -> dict[str, Any]:
@@ -288,7 +189,7 @@ def _launch_config(state: Any) -> dict[str, Any]:
     framework_version = _text(getattr(state, "framework_version", ""))
     if framework_version:
         config["framework_version"] = framework_version
-    signature = _workload_signature(config)
+    signature = workload_signature(config)
     if signature:
         config["workload_signature"] = signature
     return config
@@ -320,42 +221,6 @@ def _elapsed_seconds(state: Any) -> tuple[float, float]:
     live = max(0.0, time.time() - anchor) if anchor > 0.0 else 0.0
     total = charged + live
     return leg, total or leg
-
-
-def _recovery(state: Any) -> dict[str, Any]:
-    """Crash / interruption / resume history from live state.
-
-    Crash timestamps are stored as epoch seconds and exported as ISO, so the
-    conversion happens here rather than being repeated by every reader.
-    """
-    crash_count = int(getattr(state, "crash_count", 0) or 0)
-    crash_timestamps: list[str] = []
-    for raw in getattr(state, "crash_timestamps", None) or []:
-        try:
-            crash_timestamps.append(datetime.fromtimestamp(float(raw), tz=timezone.utc).isoformat())
-        except (TypeError, ValueError, OSError, OverflowError):
-            continue
-    last_exception: dict[str, Any] | None = None
-    raw_exception = getattr(state, "last_tick_exception", None)
-    if isinstance(raw_exception, Mapping) and raw_exception:
-        # Drop the large traceback; keep the compact postmortem header.
-        last_exception = {
-            "tick": raw_exception.get("tick"),
-            "ts": raw_exception.get("ts"),
-            "stage": raw_exception.get("stage"),
-            "agent": raw_exception.get("agent"),
-            "type": raw_exception.get("type"),
-            "message": (str(raw_exception.get("message") or "")[:500] or None),
-        }
-    resume_pending = bool(getattr(state, "resume_pending_revalidation", False))
-    return {
-        "recovered": bool(crash_count > 0 or crash_timestamps or resume_pending or last_exception),
-        "crash_count": crash_count,
-        "crash_timestamps": crash_timestamps,
-        "degraded_mode": bool(getattr(state, "degraded_mode", False)),
-        "resume_pending_revalidation": resume_pending,
-        "last_tick_exception": last_exception,
-    }
 
 
 def _langfuse(receipt: Mapping[str, Any]) -> dict[str, Any]:

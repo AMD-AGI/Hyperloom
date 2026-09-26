@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ENV_FAULT
 from hyperloom.orchestrator.bringup.argv_preflight import (
     INTERPRETER_UNPROVEN,
     OK,
@@ -28,10 +29,6 @@ from hyperloom.orchestrator.bringup.argv_preflight import (
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.environment"
-
-#: The marker an environment-fault observation carries, and the name of the
-#: terminal it produces.
-ENV_FAULT = "environment_fault"
 
 #: The stream name recorded on the excerpt, so a reader can tell a preflight
 #: record from a server log.

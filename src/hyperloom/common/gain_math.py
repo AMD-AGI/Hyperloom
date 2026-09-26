@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, passes_tput_guard
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -85,7 +85,7 @@ def conc_pair_comparison(
         opt_axes = graded_axes_of(o) if guard_axis else {}
         guard_holds: bool | None = None
         if guard_axis and base_axes.get(guard_axis) and opt_axes.get(guard_axis):
-            guard_holds = passes_tput_guard(opt_axes, base_axes, noise_pct=guard_noise_pct)
+            guard_holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=guard_noise_pct)
         rows.append(
             {
                 "conc": c,

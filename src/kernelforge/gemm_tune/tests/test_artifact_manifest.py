@@ -138,6 +138,27 @@ def test_schema_and_provenance(tmp_path):
     assert am["invalidation"]["keys"]
 
 
+def test_an_unmeasured_tuner_is_published_as_null(tmp_path):
+    # The manifest is the shipped record: a tuner that never timed a baseline must not read as "measured 1.00x".
+    csv = tmp_path / "c.csv"
+    csv.write_text("M,N,K\n8192,5120,5120\n")
+    unmeasured = TuneResult(
+        tuner_name="vllm_dense_tunableop",
+        status="ok",
+        artifact_path=str(csv),
+        env_var="PYTORCH_TUNABLEOP_FILENAME",
+        env_value=str(csv),
+        candidate=True,
+        total_shapes=3,
+        unverified_shapes=3,
+    )
+    row = build_artifact_manifest(_report(), [unmeasured])["tuners"][0]
+    assert row["total_shapes"] == 3
+    assert row["improved_shapes"] is None
+    assert row["best_micro_speedup"] is None
+    assert row["avg_micro_speedup"] is None
+
+
 def test_weighted_coverage(tmp_path):
     csv = tmp_path / "c.csv"
     csv.write_text("x")

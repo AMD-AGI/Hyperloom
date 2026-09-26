@@ -311,3 +311,45 @@ def test_a_task_with_no_forge_output_at_all_publishes_nothing(tmp_path: Path) ->
     assert recovered.published is False
     assert recovered.reason == "no trusted forge-loop best result"
     assert not published_operator_dirs(layout)
+
+
+def test_a_leftover_campaign_manifest_is_not_taken_for_this_task(tmp_path: Path) -> None:
+    """An in-place repository hands every task the same experiments directory.
+
+    A run the host killed leaves its best-result bundle there, naming a commit its
+    branch took with it on release. Trusting it reports the dead campaign's commit as
+    a missing base commit and loses the task with a reason that has nothing to do with
+    what it did.
+    """
+    layout, task_dir, worktree, best_commit = _prepared_workspace(tmp_path)
+    forge_patch = export_patch_from_base(worktree, best_commit=best_commit)
+    BestResultPublisher(str(worktree.workspace)).publish(
+        campaign_id="campaign",
+        session_index=0,
+        experiment_id="experiment",
+        iteration=1,
+        commit_hash=best_commit,
+        plan="optimize",
+        baseline_wall_ms=2.0,
+        search_start_ms=2.0,
+        best_wall_ms=1.0,
+        mean_case_speedup=2.0,
+        search_start_mean_case_speedup=1.0,
+        snr_db=100.0,
+        validation_text="PASS\n",
+        benchmark={"success": True},
+        changed_files=["kernel.py"],
+        patch=forge_patch,
+    )
+    # The commit a released campaign leaves behind: recorded in the manifest, gone
+    # from the repository.
+    manifest_path = BestResultPublisher(str(worktree.workspace)).manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["commit_hash"] = "0" * 40
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert recovered.reason == "no trusted forge-loop best result"
+    assert published_operator_dirs(layout) == ()

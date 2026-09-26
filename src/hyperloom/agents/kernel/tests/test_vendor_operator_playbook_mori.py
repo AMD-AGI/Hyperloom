@@ -23,8 +23,8 @@ _BACKENDS_DIR = _TOOLS_DIR / "backends"
 if str(_BACKENDS_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKENDS_DIR))
 
-import tracelens_analysis as tla  # noqa: E402
-from _vendor_operator_playbooks import (  # noqa: E402
+import tracelens_analysis as tla
+from _vendor_operator_playbooks import (
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,

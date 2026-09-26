@@ -132,6 +132,34 @@ def test_geometry_only_shape_excluded_from_untried():
     assert untried == ["k002"]
 
 
+def test_forge_loop_integration_retires_its_hot_kernel_by_operator_name():
+    # Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
+    # kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
+    # ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"), never touching
+    # kernel_opt_task_attempts and never sharing a kernel_id/source_file with the roofline trace's k001.
+    # Without operator-name reconciliation, k001 falsely resurfaces as untried despite being the exact
+    # kernel that landed the session's validated gain.
+    hot = [
+        _hot(
+            "k001",
+            name="_fwd_grouped_kernel_stage1",
+            src="/sgl-workspace/aiter/op_tests/triton_tests/utils/mla_decode_ref.py",
+        )
+    ]
+    state = _state(hot)
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "target_file": "/sgl-workspace/sglang/python/sglang/kernels/ops/attention/decode_attention.py",
+            "ts": "2026-09-21T18:30:06.535892+00:00",
+        }
+    ]
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == []
+
+
 def test_missing_shape_dispatchable_field_stays_untried():
     # TraceLens path never emits shape_dispatchable; absent field must be treated as dispatchable so the main path is
     # not regressed.

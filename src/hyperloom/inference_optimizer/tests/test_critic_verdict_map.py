@@ -16,8 +16,8 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     CoordinatorState,
-    PendingProposal,
 )
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -252,7 +252,7 @@ class _StubBus:
     def __init__(self) -> None:
         self.messages: list[_BusMessage] = []
 
-    async def append_and_seq(self, msg: Any) -> Any:  # noqa: ANN401
+    async def append_and_seq(self, msg: Any) -> Any:
         self.messages.append(
             _BusMessage(
                 from_agent=getattr(msg, "from_agent", ""),
@@ -455,7 +455,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
@@ -511,7 +511,7 @@ async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
@@ -1658,7 +1658,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1710,7 +1710,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             raise AssertionError("empty filtered grid must not create a task")
 
@@ -1743,7 +1743,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1821,7 +1821,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1869,7 +1869,7 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1914,7 +1914,7 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 

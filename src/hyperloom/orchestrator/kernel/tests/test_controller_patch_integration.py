@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +25,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -159,8 +159,25 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
+
+
+def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "cycle" / "result" / "patches"
+    alphabetical = tuple(root / name for name in ("first", "second", "third"))
+    priorities = {"first": 2, "second": 0, "third": 1}
+
+    monkeypatch.setattr(integration, "discover_controller_patch_dirs", lambda _root: alphabetical)
+    monkeypatch.setattr(
+        integration,
+        "load_task",
+        lambda path, record_state=False: SimpleNamespace(
+            task=SimpleNamespace(priority=priorities[path.name], operator_id=path.name)
+        ),
+    )
+
+    ordered = integration._priority_ordered_patch_dirs(root)
+    assert [path.name for path in ordered] == ["second", "third", "first"]
 
 
 def _coordinator(session_dir: Path, repo: Path) -> Coordinator:
@@ -1313,6 +1330,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 40.0,
+                "e2e_norm_intvty_p50": 40.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1329,6 +1349,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1385,6 +1408,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 42.0,
+                "e2e_norm_intvty_p50": 42.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1398,6 +1424,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {
         "action": "baseline",
@@ -1406,6 +1435,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(
@@ -1459,6 +1491,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 30.0,
+                "e2e_norm_intvty_p50": 30.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1474,6 +1509,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "input_throughput": 1300.0,
         "total_throughput": 1450.0,
         "e2e_norm_intvty_p90": 40.0,
+        "e2e_norm_intvty_p50": 40.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(

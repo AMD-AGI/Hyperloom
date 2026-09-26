@@ -20,11 +20,8 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.state.shared_state import (
-    SharedState,
-    _GAPS_ATTEMPTS_HISTORY,
-    _GAPS_MAX_ENTRIES,
-)
+from hyperloom.orchestrator.state.gaps import _GAPS_ATTEMPTS_HISTORY, _GAPS_MAX_ENTRIES
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 

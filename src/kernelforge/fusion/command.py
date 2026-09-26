@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import click
 
+from hyperloom.common.io import atomic_write_json
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
@@ -670,6 +671,48 @@ def run(
         )
     else:
         log.info("no fusion recipe located (verdict: no_opportunity)")
+
+    def publish(
+        patches: Optional[list[dict[str, Any]]],
+        *,
+        validation=None,
+        artifacts=None,
+        loop=None,
+        compile_pass=None,
+        verdict_override: str = "",
+        error=None,
+        nomination=None,
+    ) -> tuple[dict[str, Any], Path]:
+        """Write the run's manifest, as complete as the run has so far got.
+
+        The aggregate is the only thing that points at a keeper, and it used to land once
+        every campaign had returned -- so a run killed in between reported REVERT while
+        proven, already-smoked patches sat in the workspace. Called from ``on_keep`` too,
+        it is never missing, only partial, and the end-of-run call overwrites it with the
+        real loop / compile-pass / error fields before any exit.
+        """
+        manifest = build_manifest(
+            framework=framework,
+            model_path=model_path,
+            model_type=model_type,
+            diagnosis=diagnosis,
+            recipe=top_recipe,
+            candidates=recipes,
+            validation=validation,
+            artifacts=artifacts,
+            loop=loop,
+            compile_pass=compile_pass,
+            verdict_override=verdict_override,
+            error=error,
+            patches=patches,
+            nomination=nomination,
+        )
+        if selected_agent is not None:
+            manifest["agent_backend"] = selected_agent.name
+            manifest["agent_model"] = selected_agent.runtime.model
+            manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
+        return manifest, write_manifest(manifest, out)
+
     validation = None
     artifacts = None
     loop_manifest = None
@@ -748,6 +791,7 @@ def run(
                 block_size=block_size,
                 max_model_len=max_model_len,
                 agent_factory=require_agent_backend,
+                publish=publish,
             )
             if loop_result is not None:
                 validation = loop_result.best
@@ -905,27 +949,16 @@ def run(
             # into whatever runs next.
             _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
 
-    manifest = build_manifest(
-        framework=framework,
-        model_path=model_path,
-        model_type=model_type,
-        diagnosis=diagnosis,
-        recipe=top_recipe,
-        candidates=recipes,
+    manifest, path = publish(
+        patches_out,
         validation=validation,
         artifacts=artifacts,
         loop=loop_manifest,
         compile_pass=compile_pass_outcome,
         verdict_override=(LLM_UNAVAILABLE_VERDICT if llm_error is not None else ""),
         error=(llm_error.to_dict() if llm_error is not None else None),
-        patches=patches_out,
         nomination=nomination_summary,
     )
-    if selected_agent is not None:
-        manifest["agent_backend"] = selected_agent.name
-        manifest["agent_model"] = selected_agent.runtime.model
-        manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
-    path = write_manifest(manifest, out)
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
     # A compile_pass run has no kernel-level ValidationResult, so report ITS verdict instead of a null that reads as
     # "no validation ran".
@@ -963,6 +996,53 @@ def run(
     ):
         # Infrastructure failure: the pipeline never had a chance to fuse anything.
         raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
+
+
+def _publish_partial_nomination(
+    publish,
+    smoked: list[RecipePatch],
+    patch: RecipePatch,
+    *,
+    out: Path,
+    repo_root: str,
+) -> None:
+    """Record the keepers proved so far, so a kill after this one does not lose them.
+
+    ``fusion_manifest.json`` is the only artifact that points at a keeper, and it used to
+    land once every campaign had returned. A wrapper killed in between reported REVERT with
+    ``patch=null`` while smoked, already-published patches sat in the output dir -- session
+    20260916T050331Z-94ee8477 lost a 5.011x fusion that way, 44 minutes after the loop had
+    proved it at 57dB SNR.
+
+    Args:
+        publish: The run's manifest writer, or None on the paths that have no manifest.
+        smoked: Siblings already past their serving smoke; ``patch`` is appended to it.
+        patch: The sibling that just passed.
+        out: The fusion output directory.
+        repo_root: The framework checkout the patches apply to.
+    """
+    smoked.append(patch)
+    if publish is None:
+        return
+    # None speedup sorts weakest, the same rule the loop's own patches[] is built on.
+    smoked.sort(key=lambda p: p.micro_speedup if p.micro_speedup is not None else -1.0, reverse=True)
+    best = smoked[0]
+    _mirror_legacy_patch(best.patch_path, out)
+    try:
+        publish(
+            [_recipe_patch_envelope(p, repo_root=repo_root) for p in smoked],
+            artifacts=FusionArtifacts(patch=best.patch_path, repo_root=repo_root),
+            loop={
+                "kept": True,
+                "best": {"kernel_speedup": best.micro_speedup},
+                "best_env_flag": best.env_flag,
+                "termination_reason": "in_progress",
+            },
+        )
+    except OSError as exc:
+        # A manifest that could not be written is not a reason to drop a proven keeper; the
+        # end-of-run write gets another chance at it.
+        log.warning("could not publish the partial nomination: %s", exc)
 
 
 def _recipe_patch_envelope(patch: RecipePatch, *, repo_root: str) -> dict[str, Any]:
@@ -1089,6 +1169,7 @@ def _run_multi_patch_nomination(
     block_size: int,
     max_model_len: int,
     agent_factory,
+    publish=None,
 ) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
     """Run BOTH pipelines and collect every keeper as an independent sibling."""
     patches: list[dict[str, Any]] = []
@@ -1138,6 +1219,7 @@ def _run_multi_patch_nomination(
             tp=tp,
             block_size=block_size,
             max_model_len=max_model_len,
+            publish=publish,
         )
         for patch in loop_result.patches:
             patches.append(_recipe_patch_envelope(patch, repo_root=repo_root))
@@ -1236,6 +1318,7 @@ def _run_fusion_autoloop(
     tp: int = 1,
     block_size: int = 0,
     max_model_len: int = 0,
+    publish=None,
 ):
     """Try each ranked recipe as one forge-loop campaign."""
     originals = {r.pattern_id: r for r in recipes}
@@ -1308,6 +1391,7 @@ def _run_fusion_autoloop(
                 fused_us=None,
                 kept=False,
                 note="CAMPAIGN FAILED: could not restore the unfused baseline",
+                correctness_measured=False,
             )
         # After the reset, so the loop's anchor bench measures the unfused tree.
         harness_path = _harness_path_for(recipe)
@@ -1343,6 +1427,10 @@ def _run_fusion_autoloop(
         if outcome.experiment_id:
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id
         return outcome.result
+
+    # Every sibling that has passed its serving smoke so far, so a run killed mid-campaign still
+    # publishes the ones it already proved.
+    smoked: list[RecipePatch] = []
 
     def on_keep(recipe, vr):
         """Export the just-kept recipe's OWN sibling patch before the next reset."""
@@ -1389,9 +1477,13 @@ def _run_fusion_autoloop(
             vr.kernel_speedup = None
             if disposition == "serving_crash":
                 vr.correctness_passed = False
+            # The run rejected this sibling, so its exported patch must not outlive the decision: a later
+            # reader has no way to tell it apart from one that passed.
+            with contextlib.suppress(OSError):
+                Path(arts.patch).unlink()
             log.warning("dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition)
             return None
-        return RecipePatch(
+        patch = RecipePatch(
             kernel_name=recipe.pattern_id,
             patch_path=arts.patch,
             source_file=recipe.source_file,
@@ -1402,6 +1494,8 @@ def _run_fusion_autoloop(
             # un-fused path (see RecipePatch).
             env_flag=recipe.env_flag,
         )
+        _publish_partial_nomination(publish, smoked, patch, out=out, repo_root=repo_root)
+        return patch
 
     cfg = LoopConfig(
         max_recipes=_recipe_ceiling(len(loop_recipes), max_recipes),
@@ -1546,11 +1640,11 @@ def _run_serving_smoke(
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Cheapest gate first, and the only one that catches a fusion nothing calls: the smoke would boot, decode and
     # PASS, because stock code is what ran.
-    wired, wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
-    if not wired:
-        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
+    wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
+    if wiring.verdict == "not_wired":
+        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring.reason)
         note = (
-            f"KERNEL OK but NOT WIRED IN: {wiring}. The microbench measured the fused "
+            f"KERNEL OK but NOT WIRED IN: {wiring.reason}. The microbench measured the fused "
             f"entry point directly, so its speedup says nothing about the served model, "
             f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
             f"is half the deliverable -- replace the ORIGINAL call site in the framework's "
@@ -1558,7 +1652,12 @@ def _run_serving_smoke(
             f"and leave the unfused code as the fallback branch."
         )
         return "not_wired", note, "not_wired"
-    log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring)
+    if wiring.verdict == "wired":
+        log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = ""
+    else:
+        log.info("fusion wiring NOT CHECKED for %s: %s", recipe.pattern_id, wiring.reason)
+        wiring_note = f" | WIRING UNCHECKED: {wiring.reason}"
     verdict = serving_smoke_verdict(
         model_path,
         flags,
@@ -1575,7 +1674,7 @@ def _run_serving_smoke(
     reason = verdict.reason
     if verdict.ok:
         log.info("serving smoke OK for %s", recipe.pattern_id)
-        return "ok", f"{base_note} | SERVING SMOKE OK", ""
+        return "ok", f"{base_note} | SERVING SMOKE OK{wiring_note}", ""
     if verdict.blames_kernel:
         log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
         note = (
@@ -1595,7 +1694,7 @@ def _run_serving_smoke(
     )
     note = (
         f"{base_note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
-        f"(defer e2e): {reason} | LESSON: the GPU did not fault, so nothing here "
+        f"(defer e2e): {reason}{wiring_note} | LESSON: the GPU did not fault, so nothing here "
         f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
         f"e2e is the KEEP/REVERT gate."
     )
@@ -1637,16 +1736,12 @@ def _export_salvage_patch(
         return False
     # This output directory may be reused.
     _clear_kernel_keep_checkpoint(out)
-    try:
-        artifacts = export_artifacts(
-            repo_root,
-            source_file,
-            out,
-            pristine_dir=pristine_dir or None,
-        )
-    except Exception as exc:  # noqa: BLE001 — export must never fail the gate.
-        log.warning("fusion patch export failed: %s: %s", type(exc).__name__, exc)
-        return False
+    artifacts = export_artifacts(
+        repo_root,
+        source_file,
+        out,
+        pristine_dir=pristine_dir or None,
+    )
     if not artifacts.patch:
         return False
     patch = Path(artifacts.patch)
@@ -1666,11 +1761,8 @@ def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "")
         "repo_root": repo_root,
         "note": getattr(vr, "note", ""),
     }
-    path = out / KERNEL_KEEP_CHECKPOINT
-    tmp = path.with_suffix(".json.tmp")
     with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload, make_parents=False)
 
 
 def _clear_kernel_keep_checkpoint(out: Path) -> None:

@@ -19,7 +19,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 
@@ -29,7 +28,11 @@ _DEAD_PID = 2_147_483_646
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != _DEAD_PID))
     return make_session_dir()
 
 
@@ -45,7 +48,6 @@ def _silent_backends() -> dict[str, object]:
         "orchestration": MockBackend(silent, name="orch"),
         "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -72,6 +74,7 @@ async def _running_task_with_dead_lease(
             "2026-01-01T00:00:00+00:00",
         ),
     )
+    coord.db.raw.execute("UPDATE leases SET owner_scope='test-node' WHERE task_id=?", (task.task_id,))
     coord.db.raw.commit()
     return task
 
@@ -90,6 +93,22 @@ async def test_pump_counts_lease_reaped_baseline_as_failure(session_dir):
         assert entry["task_id"] == task.task_id
         assert entry["error_class"] == "dead_holder_reaped"
         assert c.shared_state.baseline_attempts[-1]["status"] == "failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_pump_accounts_for_the_reconcilers_confirmed_deaths(session_dir):
+    import time
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        task = await _running_task_with_dead_lease(c, key="reconciler-death")
+        report = await c.reconciler.run(time.time())
+        assert report.failed_tasks == [task.task_id]
+        await c._pump_dispatcher_once()
+        await c._pump_dispatcher_once()
+        assert c.shared_state.baseline_total_failures == 1
     finally:
         await c.stop()
 

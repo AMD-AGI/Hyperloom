@@ -11,9 +11,10 @@ import re
 import threading
 import warnings
 from dataclasses import dataclass, replace
-from importlib import metadata, util
+from importlib import metadata
 from typing import Callable, Mapping
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -109,14 +110,12 @@ def discover_agent_providers(*, force: bool = False) -> None:
         _plugins_loaded = True
         try:
             discovered = metadata.entry_points()
-
-            def _select(group: str):
-                if hasattr(discovered, "select"):
-                    return list(discovered.select(group=group))
-                return list(discovered.get(group, []))
-
-            entries = _select(PROVIDER_ENTRY_POINT_GROUP)
-            legacy = [e for e in _select(LEGACY_PROVIDER_ENTRY_POINT_GROUP) if e.name not in {x.name for x in entries}]
+            entries = list(discovered.select(group=PROVIDER_ENTRY_POINT_GROUP))
+            legacy = [
+                e
+                for e in discovered.select(group=LEGACY_PROVIDER_ENTRY_POINT_GROUP)
+                if e.name not in {x.name for x in entries}
+            ]
             if legacy:
                 warnings.warn(
                     f"Agent provider entry-point group {LEGACY_PROVIDER_ENTRY_POINT_GROUP!r} is deprecated; "
@@ -173,14 +172,10 @@ def list_agent_providers() -> tuple[str, ...]:
 def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     """Select a provider by the one rule the whole repository shares.
 
-    Two ranked keys, shared with
-    :func:`hyperloom.common.llm_config.preferred_agent_backend`: a configured
-    credential, then an installed SDK. Providers that tie on both keep
-    registration order, which is what puts Claude ahead of Codex.
-
-    Credentials lead because ranking on the installed SDK alone is what let an
-    OpenAI-only box resolve to Claude whenever both extras happened to be
-    installed, and then fail to authenticate.
+    Ranked by :func:`hyperloom.common.llm_config.agent_backend_rank`, the key
+    :func:`hyperloom.common.llm_config.preferred_agent_backend` also sorts on.
+    Providers that tie keep registration order, which is what puts Claude ahead
+    of Codex.
 
     A named ``preferred_model`` narrows the candidates rather than joining the
     ranking: ownership says which provider the caller's model belongs to, and no
@@ -191,6 +186,8 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     preflight reports the absent extra or the failed login. Only a provider
     missing both is refused.
     """
+    from hyperloom.common import llm_config
+
     discover_agent_providers()
     failures: list[str] = []
     model = (preferred_model or "").strip()
@@ -212,14 +209,14 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
         ]
         providers = runnable_owners or providers
     ranks = {
-        provider.name: (
-            0 if _holds(provider, lambda: provider.credentialed(os.environ)) else 1,
-            0 if _holds(provider, provider.availability) else 1,
+        provider.name: llm_config.agent_backend_rank(
+            credentialed=_holds(provider, lambda: provider.credentialed(os.environ)),
+            sdk_installed=_holds(provider, provider.availability),
         )
         for provider in providers
     }
     chosen = min(providers, key=lambda provider: ranks[provider.name], default=None)
-    if chosen is not None and ranks[chosen.name] != (1, 1):
+    if chosen is not None and ranks[chosen.name] != llm_config.UNRUNNABLE_AGENT_RANK:
         return chosen
     detail = f"; checks: {'; '.join(failures)}" if failures else ""
     raise AgentProviderUnavailableError(
@@ -352,12 +349,16 @@ def _create_codex_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
 
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
-    return util.find_spec("claude_agent_sdk") is not None
+    from hyperloom.common import llm_config
+
+    return llm_config.claude_agent_sdk_installed()
 
 
 def _codex_available() -> bool:
     """Return whether the optional Codex Python SDK is installed."""
-    return util.find_spec("openai_codex") is not None
+    from hyperloom.common import llm_config
+
+    return llm_config.codex_agent_sdk_installed()
 
 
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
@@ -395,7 +396,7 @@ register_agent_provider(
     AgentProvider(
         name="claude",
         factory=_create_claude_backend,
-        default_model="claude-opus-5",
+        default_model=DEFAULT_CLAUDE_MODEL,
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,
@@ -417,7 +418,7 @@ register_agent_provider(
     AgentProvider(
         name="codex",
         factory=_create_codex_backend,
-        default_model="gpt-5.6-sol",
+        default_model=DEFAULT_CODEX_MODEL,
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,

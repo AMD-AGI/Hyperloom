@@ -34,9 +34,9 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        parse_custom_headers,
         resolve_openai_client_config,
     )
+    from hyperloom.common.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}

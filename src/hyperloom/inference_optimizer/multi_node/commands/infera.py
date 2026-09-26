@@ -90,26 +90,23 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
-    if unset_fwd:
-        try:
-            parsed_unset = json.loads(unset_fwd)
-            if isinstance(parsed_unset, list):
-                for key in parsed_unset:
-                    fwd.pop(str(key), None)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
-    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object; forwarded verbatim
-    # regardless of prefix and take precedence over prefix-matched values for the same key.
-    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    if extra_fwd:
-        try:
-            parsed = json.loads(extra_fwd)
-            if isinstance(parsed, dict):
-                for k, v in parsed.items():
-                    fwd[str(k)] = str(v)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+    # Forward no-patch shape-discovery config; the pod-side launcher sets
+    # PYTHONPATH itself (it is blocked from SSH forwarding).
+    for _shape_key in (
+        "TRACELENS_ROOT",
+        "TRACELENS_SHAPE_DISCOVERY",
+        "HYPERLOOM_SGLANG_SHAPE_MODE",
+        "HYPERLOOM_SGLANG_VERSION_PIN",
+    ):
+        _shape_val = os.environ.get(_shape_key, "").strip()
+        if _shape_val and _shape_key not in fwd:
+            fwd[_shape_key] = _shape_val
+    # Explicit per-variant overrides are forwarded verbatim regardless of prefix and take precedence over
+    # prefix-matched values for the same key; the unsets are applied first so an override can reinstate a key.
+    overrides = _mn_cli.per_round_forward_overrides()
+    for key in overrides["unset"]:
+        fwd.pop(key, None)
+    fwd.update(overrides["set"])
     # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the SSH-launched sglang on the pod (where
     # those vars are undefined) writes traces to an absolute shared-FS path, not an unresolved literal.
     if fwd.get("SGLANG_TORCH_PROFILER_DIR"):
@@ -139,7 +136,7 @@ def _infera_fanout_launch(
     print_logs: bool,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
-    script = _mn_cli._read_pod_script("launch_infera_node.py")
+    script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
@@ -241,6 +238,9 @@ def _infera_restart_config_matches(
         and str(state.get("last_restart_pd_mode") or "aggregated") == pd_mode
         and _mn_cli._normalize_extra_args(state.get("last_restart_extra_args"))
         == _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
+        # The servers were launched over SSH with these, so a round that changes only them needs a relaunch to take
+        # effect; resuming would benchmark the previous environment and report the new one.
+        and state.get("last_restart_forward_env") == _mn_cli.per_round_forward_overrides()
     )
     if not base_match:
         return False
@@ -459,6 +459,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
+    state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
     if pd_mode == "disaggregated":
         # Persist inferred PD topology so resume fast-path and KB keys match launch.
         state["pd_prefill_nodes"] = pd_prefill_nodes
@@ -531,7 +532,7 @@ def _infera_ssh_node_op(
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = str(target.get("podIP") or "").strip()
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py")
+    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
         cp = _mn_cli._infera_ssh_run_script(
             state,

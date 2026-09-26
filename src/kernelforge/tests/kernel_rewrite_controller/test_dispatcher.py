@@ -39,8 +39,8 @@ def test_dispatch_single_task_records_success_and_controller_base_patch(
         "run_forge_loop",
         lambda invocation, **_kwargs: ForgeLoopOutcome(
             returncode=0,
-            stdout="",
-            stderr="",
+            stdout="forge stdout\n",
+            stderr="forge stderr\n",
             result={"improved": True, "best_commit": "b" * 40},
             timed_out=False,
             command=invocation.command,
@@ -74,6 +74,8 @@ def test_dispatch_single_task_records_success_and_controller_base_patch(
     assert state is not None
     assert state.status == "succeeded"
     assert state.workspace_dir == str(layout.workspace_dir(result.task.operator_id))  # type: ignore[union-attr]
+    assert (task_dir / "forge-loop.stdout.log").read_text(encoding="utf-8") == "forge stdout\n"
+    assert (task_dir / "forge-loop.stderr.log").read_text(encoding="utf-8") == "forge stderr\n"
 
 
 def test_dispatch_single_task_contains_forge_failure(

@@ -29,8 +29,6 @@ from .mock_backend import (
     ScriptedPlan,
     auto_approve_critic,
 )
-from .robustness_agent import RobustnessAgentBackend
-from .robustness_mock import MockRobustnessBackend
 
 # Public name for the row-scan critic mock (formerly the standalone ``MockCriticBackend`` class).
 MockCriticBackend = auto_approve_critic
@@ -50,10 +48,8 @@ __all__ = [
     "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",
-    "MockRobustnessBackend",
     "MockRowScanBackend",
     "MockTurn",
-    "RobustnessAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
     "ScriptedPlan",

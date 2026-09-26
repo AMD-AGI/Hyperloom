@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 from kernelforge.kernel_backends.prompt_utils import context_sections_block
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
-def build_system_prompt(config_gpu_target: str, knowledge_content: str) -> str:
+def build_system_prompt(config_gpu_target: str, knowledge_content: str, canonical_gate: str) -> str:
     return f"""You implement AMDGPU assembly kernels for {config_gpu_target}.
 
 The forge-loop host has already verified the selected assembly and its rebuild
@@ -40,7 +39,7 @@ The original source is the baseline and remains selected if no candidate wins.
 Report roundtrip timing and instruction-edit gains separately. A kernel KEEP
 does not establish a model-serving gain.
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 Read languages/assembly/ for execution and measured cases. Source-language
 knowledge explains the compiled input; it does not permit frontend edits. Hardware and common methodology maps provide ISA, occupancy,

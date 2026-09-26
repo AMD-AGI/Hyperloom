@@ -1346,7 +1346,6 @@ from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
-    MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
@@ -1474,7 +1473,6 @@ async def test_critic_agent_real_runtime_clears_proposal(
             name="orchestration",
         ),
         "critic": critic_backend,
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
 
@@ -1558,7 +1556,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             name="orchestration",
         ),
         "critic": critic_backend,
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
     try:
@@ -1664,7 +1661,7 @@ async def test_run_mirrors_kb_trace_to_langfuse(
     monkeypatch,
 ):
     fake_em = _FakeKbEmitter()
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
@@ -1689,7 +1686,7 @@ async def test_run_skips_langfuse_mirror_when_disabled(
 ):
     fake_em = _FakeKbEmitter()
     fake_em.enabled = False
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'

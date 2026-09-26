@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session import session_paths
-from hyperloom.orchestrator.knowledge import research_hints
+from hyperloom.inference_optimizer.baseline_comparison import research_hints
 from hyperloom.orchestrator.specialists import domains as sd
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts import (
@@ -144,7 +144,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
-        "robustness": MockBackend(idle),
     }
     coord = Coordinator(
         session_dir=tmp_path,

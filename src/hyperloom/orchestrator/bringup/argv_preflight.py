@@ -15,15 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 log = logging.getLogger(__name__)
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.argv"
-
-#: The marker an argv-rejection observation carries, and the name of the
-#: terminal it produces.
-ARGV_INVALID = "server_argv_invalid"
 
 #: The stream name recorded on the excerpt, so a reader can tell parser output
 #: from a server log.
@@ -467,7 +464,7 @@ def check_server_argv(
         # a repair.
         return _invalid(REPAIR_SPENT, detail, dropped=flags)
 
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.inference_optimizer.grid_server_args import (
         remove_server_args,
         tokenize_server_args_preserving_json,
     )

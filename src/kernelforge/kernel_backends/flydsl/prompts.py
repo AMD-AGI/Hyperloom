@@ -7,12 +7,12 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the FlyDSL kernel backend — a specialist in FlyDSL (MLIR-based DSL) kernel development
@@ -31,13 +31,12 @@ over MFMA instruction usage, register allocation, and data movement.
    per-operator card relevant to THIS kernel BEFORE writing or optimizing. Work from
    the docs, not from memory.
 3. WRITE / EDIT the FlyDSL kernel (one logical change at a time, with a hypothesis).
-4. Correctness FIRST: the SNR probe and the task's own correctness suite must both
-   pass — a fast-but-wrong kernel is always rejected. Check numerics before
-   chasing speed.
+4. Correctness FIRST: the driver's correctness suite must pass — a fast-but-wrong
+   kernel is always rejected. Check numerics before chasing speed.
 5. Benchmark wall-clock; profile PMC counters when suboptimal.
 6. Decide the single next change from measured data (bottleneck axis), not intuition.
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## Knowledge — READ on demand, do NOT guess
 

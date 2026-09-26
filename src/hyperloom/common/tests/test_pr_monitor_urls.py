@@ -1,3 +1,6 @@
+import pytest
+
+from hyperloom.common.env import EnvValueError
 from hyperloom.common.pr_monitor_urls import (
     DEFAULT_KB_STORE_URL,
     pr_monitor_base_url,
@@ -33,3 +36,9 @@ def test_runtime_disable_marker_is_separate_from_url_derivation() -> None:
     }
     assert pr_monitor_enabled(env) is False
     assert pr_monitor_base_url(env=env) == "https://kb.example/knowledge-base/pr-monitor"
+
+
+def test_an_unreadable_disable_marker_is_not_read_as_enabled() -> None:
+    """The marker is written by preflight; a value it cannot spell means the two sides disagree on the run."""
+    with pytest.raises(EnvValueError, match="HYPERLOOM_PR_MONITOR_ENABLED"):
+        pr_monitor_enabled({"HYPERLOOM_PR_MONITOR_ENABLED": "ture"})

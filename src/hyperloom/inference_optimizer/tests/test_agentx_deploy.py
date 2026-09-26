@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.agentx import mapping
 from hyperloom.inference_optimizer.agentx.deploy import (
     agentx_asset_dir,
     deploy_agentx_assets,
@@ -28,8 +30,9 @@ def test_deploy_copies_and_is_executable(tmp_path):
     assert (dst / "aiperf_client.sh").exists()
     assert (dst / "map_aiperf.py").exists()
     assert (dst / "aiperf_phase_gate.py").exists()
+    assert (dst / "agentx_mapping.py").read_bytes() == Path(mapping.__file__).read_bytes()
     assert os.access(dst / "aiperf_client.sh", os.X_OK)
-    assert len(written) == 3
+    assert len(written) == 4
 
 
 def test_deploy_idempotent(tmp_path):
@@ -45,6 +48,7 @@ def test_deploy_modes(tmp_path):
     assert (os.stat(dst / "aiperf_client.sh").st_mode & 0o777) == 0o700
     assert (os.stat(dst / "map_aiperf.py").st_mode & 0o777) == 0o600
     assert (os.stat(dst / "aiperf_phase_gate.py").st_mode & 0o777) == 0o600
+    assert (os.stat(dst / "agentx_mapping.py").st_mode & 0o777) == 0o600
 
 
 def test_deploy_leaves_no_temp_files(tmp_path):

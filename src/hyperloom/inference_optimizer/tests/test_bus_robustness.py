@@ -11,7 +11,7 @@ from unittest import mock
 import pytest
 
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
-from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import LaneBusy, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
 
 
@@ -46,26 +46,53 @@ def test_open_connection_closes_the_connection_when_setup_fails(tmp_path):
 async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
     db = SqliteConnection(tmp_path / "leases.db")
     backend = SqliteLeaseBackend(db)
-    stamp = "2026-01-01T00:00:00+00:00"
-    db.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("benchmark_lane", "dead_holder", "t0", "bench", 0, stamp, "NOT_A_DATE", stamp),
-    )
-    db.raw.commit()
+    try:
+        held = await backend.acquire_many(
+            lanes=["benchmark_lane"],
+            holder_id="live_holder",
+            task_id="t0",
+            action="bench",
+            ttl_sec=60,
+        )
+        stamp = "2026-01-01T00:00:00+00:00"
+        db.raw.execute(
+            "UPDATE leases SET acquired_at=?, expires_at=?, heartbeat_at=? WHERE holder_id=?",
+            (stamp, "NOT_A_DATE", stamp, held.holder_id),
+        )
+        db.raw.commit()
+        retained = [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")]
+        assert len(retained) == len(held.lanes)
+        assert all(row["expires_at"] == "NOT_A_DATE" for row in retained)
 
-    lease = await backend.acquire_many(
-        lanes=["benchmark_lane"],
-        holder_id="new_holder",
-        task_id="t1",
-        action="bench",
-        ttl_sec=60,
-    )
+        with pytest.raises(LaneBusy) as exc:
+            await backend.acquire_many(
+                lanes=["benchmark_lane"],
+                holder_id="new_holder",
+                task_id="t1",
+                action="bench",
+                ttl_sec=60,
+            )
 
-    assert "benchmark_lane" in lease.lanes
-    remaining = db.fetchall_sync("SELECT holder_id FROM leases WHERE lane='benchmark_lane'")
-    assert [r["holder_id"] for r in remaining] == ["new_holder"], "the corrupt row must be reaped"
-    db.close()
+        assert exc.value.busy_lanes == list(held.lanes)
+        assert [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")] == retained
+        released = await backend.release(held)
+        holders = await backend.lane_holders()
+        assert released == len(held.lanes)
+        assert holders == {}
+
+        lease = await backend.acquire_many(
+            lanes=["benchmark_lane"],
+            holder_id="new_holder",
+            task_id="t1",
+            action="bench",
+            ttl_sec=60,
+        )
+
+        assert lease.lanes == held.lanes
+        remaining = db.fetchall_sync("SELECT lane, holder_id FROM leases ORDER BY lane")
+        assert [(row["lane"], row["holder_id"]) for row in remaining] == [(lane, "new_holder") for lane in lease.lanes]
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel.request_handlers import _final_content_snapshot
+from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _final_content_snapshot
 
 MODELS = "python/sglang/srt/models"
 PRISTINE_SRC = "def forward(x):\n    return x\n"

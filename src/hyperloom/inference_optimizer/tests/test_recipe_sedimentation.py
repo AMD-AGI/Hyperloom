@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -24,7 +26,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     backends = {
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
-        "robustness": MockBackend(idle),
     }
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     return Coordinator(
@@ -200,6 +201,173 @@ def test_warm_recipe_proven_items(tmp_path):
 def test_warm_recipe_proven_items_empty_without_recipe(tmp_path):
     coord = _make_coordinator(tmp_path)
     assert coord._warm_recipe_proven_items() == []
+
+
+def test_experience_rows_survive_the_kb_round_trip(tmp_path):
+    """Every field the Coordinator writes onto an experience row is readable again after persistence.
+
+    This is the seam between the writeback shape and the prelude readers: the
+    surrounding tests prove writeback stamps these keys and that prelude reads
+    them, but they hand-inject the rows, so the store sits between two proven
+    ends without its own coverage.
+    """
+    store = LocalRecipeStore(root=tmp_path / "kb2")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        # Exactly what writeback._build_recipe_attrs_from_state emits.
+        what_worked=[
+            {
+                "name": "mtp_on",
+                "extra_server_args": "--speculative-num-steps 3",
+                "extra_envs": {"VLLM_MTP": "1"},
+                "gain_pct": 4.2,
+                "source": "https://pr/123",
+            }
+        ],
+        what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+    )
+    row = store.get_recipe(canonical_id=cid) or {}
+
+    worked = row.get("what_worked") or []
+    assert len(worked) == 1
+    assert worked[0].get("name") == "mtp_on"
+    assert worked[0].get("source") == "https://pr/123"
+    assert worked[0].get("extra_server_args") == "--speculative-num-steps 3"
+    assert worked[0].get("extra_envs") == {"VLLM_MTP": "1"}
+    assert worked[0].get("gain_pct") == 4.2
+
+    failed = row.get("what_failed") or []
+    assert failed[0].get("name") == "bad_flag"
+    assert failed[0].get("reason") == "reverted"
+    # A REVERT's gain is negative, so a falsy-check would drop exactly the rows this column exists to record.
+    assert failed[0].get("gain_pct") == -1.0
+
+
+def test_an_experience_row_that_stored_a_description_still_names_its_variant(tmp_path):
+    """A row whose producer really wrote ``description`` reads back under ``name``.
+
+    This covers arbor-sourced rows only. A Coordinator row went to disk through a
+    projection that wrote ``description: ""``, so its variant was destroyed at write
+    time and no read-side fallback can recover it — the row stays nameless.
+    """
+    store = LocalRecipeStore(root=tmp_path / "kb_legacy")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        what_worked=[{"description": "mtp_on", "measured_impact": "+4.2%"}],
+        what_failed=[{"description": "", "reason": "OOM"}],
+    )
+    row = store.get_recipe(canonical_id=cid) or {}
+    assert (row.get("what_worked") or [])[0].get("name") == "mtp_on"
+    assert not (row.get("what_failed") or [])[0].get("name")
+
+
+def test_an_experience_row_keeps_a_key_this_module_never_heard_of(tmp_path):
+    """A field the Coordinator starts sending reaches disk without being taught here first."""
+    store = LocalRecipeStore(root=tmp_path / "kb_forward")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        what_worked=[{"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}],
+        what_failed=[{"name": "bad_flag", "reason": "reverted", "error_class": "OOMError"}],
+    )
+    row = store.get_recipe(canonical_id=cid) or {}
+    assert (row.get("what_worked") or [])[0] == {"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}
+    assert (row.get("what_failed") or [])[0] == {
+        "name": "bad_flag",
+        "reason": "reverted",
+        "error_class": "OOMError",
+    }
+
+
+def test_an_experience_row_serialises_to_exactly_what_it_parsed(tmp_path):
+    """``Recipe.from_dict`` and ``to_dict`` are inverses, so a re-put cannot erode a row."""
+    from hyperloom.orchestrator.knowledge.recipe_kb.schema import Recipe
+
+    payload = {
+        "what_worked": [
+            {
+                "name": "mtp_on",
+                "extra_server_args": "--speculative-num-steps 3",
+                "extra_envs": {"VLLM_MTP": "1"},
+                "gain_pct": 4.2,
+                "source": "https://pr/123",
+            }
+        ],
+        "what_failed": [
+            {
+                "name": "bad_flag",
+                "reason": "reverted",
+                "extra_server_args": "",
+                "extra_envs": {},
+                "gain_pct": -1.0,
+                "source": "",
+            }
+        ],
+    }
+    once = Recipe.from_dict(payload).to_dict()
+    assert once["what_worked"] == payload["what_worked"]
+    assert once["what_failed"] == payload["what_failed"]
+    assert Recipe.from_dict(once).to_dict() == once
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        {"name": "v", "gain_pct": "not-a-number"},
+        # A number the producer stringified is still the wrong type: ``writeback`` passes ``float | None``, and a
+        # store that quietly parses this one would take the unparseable one above just as quietly.
+        {"name": "v", "gain_pct": "4.2"},
+        {"name": "v", "extra_envs": ["not", "a", "mapping"]},
+    ],
+)
+def test_a_malformed_experience_row_fails_at_the_boundary(tmp_path, bad_row):
+    """``put_recipe`` is the boundary: a bad type raises rather than landing a row with the value silently gone."""
+    store = LocalRecipeStore(root=tmp_path / "kb_bad")
+    with pytest.raises(TypeError):
+        store.put_recipe(
+            canonical_id="inference:m:h:f:text:a:1:fp4",
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[bad_row],
+        )
+
+
+def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
+    """End-to-end: a recipe written to the KB feeds prelude's ``already_proven``."""
+    coord = _make_coordinator(tmp_path)
+    store = LocalRecipeStore(root=tmp_path / "kb3")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        what_worked=[
+            {"name": "mtp_on", "source": "https://pr/123"},
+            {"name": "fp8_kv"},
+        ],
+    )
+    # The shape recipe_kb_t0 hands to SharedState on a hit.
+    coord.shared_state.warm_start_recipe = {
+        "workload": "m",
+        "hw": "h",
+        "recipe": store.get_recipe(canonical_id=cid) or {},
+    }
+    proven = coord._warm_recipe_proven_items()
+    assert {p["name"] for p in proven} == {"mtp_on", "fp8_kv"}
+    assert next(p for p in proven if p["name"] == "mtp_on")["source"] == "https://pr/123"
 
 
 def test_gap_provenance_round_trips_through_serialization(tmp_path):

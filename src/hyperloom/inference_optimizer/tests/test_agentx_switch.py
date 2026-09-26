@@ -9,8 +9,10 @@ import os
 import subprocess
 import sys
 
+import pytest
 import yaml
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
@@ -73,7 +75,8 @@ def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
     # gpu_type pre-pins vllm_mi300x.sh; the switch must overwrite it.
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "aiperf_client.sh"
-    assert bench["envs"]["AGENTX_PHASE_WAIT_TIMEOUT_S"] == str(bench["timeout_seconds"])
+    assert "timeout_seconds" not in bench
+    assert "AGENTX_PHASE_WAIT_TIMEOUT_S" not in bench["envs"]
 
 
 def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatch):
@@ -159,13 +162,23 @@ def test_switch_off_does_not_leak_weka_loader_override(tmp_path, monkeypatch):
     assert "WEKA_LOADER_OVERRIDE" not in (bench.get("envs") or {})
 
 
-# ── A3: defensive parsing ────────────────────────────────────────────────────
-def test_switch_unrecognized_value_is_off_no_raise(tmp_path, monkeypatch):
+# ── A3: parsing ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
+def test_switch_off_tokens_keep_the_synthetic_script(tmp_path, monkeypatch, raw):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")  # typo -> OFF, must not raise
+    monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     src = _write(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def test_an_unreadable_switch_does_not_materialize_the_synthetic_workload(tmp_path, monkeypatch):
+    """A typo used to read as OFF here, benchmarking the run the operator did not ask for."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")
+    src = _write(tmp_path / "base.yaml")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
 
 
 def test_switch_only_serving_frameworks(tmp_path, monkeypatch):

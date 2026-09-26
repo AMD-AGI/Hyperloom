@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.intent_envelope import (
-    ALLOWED_VERDICTS,
     ALLOWED_VERDICT_SOURCES,
     DEFAULT_IDLE_BODY,
     Intent,
@@ -20,6 +19,7 @@ from hyperloom.agents.critic.runtime.intent_envelope import (
     build_review_verdict_intent,
     validate_envelope,
 )
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
 
 def test_allowed_verdicts_match_design_v06():

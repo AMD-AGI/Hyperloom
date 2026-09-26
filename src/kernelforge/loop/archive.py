@@ -85,7 +85,7 @@ class CandidateArchive:
         self._degrade_seq: int = 0
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
+        except OSError as e:
             self._mark_degraded(f"create {self.root}", e)
 
     def _iter_dir(self, iteration: int) -> Path:
@@ -407,7 +407,7 @@ class CandidateArchive:
             os.rename(temp_dir, d)
             temp_dir = None
             fsync_directory(self.root)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self._mark_degraded(f"record iteration {rec.iteration}", e)
             return None
         finally:
@@ -496,7 +496,7 @@ class CandidateArchive:
         """Raw content of one file inside an iteration dir (best-effort)."""
         try:
             return (self._iter_dir(iteration) / filename).read_text()
-        except Exception as e:
+        except OSError as e:
             log.debug("archive: failed to read %s for iter %s: %s", filename, iteration, e)
             return ""
 
