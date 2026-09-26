@@ -32,6 +32,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.inference_optimizer.framework_paths import (
@@ -2280,7 +2281,10 @@ class IntegratePatchExecutor:
             state.save(self.session_dir)
         if summary["failed"]:
             if state is not None and hasattr(state, "set_stop_reason"):
-                state.set_stop_reason("environment_fault")
+                # Not environment_fault: the host is fine, the tree this attempt
+                # patched is not, and the report for environment_fault tells the
+                # operator to look at the install instead.
+                state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
                 state.save(self.session_dir)
             return {
                 **result,

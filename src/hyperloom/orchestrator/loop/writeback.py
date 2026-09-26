@@ -5747,6 +5747,14 @@ class WritebackCollaborator:
             )
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
+        if phase == "restored":
+            # The attempt put the tree back before it failed, so there is
+            # nothing left to roll back. The verdict above needs a result to
+            # say so, and an attempt that died after the restore records a
+            # failed task with an empty one.
+            report["fixes"].append({"kind": "settled_pending_integrate", "task_id": task_id, "phase": phase})
+            self._clear_pending_integrate(pending, gc_runtime=True)
+            return True
         if phase == "accepted":
             # A KEEP verdict left the candidate in the tree on purpose and
             # popped the user's stash, so neither rollback nor clear is
@@ -5756,6 +5764,12 @@ class WritebackCollaborator:
             # misattribute the candidate's gain on the next stack rebench.
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id, "phase": phase})
             return True
+        if verdict == "incomplete":
+            # A confirmed outcome that discharged nothing: the teardown the
+            # attempt owed is still owed, so retry it rather than hold the
+            # sentinel until someone edits state.json. An online restore that
+            # failed lands here on a task the runner recorded as succeeded.
+            return False
         if task is None or task.state not in ("queued", "running", "failed"):
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id})
             return True

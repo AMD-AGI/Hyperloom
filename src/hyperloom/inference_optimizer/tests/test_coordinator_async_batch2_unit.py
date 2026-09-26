@@ -2898,3 +2898,51 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
     assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coord, pending_candidate):
+    """An attempt that died after putting the tree back has nothing left to roll back.
+
+    The verdict table needs a result to say "settled", and this task has an
+    empty one, so the sentinel used to be held until someone edited state.json.
+    """
+    candidate = await pending_candidate(patches=True)
+    coord.shared_state.pending_integrate = {
+        **coord.shared_state.pending_integrate,
+        "recovery": {"phase": "restored"},
+    }
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    await coord.tasks.transition(candidate.task.task_id, "failed")
+    await coord.tasks.append_completion_evidence(candidate.task.task_id, {"outcome": {"result": {}}})
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    assert coord.shared_state.pending_integrate == {}
+    assert any(entry.get("kind") == "settled_pending_integrate" for entry in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_online_restore_is_retried_not_held_forever(coord, pending_candidate):
+    """_finish_attempt returns normally on a failed restore, so the row reads succeeded.
+
+    That discharged nothing: the teardown is still owed and must be retried.
+    """
+    candidate = await pending_candidate(patches=True)
+    coord.shared_state.pending_integrate = {
+        **coord.shared_state.pending_integrate,
+        "recovery": {"phase": "applied"},
+    }
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    await coord.tasks.transition(candidate.task.task_id, "succeeded")
+    await coord.tasks.append_completion_evidence(
+        candidate.task.task_id,
+        {"outcome": {"result": {"status": "failed", "error_class": "integrate_restore_incomplete"}}},
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    # The rollback ran, so the candidate's edits are gone from the tree.
+    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
