@@ -147,6 +147,7 @@ def package_probe(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setattr(bi, "_resolve_probe_python", lambda _framework: state.executable)
     monkeypatch.setattr(vf, "_HELP_PROBE_FAILURES", {})
+    monkeypatch.setattr(vf, "_HELP_TEXT_CACHE", {})
     monkeypatch.setattr(vf.time, "monotonic", lambda: state.clock)
 
     def write_package(root, flag):
@@ -364,6 +365,64 @@ def test_failed_stdout_and_stderr_never_become_help(package_probe, monkeypatch):
         "run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, "--invalid", "Traceback: --invalid"),
     )
+
+    assert vf._probe_server_help_text("sglang") == ""
+    assert vf._HELP_PROBE_FAILURES["sglang"][1] == package_probe.clock + 300
+
+
+def test_an_unchanged_parser_is_read_once_not_once_per_task(package_probe, monkeypatch):
+    """The probe is a blocking subprocess inside an async executor, run per explore task.
+
+    Re-reading a parser that has not moved would pay that cost on every task.
+    """
+    state = package_probe
+    monkeypatch.setattr(vf, "_framework_package_stamp", lambda _interp, _fw: [str(state.source), 1, 1])
+
+    assert "--before" in vf._probe_server_help_text("sglang")
+    assert state.calls == 1
+    assert "--before" in vf._probe_server_help_text("sglang")
+    assert "--before" in vf._probe_server_help_text("sglang")
+    assert state.calls == 1
+
+
+def test_a_reinstalled_framework_is_not_judged_by_its_predecessor_parser(package_probe, monkeypatch):
+    """The staleness this cache used to have: a long-lived orchestrator kept the old help forever."""
+    state = package_probe
+    stamp = {"value": [str(state.source), 1, 1]}
+    monkeypatch.setattr(vf, "_framework_package_stamp", lambda _interp, _fw: list(stamp["value"]))
+
+    assert "--before" in vf._probe_server_help_text("sglang")
+    assert state.calls == 1
+
+    state.write_package(state.root, "--after")
+    stamp["value"] = [str(state.source), 2, 2]
+    help_text = vf._probe_server_help_text("sglang")
+
+    assert state.calls == 2
+    assert "--after" in help_text
+    assert "--before" not in help_text
+
+
+def test_an_unlocatable_package_is_never_cached(package_probe, monkeypatch):
+    """Without a package to watch, nothing would ever retire the entry."""
+    state = package_probe
+    monkeypatch.setattr(vf, "_framework_package_stamp", lambda _interp, _fw: None)
+
+    assert "--before" in vf._probe_server_help_text("sglang")
+    assert "--before" in vf._probe_server_help_text("sglang")
+
+    assert state.calls == 2
+    assert vf._HELP_TEXT_CACHE == {}
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("resolve loop"), UnicodeDecodeError("utf-8", b"", 0, 1, "bad")])
+def test_a_probe_that_raises_anything_leaves_the_variant_alone(package_probe, monkeypatch, failure):
+    """A best-effort predicate must degrade to "drop nothing", not fail the explore task around it."""
+
+    def explode(_framework):
+        raise failure
+
+    monkeypatch.setattr(bi, "_resolve_probe_python", explode)
 
     assert vf._probe_server_help_text("sglang") == ""
     assert vf._HELP_PROBE_FAILURES["sglang"][1] == package_probe.clock + 300

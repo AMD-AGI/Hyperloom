@@ -234,10 +234,16 @@ def xdit_blacklist_reason(
     return None
 
 
-# Framework -> (observable launch identity, failed-probe retry deadline).
+# Framework -> (parser identity, help text). Keyed on identity rather than kept
+# for the life of the process: a reinstalled framework must not be judged by the
+# parser its predecessor printed.
+_HELP_TEXT_CACHE: dict[str, tuple[str, str]] = {}
+
+# Framework -> (parser identity, failed-probe retry deadline).
 _HELP_PROBE_FAILURES: dict[str, tuple[str, float]] = {}
 _HELP_PROBE_RETRY_SEC: float = 300.0
-# Parser imports can cost seconds; a filter call shares one probe across all variants.
+# Importing a serving framework to read its parser costs seconds (sglang: ~4s warm,
+# more on a cold pod), and the probe is a blocking call inside an async executor.
 _HELP_PROBE_TIMEOUT_SEC: float = 30.0
 
 # Per-framework ``--help`` argv tails; resolve the interpreter at call time.
@@ -266,14 +272,35 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _help_probe_launch_identity(interpreter: str, argv_tail: tuple[str, ...]) -> str:
-    """Identify an attempted launch without importing a framework in this process.
+def _framework_package_stamp(interpreter: str, fw: str) -> list[str | int] | None:
+    """Stat the framework package the probe would import, or None if not locatable.
 
-    The executable and its stat cover the cases that change what the parser
-    prints: a rebuilt venv, an upgraded framework, a different interpreter
+    Read off the filesystem, never imported: the parser lives in the probe
+    interpreter's environment, not this process's, and importing a serving
+    framework here is exactly the cost the cache exists to avoid.
+    """
+    try:
+        root = Path(interpreter).resolve().parent.parent
+        for init in sorted(root.glob(f"lib/python*/site-packages/{fw}/__init__.py")):
+            stat = init.stat()
+            return [str(init), stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        return None
+    return None
+
+
+def _help_probe_launch_identity(
+    interpreter: str,
+    argv_tail: tuple[str, ...],
+    package_stamp: list[str | int] | None,
+) -> str:
+    """Identify the parser a probe would print, without importing it here.
+
+    The executable, its stat and the installed package's stat cover what changes
+    the output: a rebuilt venv, a reinstalled framework, a different interpreter
     resolved out of the environment. Ambient env vars are deliberately absent --
     per-round tuning overrides rewrite them constantly, and folding those in
-    would expire the cooldown on every round and re-pay the probe each time.
+    would expire both the cache and the cooldown on every round.
     """
     executable = Path(shutil.which(interpreter) or interpreter)
     try:
@@ -281,24 +308,34 @@ def _help_probe_launch_identity(interpreter: str, argv_tail: tuple[str, ...]) ->
         stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
     except OSError:
         stamp = None
-    payload = (interpreter, str(executable.resolve()), stamp, argv_tail)
+    payload = (interpreter, str(executable.resolve()), stamp, argv_tail, package_stamp)
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
 
 
 def _probe_server_help_text(framework: str) -> str:
-    """Fetch current parser help; suppress repeated failures of the same launch."""
+    """Return the installed parser's help, reusing it while that parser is unchanged.
+
+    Every step runs under one handler: this is a best-effort predicate, and a
+    probe that cannot answer must leave the variant alone rather than fail the
+    explore task around it.
+    """
     fw = (framework or "").strip().lower()
     argv_tail = _HELP_PROBE_COMMANDS.get(fw)
     if argv_tail is None:
         return ""
-    from ._benchmark_interpreter import _resolve_probe_python
-
-    interpreter = _resolve_probe_python(fw)
-    identity = _help_probe_launch_identity(interpreter, argv_tail)
-    failure = _HELP_PROBE_FAILURES.get(fw)
-    if failure and failure[0] == identity and time.monotonic() < failure[1]:
-        return ""
+    identity = ""
     try:
+        from ._benchmark_interpreter import _resolve_probe_python
+
+        interpreter = _resolve_probe_python(fw)
+        package_stamp = _framework_package_stamp(interpreter, fw)
+        identity = _help_probe_launch_identity(interpreter, argv_tail, package_stamp)
+        cached = _HELP_TEXT_CACHE.get(fw)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        failure = _HELP_PROBE_FAILURES.get(fw)
+        if failure is not None and failure[0] == identity and time.monotonic() < failure[1]:
+            return ""
         proc = subprocess.run(
             [interpreter, *argv_tail],
             capture_output=True,
@@ -309,11 +346,16 @@ def _probe_server_help_text(framework: str) -> str:
         out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
         if out:
             _HELP_PROBE_FAILURES.pop(fw, None)
+            if package_stamp is not None:
+                # Without a package to watch, a cached help text has no event that
+                # would retire it, which is the staleness this cache had before.
+                _HELP_TEXT_CACHE[fw] = (identity, out)
             return out
         reason = f"exit={proc.returncode}: {' '.join((proc.stderr or '').split())[-300:]}"
-    except (OSError, subprocess.SubprocessError) as exc:
+    except Exception as exc:  # noqa: BLE001 — see docstring: the filter degrades, it does not fail
         reason = repr(exc)
-    already_reported = bool(failure) and failure[0] == identity
+    previous = _HELP_PROBE_FAILURES.get(fw)
+    already_reported = previous is not None and previous[0] == identity
     _HELP_PROBE_FAILURES[fw] = (identity, time.monotonic() + _HELP_PROBE_RETRY_SEC)
     if not already_reported:
         log.warning(
