@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 def test_fingerprint_args_order_independent() -> None:

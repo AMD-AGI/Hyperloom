@@ -28,7 +28,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
 )
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import chatty_child
 

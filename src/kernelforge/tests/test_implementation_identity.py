@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from kernelforge.knowledge.implementation_identity import (
     canonical_editable_source_paths,
     canonical_framework_version,
@@ -308,3 +312,41 @@ def test_signature_uses_empty_symbols_when_source_has_no_kernel_entry(tmp_path):
     )
 
     assert identity["implementation_symbols"] == []
+
+
+def test_an_unreadable_declared_source_never_signs_a_subset(tmp_path):
+    # Dropping it would hash the kernel alone under an address that claims to cover both files, so two
+    # implementations differing only inside the helper would land on one page.
+    kernel = tmp_path / "kernel.py"
+    helper = tmp_path / "helper.py"
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
+    helper.write_text("import triton\n@triton.jit\ndef helper_kernel(x):\n    return x\n")
+    helper.chmod(0o000)
+    if os.access(helper, os.R_OK):
+        helper.chmod(0o600)
+        pytest.skip("this user reads a file whatever its mode bits say")
+
+    try:
+        with pytest.raises(OSError):
+            implementation_signature(
+                workspace=str(tmp_path),
+                kernel_path=str(kernel),
+                source_files=[str(helper)],
+                framework="vllm",
+            )
+    finally:
+        helper.chmod(0o600)
+
+
+def test_a_declared_source_that_was_never_written_contributes_no_symbols(tmp_path):
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
+
+    _, identity = implementation_signature(
+        workspace=str(tmp_path),
+        kernel_path=str(kernel),
+        source_files=[str(tmp_path / "added_later.py")],
+        framework="vllm",
+    )
+
+    assert identity["implementation_symbols"] == ["target_kernel"]

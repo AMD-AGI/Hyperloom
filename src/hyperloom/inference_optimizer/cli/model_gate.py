@@ -500,52 +500,6 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     }
 
 
-def _model_is_moe(model_path: str) -> bool:
-    """Best-effort detect a Mixture-of-Experts model from config.json."""
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
-    for cfg in candidates:
-        for key in expert_keys:
-            val = cfg.get(key)
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val > 1:
-                return True
-        if cfg.get("moe_intermediate_size"):
-            return True
-        if "moe" in str(cfg.get("model_type") or "").lower():
-            return True
-        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
-            return True
-    return False
-
-
-def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
-    """Whether aiter's CK fused-MoE can serve this checkpoint at this TP."""
-    if not _model_is_moe(model_path):
-        return True
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return True
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        size = cfg.get("moe_intermediate_size")
-        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            continue
-        shards = max(1, int(tp or 1))
-        return (size // shards) % 128 == 0
-    return True
-
-
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     """Return a reason when the model ships a quant format unsupported on ROCm."""
     if not model_path:
@@ -1483,7 +1437,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse."""
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )

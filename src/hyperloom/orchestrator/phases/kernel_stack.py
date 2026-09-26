@@ -230,7 +230,7 @@ class KernelStackPhase(PhaseHandler):
 
     async def _recover_interrupted_stack_validation(self) -> bool:
         """Resume or abort a stack validation interrupted by crash."""
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+        from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
         if isinstance(pending, dict) and pending:
@@ -355,6 +355,8 @@ class KernelStackPhase(PhaseHandler):
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _grade_integrate_accuracy,
+        )
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             _maybe_finalize_kernel_patch,
             _maybe_revert_kernel_patch,
@@ -517,8 +519,7 @@ class KernelStackPhase(PhaseHandler):
                 "bench_result": bench_result,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
-                # A stack cannot be left half-applied, so RECORDED reverts like
-                # REVERT does; the verdict says which one it was.
+                # A stack cannot be left half-applied, so anything short of KEEP reverts it whole.
                 "graded_verdict": graded_verdict,
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),

@@ -377,9 +377,9 @@ class TestCandidateEnvForwarding(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[5]
         sys.path.insert(0, str(repo_root))
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+        from hyperloom.orchestrator.actions.executors import trace_analyze
 
-        self.h = kernel_request_handlers
+        self.h = trace_analyze
 
     def test_flydsl_prefix_allowed(self) -> None:
         self.assertIn("FLYDSL_", self.h._CANDIDATE_ENV_PREFIXES)

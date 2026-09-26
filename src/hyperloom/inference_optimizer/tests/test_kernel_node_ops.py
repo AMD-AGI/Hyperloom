@@ -33,7 +33,11 @@ def _bundle_kernel_node_ops() -> str:
 
 def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
-    exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
+    mod.__file__ = str(mn_cli._SCRIPTS_DIR / "kernel_node_ops.py")
+    with pytest.MonkeyPatch.context() as context:
+        for dep in mn_cli._KERNEL_NODE_OPS_DEPS:
+            context.setitem(sys.modules, dep.stem, sys.modules.get(dep.stem))
+        exec(compile(_bundle_kernel_node_ops(), mod.__file__, "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod
 
@@ -299,10 +303,32 @@ def test_bench_invalid_files_json_fails(tmp_path, capsys):
     assert "JSON" in payload["error"]
 
 
+def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys):
+    """Accepting a patch clears its backups; a path outside the root is refused."""
+    _fw, bak = patch_env
+    k = _load("kno_finalize")
+    backup = bak / "kernel.bak"
+    backup.write_bytes(b"baseline")
+    outside = bak.parent / "outside.bak"
+    outside.write_bytes(b"untouched")
+
+    k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(backup)}])))
+    accepted = _last_json(capsys)
+    assert accepted["status"] == "finalized"
+    assert accepted["deleted"] == [str(backup)]
+    assert not backup.exists()
+
+    rc = k._do_finalize(argparse.Namespace(records_json=json.dumps([{"backup_path": str(outside)}])))
+    refused = _last_json(capsys)
+    assert rc == 1
+    assert refused["status"] == "failed"
+    assert outside.read_bytes() == b"untouched"
+
+
 def test_emit_status_to_returncode_contract():
     k = _load("kno_emit")
-    # ok/restored/noop_missing_backup -> 0; everything else -> 1.
-    for ok_status in ("ok", "restored", "noop_missing_backup"):
+    # Completed operations return zero; failures and unknown states do not.
+    for ok_status in ("ok", "restored", "finalized", "noop_missing_backup"):
         assert k._emit({"status": ok_status}) == 0
     for bad_status in ("failed", "error", ""):
         assert k._emit({"status": bad_status}) == 1

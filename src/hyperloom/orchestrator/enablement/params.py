@@ -382,7 +382,7 @@ class EnablementParams(CoordinatorCollaborator):
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
         from ..actions.executors._apply_feedback import source_context_for_file
-        from ..framework.paths import resolve_kernel_search_roots
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
         search_roots = [Path(str(r)) for r in resolve_kernel_search_roots()]
         return source_context_for_file(

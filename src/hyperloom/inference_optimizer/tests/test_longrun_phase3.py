@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -43,8 +44,6 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(SOFT_RESTART_DISABLE_ENV, raising=False)
-    # Don't let the soft restart's /proc server sweep run against the real host.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
@@ -81,23 +80,11 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -130,22 +117,10 @@ async def test_soft_restart_can_be_disabled(cyclic_coordinator, monkeypatch):
     c._cycle_soft_restart = False
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan2",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -159,29 +134,6 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     assert summary["memory_captured"] is True
     again = await c._run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
     assert again["running_tasks_reclaimed"] == 0
-
-
-@pytest.mark.asyncio
-async def test_soft_restart_invokes_server_deep_clean(cyclic_coordinator):
-    c = cyclic_coordinator
-    # Enable the server-restart step but stub the real /proc kill.
-    c._cycle_restart_servers = True
-    calls: list[int] = []
-    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == [1]
-    assert summary["servers_restarted"] is True
-
-
-@pytest.mark.asyncio
-async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator):
-    c = cyclic_coordinator
-    assert c._cycle_restart_servers is False
-    calls: list[int] = []
-    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == []
-    assert "servers_restarted" not in summary
 
 
 async def _noop_phase_side_effects(c):
@@ -201,7 +153,7 @@ def _arm_explore_to_sweep(st):
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
     st.kernel_enabled = False
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
 
 @pytest.mark.asyncio
@@ -225,85 +177,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
-async def test_geak_revalidation_blocks_sweep_transition_while_queued(cyclic_coordinator):
-    c = cyclic_coordinator
-    await _noop_phase_side_effects(c)
-    now = datetime.now(timezone.utc)
-    st = c.shared_state
-    st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
-    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
-    st.start_ts = (now - timedelta(minutes=10)).isoformat()
-    st.max_minutes = 96 * 60
-    st.kernel_optimizer = "geak"
-    st.geak_result = {"status": "ok"}
-    st.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "geak-revalidate-1",
-    }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
-
-    queued = await c.tasks.create(
-        kind="explore",
-        params={
-            "source": "resume_stack_revalidate",
-            "geak_fallback": True,
-        },
-        idempotency_key="geak-revalidate",
-        task_id="geak-revalidate-1",
-    )
-
-    await c._advance_phase_if_needed()
-
-    assert st.phase == ps.PHASE_KERNEL_AGENT
-    assert (await c.tasks.get(queued.task_id)).state == "queued"
-
-
-@pytest.mark.asyncio
-async def test_failed_geak_revalidation_releases_sweep_transition(cyclic_coordinator):
-    c = cyclic_coordinator
-    await _noop_phase_side_effects(c)
-    now = datetime.now(timezone.utc)
-    st = c.shared_state
-    st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
-    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
-    st.start_ts = (now - timedelta(minutes=10)).isoformat()
-    st.max_minutes = 96 * 60
-    st.kernel_optimizer = "geak"
-    st.geak_result = {"status": "ok"}
-    st.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "geak-revalidate-failed",
-    }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
-
-    task = await c.tasks.create(
-        kind="explore",
-        params={
-            "source": "resume_stack_revalidate",
-            "geak_fallback": True,
-        },
-        idempotency_key="geak-revalidate-failed",
-        task_id="geak-revalidate-failed",
-    )
-
-    await c._handle_unpromotable_result(
-        task,
-        {
-            "status": "failed",
-            "error_class": "subprocess_nonzero",
-            "error": "revalidation failed",
-        },
-    )
-    await c._advance_phase_if_needed()
-
-    assert not st.geak_pending
-    assert st.phase == ps.PHASE_SWEEP
-
-
-@pytest.mark.asyncio
-async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordinator):
+async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
@@ -316,9 +190,11 @@ async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordi
     await c.tasks.transition(running.task_id, "running")
 
     await c._advance_phase_if_needed()
+    assert c.shared_state.phase == ps.PHASE_FRAMEWORK_AGENT
 
+    await c.tasks.transition(running.task_id, "cancelled", evidence={"reason": "stopped"})
+    await c._advance_phase_if_needed()
     assert c.shared_state.phase == ps.PHASE_SWEEP
-    assert (await c.tasks.get(running.task_id)).state == "running"
 
 
 @pytest.mark.asyncio

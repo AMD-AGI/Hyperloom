@@ -324,12 +324,19 @@ class TestVariantResultToDict:
         encoded = result.to_dict()
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
+        expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
         assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
         encoded = result.to_dict()
-        for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
+        for key in (
+            "input_throughput",
+            "total_token_throughput",
+            "e2e_norm_intvty_p90",
+            "e2e_norm_intvty_p50",
+            "tpot_p90_ms",
+        ):
             assert key in encoded
             assert encoded[key] is None
 
@@ -2723,7 +2730,7 @@ class TestServerArgTokenizerOnTheSyntheticPath:
 
 def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     """The window must cover ``remove_server_args``, which is what it is about."""
-    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+    from hyperloom.inference_optimizer import grid_server_args as gsa
 
     real = gsa.remove_server_args
 

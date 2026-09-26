@@ -367,7 +367,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
 def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
     """``resolve_session_framework_root`` answers "which tree is this session
     optimising", which is a different question from "what may be edited"."""
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         _scriptable_frameworks,
         resolve_session_framework_root,
     )
@@ -399,7 +399,7 @@ def test_session_framework_root_ignores_other_framework_env(
     tmp_path: Path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator.framework.paths import resolve_session_framework_root
+    from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
 
     active = tmp_path / "active-sglang"
     stale = tmp_path / "stale-vllm"
@@ -2219,10 +2219,11 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
         pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", None, id="interactivity-tradeoff"),
         pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", None, id="both-axes-regress"),
         pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", None, id="flat-interactivity"),
-        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "kept", 10.0, id="intvty-win-output-down"),
-        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "kept", 2.0, id="exact-floor-and-throughput-guard"),
-        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "reverted", None, id="throughput-guard-breach"),
-        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", None, id="below-agentx-floor"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "reverted", None, id="output-guard-breach"),
+        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "reverted", None, id="median-below-bar-and-output-breach"),
+        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "kept", 10.0, id="total-no-longer-participates"),
+        pytest.param("agentx", 25000.0, 463.5, 200.0, None, "kept", 3.0, id="median-at-the-bar"),
+        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", None, id="median-below-the-bar"),
         pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
         *[
             pytest.param(
@@ -2279,6 +2280,9 @@ async def test_executor_grades_real_patch_bench(
         output_throughput=output,
         total_token_throughput=total,
         intvty_p90=intvty,
+        intvty_p50=intvty,
+        duration_seconds=900.0,
+        request_error_rate=0.0,
         tpot_p90_ms=3.0,
         workspace=str(workspace),
     )
@@ -2292,7 +2296,14 @@ async def test_executor_grades_real_patch_bench(
     state = SimpleNamespace(
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
-        current_best={"tput": 100.0, "total_throughput": 20000.0, "e2e_norm_intvty_p90": 450.0},
+        current_best={
+            "tput": 100.0,
+            "total_throughput": 20000.0,
+            "e2e_norm_intvty_p90": 450.0,
+            "e2e_norm_intvty_p50": 450.0,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
+        },
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
@@ -2305,7 +2316,8 @@ async def test_executor_grades_real_patch_bench(
             else:
                 measured.intvty_p90 = None
         else:
-            state.current_best.pop("total_throughput" if axis == "total" else "e2e_norm_intvty_p90")
+            for _axis in ("total_throughput",) if axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50"):
+                state.current_best.pop(_axis, None)
     original_measurement = measured.to_dict()
     original_best = dict(state.current_best)
     executor = IntegratePatchExecutor(session_dir=session_dir)

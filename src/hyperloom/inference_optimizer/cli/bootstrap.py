@@ -140,10 +140,8 @@ def _seed_shared_state(
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.orchestrator.policy.gate import (
-        detect_gpu_count,
-        research_lane_ceiling,
-    )
+    from hyperloom.common.visible_devices import detect_gpu_count
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
     research_lane_capacity = max(
@@ -417,6 +415,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.closing_phase = False
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
+    state.close_sequence_done = False
     state.crash_count = 0
     state.teardown_timings_sec = {}
     state.begin_leg()

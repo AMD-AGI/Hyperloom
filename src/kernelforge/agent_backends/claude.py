@@ -292,13 +292,18 @@ class ClaudeBackend:
 
     def preflight(self) -> None:
         """Validate that an explicitly configured executable is Claude CLI."""
-        explicit = self.runtime.executable.strip()
-        if not explicit:
+        if not self.runtime.executable.strip():
             return
-        candidate = Path(explicit).expanduser()
-        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(explicit)
+        self.validate_runtime(self.runtime)
+
+    @staticmethod
+    def validate_runtime(runtime: AgentRuntimeConfig) -> None:
+        """Check the selected CLI with a 10-second --version call, without loading the SDK."""
+        selected = resolve_claude_cli(runtime.executable)
+        candidate = Path(selected).expanduser()
+        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(selected)
         if not executable:
-            raise ClaudeUnavailableError(f"Claude CLI is not executable: {explicit}")
+            raise ClaudeUnavailableError(f"Claude CLI is not executable: {selected}")
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -311,7 +316,7 @@ class ClaudeBackend:
         version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
         if version.returncode != 0 or "claude" not in version_text.lower():
             raise ClaudeUnavailableError(
-                f"configured CLI does not appear to be Claude: {explicit}; --version returned {version_text!r}"
+                f"configured CLI does not appear to be Claude: {selected}; --version returned {version_text!r}"
             )
 
     def probe(
@@ -660,8 +665,13 @@ class ClaudeBackend:
             end_reason = "turn_cap"
         elif subtype and subtype != "success":
             end_reason = f"sdk_{subtype}"
-        else:
+        elif subtype == "success":
             end_reason = "agent_stopped"
+        else:
+            # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
+            # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
+            # as the agent's answer.
+            end_reason = "sdk_no_result"
 
         result = AgentRunResult(
             text="\n".join(text_parts).strip(),

@@ -30,7 +30,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -82,7 +82,7 @@ from ._grid_base import (
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
 )
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
@@ -596,148 +596,6 @@ def _run_grid_warmup_enabled() -> bool:
     return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
-def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:
-    """Resolve ``pid``'s visible-GPU mask from its own environment."""
-    from ...bus.gpu_pool import _parse_gpu_list
-
-    try:
-        with open(f"/proc/{pid}/environ", "rb") as fh:
-            raw = fh.read()
-    except (OSError, PermissionError):
-        return None
-    env = {}
-    for entry in raw.split(b"\0"):
-        if b"=" not in entry:
-            continue
-        key, _, value = entry.partition(b"=")
-        env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
-    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
-        if env_name in env:
-            return _parse_gpu_list(env[env_name]), True
-    return [], False
-
-
-def _kill_stale_servers() -> None:
-    """Deep-clean any lingering inference server processes + shared memory."""
-    from ._multi_node_env import is_multi_node
-    from ...bus.gpu_pool import _visible_device_mask
-
-    if is_multi_node():
-        return
-
-    import signal
-    import glob
-    import time
-
-    _KILL_PATTERNS = (
-        "VLLM::Worker",
-        "VLLM::EngineCore",
-        "vllm.entrypoints",
-        "vllm serve",
-        "sglang.srt",
-        "sglang.launch_server",
-        "atom.entrypoints",
-        "atom.entrypoints.openai_server",
-    )
-
-    # atom ModelRunner workers spawn with a generic ``--multiprocessing-fork`` cmdline (unmatchable by _KILL_PATTERNS)
-    # and can orphan holding VRAM; identify survivors by atom/aiter JIT mmaps in their address space.
-    _FORK_MARKERS = (b"--multiprocessing-fork", b"spawn_main")
-    _ATOM_MAP_SIGNATURES = ("/ATOM/atom/", "/aiter/jit/", "/aiter-test/aiter/")
-
-    my_pid = os.getpid()
-    try:
-        my_pgid = os.getpgrp()
-    except OSError:
-        my_pgid = -1
-    my_gpu_ids, my_gpu_mask_present = _visible_device_mask()
-    my_gpu_id_set = frozenset(my_gpu_ids)
-
-    def _in_our_gpu_scope(pid: int) -> bool:
-        """Whether ``pid`` overlaps our own visible-GPU mask."""
-        if not my_gpu_mask_present:
-            return True
-        candidate = _read_pid_gpu_mask(pid)
-        if candidate is None:
-            return False
-        candidate_ids, candidate_present = candidate
-        if not candidate_present:
-            return False
-        return not my_gpu_id_set.isdisjoint(candidate_ids)
-
-    def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
-        """Detect an orphaned atom ModelRunner worker by its memory maps."""
-        if not any(m in cmdline for m in _FORK_MARKERS):
-            return False
-        # Never touch a worker that belongs to *our* process group.
-        try:
-            if my_pgid != -1 and os.getpgid(pid) == my_pgid:
-                return False
-        except (OSError, ProcessLookupError):
-            return False
-        try:
-            with open(f"/proc/{pid}/maps", "r", errors="replace") as fh:
-                maps = fh.read()
-        except (OSError, PermissionError):
-            return False
-        return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
-
-    killed_atom = False
-    killed_any = False
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        if pid == my_pid:
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                cmdline = fh.read()
-        except (OSError, PermissionError):
-            continue
-        text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
-        is_atom_server = "atom.entrypoints" in text
-        if not (any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline)):
-            continue
-        if not _in_our_gpu_scope(pid):
-            continue
-        killed_any = True
-        killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
-        # Kill the whole pgrp so atom children die with the leader.
-        try:
-            pgid = os.getpgid(pid)
-            if pgid not in (my_pgid, 0):
-                os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            # Group gone or not ours; fall through to per-pid kill.
-            pass
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # Already exited or owned by another user.
-            pass
-
-    # Clear GPU runtime shared-memory segments that prevent re-binding.
-    if not my_gpu_mask_present:
-        for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
-            "/dev/shm/vllm*",
-            "/dev/shm/nccl*",
-            "/dev/shm/cuda*",
-            "/dev/shm/torch*",
-            "/dev/shm/atom*",
-        ):
-            for f in glob.glob(pattern):
-                try:
-                    os.remove(f)
-                except OSError:
-                    # Already removed or held by another process.
-                    pass
-
-    # Pause for KFD async VRAM release; atom teardown lags past 2s.
-    if killed_any:
-        time.sleep(8 if killed_atom else 2)
-
-
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
     """Prepend Magpie's import root to PYTHONPATH, skipping package-root dirs."""
     if not magpie_dir or is_python_package_root(magpie_dir):
@@ -775,7 +633,6 @@ def _run_magpie(
     cwd: str,
     result_dir: str | None = None,
     silence_timeout_sec: float | None = None,
-    preclean: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
     on_output: Callable[[], None] | None = None,
@@ -785,11 +642,6 @@ def _run_magpie(
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
     sync_benchmark_timeout(config_path, timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
-    # Pre-clean lingering servers + shared memory (skip under pytest, and for lifecycle re-attach rounds that would
-    # kill the warm server).
-    if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
-        _kill_stale_servers()
-
     env = scrub_benchmark_process_env(os.environ.copy())
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
@@ -1035,7 +887,6 @@ async def run_grid(
     base_remove_args: list[str] | None = None,
     base_unset_envs: list[str] | None = None,
     warmup_before_measure: bool | None = None,
-    preclean_before_run: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
     session_deadline_sec: float | None = None,
@@ -1406,7 +1257,6 @@ async def run_grid(
                     silence_timeout_sec=silence_timeout_sec,
                     cwd=cwd,
                     result_dir=result_dir,
-                    preclean=True,
                     serving_lease=serving_lease,
                     session_deadline_sec=session_deadline_sec,
                 )
@@ -1643,7 +1493,6 @@ async def run_grid(
                 server_already_ready=True,
                 cwd=cwd,
                 result_dir=None,
-                preclean=False,
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
             )
@@ -1686,7 +1535,6 @@ async def run_grid(
                 cwd=cwd,
                 result_dir=result_dir,
                 silence_timeout_sec=silence_timeout_sec,
-                preclean=(False if auto_warmup else preclean_before_run),
                 server_already_ready=(server_already_ready or auto_warmup or _mn_imn()),
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
@@ -2148,6 +1996,8 @@ async def run_grid(
                 input_throughput=measurement.get("input_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),
                 intvty_p90=measurement.get("e2e_norm_intvty_p90"),
+                intvty_p50=measurement.get("e2e_norm_intvty_p50"),
+                request_error_rate=measurement.get("request_error_rate"),
                 workspace=str(workspace),
                 report_path=str(report_path) if report_path.exists() else None,
                 raw_result_path=measurement.get("raw_result_path"),

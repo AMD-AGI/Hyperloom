@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.orchestrator.policy import gate as pol
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
-    detect_gpu_count,
     research_lane_ceiling,
 )
 from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling

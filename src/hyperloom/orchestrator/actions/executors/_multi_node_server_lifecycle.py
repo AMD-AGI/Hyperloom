@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from ...loop.coordinator_helpers import format_exc_brief
-from hyperloom.common.env import env_flag
+from hyperloom.common.env import env_flag, env_int
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -1135,18 +1135,12 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
 
 def _published_ready_timeout_s() -> int:
     """Resolve the published-service gate budget from the environment."""
-    try:
-        return int(os.environ.get("HYPERLOOM_MN_PUBLISHED_READY_S", "300"))
-    except ValueError:
-        return 300
+    return env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Read a positive int knob from the environment, clamped and junk-tolerant."""
-    try:
-        return max(minimum, int(os.environ.get(name, str(default))))
-    except ValueError:
-        return default
+    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
+    return max(minimum, env_int(name, default))
 
 
 async def _wait_for_published_service_ready_async(
