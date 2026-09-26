@@ -292,6 +292,9 @@ def _register_executors(
     # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
     coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator._run_kernel_agent(ctx))
 
+    # Context-tool schemas describe the executors that are now registered.
+    coordinator._attach_orchestration_context_tools()
+
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):
             if required_kind not in coordinator.sub.executor_registry:

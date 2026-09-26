@@ -79,10 +79,10 @@ Five tools close the act->observe loop without waiting for the next tick
   running, and a specialist can hold the machine for hours.
 - **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
   action synchronously and get its result back IN THIS TURN. Only a
-  small whitelist of fast, non-GPU / non-serving actions is eligible
-  (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
-  work) must still go through a `delegate` intent so it runs async and
-  preemptibly. PolicyGate still gates the run (phase / role / paths).
+  whitelist of fast, non-GPU / non-serving actions in the tool's
+  `action_name` enum is eligible; anything heavy (benchmarks, sweeps, kernel
+  work) must use `emit_intent` with `propose_action` or `delegate` so it
+  runs async and preemptibly. PolicyGate still gates the run (phase / role / paths).
 - **`get_failure{failure_id}`** — pull the structured evidence packet for
   one variant failure: stage, error_class, error_excerpt,
   server_log_path, workspace. The failure_id appears in inbox failure
@@ -184,6 +184,25 @@ separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
 budget line as the urgency signal.
 
 <!-- phase: PRELUDE -->
+<!-- transport: tools -->
+### PRELUDE — phase goal
+
+Drive `baseline_tput > 0` so the Coordinator advances.
+
+Run `target_analysis` once before requesting the baseline. Submit baseline
+through the asynchronous scheduler with this tool call:
+
+```json
+{"intent_type":"propose_action","payload":{"action_name":"baseline","predicted_gain_pct":0,"params":{}}}
+```
+
+Send that object to **`emit_intent`**, then end the turn so the Critic can
+review it and the Coordinator can dispatch the approved work. `baseline`
+is never eligible for `run_action_now`. On later turns, inspect `get_running_tasks` or
+`get_recent_outcomes` before requesting another baseline.
+
+<!-- phase: PRELUDE -->
+<!-- transport: structured_output -->
 ### PRELUDE — phase goal
 
 Drive `baseline_tput > 0` so the Coordinator advances.
