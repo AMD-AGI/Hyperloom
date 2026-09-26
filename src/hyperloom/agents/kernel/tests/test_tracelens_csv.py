@@ -1132,9 +1132,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         _os.environ.update(env_backup)
 
     assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
-    assert all(
-        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p) for cmd in captured for p in cmd
-    ), f"splitter must not run on CPU-only trace; captured={captured}"
+    assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
+        f"splitter must not run on CPU-only trace; captured={captured}"
+    )
     assert all(
         "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
     ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
@@ -1677,7 +1677,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# splitter CLI must match the real split_inference_trace_annotation interface (positional trace_path, -o,
+# splitter CLI must match the real TraceLens.TraceUtils.split_trace.main interface (positional trace_path, -o,
 # --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
@@ -1906,7 +1906,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
@@ -2039,7 +2039,7 @@ def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc
     assert len(probes) == 1
     assert probes[0][0] == sys.executable
     assert "import TraceLens" in probes[0][-1]
-    assert "split_inference_trace_annotation" in probes[0][-1]
+    assert "split_trace.main" in probes[0][-1]
     splitter = _find_splitter_cmd(captured)
     if dependency_rc:
         assert splitter is None
@@ -2053,7 +2053,7 @@ def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc
 
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
 
