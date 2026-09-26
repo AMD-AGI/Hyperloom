@@ -50,7 +50,10 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_base import is_kept as _is_kept
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    AGENTX_PREFLIGHT_STOP_REASON,
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+)
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, record_lifecycle_event
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
@@ -201,6 +204,111 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
+def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep performance axes and launch evidence on the same E2E measurement."""
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    return {
+        **graded_axes_of(measurement),
+        **{
+            key: measurement[key]
+            for key in (
+                "ttft_mean_ms",
+                "e2el_mean_ms",
+                "tpot_mean_ms",
+                "workspace",
+                "raw_result_path",
+                "report_path",
+                "materialized_config",
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+            )
+            if key in measurement
+        },
+    }
+
+
+_INTEGRATE_KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
+
+
+def _integrate_marker_verdict(status: str, phase: str) -> str:
+    """Classify one integrate window from its verdict and its durable phase.
+
+    The pair is the whole truth about an attempt's obligations, so the live
+    promotion path and the resume recovery path read it here rather than each
+    keeping its own table.
+
+    Returns:
+        ``"retained"`` when the candidate was deliberately left in the tree and
+        the user's stash was popped, ``"settled"`` when the tree was restored
+        to its pre-attempt state, ``"inflight"`` when an apply-only attempt is
+        still waiting for its benchmark, and ``"incomplete"`` when the two
+        disagree and no obligation can be discharged from them.
+    """
+    if phase == "accepted" and status in _INTEGRATE_KEEP_STATUSES:
+        return "retained"
+    if phase == "restored" and status not in _INTEGRATE_KEEP_STATUSES and status != "applied_no_bench":
+        return "settled"
+    if status == "applied_no_bench" and phase in {"applied", "applied_with_restored_stash"}:
+        return "inflight"
+    return "incomplete"
+
+
+def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
+    """Read a task's own record of the result its executor produced.
+
+    ``SubAgentRunner`` writes the full outcome onto the task row before the
+    ``delegated_result`` reaches the bus, so a crash inside that window leaves
+    the verdict durable here and nowhere else. An unconfirmed physical cleanup
+    makes that outcome diagnostic only — the work it describes may still hold
+    resources — so it is not returned.
+
+    TODO: ``bringup.reconcile._terminal_by_observation`` and
+    ``dispatcher.run_action_now`` read the same evidence shape under slightly
+    different rules; the three want one reader.
+    """
+    for entry in reversed(getattr(task, "history", None) or []):
+        if not isinstance(entry, dict):
+            continue
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("outcome"), dict):
+            continue
+        if evidence.get("cleanup_confirmed") is not True:
+            return None
+        result = evidence["outcome"].get("result")
+        return result if isinstance(result, dict) else None
+    return None
+
+
+def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
+    """Validate kernel membership before promotion and copy its independent evidence."""
+    from ..phases.kernel_stack import resolve_stack_members
+
+    raw_members = result.get("stack_kernel_ids")
+    inferred_stack = (
+        (isinstance(raw_members, list) and len(raw_members) > 1)
+        or "stack_validation_started_at" in result
+        or "stack_member_identities" in result
+    )
+    membership = {"stack_validation": inferred_stack, **result}
+    members = resolve_stack_members(
+        membership,
+        entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
+    )
+    fields: dict[str, Any] = {
+        "stack_kernel_ids": list(members),
+        "stack_validation": membership["stack_validation"],
+    }
+    if membership["stack_validation"] is True:
+        fields["stack_validation_started_at"] = membership["stack_validation_started_at"]
+        fields["stack_member_identities"] = [
+            {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")}
+            for entry in membership["stack_member_identities"]
+        ]
+    return fields
+
+
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Name the lever a settled KEEP moved, reading the delivery first.
 
@@ -255,6 +363,10 @@ def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
     if by_kind:
         return by_kind
     return patch_lever_kind(bv if isinstance(bv, dict) else None)
+
+
+class IntegrateRecoveryIncomplete(RuntimeError):
+    """An integration cannot publish a result while its recovery is unconfirmed."""
 
 
 @dataclass
@@ -969,6 +1081,7 @@ class WritebackCollaborator:
                 new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
+        stack_fields = _integrate_stack_fields(result, self.shared_state)
         # A fusion sibling drained through the shared integrate lane must still
         # land on the stack as ``action="fusion"``: the idempotency short-circuit
         # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
@@ -1000,7 +1113,7 @@ class WritebackCollaborator:
                 "patch_path": result.get("patch_path"),
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
-                "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                **stack_fields,
                 "backend": result.get("backend"),
                 "engine": result.get("engine"),
                 # Provenance for a fusion sibling; readers key the stack row on
@@ -4633,13 +4746,46 @@ class WritebackCollaborator:
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
+    def _confirmed_integrate_completion(
+        self, result: dict, task: "Task | None", *, kept_flag: bool
+    ) -> dict[str, Any] | None:
+        """Return the matching, completed marker without performing recovery."""
+        pending = getattr(self.shared_state, "pending_integrate", None)
+        task_id = str(getattr(task, "task_id", "") or "")
+        matches = isinstance(pending, dict) and bool(task_id) and pending.get("task_id") == task_id
+        failed = (
+            result.get("error_class") == "integrate_restore_incomplete"
+            or bool(result.get("recovery_errors"))
+            or bool(result.get("stash_restore_error"))
+        )
+        if not matches and not failed:
+            return None
+        recovery = pending.get("recovery") if matches else None
+        phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
+        status = str(result.get("status") or "")
+        if not failed:
+            if matches and "recovery" not in pending and kept_flag:
+                return pending
+            verdict = _integrate_marker_verdict(status, phase)
+            if verdict in ("retained", "settled"):
+                return pending
+            if verdict == "inflight":
+                return None
+        self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
+        self.shared_state.save(self.session_dir)
+        raise IntegrateRecoveryIncomplete(
+            f"integrate recovery is incomplete or inconsistent for task={task_id!r}: "
+            f"phase={phase!r}, status={status!r}, errors={result.get('recovery_errors')!r}, "
+            f"stash_restore_error={result.get('stash_restore_error')!r}"
+        )
+
     async def _promote_integrate_patch(
         self,
         result: dict,
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> None:
-        """Promote an integrate_patch result: on KEEP lift current_best; clear pending_integrate."""
+        """Promote only after recovery is confirmed; clear only its completed marker."""
         changed = False
         stack_len_before = len(self.shared_state.optimization_stack or [])
         audit_decision: str | None = None
@@ -4648,6 +4794,7 @@ class WritebackCollaborator:
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
         # Register framework-rewrite switches as search levers. Done for both KEEP
         # verdicts: a bundle that cleared the gate is on and gets leave-one-out
         # attribution, while an inert KEEP is dormant and gets additive
@@ -4759,15 +4906,9 @@ class WritebackCollaborator:
                         reason="integrate_keep_watermark",
                     )
             changed = True
-        # Clear the pending_integrate sentinel after the task outcome is observed.
-        if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
-            pending = self.shared_state.pending_integrate
-            if not pending or str(pending.get("task_id") or "") in {
-                "",
-                str(getattr(task, "task_id", "") or ""),
-            }:
-                self.shared_state.pending_integrate = {}
-                changed = True
+        if completed_pending is not None and self.shared_state.pending_integrate is completed_pending:
+            self.shared_state.pending_integrate = {}
+            changed = True
         if prebaseline_enablement:
             audit_decision = "enablement_accepted" if lifted else "no_promote"
         elif lifted:
@@ -5320,6 +5461,12 @@ class WritebackCollaborator:
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
         await self._resume_recover_pending_integrate(report)
+        if state.pending_integrate:
+            state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
+            state.save(self.session_dir)
+            raise IntegrateRecoveryIncomplete(
+                "pending integrate recovery is incomplete; refusing resume before measurement"
+            )
         # (1b) In-flight targeted build: an off-loop compile cannot survive a
         # coordinator restart, so kill the orphan group, GC its attempt dir,
         # sweep its jit locks, fail the row, and clear the sentinel.
@@ -5489,13 +5636,10 @@ class WritebackCollaborator:
         return len(self.shared_state.optimization_stack or []) > before
 
     def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
-        """Reverse-apply a half-applied integrate patch set (Gap C rollback).
+        """Restore a pending integration from its durable file and stash evidence.
 
-        Best-effort ``git apply -R`` of every patch recorded on the
-        ``pending_integrate`` sentinel into the framework source tree, so a
-        crash AFTER ``git apply`` but BEFORE the bench/KEEP cannot leak a partial
-        change into later launches. A patch that is not currently applied simply
-        fails the reverse ``--check`` and is reported, not retried.
+        Incomplete evidence or an unverifiable restore remains pending; the
+        resume entry point refuses to continue to measurement in that state.
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
@@ -5503,32 +5647,9 @@ class WritebackCollaborator:
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
-        from ..actions.executors.integrate_patch import _git_apply_reverse
+        from ..actions.executors.integrate_patch import restore_pending_integrate
 
-        summary: dict[str, Any] = {"reversed": [], "failed": []}
-        # Discard a half-provisioned attempt venv so a crash mid-provision
-        # cannot leak a multi-GB dir. Independent of the patch rollback below.
-        attempt_venv_root = str(pending.get("attempt_venv_root") or "").strip()
-        if attempt_venv_root:
-            gc_root = str(Path(attempt_venv_root).parent)
-            if self._gc_attempt_runtime(gc_root):
-                summary["attempt_runtime_gc"] = gc_root
-        root = str(pending.get("framework_source_root") or "").strip()
-        patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
-        if not root or not patches:
-            return summary
-        root_path = Path(root)
-        for patch in patches:
-            try:
-                ok, err = _git_apply_reverse(root_path, Path(patch))
-            except Exception as exc:  # noqa: BLE001 — rollback is best-effort
-                summary["failed"].append({"patch": patch, "error": repr(exc)})
-                continue
-            if ok:
-                summary["reversed"].append(patch)
-            else:
-                summary["failed"].append({"patch": patch, "error": err})
-        return summary
+        return restore_pending_integrate(pending)
 
     @staticmethod
     def _gc_attempt_runtime(attempt_dir: str) -> bool:
@@ -5563,14 +5684,115 @@ class WritebackCollaborator:
         if await self._recover_interrupted_stack_validation():
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
+    def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:
+        """Drop a discharged sentinel, and its attempt runtime once nothing runs from it."""
+        self.shared_state.pending_integrate = {}
+        self.shared_state.save(self.session_dir)
+        if gc_runtime and pending.get("attempt_venv_root"):
+            self._gc_attempt_runtime(str(Path(pending["attempt_venv_root"]).parent))
+
+    async def _recover_pending_integrate_from_task(
+        self,
+        pending: dict[str, Any],
+        task_id: str,
+        report: dict[str, Any],
+    ) -> bool:
+        """Settle a mutated integrate window from durable records rather than the bus.
+
+        Args:
+            pending: The ``pending_integrate`` sentinel dict.
+            task_id: The sentinel's task id.
+            report: The resume report dict to append fixes/warnings to.
+
+        Returns:
+            ``True`` when the sentinel was discharged or deliberately retained,
+            ``False`` when the caller should roll the half-applied patch back.
+        """
+        from ..state.task_registry import TaskNotFound
+
+        state = self.shared_state
+        # Event retention can erase a KEEP. A promoted stack row is
+        # independent positive evidence; a terminal/missing task without
+        # its result is not evidence that a candidate was rejected.
+        stack = getattr(state, "optimization_stack", None) or []
+        if any(isinstance(row, dict) and row.get("task_id") == task_id for row in stack):
+            state.pending_integrate = {}
+            state.save(self.session_dir)
+            report["fixes"].append({"kind": "retained_promoted_pending_integrate", "task_id": task_id})
+            return True
+        try:
+            task = await self.tasks.get(task_id)
+        except TaskNotFound:
+            task = None
+        if task is not None and task.kind != "integrate_patch":
+            task = None
+        recovery = pending.get("recovery")
+        phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
+        outcome = _confirmed_task_outcome(task) if task is not None else None
+        verdict = _integrate_marker_verdict(str((outcome or {}).get("status") or ""), phase) if outcome else ""
+        if verdict == "retained":
+            appended = self._replay_keep_from_result("integrate_patch", outcome or {})
+            report["fixes"].append(
+                {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
+            )
+            self._clear_pending_integrate(pending, gc_runtime=False)
+            return True
+        if verdict == "settled":
+            report["fixes"].append(
+                {
+                    "kind": "settled_pending_integrate",
+                    "task_id": task_id,
+                    "status": str((outcome or {}).get("status") or ""),
+                }
+            )
+            self._clear_pending_integrate(pending, gc_runtime=True)
+            return True
+        if phase == "restored" and outcome is not None:
+            # A confirmed outcome carrying no result: the attempt put the tree
+            # back and then died before recording what it decided. The verdict
+            # table needs a result to call that settled, but the phase already
+            # says the tree is clean. An unconfirmed or absent outcome is a
+            # different case and still falls through to the rollback below.
+            report["fixes"].append({"kind": "settled_pending_integrate", "task_id": task_id, "phase": phase})
+            self._clear_pending_integrate(pending, gc_runtime=True)
+            return True
+        if phase == "accepted":
+            # A KEEP verdict left the candidate in the tree on purpose and
+            # popped the user's stash, so neither rollback nor clear is
+            # correct here. Hold the obligation: dropping it would strand
+            # unrecorded candidate code, and standing in a baseline number
+            # for the lost measurement would poison current_best and
+            # misattribute the candidate's gain on the next stack rebench.
+            report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id, "phase": phase})
+            return True
+        if verdict == "incomplete":
+            # A confirmed outcome that discharged nothing: the teardown the
+            # attempt owed is still owed, so retry it rather than hold the
+            # sentinel until someone edits state.json. An online restore that
+            # failed lands here on a task the runner recorded as succeeded.
+            return False
+        if task is None or task.state not in ("queued", "running", "failed"):
+            report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id})
+            return True
+        if any(
+            any(key in (row.get("evidence") or {}) for key in ("result_keys", "result", "outcome"))
+            for row in task.history
+            if isinstance(row, dict)
+        ):
+            report["warnings"].append({"kind": "pending_integrate_result_missing", "task_id": task_id})
+            return True
+        return False
+
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
         """Recover a crashed integrate_patch window from the sentinel.
 
-        Three-way decision keyed on whether a ``kept`` delegated-result exists
-        for the sentinel's task: replay the missing append (crashed after KEEP),
-        roll back the half-applied patch (crashed after apply, before KEEP), or
-        clear a stale sentinel. A scan that could not read the event log reaches
-        none of the three, so it must neither roll back nor clear the sentinel.
+        The verdict is taken from the first source that still carries one: a
+        published KEEP on the bus, then the task row's own completion evidence,
+        which the runner writes before it publishes. Whatever is found is
+        classified by the same ``(status, phase)`` table the live promotion path
+        reads, then replayed, cleared, or rolled back accordingly. A scan that
+        could not read the event log establishes nothing, so it must neither
+        roll back nor clear the sentinel.
 
         Args:
             report: The resume report dict to append fixes/warnings to.
@@ -5582,8 +5804,11 @@ class WritebackCollaborator:
         task_id = str(pending.get("task_id") or "")
         kept_res: dict[str, Any] | None = None
         scanned = False
+        if not task_id:
+            report["warnings"].append({"kind": "pending_integrate_task_missing"})
+            return
         try:
-            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+            for msg in await self.bus.tail(topic="delegated_result", n=-1):
                 payload = msg.payload or {}
                 if task_id and str(payload.get("task_id") or "") != task_id:
                     continue
@@ -5610,15 +5835,22 @@ class WritebackCollaborator:
             report["fixes"].append(
                 {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
             )
+            self._clear_pending_integrate(pending, gc_runtime=False)
+            return
+        if (pending.get("patches") or pending.get("artifacts")) and await self._recover_pending_integrate_from_task(
+            pending, task_id, report
+        ):
+            return
+        summary = self._resume_rollback_pending_integrate(pending)
+        if summary.get("failed"):
+            report["warnings"].append({"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary})
+            state.save(self.session_dir)
+            return
+        if summary.get("reversed") or summary.get("artifacts_reverted"):
+            report["fixes"].append({"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary})
         else:
-            summary = self._resume_rollback_pending_integrate(pending)
-            if summary.get("reversed"):
-                report["fixes"].append({"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary})
-            elif summary.get("failed"):
-                report["warnings"].append({"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary})
-            else:
-                report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
-        state.pending_integrate = {}
+            report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
+        self._clear_pending_integrate(pending, gc_runtime=True)
 
     async def _resume_recover_pending_warm_replay(
         self,
