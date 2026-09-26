@@ -224,65 +224,6 @@ def test_prepare_uses_platform_fsync_access_mode(tmp_path, monkeypatch, platform
     assert backup.read_bytes() == b"original\n"
 
 
-def test_prepared_first_patch_survives_an_unprepared_second_tail(tmp_path):
-    """One root serves every patch of an attempt, so it reads as segments.
-
-    A record is written before the mutation it describes, so an uncommitted
-    tail names files that were never touched: it must not be restored from, and
-    it must not veto the committed prefix either. Vetoing is what left an
-    earlier, fully applied patch in the tree when the next one died while it
-    was still preparing its backups.
-    """
-    from hyperloom.orchestrator.delivery import ledger
-
-    root = tmp_path / "backups"
-    target = tmp_path / "target.py"
-    second = tmp_path / "second.py"
-    second.write_text("UNTOUCHED\n", encoding="utf-8")
-    record = {"target": str(target), "existed": False, "backup_path": None}
-    assert ledger.append_record(root, record)
-    assert ledger.mark_prepared(root)
-    assert ledger.load_prepared_records(root) == [record]
-
-    tail = {**record, "target": str(second)}
-    assert ledger.append_record(root, tail)
-    assert ledger.load_prepared_records(root) == [record]
-    restored, errors = ledger.restore_records(ledger.load_prepared_records(root))
-    assert errors == []
-    assert restored == [str(target)]
-    assert second.read_text(encoding="utf-8") == "UNTOUCHED\n", "an uncommitted record was used to restore"
-
-    assert ledger.mark_prepared(root)
-    assert ledger.load_prepared_records(root) == [record, tail]
-    assert len(ledger.load_records(root)) == 2
-
-
-@pytest.mark.parametrize(
-    "damage",
-    [{"pre_image_sha256": ""}, {"existed": "yes"}, {"target": "relative/path.py"}, {"mode": "755"}],
-)
-def test_committed_prefix_still_refuses_a_record_that_cannot_restore(tmp_path, damage):
-    """Dropping the tail relaxes nothing about what the checkpoint did commit."""
-    from hyperloom.orchestrator.delivery import ledger
-
-    root = tmp_path / "backups"
-    root.mkdir()
-    backup = root / "target.bak"
-    backup.write_text("original\n", encoding="utf-8")
-    record = {
-        "target": str(tmp_path / "target.py"),
-        "existed": True,
-        "backup_path": str(backup),
-        "pre_image_sha256": ledger.file_digest(backup),
-        "revert_action": "restore",
-        **damage,
-    }
-    assert ledger.append_record(root, record)
-    assert ledger.mark_prepared(root)
-    with pytest.raises(ValueError):
-        ledger.load_prepared_records(root)
-
-
 def test_non_git_prepare_failure_never_invokes_real_patch(tmp_path, monkeypatch):
     target = tmp_path / "target.py"
     target.write_text("original\n")

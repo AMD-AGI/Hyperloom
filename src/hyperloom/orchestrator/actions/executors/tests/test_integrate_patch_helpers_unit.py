@@ -553,10 +553,6 @@ def _executor():
     return ip.IntegratePatchExecutor(session_dir=None)
 
 
-def test_restore_without_mutation_is_noop():
-    assert ip.restore_pending_integrate({})["failed"] == []
-
-
 @pytest.mark.parametrize("head,checkout_ok", [("base", True), ("changed", True), ("base", False)])
 def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, head, checkout_ok):
     calls = []

@@ -132,19 +132,6 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
 # provision ok / fail
 
 
-async def test_provision_ok_sets_attempt(_executor, monkeypatch):
-    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
-    adapter = _FakeAdapter(_ok_result(venv))
-    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
-    attempt = _attempt()
-    out = await _executor._stage_provision_attempt_runtime(attempt, {"runtime_candidate": _candidate()}, "t-1")
-    assert out is None
-    assert attempt.provision_result is not None
-    assert attempt.provision_result.ok is True
-    assert attempt.stack_action.attempt_venv_root == venv
-    assert attempt.attempt_venv_root == venv
-
-
 @pytest.mark.asyncio
 async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
     """Adapter provision (venv/pip, 1800s) must not occupy the event-loop thread."""

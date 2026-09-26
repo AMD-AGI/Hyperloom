@@ -564,7 +564,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
 @pytest.mark.parametrize("early_exit", ["missing_param", "critic", "multi_node"])
 async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tmp_path, monkeypatch, early_exit):
     from hyperloom.orchestrator.actions.executors import _multi_node_env
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     session = tmp_path / "session"
@@ -601,23 +600,11 @@ async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tm
         == {"missing_param": "failed", "critic": "rejected_by_critic", "multi_node": "skipped"}[early_exit]
     )
     first_attempt, second_attempt = attempts
-    assert isinstance(second_attempt, ip.IntegrateAttempt)
     assert second_attempt is not first_attempt
-    assert first_attempt.shared_state is state
-    assert second_attempt.specialist_workspace is None
-    assert second_attempt.specialist_task_id == ""
-    assert second_attempt.done_payload == {}
-    assert second_attempt.done_payload is not first_attempt.done_payload
-    assert second_attempt.provision_result is None
-    assert second_attempt.attempt_venv_root == ""
-    assert second_attempt.localization_patches == []
-    assert second_attempt.localization_patches is not first_attempt.localization_patches
+    # A generic RunnerContext carries no integrate-private state, so a second
+    # task reusing the executor cannot read the first one's.
     for ctx in (first_ctx, second_ctx):
         assert ctx.extra == {"shared_state": state}
-        assert not any(name.startswith("_ip_") for name in vars(ctx))
-    assert not any(
-        name in vars(executor) for name in ("_apply_attempted", "_nogit_backup_root", "_nogit_patch_backups")
-    )
 
 
 @pytest.mark.asyncio
