@@ -14,13 +14,13 @@ from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class MachinePhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class MachinePhase(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
@@ -207,7 +207,7 @@ class MachinePhase(PhaseHandler):
             allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
         )
-        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        stopped = await self.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
                 "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",

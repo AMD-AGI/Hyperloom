@@ -35,10 +35,10 @@ def kernel_coordinator(tmp_path, monkeypatch):
     async def _noop(*_args, **_kwargs):
         return None
 
-    c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
-    c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
-    c.phase_machine._on_phase_entered = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    c._on_phase_entered = _noop  # type: ignore[method-assign]
     yield c
 
 
@@ -145,7 +145,7 @@ async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
-    assert not await c.phase_machine._inflight_kernel_task_ids()
+    assert not await c._inflight_kernel_task_ids()
 
 
 @pytest.mark.asyncio
@@ -220,7 +220,7 @@ async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
     st.kernel_progress_fingerprint = "stale"
     st.kernel_idle_since_unix = 1.0
 
-    await c.phase_machine._track_kernel_idle_streak()
+    await c._track_kernel_idle_streak()
 
     assert st.kernel_idle_ticks == 0
     assert st.kernel_progress_fingerprint == ""

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     NoLaunchBackendInstalled,
     _isolate_session_layout_env,
@@ -189,7 +190,7 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
-class _BuildFakeCoordinator:
+class _BuildFakeCoordinator(BuildLifecycleCollaborator):
     """Minimal coordinator surface for off-loop targeted-build tests."""
 
     def __init__(self, session_dir: Path, db) -> None:
@@ -217,14 +218,6 @@ def build_coord(tmp_path):
     fc = _BuildFakeCoordinator(tmp_path, db)
     yield fc
     db.close()
-
-
-@pytest.fixture
-def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
-    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
-
-    return BuildLifecycleCollaborator(build_coord)
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:

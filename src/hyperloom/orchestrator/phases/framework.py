@@ -497,8 +497,8 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _framework_timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
 
-        Read through ``getattr`` because the handler delegates unknown
-        attributes to its Coordinator, so an unset recorder must not raise.
+        Read through ``getattr``: the recorder exists only once an entry has
+        opened one.
         """
         return getattr(self, "_framework_timeline_recorder", None)
 

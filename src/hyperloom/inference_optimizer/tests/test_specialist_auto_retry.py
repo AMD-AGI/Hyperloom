@@ -150,15 +150,13 @@ def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tas
     fake_tasks = MagicMock()
     fake_tasks.create_or_return_existing = _fake_create
 
-    coord_stub = MagicMock()
-    coord_stub.tasks = fake_tasks
-    coord_stub._registry_lanes_ttl = MagicMock(return_value=(list(registry_lanes), registry_ttl))
-    coord_stub._gpu_lease_ttl_sec = MagicMock(return_value=gpu_ttl)
-    coord_stub._record_observation = AsyncMock()
-
-    # Build SpecialistDispatchCollaborator with __init__ bypassed.
-    phase = SpecialistDispatchCollaborator.__new__(SpecialistDispatchCollaborator)
-    phase._coord = coord_stub
+    phase = SpecialistDispatchCollaborator()
+    vars(phase).update(
+        tasks=fake_tasks,
+        _registry_lanes_ttl=MagicMock(return_value=(list(registry_lanes), registry_ttl)),
+        _gpu_lease_ttl_sec=MagicMock(return_value=gpu_ttl),
+        _record_observation=AsyncMock(),
+    )
     return phase
 
 

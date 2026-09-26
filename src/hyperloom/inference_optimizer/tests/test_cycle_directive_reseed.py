@@ -21,7 +21,7 @@ def _explore_with_stub_coordinator(
     next_cycle_directive: str = "",
     user_supplied: bool = False,
     plan_focus: dict | None = None,
-) -> tuple[ExplorePhase, SimpleNamespace, list[dict]]:
+) -> tuple[ExplorePhase, list[dict]]:
     """Build an ExplorePhase over a minimal coordinator stub."""
     st = SharedState(session_id="t", macro_cycle=macro_cycle)
     st.orchestration_memory = {"next_cycle_directive": next_cycle_directive}
@@ -31,21 +31,21 @@ def _explore_with_stub_coordinator(
         rebuild_calls.append(kwargs)
         return f"PROMPT[cycle={kwargs.get('macro_cycle')}|{kwargs.get('cycle_directive')}]"
 
-    coord = SimpleNamespace(
+    phase = ExplorePhase()
+    vars(phase).update(
         shared_state=st,
         session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
     )
-    phase = ExplorePhase(coord)
     if plan_focus is not None:
         phase._plan_cycle_focus = lambda: plan_focus  # type: ignore[method-assign]
-    return phase, coord, rebuild_calls
+    return phase, rebuild_calls
 
 
 def test_fallback_renders_focus_line():
-    phase, _coord, _ = _explore_with_stub_coordinator(
+    phase, _ = _explore_with_stub_coordinator(
         plan_focus={
             "focus": "comm_specialist",
             "rationale": "all_reduce dominates",
@@ -61,12 +61,12 @@ def test_fallback_renders_focus_line():
 
 
 def test_fallback_empty_when_no_focus():
-    phase, _coord, _ = _explore_with_stub_coordinator(plan_focus={"focus": ""})
+    phase, _ = _explore_with_stub_coordinator(plan_focus={"focus": ""})
     assert phase._cycle_directive_fallback() == ""
 
 
 def test_reseed_llm_directive_wins(tmp_path):
-    phase, coord, calls = _explore_with_stub_coordinator(
+    phase, calls = _explore_with_stub_coordinator(
         session_dir=tmp_path,
         macro_cycle=2,
         next_cycle_directive="Attack MoE dispatch; drop config sweeps.",
@@ -75,14 +75,14 @@ def test_reseed_llm_directive_wins(tmp_path):
     assert phase._reseed_orch_prompt_for_cycle() is True
     assert calls[0]["macro_cycle"] == 2
     assert calls[0]["cycle_directive"] == "Attack MoE dispatch; drop config sweeps."
-    assert "Attack MoE dispatch" in coord.system_prompt_overrides["orchestration"]
-    hist = coord.shared_state.cycle_directive_history
+    assert "Attack MoE dispatch" in phase.system_prompt_overrides["orchestration"]
+    hist = phase.shared_state.cycle_directive_history
     assert hist[-1]["source"] == "llm"
     assert hist[-1]["cycle"] == 2
 
 
 def test_reseed_uses_deterministic_fallback_when_empty(tmp_path):
-    phase, coord, calls = _explore_with_stub_coordinator(
+    phase, calls = _explore_with_stub_coordinator(
         session_dir=tmp_path,
         macro_cycle=3,
         next_cycle_directive="",
@@ -90,32 +90,32 @@ def test_reseed_uses_deterministic_fallback_when_empty(tmp_path):
     )
     assert phase._reseed_orch_prompt_for_cycle() is True
     assert "focus=comm_specialist" in calls[0]["cycle_directive"]
-    hist = coord.shared_state.cycle_directive_history
+    hist = phase.shared_state.cycle_directive_history
     assert hist[-1]["source"] == "deterministic"
 
 
 def test_reseed_skipped_for_user_supplied_prompt():
-    phase, coord, calls = _explore_with_stub_coordinator(
+    phase, calls = _explore_with_stub_coordinator(
         next_cycle_directive="ignored",
         user_supplied=True,
         plan_focus={"focus": "serving_specialist"},
     )
     assert phase._reseed_orch_prompt_for_cycle() is False
     assert calls == []
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
-    assert coord.shared_state.cycle_directive_history == []
+    assert phase.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert phase.shared_state.cycle_directive_history == []
 
 
 def test_reseed_history_ring_caps_at_10(tmp_path):
-    phase, coord, _ = _explore_with_stub_coordinator(
+    phase, _ = _explore_with_stub_coordinator(
         session_dir=tmp_path,
         next_cycle_directive="d",
         plan_focus={"focus": "serving_specialist"},
     )
     for i in range(15):
-        coord.shared_state.macro_cycle = i
+        phase.shared_state.macro_cycle = i
         phase._reseed_orch_prompt_for_cycle()
-    hist = coord.shared_state.cycle_directive_history
+    hist = phase.shared_state.cycle_directive_history
     assert len(hist) == 10
     # Newest kept; oldest dropped.
     assert hist[-1]["cycle"] == 14
@@ -131,12 +131,11 @@ def _explore_with_memory_backend(*, raw_text: str, previous: dict | None = None)
         async def run(self, **_kwargs):
             return SimpleNamespace(raw_text=raw_text)
 
-    phase = ExplorePhase(
-        SimpleNamespace(
-            shared_state=st,
-            session_dir=None,
-            backends={"orchestration": _Backend()},
-        )
+    phase = ExplorePhase()
+    vars(phase).update(
+        shared_state=st,
+        session_dir=None,
+        backends={"orchestration": _Backend()},
     )
 
     async def _stub(_agent: str) -> str:

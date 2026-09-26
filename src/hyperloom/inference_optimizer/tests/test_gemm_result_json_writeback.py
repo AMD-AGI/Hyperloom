@@ -38,7 +38,7 @@ def _phase(tmp_path: Path, model_path: str, tp: int = 8) -> KernelPhase:
         framework="sglang",
         baseline_tput=100.0,
     )
-    return KernelPhase(coord)
+    return coord
 
 
 def _workspace_with_pre_e2e_result(tmp_path: Path) -> Path:

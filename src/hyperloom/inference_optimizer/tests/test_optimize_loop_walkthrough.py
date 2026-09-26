@@ -45,7 +45,7 @@ def _coordinator(session_dir: Path):
 
 async def _settle_unjoined_actions(coord: Any) -> None:
     """Let the actions the pump dispatched without joining run to completion."""
-    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
+    handles = [entry.atask for entry in coord._inflight_actions.values()]
     if handles:
         await asyncio.gather(*handles)
 

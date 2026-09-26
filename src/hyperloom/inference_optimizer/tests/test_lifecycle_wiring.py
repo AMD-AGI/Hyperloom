@@ -363,7 +363,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         # Bypass the execution-order gate that would deny an integrate request in the initial phase before reaching
         # the emit.
         monkeypatch.setattr(
-            c.dispatcher,
+            c,
             "_sequence_denial_for_request",
             lambda target, kind: None,
         )
@@ -417,7 +417,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         async def _noop(**kwargs):
             return None
 
-        monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
+        monkeypatch.setattr(c, "_on_phase_entered", _noop)
 
         await c._advance_phase_if_needed()
 
@@ -474,18 +474,18 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             return _Res()
 
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_report_task",
             fake_enqueue_report,
         )
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_session_breakdown_task",
             fake_enqueue_breakdown,
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c,
             "finalize_recipe_and_journal",
             lambda: None,
         )
@@ -545,18 +545,18 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
             return _Failed() if task.kind == "report" else _Succeeded()
 
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_report_task",
             fake_enqueue_report,
         )
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_session_breakdown_task",
             fake_enqueue_breakdown,
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c,
             "finalize_recipe_and_journal",
             lambda: None,
         )
@@ -610,18 +610,18 @@ async def test_on_enter_close_emits_report_error_for_exception(
             return _Succeeded()
 
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_report_task",
             fake_enqueue_report,
         )
         monkeypatch.setattr(
-            c.phase_close,
+            c,
             "_enqueue_internal_session_breakdown_task",
             fake_enqueue_breakdown,
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c,
             "finalize_recipe_and_journal",
             lambda: None,
         )

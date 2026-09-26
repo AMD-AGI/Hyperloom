@@ -12,13 +12,13 @@ from typing import Any
 from hyperloom.common.env import env_bool
 
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class InternalTasksPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class InternalTasksPhase(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _enqueue_internal_research_scout_task(
         self,

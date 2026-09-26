@@ -8,6 +8,7 @@ from typing import Any
 from ..state.shared_state import SharedState
 
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -62,14 +63,8 @@ async def run_lease_and_db_reclaim(
         log.exception("%s: DB retention failed", reason)
 
 
-class MaintenanceCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+class MaintenanceCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     async def _run_maintenance(
         self,

@@ -50,6 +50,7 @@ from ..state.shared_state import (
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from ..collaborator import CoordinatorCollaborator
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
@@ -90,9 +91,6 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
             out[key] = val
     return out
 
-
-# ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
-# as a back-reference and the annotation below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -417,15 +415,8 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
-class IntentRouter:
+class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
-
-    def __init__(self, coordinator: Any) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str) -> Any:
-        # Attributes not defined on the router resolve onto the coordinator.
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
@@ -505,7 +496,7 @@ class IntentRouter:
             it = intent.type
             handler_name = _INTENT_DISPATCH.get(it)
             if handler_name is not None:
-                await getattr(self._coord, handler_name)(source, intent)
+                await getattr(self, handler_name)(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
                 await self._record_observation(
@@ -635,7 +626,7 @@ class IntentRouter:
                 str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
             self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
-        await self._coord._handle_single_verdict(
+        await self._handle_single_verdict(
             source=source,
             pending=pending,
             verdict=verdict,
@@ -816,7 +807,7 @@ class IntentRouter:
             )
         elif verdict == "reject" and _is_upstream_pr_candidate(pending):
             # Record the critic_denied row so the candidate pump advances.
-            await self._coord._record_framework_agent_critic_denied(
+            await self._record_framework_agent_critic_denied(
                 pending,
                 reasoning,
             )
@@ -824,7 +815,7 @@ class IntentRouter:
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                await self._coord._maybe_rearm_enablement(
+                await self._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:
@@ -833,7 +824,7 @@ class IntentRouter:
                     sid_candidate,
                 )
         elif verdict == "needs_review":
-            await self._coord._maybe_reauthor_from_critic_feedback(
+            await self._maybe_reauthor_from_critic_feedback(
                 pending,
                 advisory,
             )
@@ -959,7 +950,7 @@ class IntentRouter:
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._coord._gpu_lease_ttl_sec(
+                    ttl = self._gpu_lease_ttl_sec(
                         int(ttl or 0),
                         params=params,
                     )

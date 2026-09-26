@@ -12,7 +12,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.intent_router import IntentRouter
 from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -67,7 +66,7 @@ async def test_a_patch_mode_specialist_is_owned_at_dispatch(session_dir: Path, p
     coord = _coordinator(session_dir, phase=phase)
     try:
         params = dict(_FREEFORM_PATCH)
-        assert IntentRouter(coord)._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+        assert coord._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
         assert params["source_phase"] == "FRAMEWORK_AGENT"
     finally:
         await coord.stop()
@@ -83,7 +82,7 @@ async def test_a_research_specialist_names_no_owner(session_dir: Path) -> None:
     coord = _coordinator(session_dir, phase="KERNEL_AGENT")
     try:
         params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
-        assert IntentRouter(coord)._stamp_specialist_owner(params) == ""
+        assert coord._stamp_specialist_owner(params) == ""
         assert "source_phase" not in params
     finally:
         await coord.stop()
@@ -97,14 +96,13 @@ async def test_the_integrate_route_accepts_the_specialist_it_owned(session_dir: 
     autosubmit path would carry has to be accepted here too.
     """
     coord = _coordinator(session_dir, phase="KERNEL_AGENT")
-    router = IntentRouter(coord)
     try:
         params = dict(_FREEFORM_PATCH)
-        router._stamp_specialist_owner(params)
+        coord._stamp_specialist_owner(params)
         task = await coord.tasks.create(kind="specialist", params=params, idempotency_key="spec-1")
 
         integrate_params = {"specialist_task_id": task.task_id}
-        assert await router._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
+        assert await coord._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
         assert integrate_params["source_phase"] == "FRAMEWORK_AGENT"
     finally:
         await coord.stop()
@@ -121,7 +119,7 @@ async def test_the_autosubmitted_patch_is_integrated_and_owned(session_dir: Path
     coord = _coordinator(session_dir, phase=phase)
     try:
         params = dict(_FREEFORM_PATCH)
-        IntentRouter(coord)._stamp_specialist_owner(params)
+        coord._stamp_specialist_owner(params)
         await _specialist_wrote_a_patch(coord, spec_params=params)
 
         await coord._reactor_pass("critic")

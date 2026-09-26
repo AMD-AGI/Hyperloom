@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib
 import inspect
 from typing import Any
 
@@ -81,41 +80,11 @@ class FakeCoordinator:
     def __getattr__(self, name: str) -> Any:
         from hyperloom.orchestrator.loop.coordinator import Coordinator
 
-        owner = Coordinator._DELEGATED.get(name)
-        if owner is None:
-            # A class constant or a method still defined on Coordinator itself.
-            attr = inspect.getattr_static(Coordinator, name, _MISSING)
-            if attr is not _MISSING:
-                get = getattr(attr, "__get__", None)
-                return get(self, type(self)) if get is not None else attr
-            # A collaborator-internal helper: reachable only from inside its own class in production, so it has no
-            # delegation entry.
-            owner = self._sole_owner(name)
-        key = f"_collab_{owner}"
-        collaborator = self.__dict__.get(key)
-        if collaborator is None:
-            module_path, cls_name = Coordinator._COLLAB_MODULES[owner]
-            module = importlib.import_module(f"hyperloom.orchestrator.{module_path}")
-            collaborator = getattr(module, cls_name)(self)
-            self.__dict__[key] = collaborator
-        return getattr(collaborator, name)
-
-    @staticmethod
-    def _sole_owner(name: str) -> str:
-        """The one collaborator defining ``name``, or an explanation of why not."""
-        from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-        owners = []
-        for prop, (module_path, cls_name) in Coordinator._COLLAB_MODULES.items():
-            cls = getattr(importlib.import_module(f"hyperloom.orchestrator.{module_path}"), cls_name)
-            if name in vars(cls):
-                owners.append(prop)
-        if len(owners) == 1:
-            return owners[0]
-        if owners:
-            raise AttributeError(f"{name!r} is defined by more than one collaborator: {owners}")
-        raise AttributeError(
-            f"{name!r} is neither state this fake was given, nor an attribute of "
-            f"Coordinator, nor defined by any collaborator -- the test is reaching "
-            f"for something that no longer exists."
-        )
+        attr = inspect.getattr_static(Coordinator, name, _MISSING)
+        if attr is _MISSING:
+            raise AttributeError(
+                f"{name!r} is neither state this fake was given nor an attribute of the Coordinator -- the test is "
+                f"reaching for something that no longer exists."
+            )
+        get = getattr(attr, "__get__", None)
+        return get(self, type(self)) if get is not None else attr

@@ -60,6 +60,7 @@ from .coordinator_helpers import (
 
 from .conversation import _format_inbox_event
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -135,25 +136,21 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class DispatcherCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    def _init_dispatch_state(self) -> None:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
         # Handles on the actions currently running, ``task_id -> _InflightAction``.
-        # Kept on the collaborator and not only in the pump's frame: an action
+        # Kept on the coordinator and not only in the pump's frame: an action
         # whose handle lives in a frame can only be stopped by the frame that is
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -799,8 +796,7 @@ class DispatcherCollaborator:
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _coord = object.__getattribute__(self, "_coord")
-            _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+            _execs = getattr(getattr(self, "sub", None), "executor_registry", None)
             if (
                 isinstance(_execs, dict)
                 and _execs
@@ -1717,7 +1713,7 @@ class DispatcherCollaborator:
         Returns:
             A frozenset of action names eligible for inline execution.
         """
-        coord = object.__getattribute__(self, "_coord")
+        coord = self
         executors = getattr(coord.sub, "executor_registry", {}) or {}
         allowed: set[str] = set()
         for name in coord.action_registry:

@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from hyperloom.agents.framework import repo_map as _repo_map
-from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -627,7 +626,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         result={"status": "reverted"},
     )
 
-    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
+    await stub._reap_dispatched_task(task, result, None)
 
     assert recorded == ["reverted"]
     assert result.result["reauthor_attempt"] == 1

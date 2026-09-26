@@ -40,7 +40,7 @@ def _phase(tmp_path: Path, model_path: str, tp: int) -> KernelPhase:
         framework="sglang",
         baseline_tput=100.0,
     )
-    return KernelPhase(coord)
+    return coord
 
 
 def _fmoe_ck_result(csv_path: str) -> dict:

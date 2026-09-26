@@ -1216,7 +1216,7 @@ async def test_rearm_authored_lane_delegates_enablement(session_dir):
     async def _fake_rearm(res):
         called.append(res)
 
-    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
     await coord._maybe_rearm_authored_lane(res)
@@ -1285,7 +1285,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
     async def _fake_rearm(res):
         rearm_called.append(res)
 
-    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+    coord._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}

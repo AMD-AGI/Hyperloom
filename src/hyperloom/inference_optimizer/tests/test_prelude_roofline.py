@@ -85,6 +85,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c._run_deadline = None
     c._run_started_monotonic = None
     c._phase_budget_pct = {}
+    c._init_dispatch_state()
 
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     async def _skip_controller(
@@ -94,7 +95,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     ) -> None:
         return None
 
-    monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
+    monkeypatch.setattr(c, "_run_kernel_rewrite_controller", _skip_controller)
     return c
 
 
@@ -369,8 +370,8 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord._run_kernel_agent(_kernel_agent_ctx())
@@ -386,8 +387,8 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
 async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator, monkeypatch):
     """Disabling GEMM tuning must not disable the independently gated fusion stage."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: True)
+    monkeypatch.setattr(coord, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord, "_fusion_required_before_kernel_opt", lambda: True)
     assert coord._gemm_tuning_required_before_kernel_opt() is False
 
     fusion_calls = 0
@@ -399,8 +400,8 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
     async def _skip_reprofile() -> None:
         return None
 
-    monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    monkeypatch.setattr(coord, "_run_forge_fusion", _run_fusion)
+    monkeypatch.setattr(coord, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
     await coord._run_kernel_agent(_kernel_agent_ctx())
 
@@ -435,12 +436,12 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         "seal_campaign_baseline",
         lambda _state, **_kwargs: {"/repo": "a" * 40},
     )
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
+    monkeypatch.setattr(coord, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord, "_run_kernel_rewrite_controller", _controller)
 
-    await coord.phase_kernel._finish_kernel_entry()
-    await coord.phase_kernel._finish_kernel_entry()
+    await coord._finish_kernel_entry()
+    await coord._finish_kernel_entry()
 
     attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
     # Each entry gets its own attempt directory: the controller refuses an output root it has already initialized, so
@@ -475,7 +476,7 @@ def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
     # The record and a freshly built context differ, exactly as in production.
     assert state.last_profile_workload != state.profile_workload_context()
 
-    assert coord.phase_kernel._profile_workload_changed() is False
+    assert coord._profile_workload_changed() is False
 
 
 def test_a_trace_of_a_different_workload_is_still_stale(coord: Coordinator):
@@ -483,11 +484,11 @@ def test_a_trace_of_a_different_workload_is_still_stale(coord: Coordinator):
     state = coord.shared_state
     state.last_profile_status = "succeeded"
     state.last_profile_workload = state.profile_workload_context()
-    assert coord.phase_kernel._profile_workload_changed() is False
+    assert coord._profile_workload_changed() is False
 
     state.isl = int(state.isl or 0) + 4096
 
-    assert coord.phase_kernel._profile_workload_changed() is True
+    assert coord._profile_workload_changed() is True
 
 
 def _recorded_under(state, *, server_args: str, envs: dict) -> None:
@@ -501,9 +502,8 @@ def _recorded_under(state, *, server_args: str, envs: dict) -> None:
 
 def _reprofiles(coord: Coordinator) -> bool:
     """Whether the two staleness checks together call for a re-profile."""
-    phase = coord.phase_kernel
-    signature = phase._current_profile_config_signature()
-    return phase._profile_config_changed(signature) or phase._profile_workload_changed()
+    signature = coord._current_profile_config_signature()
+    return coord._profile_config_changed(signature) or coord._profile_workload_changed()
 
 
 _BASE_ARGS = "--block-size 128 --enable-expert-parallel"
@@ -709,8 +709,8 @@ async def _latch_after(coord: Coordinator, monkeypatch, handler) -> Any:
     coord.shared_state.last_trace_analyze = {"candidates_path": "/tmp/kernel_candidates.json"}
     coord.shared_state.kernel_auto_pass_cycle = None
     monkeypatch.setattr(krh, "run_optimization_handler", handler)
-    coord.phase_kernel.bus = _LatchBus()
+    coord.bus = _LatchBus()
 
-    await coord.phase_kernel._run_kernel_opt_nomination()
+    await coord._run_kernel_opt_nomination()
 
     return coord.shared_state.kernel_auto_pass_cycle

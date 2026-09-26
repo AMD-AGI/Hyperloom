@@ -56,6 +56,29 @@ from ..bus.resource_lock import (
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
+from ..phases.machine import MachinePhase
+from ..phases.prelude import PreludePhase
+from ..phases.sweep import SweepPhase
+from ..phases.close import ClosePhase
+from ..phases.internal import InternalTasksPhase
+from ..phases.kernel_stack import KernelStackPhase
+from ..phases.kernel import KernelPhase
+from ..phases.macro_cycle import MacroCycleCollaborator
+from .cycle_memory import CycleMemoryCollaborator
+from ..specialists.dispatch import SpecialistDispatchCollaborator
+from ..state.gaps import GapRefreshCollaborator
+from ..phases.framework import FrameworkPhase
+from ..gpu_lanes import GpuLanes
+from ..enablement.params import EnablementParams
+from ..enablement.lane import EnablementLane
+from ..enablement.build import EnablementBuild
+from ..enablement.revalidation import EnablementRevalidation
+from .maintenance import MaintenanceCollaborator
+from .build_lifecycle import BuildLifecycleCollaborator
+from .writeback import WritebackCollaborator
+from .dispatcher import DispatcherCollaborator
+from .proposals import ProposalsCollaborator
+from .conversation import ConversationCollaborator
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
@@ -84,51 +107,33 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
-class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods."""
-
-    def __getattr__(cls, name):
-        prop = cls._DELEGATED.get(name)
-        if prop is not None:
-            import importlib
-
-            mod, clsname = cls._COLLAB_MODULES[prop]
-            module = importlib.import_module(f"hyperloom.orchestrator.{mod}")
-            return getattr(getattr(module, clsname), name)
-        raise AttributeError(f"type object {cls.__name__!r} has no attribute {name!r}")
-
-
-class Coordinator(metaclass=_CoordinatorMeta):
+class Coordinator(
+    MachinePhase,
+    PreludePhase,
+    SweepPhase,
+    ClosePhase,
+    InternalTasksPhase,
+    KernelStackPhase,
+    KernelPhase,
+    MacroCycleCollaborator,
+    CycleMemoryCollaborator,
+    SpecialistDispatchCollaborator,
+    GapRefreshCollaborator,
+    FrameworkPhase,
+    GpuLanes,
+    EnablementParams,
+    EnablementLane,
+    EnablementBuild,
+    EnablementRevalidation,
+    IntentRouter,
+    MaintenanceCollaborator,
+    BuildLifecycleCollaborator,
+    WritebackCollaborator,
+    DispatcherCollaborator,
+    ProposalsCollaborator,
+    ConversationCollaborator,
+):
     """The single Coordinator instance per session."""
-
-    # property name -> (module, collaborator class) for class-level delegation.
-    _COLLAB_MODULES = {
-        # Phase handlers in call-chain order.
-        "phase_machine": ("phases.machine", "MachinePhase"),
-        "phase_prelude": ("phases.prelude", "PreludePhase"),
-        "phase_sweep": ("phases.sweep", "SweepPhase"),
-        "phase_close": ("phases.close", "ClosePhase"),
-        "phase_internal": ("phases.internal", "InternalTasksPhase"),
-        "phase_kernel_stack": ("phases.kernel_stack", "KernelStackPhase"),
-        "phase_kernel": ("phases.kernel", "KernelPhase"),
-        "phase_macro_cycle": ("phases.macro_cycle", "MacroCycleCollaborator"),
-        "cycle_memory": ("loop.cycle_memory", "CycleMemoryCollaborator"),
-        "specialist_dispatch": ("specialists.dispatch", "SpecialistDispatchCollaborator"),
-        "gap_refresh": ("state.gaps", "GapRefreshCollaborator"),
-        "phase_framework": ("phases.framework", "FrameworkPhase"),
-        "gpu_lanes": ("gpu_lanes", "GpuLanes"),
-        "enablement_params": ("enablement.params", "EnablementParams"),
-        "enablement_lane": ("enablement.lane", "EnablementLane"),
-        "enablement_build": ("enablement.build", "EnablementBuild"),
-        "enablement_revalidation": ("enablement.revalidation", "EnablementRevalidation"),
-        "router": ("loop.intent_router", "IntentRouter"),
-        "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
-        "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
-        "writeback": ("loop.writeback", "WritebackCollaborator"),
-        "dispatcher": ("loop.dispatcher", "DispatcherCollaborator"),
-        "proposals": ("loop.proposals", "ProposalsCollaborator"),
-        "conversation": ("loop.conversation", "ConversationCollaborator"),
-    }
 
     def __init__(
         self,
@@ -149,6 +154,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
+        self._init_dispatch_state()
         # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
         # path.
         bind_session(self.session_dir)
@@ -322,459 +328,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._ensure_recipe_kb_t0_anchored()
 
     @property
-    def router(self) -> IntentRouter:
-        """Intent routing collaborator (extracted from this class)."""
-        r = self.__dict__.get("_router")
-        if r is None:
-            r = IntentRouter(self)
-            self.__dict__["_router"] = r
-        return r
-
-    # Methods extracted into collaborator objects are delegated back by name here (symmetric to each collaborator's
-    # ``__getattr__`` back to this coordinator).
-    _DELEGATED = {
-        # router
-        "_handle_intent": "router",
-        "_handle_propose_action": "router",
-        "_handle_review_verdict": "router",
-        "_handle_single_verdict": "router",
-        "_handle_delegate": "router",
-        "_handle_request": "router",
-        "_handle_extend_lease": "router",
-        "_deliver_specialist_inbox": "router",
-        "_handle_prune_branch": "router",
-        "_handle_escalate_strategy_change": "router",
-        "_handle_send_message": "router",
-        "_handle_alert": "router",
-        "_handle_update_state": "router",
-        # recorder (folded into writeback)
-        "_aggregate_research_evidence": "writeback",
-        "_harvest_specialist_findings": "writeback",
-        "_record_specialist_result": "writeback",
-        "_drain_queued_baselines": "writeback",
-        # Phase handlers, grouped in the same call-chain order as _COLLAB_MODULES/the @property block above: machine
-        # -> prelude -> sweep -> close -> internal -> kernel_stack -> kernel -> explore -> framework (framework last:
-        # largest cluster).
-        "_ensure_phase_initialised": "phase_machine",
-        "_ensure_recipe_kb_t0_anchored": "phase_machine",
-        "_kernel_enabled": "phase_machine",
-        "_optimize_enabled": "phase_machine",
-        "_advance_phase_if_needed": "phase_machine",
-        "_on_phase_entered": "phase_machine",
-        "_reseed_orch_prompt_for_phase": "phase_machine",
-        "_record_phase_entry_evidence": "phase_machine",
-        "_internal_analysis_kind": "phase_prelude",
-        "_measured_analysis_cost_sec": "phase_prelude",
-        "_record_prelude_arm_dropped": "phase_prelude",
-        "_warm_recipe_proven_items": "phase_prelude",
-        "_inject_warm_recipe_history_into_ledger": "phase_prelude",
-        "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_promote_warm_replay": "phase_prelude",
-        "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
-        "_enqueue_internal_analysis_task": "phase_prelude",
-        "_internal_analysis_params": "phase_prelude",
-        "_on_enter_sweep": "phase_sweep",
-        "_enqueue_internal_conc_sweep_task": "phase_sweep",
-        "_record_session_budget_conc_sweep_skip": "phase_sweep",
-        "_record_terminal_conc_sweep_skip": "phase_sweep",
-        "_derive_close_stop_reason": "phase_close",
-        "_session_integrated_kernel_patch": "phase_close",
-        "_maybe_run_close_post_opt_roofline": "phase_close",
-        "_revalidate_stack_for_close": "phase_close",
-        "_on_enter_close": "phase_close",
-        "_enqueue_runnable_internal_task": "phase_close",
-        "_enqueue_internal_report_task": "phase_close",
-        "_enqueue_internal_session_breakdown_task": "phase_close",
-        "_run_close_task": "phase_close",
-        "_record_close_step": "phase_close",
-        "_enter_closing_phase": "phase_close",
-        "_closing_report_terminal": "phase_close",
-        "ensure_close_sequence": "phase_close",
-        "_enqueue_internal_research_scout_task": "phase_internal",
-        "_maybe_enqueue_prelude_research_scout": "phase_internal",
-        "_maybe_enqueue_explore_research_scout": "phase_internal",
-        "_enqueue_internal_static_recon_task": "phase_internal",
-        "_maybe_enqueue_prelude_static_recon": "phase_internal",
-        "_maybe_enqueue_trajectory_reviewer": "phase_internal",
-        "_consume_static_recon": "phase_internal",
-        "_drain_pending_keep_integrates": "phase_kernel_stack",
-        "_positive_needs_review_integrates": "phase_kernel_stack",
-        "_stack_resolved_kernel_ids": "phase_kernel_stack",
-        "_mark_stack_validation_entries_resolved": "phase_kernel_stack",
-        "_stack_component_identities": "phase_kernel_stack",
-        "_mark_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_pending_stack_validation_checkpoints": "phase_kernel_stack",
-        "_recover_interrupted_stack_validation": "phase_kernel_stack",
-        "_stack_entries_for_validation": "phase_kernel_stack",
-        "_finalize_stack_validation_outcome": "phase_kernel_stack",
-        "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
-        "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
-        "_auto_enqueue_pending_integrations": "phase_kernel_stack",
-        "_maybe_reprofile_for_kernel": "phase_kernel",
-        "_geak_enabled": "phase_kernel",
-        "_on_enter_kernel": "phase_kernel",
-        "_run_kernel_agent": "phase_kernel",
-        "_open_kernel_timeline": "phase_kernel",
-        "_close_kernel_timeline": "phase_kernel",
-        "_kernel_timeline": "phase_kernel",
-        "_resolve_bench_protocol": "phase_kernel",
-        "_geak_timeouts": "phase_kernel",
-        "_run_geak_kernel_phase": "phase_kernel",
-        "_geak_win_already_recorded": "phase_kernel",
-        "_parse_geak_accepted_config": "phase_kernel",
-        "_record_geak_candidate": "phase_kernel",
-        "_promote_geak_from_candidate": "phase_kernel",
-        "_reject_geak_promotion": "phase_kernel",
-        "_record_geak_kernel_journey": "phase_kernel",
-        "_ck_blockscale_switch_eligible": "phase_kernel",
-        "_ck_switch_precision_is_fp8": "phase_kernel",
-        "_handle_gemm_tuning_result": "phase_kernel",
-        "_sync_profile_state_after_gemm_roofline": "phase_kernel",
-        "_journal_gemm_tuning_keep": "phase_kernel",
-        "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_gemm_e2e_candidates": "phase_kernel",
-        "_validate_gemm_tuning_e2e": "phase_kernel",
-        "_current_tput_from_validated_gain": "phase_kernel",
-        "_last_measured_roofline_tput": "phase_kernel",
-        "_needs_roofline_for_watermark": "phase_kernel",
-        "_maybe_enqueue_watermark_roofline": "phase_kernel",
-        "_cached_kernel_request": "phase_kernel",
-        "_negative_ledger_domain_counts": "phase_macro_cycle",
-        "_plan_cycle_focus": "phase_macro_cycle",
-        "_record_cycle_strategy_for_current_cycle": "phase_macro_cycle",
-        "_cycle_strategy_block": "phase_macro_cycle",
-        "_apply_macro_cycle_reloop": "phase_macro_cycle",
-        "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_on_cycle_start_reprofile": "phase_macro_cycle",
-        "_capture_cycle_memory": "cycle_memory",
-        "_cycle_directive_fallback": "cycle_memory",
-        "_reseed_orch_prompt_for_cycle": "cycle_memory",
-        "_maybe_force_stalled_domain_specialist": "specialist_dispatch",
-        "_fan_out_specialist_wave": "specialist_dispatch",
-        "_maybe_auto_retry_specialist": "specialist_dispatch",
-        "_record_specialist_retry_exhausted": "specialist_dispatch",
-        "_warm_specialist_params": "specialist_dispatch",
-        "_build_specialist_round_entry": "specialist_dispatch",
-        "_task_id_from_specialist_source": "specialist_dispatch",
-        "_refresh_gaps": "gap_refresh",
-        "_extract_gaps_from_baseline": "gap_refresh",
-        "_extract_gaps_from_attempts": "gap_refresh",
-        "_framework_authoring_domain": "gap_refresh",
-        "_gap_layer_for_action": "gap_refresh",
-        "_seed_gaps_from_research_hints": "gap_refresh",
-        "_record_explore_round_gaps": "phase_framework",
-        "_record_explore_variant_failures": "phase_framework",
-        "_maybe_materialize_mn_explore": "phase_framework",
-        "_maybe_autosubmit_specialist_patches": "phase_framework",
-        "_maybe_autosubmit_framework_config": "phase_framework",
-        "_config_lever_known_bad": "phase_framework",
-        "_on_enter_framework": "phase_framework",
-        "_open_framework_timeline": "phase_framework",
-        "_close_framework_timeline": "phase_framework",
-        "_framework_timeline": "phase_framework",
-        "_framework_policy_fields": "phase_framework",
-        "_pump_framework_agent_phase": "phase_framework",
-        "_framework_agent_authoring_inflight": "phase_framework",
-        "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_framework_gpu_params": "gpu_lanes",
-        "_framework_authoring_lanes_ttl": "gpu_lanes",
-        "_build_enablement_specialist_params": "enablement_params",
-        "_read_enablement_source_context": "enablement_params",
-        "_derive_checkpoint_weight_facts": "enablement_params",
-        "_discover_enablement_candidate_refs": "enablement_params",
-        "_enablement_admitted": "enablement_lane",
-        "_maybe_enqueue_enablement_specialist": "enablement_lane",
-        "_maybe_record_enablement_human_review": "enablement_lane",
-        "_enablement_in_flight": "enablement_lane",
-        "_round_has_live_work": "enablement_lane",
-        "_open_authoring_round": "enablement_lane",
-        "_renew_enablement_round": "enablement_lane",
-        "_handoff_enablement_round": "enablement_lane",
-        "_settle_enablement_round": "enablement_lane",
-        "_maybe_rearm_enablement": "enablement_lane",
-        "_maybe_escalate_to_targeted_build": "enablement_build",
-        "_maybe_enqueue_specialist_requested_build": "enablement_build",
-        "_maybe_route_build_outcomes": "enablement_build",
-        "_route_succeeded_build": "enablement_build",
-        "_route_failed_build": "enablement_build",
-        "_build_routing_record": "enablement_build",
-        "_note_build_routed": "enablement_build",
-        "_build_probe_was_cancelled": "enablement_build",
-        "_enqueue_build_launch_probe": "enablement_build",
-        "_maybe_rearm_authored_lane": "phase_framework",
-        "_enqueue_author_specialist": "phase_framework",
-        "_drain_apply_fail_retry_pending": "phase_framework",
-        "_framework_candidate_key": "phase_framework",
-        "_framework_processed_candidate_keys": "phase_framework",
-        "_unprocessed_framework_agent_candidates": "phase_framework",
-        "_select_next_framework_agent_candidate": "phase_framework",
-        "_framework_known_candidate_ids": "phase_framework",
-        "_framework_tried_refs": "phase_framework",
-        "_build_framework_working_memory": "phase_framework",
-        "_framework_agent_discover_repo_urls": "phase_framework",
-        "_record_framework_agent_phase_done": "phase_framework",
-        "_enqueue_framework_agent_task": "phase_framework",
-        "_collect_framework_agent_candidate_priors": "phase_framework",
-        "_submit_framework_agent_candidate_for_review": "phase_framework",
-        "_materialize_framework_agent_candidate": "phase_framework",
-        "_stamp_framework_progress": "phase_framework",
-        "_record_framework_agent_critic_denied": "phase_framework",
-        "_maybe_reauthor_from_critic_feedback": "phase_framework",
-        "_pump_framework_agent_phase_safely": "phase_framework",
-        "_pump_enablement_safely": "enablement_lane",
-        "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
-        "_open_revalidation_row": "enablement_revalidation",
-        "_open_round_past_spent_generations": "enablement_revalidation",
-        "_open_row_past_spent_generations": "enablement_revalidation",
-        "_record_framework_agent_authored_outcome": "phase_framework",
-        "_recover_framework_agent_authoring_outcome": "phase_framework",
-        "_record_framework_agent_authoring_empty_outcome": "phase_framework",
-        "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_maybe_enqueue_candidate_discovery": "phase_framework",
-        "_candidate_discovery_inflight": "phase_framework",
-        "_ingest_candidate_discovery": "phase_framework",
-        "_candidates_from_discovery_proposals": "phase_framework",
-        "_attach_orchestration_context_tools": "conversation",
-        "_context_inbox_reader": "conversation",
-        "_context_recent_outcomes_reader": "conversation",
-        "_context_running_tasks_reader": "conversation",
-        "_task_heartbeat_age_sec": "conversation",
-        "_context_analysis_reader": "conversation",
-        "_record_reactor_conversation": "conversation",
-        "_compose_prompt": "conversation",
-        "_load_system_prompt": "conversation",
-        "_inline_action_whitelist": "dispatcher",
-        "_run_action_now_sync": "dispatcher",
-        "_run_action_now": "dispatcher",
-        "_plateau_advisory_block": "conversation",
-        "_dominant_roofline_direction": "conversation",
-        "_bottleneck_redirect_advisory_block": "conversation",
-        "_acceptance_threshold_advisory_block": "conversation",
-        "_target_gap_advisory_block": "conversation",
-        "_current_primary_gap": "conversation",
-        "_recent_proposed_variants": "conversation",
-        "_priors_match_advisory_block": "conversation",
-        "_discarded_escalate_hint_advisory_block": "conversation",
-        "_workload_canonical_id": "proposals",
-        "_read_local_recipe_row": "proposals",
-        "_extract_kept_best_config": "proposals",
-        "_kb_best_config_overrides_for_keep": "proposals",
-        "_kb_amend_recipe": "proposals",
-        "_inject_explore_runtime_params": "proposals",
-        "_materialize_approved_proposal": "proposals",
-        "_record_proposal_task_map": "proposals",
-        "_registry_lanes_ttl": "dispatcher",
-        "_cycle_idem_suffix": "dispatcher",
-        "_advance_rendered_cursor": "conversation",
-        "_dispatch_paused_for_phase_budget": "dispatcher",
-        "_pump_dispatcher_once": "dispatcher",
-        "_spawn_fitting_queued": "dispatcher",
-        "run_task_registered": "dispatcher",
-        "_specialist_wall_budget_sec": "dispatcher",
-        "_specialist_deadline": "dispatcher",
-        "_specialist_progress_publisher": "dispatcher",
-        "_resolve_serving_tp": "dispatcher",
-        "_gpu_lease_ttl_sec": "dispatcher",
-        "_reap_dispatched_task": "dispatcher",
-        "_account_dead_holder_failures": "dispatcher",
-        "_lanes_fit": "dispatcher",
-        "_phase_denial_for_action": "dispatcher",
-        "_sequence_denial_for_action": "dispatcher",
-        "_time_budget_denial_for_action": "dispatcher",
-        "_admission_denial_for_action": "dispatcher",
-        "_sequence_denial_for_request": "dispatcher",
-        "_skip_gemm_tuning": "dispatcher",
-        "_gemm_tuning_required_before_kernel_opt": "dispatcher",
-        "_emit_lifecycle": "writeback",
-        "_record_policy_denied": "writeback",
-        "_record_observation": "writeback",
-        "_record_integrate_keep": "writeback",
-        "_is_promotable_result": "writeback",
-        "_record_intervention_for_task": "writeback",
-        "_handle_unpromotable_result": "writeback",
-        "_source_session_id": "writeback",
-        "_fact_write_hook": "writeback",
-        "_ensure_journal": "writeback",
-        "_pitfall_severity_for": "writeback",
-        "_journal_entry_phase": "writeback",
-        "_record_fact_per_task": "writeback",
-        "_build_statement": "writeback",
-        "_build_measured_impact": "writeback",
-        "_record_fact_per_variant": "writeback",
-        "_collect_workload_tags": "writeback",
-        "_build_kernel_optimizations_from_state": "writeback",
-        "_collect_attempt_provenance": "writeback",
-        "_build_recipe_attrs_from_state": "writeback",
-        "ensure_recipe_finalized": "writeback",
-        "finalize_recipe_and_journal": "writeback",
-        "_lift_to_current_best": "writeback",
-        "_update_cumulative_gain_validated": "writeback",
-        "_promote_to_shared_state": "writeback",
-        "_should_run_prelude_bootstrap": "writeback",
-        "_detect_resume_state": "writeback",
-        "replay_for_resume": "writeback",
-        "_current_best_launch_config": "writeback",
-        "build_env_spec": "writeback",
-        "_resume_consistency_pass": "writeback",
-        "_resume_reenter_kernel_if_needed": "writeback",
-        "_replay_keep_from_result": "writeback",
-        "_resume_rollback_pending_integrate": "writeback",
-        "_resume_recover_pending_integrate": "writeback",
-        "_resume_recover_orphaned_keeps": "writeback",
-        "_geak_rebench_params": "writeback",
-        "_enqueue_internal_stack_rebench": "writeback",
-        "_validate_geak_via_geak_harness": "writeback",
-        "resumed_from": "writeback",
-        "_replay_resume_if_needed": "writeback",
-        "_run_maintenance": "maintenance",
-        "_maybe_prune_runs_for_disk": "maintenance",
-        "enqueue_targeted_build": "build_lifecycle",
-    }
-
-    def __getattr__(self, name: str):
-        # Only fires for genuinely-missing attributes (not shadowed instance attrs / real methods).
-        owner = Coordinator._DELEGATED.get(name)
-        if owner is not None:
-            target = getattr(self, owner)
-            try:
-                # Do not invoke the collaborator's fallback ``__getattr__`` here: a stale _DELEGATED entry would
-                # otherwise bounce back to this Coordinator and recurse until RecursionError.
-                return object.__getattribute__(target, name)
-            except AttributeError as exc:
-                raise AttributeError(
-                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, but that collaborator does not define it"
-                ) from exc
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
-
-    def _inline_action_whitelist(self) -> frozenset[str]:
-        return self.dispatcher._inline_action_whitelist()
-
-    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return self.dispatcher._run_action_now_sync(action_name, params)
-
-    async def _run_action_now(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return await self.dispatcher._run_action_now(action_name, params)
-
-    def _collaborator(self, attr: str, factory):
-        """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
-        ``Coordinator.__new__`` test doubles too (uses ``__dict__``).
-        """
-        obj = self.__dict__.get(attr)
-        if obj is None:
-            obj = factory(self)
-            self.__dict__[attr] = obj
-        return obj
-
-    # Phase handlers, in call-chain order.
-    @property
-    def phase_machine(self):
-        from ..phases.machine import MachinePhase
-
-        return self._collaborator("_phase_machine", MachinePhase)
-
-    @property
-    def phase_prelude(self):
-        from ..phases.prelude import PreludePhase
-
-        return self._collaborator("_phase_prelude", PreludePhase)
-
-    @property
-    def phase_sweep(self):
-        from ..phases.sweep import SweepPhase
-
-        return self._collaborator("_phase_sweep", SweepPhase)
-
-    @property
-    def phase_close(self):
-        from ..phases.close import ClosePhase
-
-        return self._collaborator("_phase_close", ClosePhase)
-
-    @property
-    def phase_internal(self):
-        from ..phases.internal import InternalTasksPhase
-
-        return self._collaborator("_phase_internal", InternalTasksPhase)
-
-    @property
-    def phase_kernel_stack(self):
-        from ..phases.kernel_stack import KernelStackPhase
-
-        return self._collaborator("_phase_kernel_stack", KernelStackPhase)
-
-    @property
-    def phase_kernel(self):
-        from ..phases.kernel import KernelPhase
-
-        return self._collaborator("_phase_kernel", KernelPhase)
-
-    @property
-    def phase_macro_cycle(self):
-        from ..phases.macro_cycle import MacroCycleCollaborator
-
-        return self._collaborator("_phase_macro_cycle", MacroCycleCollaborator)
-
-    @property
-    def cycle_memory(self):
-        from ..loop.cycle_memory import CycleMemoryCollaborator
-
-        return self._collaborator("_cycle_memory", CycleMemoryCollaborator)
-
-    @property
-    def specialist_dispatch(self):
-        from ..specialists.dispatch import SpecialistDispatchCollaborator
-
-        return self._collaborator("_specialist_dispatch", SpecialistDispatchCollaborator)
-
-    @property
-    def gap_refresh(self):
-        from ..state.gaps import GapRefreshCollaborator
-
-        return self._collaborator("_gap_refresh", GapRefreshCollaborator)
-
-    @property
-    def phase_framework(self):
-        from ..phases.framework import FrameworkPhase
-
-        return self._collaborator("_phase_framework", FrameworkPhase)
-
-    @property
-    def gpu_lanes(self):
-        """GPU-lease params and lane resolution, shared by both dispatchers."""
-        from ..gpu_lanes import GpuLanes
-
-        return self._collaborator("_gpu_lanes", GpuLanes)
-
-    @property
-    def enablement_params(self):
-        """Enablement authoring-specialist request construction."""
-        from ..enablement.params import EnablementParams
-
-        return self._collaborator("_enablement_params", EnablementParams)
-
-    @property
-    def enablement_lane(self):
-        """Enablement round admission / in-flight / re-arm."""
-        from ..enablement.lane import EnablementLane
-
-        return self._collaborator("_enablement_lane", EnablementLane)
-
-    @property
-    def enablement_build(self):
-        """Off-loop compiled-build escalation and outcome routing."""
-        from ..enablement.build import EnablementBuild
-
-        return self._collaborator("_enablement_build", EnablementBuild)
-
-    @property
-    def enablement_revalidation(self):
-        """Genuine-baseline revalidation of a kept enablement round."""
-        from ..enablement.revalidation import EnablementRevalidation
-
-        return self._collaborator("_enablement_revalidation", EnablementRevalidation)
-
-    @property
     def reconciler(self):
         """The unconditional repair pass run at the top of every tick.
 
@@ -798,42 +351,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.__dict__["_reconciler"] = r
         return r
-
-    @property
-    def conversation(self):
-        from .conversation import ConversationCollaborator
-
-        return self._collaborator("_conversation", ConversationCollaborator)
-
-    @property
-    def proposals(self):
-        from .proposals import ProposalsCollaborator
-
-        return self._collaborator("_proposals", ProposalsCollaborator)
-
-    @property
-    def dispatcher(self):
-        from .dispatcher import DispatcherCollaborator
-
-        return self._collaborator("_dispatcher", DispatcherCollaborator)
-
-    @property
-    def writeback(self):
-        from .writeback import WritebackCollaborator
-
-        return self._collaborator("_writeback", WritebackCollaborator)
-
-    @property
-    def maintenance(self):
-        from .maintenance import MaintenanceCollaborator
-
-        return self._collaborator("_maintenance", MaintenanceCollaborator)
-
-    @property
-    def build_lifecycle(self):
-        from .build_lifecycle import BuildLifecycleCollaborator
-
-        return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``."""
@@ -904,7 +421,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Signal shutdown, cancel in-flight work, and close the DB."""
         self._stop.set()
         try:
-            await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+            await self.cancel_inflight_actions(reason="coordinator_stop")
         except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
@@ -918,7 +435,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 pass
             except Exception:
                 log.exception("reactor task raised on shutdown")
-        await self.dispatcher.close_db_after_executions()
+        await self.close_db_after_executions()
 
     def _bind_session_deadline(
         self,

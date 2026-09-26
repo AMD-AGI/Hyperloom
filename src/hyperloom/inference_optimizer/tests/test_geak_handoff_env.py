@@ -27,7 +27,7 @@ async def test_handoff_preserves_environment_values(
         model_path="/models/example",
         current_best={"extra_envs": expected, "optimization_stack": []},
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
     def stop_after_handoff(_name: str) -> Path:
@@ -71,7 +71,7 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             last_baseline={"extras": {"materialized_config": str(recipe)}},
             current_best={**current, "measurement": {"resolved_server_launch_flags": observed_flags}},
         )
-        coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+        coord._record_geak_kernel_journey = lambda _result: None
         monkeypatch.setenv("FRAMEWORK", framework)
         monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
         monkeypatch.delenv("GPU_MEMORY_UTILIZATION", raising=False)

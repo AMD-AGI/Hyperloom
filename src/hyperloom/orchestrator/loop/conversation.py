@@ -20,6 +20,7 @@ from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -184,14 +185,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     return f"{head} payload={payload}"
 
 
-class ConversationCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+class ConversationCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
@@ -208,7 +203,7 @@ class ConversationCollaborator:
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
-                action_runner=self._coord.dispatcher._run_action_now_wait,
+                action_runner=self._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)
@@ -538,7 +533,7 @@ class ConversationCollaborator:
         rendered = list(msgs)
         if msgs:
             top = msgs[-1]
-            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
+            self._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
@@ -555,7 +550,7 @@ class ConversationCollaborator:
 
     async def _advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._coord._rendered_cursor.get(agent_name)
+        entry = self._rendered_cursor.get(agent_name)
         if entry is None:
             return
         seq, msg_id = entry

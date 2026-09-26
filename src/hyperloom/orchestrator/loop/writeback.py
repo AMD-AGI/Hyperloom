@@ -99,6 +99,7 @@ from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 import logging as _logging
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -483,14 +484,11 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
-class WritebackCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class WritebackCollaborator(CoordinatorCollaborator):
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+    _journal: Journal | None
+    _lifecycle_last_save: float
 
     def _emit_lifecycle(
         self,
@@ -528,7 +526,7 @@ class WritebackCollaborator:
             now = time.monotonic()
             if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
                 self.shared_state.save(self.session_dir)
-                self._coord._lifecycle_last_save = now
+                self._lifecycle_last_save = now
         except Exception:
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
@@ -1667,10 +1665,10 @@ class WritebackCollaborator:
             The per-session :class:`Journal` instance (created on first call,
             with the baseline backfilled on subsequent calls).
         """
-        existing = getattr(self, "_journal", None)
-        if existing is None:
+        journal: Journal | None = getattr(self, "_journal", None)
+        if journal is None:
             ss = self.shared_state
-            self._coord._journal = Journal.load_or_create(
+            journal = self._journal = Journal.load_or_create(
                 self.session_dir,
                 session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
                 or str(getattr(ss, "session_id", "") or "")
@@ -1682,8 +1680,8 @@ class WritebackCollaborator:
             )
         else:
             # Backfill baseline once the baseline executor finishes.
-            existing.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
-        return self._journal
+            journal.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
+        return journal
 
     def _pitfall_severity_for(
         self,
@@ -1771,7 +1769,7 @@ class WritebackCollaborator:
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1788,11 +1786,11 @@ class WritebackCollaborator:
             provenance_base["source_variant_name"] = variant_name
 
         if is_keep and gain_pct is not None and gain_pct > 0:
-            statement = self._coord._build_statement(
+            statement = self._build_statement(
                 change=change,
                 kind="lesson",
             )
-            impact = self._coord._build_measured_impact(
+            impact = self._build_measured_impact(
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
@@ -1816,7 +1814,7 @@ class WritebackCollaborator:
 
         severity = self._pitfall_severity_for(pitfall_severity_dict)
         if severity is not None:
-            description = self._coord._build_statement(
+            description = self._build_statement(
                 change=change,
                 severity=severity,
                 kind="pitfall",
@@ -2350,11 +2348,11 @@ class WritebackCollaborator:
                 )
         for rev in reverted_rows:
             what_failed.append(rev)
-        kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
+        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._coord._collect_workload_tags()
+        workload_tags = self._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
@@ -2719,7 +2717,7 @@ class WritebackCollaborator:
                 "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
         try:
-            attrs = self._coord._build_recipe_attrs_from_state()
+            attrs = self._build_recipe_attrs_from_state()
             # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
             workload_tags = attrs.get("workload") or {}
 
@@ -2962,18 +2960,18 @@ class WritebackCollaborator:
 
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
-            await self._coord._harvest_specialist_findings(done_payload)
+            await self._harvest_specialist_findings(done_payload)
 
         # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate.
         if domain == "static_recon_specialist":
-            self._coord._consume_static_recon(done_payload)
+            self._consume_static_recon(done_payload)
 
         # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above).
-        self._coord._aggregate_research_evidence(done_payload)
+        self._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
@@ -3981,7 +3979,7 @@ class WritebackCollaborator:
             got_hash: The fingerprint the run reported.
             got_overlay_digest: The overlay digest observed after the run.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self._kernel_timeline()
         if recorder is None:
             return
         params = task.params or {}
@@ -4021,7 +4019,7 @@ class WritebackCollaborator:
         afterwards. The recorder declines silently when the kernel event has
         already closed, and the close-out's ``geak_candidate`` carries it then.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self._kernel_timeline()
         if recorder is None:
             return
         recorder.record_geak_rebench_conclusion(
@@ -4407,7 +4405,7 @@ class WritebackCollaborator:
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_material")
-                    self.phase_kernel._reject_geak_kernel_journey(
+                    self._reject_geak_kernel_journey(
                         ps_stamped,
                         measured_tput=float(measured),
                         current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
@@ -4466,10 +4464,7 @@ class WritebackCollaborator:
                     )
                     fallback_result: dict[str, Any]
                     try:
-                        # Routed via ``_coord`` so a test / caller that overrides
-                        # ``coordinator._validate_geak_via_geak_harness`` still wins
-                        # (bare-name delegation resolves it back onto this class).
-                        fallback_result = await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
+                        fallback_result = await self._validate_geak_via_geak_harness(reason="2b_inconclusive")
                     except Exception as exc:
                         log.exception("geak 2a GEAK-harness fallback failed")
                         fallback_result = {
@@ -4836,9 +4831,7 @@ class WritebackCollaborator:
     # (``_replay_keep_from_result``), the resume-reconcile path
     # (``_resume_consistency_pass`` + its recover helpers), and the
     # current_best lift path (``_current_best_launch_config`` /
-    # ``build_env_spec``). Methods keep bare ``self.<name>`` access; tests
-    # monkeypatch them via ``coord.writeback.<name>`` (or bare-name
-    # ``_DELEGATED`` on the coordinator).
+    # ``build_env_spec``).
     # ------------------------------------------------------------------
     def _detect_resume_state(self) -> dict[str, Any]:
         """Synchronously inspect persistence to determine if this is a resume (non-blocking).
@@ -5608,7 +5601,7 @@ class WritebackCollaborator:
         pending = getattr(state, "warm_replay_pending", {}) or {}
         if not isinstance(pending, dict) or not pending:
             return
-        rollback = self.phase_prelude._rollback_combined_warm({}, None)
+        rollback = self._rollback_combined_warm({}, None)
         errors = list(rollback.get("errors") or [])
         if errors:
             report["warnings"].append(

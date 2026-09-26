@@ -415,9 +415,8 @@ def _round(domain: str, finding: str, confidence, questions=()) -> dict:
 
 
 def _findings(coord: Coordinator) -> str:
-    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
 
-    return ConversationCollaborator(coord)._specialist_findings_block()
+    return coord._specialist_findings_block()
 
 
 def test_specialist_findings_survive_a_non_numeric_confidence(coord: Coordinator) -> None:

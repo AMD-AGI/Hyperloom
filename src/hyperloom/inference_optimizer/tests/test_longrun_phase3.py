@@ -140,9 +140,9 @@ async def _noop_phase_side_effects(c):
     async def _noop(*_args, **_kwargs):
         return None
 
-    c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
-    c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
 
 
 def _arm_explore_to_sweep(st):

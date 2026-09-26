@@ -1450,17 +1450,17 @@ def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holdin
 ) -> None:
     from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
-    coord = SimpleNamespace(
+    disp = DispatcherCollaborator()
+    vars(disp).update(
         action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
         sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
         _INLINE_ACTION_DENY=frozenset({"report"}),
     )
-    disp = DispatcherCollaborator(coord)
     monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
     # report is denied, missing has no executor, lane_action holds a lane.
     assert disp._inline_action_whitelist() == frozenset({"ok_action"})
 
-    coord.action_registry = {}
+    disp.action_registry = {}
     assert disp._inline_action_whitelist() == frozenset()
 
 
@@ -1468,20 +1468,20 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyP
     from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
     from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
-    coord = SimpleNamespace(
+    disp = DispatcherCollaborator()
+    vars(disp).update(
         _inline_fast_actions_enabled=True,
         _coordinator_loop=None,
         _INLINE_ACTION_DENY=frozenset(),
         action_registry=None,
         sub=SimpleNamespace(executor_registry={}),
     )
-    disp = DispatcherCollaborator(coord)
     assert "action_name required" in disp._run_action_now_sync("  ", {})
 
     monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
     assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
 
-    coord._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
+    disp._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
     monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
 

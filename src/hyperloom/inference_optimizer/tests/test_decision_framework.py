@@ -99,7 +99,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
         }
         c.shared_state.save(session_dir)
 
-        await c.phase_kernel._handle_gemm_tuning_result(
+        await c._handle_gemm_tuning_result(
             {
                 "status": "ok",
                 "decision": "KEEP",

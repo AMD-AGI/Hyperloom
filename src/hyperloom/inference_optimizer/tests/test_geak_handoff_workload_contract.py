@@ -125,7 +125,7 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
         },
     )
     coord.shared_state.current_best["measurement"]["launch_identity"] = coord.build_env_spec()["launch_identity"]
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     return coord
 
 
@@ -204,7 +204,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         lambda _name: tmp_path / "mock_geak_runner.py",
     )
-    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
+    coord._geak_timeouts = lambda: (60, 90, False)
     captured_env = {}
 
     def _start_runner(_cmd, *, env, **_kwargs):
