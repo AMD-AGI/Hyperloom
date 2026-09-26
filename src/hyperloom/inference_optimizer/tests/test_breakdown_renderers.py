@@ -145,17 +145,13 @@ def test_kernel_lifecycle_full_with_adopted_and_residual():
                             # residual long tail.
                             {"kernel_id": "k4", "name": "elementwise", "gpu_pct": 1.0, "duration_us": 5.0},
                         ],
-                        "lanes": {"kernel_rewrites": [{"kernel_id": "k1", "speedup": 1.1, "outcome": "adopted"}]},
                     },
-                    geak={
-                        "attempts": {
-                            "kernels": [
-                                {"kernel_id": "k1", "micro_speedup": 1.3, "outcome": "adopted"},
-                                {"kernel_id": "k2", "micro_speedup": 1.05, "outcome": "adopted"},
-                                {"kernel_id": "k3", "micro_speedup": 0.9, "outcome": "rejected"},
-                            ]
-                        }
-                    },
+                    attempts=[
+                        {"route": "forge", "kernel_id": "k1", "speedup": 1.1, "outcome": "adopted"},
+                        {"route": "geak", "kernel_id": "k1", "speedup": 1.3, "outcome": "adopted"},
+                        {"route": "geak", "kernel_id": "k2", "speedup": 1.05, "outcome": "adopted"},
+                        {"route": "geak", "kernel_id": "k3", "speedup": 0.9, "outcome": "rejected"},
+                    ],
                     integrate=[
                         {"kernel_id": "k1", "decision": "KEEP"},
                         {"kernel_id": "k2", "decision": "REVERT"},
@@ -195,8 +191,8 @@ def test_kernel_lifecycle_merges_a_kernel_across_two_visits():
                 _kernel_event(
                     forge={
                         "discovered_kernels": [{"kernel_id": "k1", "name": "gemm", "gpu_pct": 40.0, "selected": True}],
-                        "lanes": {"kernel_rewrites": [{"kernel_id": "k1", "speedup": 1.4}]},
-                    }
+                    },
+                    attempts=[{"route": "forge", "kernel_id": "k1", "speedup": 1.4}],
                 ),
                 _kernel_event(integrate=[{"kernel_id": "k1", "decision": "KEEP"}]),
             ]

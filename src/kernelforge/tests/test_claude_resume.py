@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.claude import (
-    DEFAULT_CLAUDE_MODEL,
     ClaudeBackend,
     ClaudeBackendError,
     _supports_adaptive_thinking,
@@ -118,6 +118,27 @@ def test_run_without_a_session_id_stays_empty():
     backend = _backend([_result_message()], captured)
     result = asyncio.run(backend.run(_spec()))
     assert result.session_id == ""
+
+
+def test_a_stream_that_ends_without_a_result_is_not_a_clean_stop():
+    """No ResultMessage means the CLI never said how the session finished."""
+    from kernelforge.agent_backends.session_resume import is_api_failure
+
+    captured: dict = {}
+    backend = _backend(
+        [
+            _message(subtype="init", session_id="sess-no-result"),
+            SimpleNamespace(content=[SimpleNamespace(text="half an answer")]),
+        ],
+        captured,
+    )
+
+    result = asyncio.run(backend.run(_spec()))
+
+    # Reading this as ``agent_stopped`` handed the caller "half an answer" as the agent's own conclusion.
+    assert result.end_reason == "sdk_no_result"
+    assert is_api_failure(result) is True
+    assert result.session_id == "sess-no-result"
 
 
 def test_turn_cap_after_session_id_returns_a_resumable_result():

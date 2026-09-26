@@ -187,8 +187,11 @@ incident response or launch validation:
   A non-zero exit must abort the launch.
 * `read_optimizer_state.py`: concise `state.json` / lifecycle summary:
   `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
-* `robustness_monitor.sh.example`: shell example for polling robustness
-  findings around a session; copy/adapt it for local operator workflows.
+* `recover-session`: explicit offline artifact recovery without restarting the
+  optimization loop:
+  `python -m hyperloom.inference_optimizer.cli recover-session --session-dir <SD>`.
+  To keep optimizing instead, inspect the failed run and explicitly use
+  `optimize --resume-from <SD>`.
 
 ---
 

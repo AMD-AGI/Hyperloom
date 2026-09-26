@@ -52,7 +52,6 @@ async def _build_coord_with_capacity(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=tmp_path,
@@ -382,10 +381,12 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     """The default ``--research-lane-capacity`` is the GPU-derived ceiling (2 × visible GPU)."""
+    from hyperloom.common import visible_devices
     from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
@@ -399,9 +400,11 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     """An operator value above the GPU-derived ceiling is clamped down in SharedState."""
     import argparse
 
+    from hyperloom.common import visible_devices
     from hyperloom.inference_optimizer.cli.bootstrap import _seed_shared_state
     from hyperloom.orchestrator.policy import gate as policy_mod
 
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 
     args = argparse.Namespace(

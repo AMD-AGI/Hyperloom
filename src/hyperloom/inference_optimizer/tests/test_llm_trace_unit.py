@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace import llm_trace
+from hyperloom.inference_optimizer.trace import _row_utils, llm_trace
 
 
 def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
     monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
 
     record = llm_trace.LLMCallRecord.from_metadata(
@@ -43,7 +43,7 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
 
 def test_from_metadata_carries_call_id_and_reasoning_tokens(tmp_path: Path, monkeypatch):
     """The backend's call_id + reasoning spend reach the unified ledger."""
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
     record = llm_trace.LLMCallRecord.from_metadata(
         session_id="s1",
@@ -78,7 +78,7 @@ def test_llm_call_record_rejects_unknown_component(tmp_path: Path):
 
 
 def test_llm_trace_handles_unusable_reviewed_ids_and_io_failure(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
     record = llm_trace.LLMCallRecord(
         session_id="s2",
         component="forge",
@@ -106,7 +106,7 @@ def test_coerce_optional_str_list_variants():
 
 def test_for_failure_records_error_without_token_counters(tmp_path: Path, monkeypatch):
     """A failed call lands in the ledger as an ``error`` row, tokens unmeasured."""
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
     monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
 
     record = llm_trace.LLMCallRecord.for_failure(
@@ -153,7 +153,7 @@ def test_for_failure_accepts_plain_message_and_truncates(tmp_path: Path):
 
 
 def test_success_rows_default_to_ok_status(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
     row = llm_trace.LLMCallRecord(session_id="s1", component="forge").to_row()
     assert row["status"] == llm_trace.LLM_STATUS_OK
     assert row["error_type"] is None and row["error_message"] is None
@@ -176,9 +176,9 @@ def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
 
 
 def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
-    import hyperloom.orchestrator.trace.langfuse_emitter as le
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as le
 
     def _boom(_dir):
         raise RuntimeError("langfuse down")

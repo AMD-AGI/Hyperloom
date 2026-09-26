@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -16,12 +17,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 
+# The env file's whole subject is "was this name already exported at launch", so every name these tests reason about
+# has to start out unset regardless of what the operator's shell carries.
+_CONTROLLED_ENV_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_CUSTOM_HEADERS",
+    "MAGPIE_PATH",
+)
+
 _INSTALL_KEY = "ak-install-time-key"
 _INSTALL_URL = "https://gateway.install-time.example/v1"
 _INSTALL_TOKEN = "sk-ant-oat01-install-time-token"
 _ROTATED_KEY = "ak-rotated-key"
 _ROTATED_URL = "https://gateway.rotated.example/v1"
 _ROTATED_TOKEN = "sk-ant-oat01-rotated-token"
+
+
+def _controlled_env() -> dict[str, str]:
+    """A copy of the ambient environment with every name these tests own removed."""
+    return {k: v for k, v in os.environ.items() if k not in _CONTROLLED_ENV_NAMES}
 
 
 def _sourceable_installer(dest_dir: Path) -> Path:
@@ -63,6 +83,7 @@ write_env_file
             text=True,
             capture_output=True,
             timeout=60,
+            env=_controlled_env(),
         )
         self.assertEqual(
             proc.returncode,
@@ -86,6 +107,7 @@ write_env_file
             text=True,
             capture_output=True,
             timeout=60,
+            env=_controlled_env(),
         )
         self.assertEqual(
             proc.returncode,

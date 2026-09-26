@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+from hyperloom.common.llm_config import CLAUDE_GATEWAY_SIGNAL_KEYS, LEGACY_DEEPSEEK_ENV_KEYS
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     EMIT_INTENT_TOOL_NAME,
@@ -102,13 +103,8 @@ def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch)
 
 
 def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeypatch) -> None:
-    for key in (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "LLM_GATEWAY_KEY",
-    ):
+    # Taken from the product's signal set so a newly recognised gateway variable cannot leak in from the shell.
+    for key in (*CLAUDE_GATEWAY_SIGNAL_KEYS, *LEGACY_DEEPSEEK_ENV_KEYS, "LLM_GATEWAY_KEY"):
         monkeypatch.delenv(key, raising=False)
     b = _backend(model="claude-opus-4-6")
 

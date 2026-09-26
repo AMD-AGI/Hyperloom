@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX benchmark timeout derivations shared by baseline and grid launches."""
+"""AgentX client warmup parameters, independent of the benchmark process cap."""
 
 from __future__ import annotations
 
@@ -11,15 +11,7 @@ from collections.abc import Mapping
 
 log = logging.getLogger(__name__)
 
-# An AgentX baseline does not fit either of the caps above, and the cold-start detector cannot see why.
-AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
-AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
-
-# The warmup share of that overhead is not a constant either, and it is the share that actually varies by model:
-# aiperf_client.sh bounds the warmup drain with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a
-# model whose operator has already had to raise that knob for the round to complete at all.
 AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
-_AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
 
 # ...and the warmup share does not only vary by model, it varies by CONCURRENCY, which the grace knob cannot express
 # because it is one flat number.
@@ -97,66 +89,3 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
         ("grace-scaled", grace, scaled, conc, anchor),
     )
     return scaled
-
-
-def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
-    """Resolve the AgentX baseline cap: explicit, else duration + overhead."""
-    src = os.environ if env is None else env
-
-    # One parser for every knob in this module.
-    def _int(name: str, default: int) -> int:
-        return _agentx_positive_int(src, name) or default
-
-    def _is_valid_override(name: str) -> bool:
-        return _agentx_positive_int(src, name) > 0
-
-    explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
-    if explicit:
-        return explicit
-
-    # Same validity bar as `_int` itself (parses to a positive int) rather than "non-empty string" -- otherwise an
-    # invalid override (e.g. "abc" or "-1") both silently falls back to the default AND suppresses the warning meant
-    # to flag exactly that case.
-    if _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
-        overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
-        grace = None
-    else:
-        # Derive the warmup share from the same knob that bounds it in the client, via the same helper the client's
-        # value is exported from, so the cap and the client's --warmup-grace-period cannot drift apart.
-        grace = agentx_warmup_grace_sec(src)
-        overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
-        if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
-            # Nothing has been tuned for this model at all.
-            _say_once(
-                lambda: log.warning(
-                    "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
-                    "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
-                    "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
-                    "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
-                    "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
-                    "at concurrency=64 measured warmup alone taking ~12075s. Raise "
-                    "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
-                    "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
-                    overhead,
-                    _AGENTX_NON_WARMUP_OVERHEAD_SEC,
-                    AGENTX_CANON_WARMUP_GRACE_SEC,
-                ),
-                ("untuned-overhead", overhead),
-            )
-    duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
-    total = duration + overhead
-    # Log every input, so a timeout in the field can be read back to the value that produced it instead of guessing
-    # which knob was in play.
-    _say_once(
-        lambda: log.info(
-            "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
-            total,
-            duration,
-            overhead,
-            "explicit AGENTX_BASELINE_OVERHEAD_SEC"
-            if grace is None
-            else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
-        ),
-        ("baseline-timeout", total, duration, overhead, grace),
-    )
-    return total

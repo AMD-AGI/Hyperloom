@@ -63,6 +63,22 @@ class TestMedianNotMean:
         assert v.deltas_pct == [10.0, 20.0]
         assert v.to_dict()["pairs"] == [[100.0, 110.0], [100.0, 120.0]]
 
+    def test_mutating_exported_evidence_does_not_change_the_verdict(self):
+        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
+        snapshot = v.to_dict()
+        snapshot["deltas_pct"][0] = -99.0
+        snapshot["pairs"][0][1] = 1.0
+        assert v.deltas_pct == [10.0, 20.0]
+        assert v.pairs == [(100.0, 110.0), (100.0, 120.0)]
+        assert v.to_dict()["deltas_pct"] == [10.0, 20.0]
+        assert v.candidate_wins
+
+    def test_exported_evidence_does_not_follow_later_verdict_list_mutation(self):
+        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
+        snapshot = v.to_dict()
+        v.deltas_pct.append(30.0)
+        assert snapshot["deltas_pct"] == [10.0, 20.0]
+
 
 class TestBadInput:
     def test_non_positive_values_are_dropped(self):

@@ -150,7 +150,7 @@ def _make_loop(
     loop = IterationLoop(
         config,
         tracker,
-        config=object(),
+        config=SimpleNamespace(gpu_target="gfx942"),
         resume=resume,
     )
     monkeypatch.setattr(
@@ -2400,9 +2400,22 @@ def _faster_bench(candidate_ms=1.0 / 1.05):
     }
 
 
+def _git_workspace(path: Path) -> Path:
+    """The loop commits every iteration and diffs against HEAD, so a workspace is a repo that has one."""
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 def _canonical_workspace(tmp_path, command: str) -> Path:
-    # The arena fails a task that declares no compile_command, so the gate needs
-    # a Step 1 that passes before it reaches the correctness command under test.
+    # A task config shaped the way the arena's evaluator reads one. Only the
+    # assembly backend asks the engine to run it; for every other backend its
+    # presence must not move a verdict the driver has already reached.
     tmp_path.joinpath("config.yaml").write_text(
         yaml.safe_dump(
             {
@@ -2415,37 +2428,27 @@ def _canonical_workspace(tmp_path, command: str) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_snr_pass_with_failing_canonical_suite_is_reverted(tmp_path, monkeypatch, capsys):
-    """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's.
+@pytest.mark.parametrize("ships_a_config", [True, False])
+async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
+    tmp_path, monkeypatch, capsys, ships_a_config
+):
+    """The driver judged this candidate in Step 4 and has measured it ever since.
 
-    The SNR probe passes, the candidate is 5% faster, and the task's own suite
-    rejects it. That candidate must not be kept, and the tolerance it broke --
-    not the dB figure -- has to reach the agent.
+    Re-running that verdict here would ask the same question of the same command
+    through a configuration file whose shape the engine has no business knowing,
+    and a consumer that declares evaluation differently could never earn a keep.
+    Shipping a task config -- even one whose suite would reject -- must therefore
+    change nothing, and no canonical verdict may reach the operator's log.
     """
-    workspace = _canonical_workspace(
-        tmp_path,
-        "raise AssertionError('normalized max err 0.02468 too high')",
-    )
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is False
-    assert result.validation_passed is False
-    assert result.validation_outcome == "canonical_correctness_failure"
-    assert "0.02468" in result.error_output
-    assert "[canonical] FAIL" in capsys.readouterr().out
-
-
-@pytest.mark.asyncio
-async def test_canonical_suite_passing_keeps_the_faster_candidate(tmp_path, monkeypatch):
-    workspace = _canonical_workspace(tmp_path, "print('all cases PASS')")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
+    if ships_a_config:
+        _canonical_workspace(tmp_path, "raise AssertionError('the engine must not run this')")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
 
     result = await loop.run_one_iteration(1)
 
     assert result.kept is True
     assert result.validation_passed is True
+    assert "[canonical]" not in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -2455,7 +2458,7 @@ async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, m
 
     if kind != "missing":
         _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
-    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
     loop.ic.kernel_backend = "assembly"
     loop.ic.pristine_baseline_wall_ms = 1.0
 
@@ -2471,47 +2474,37 @@ async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_canonical_suite_output_reporting_failure_reverts(tmp_path, monkeypatch):
-    workspace = _canonical_workspace(tmp_path, "print('mla-decode-bs64-kv8192: FAILED')")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
+async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, monkeypatch, capsys):
+    """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's.
 
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is False
-    assert "mla-decode-bs64-kv8192" in result.error_output
-
-
-@pytest.mark.asyncio
-async def test_workspace_declaring_no_correctness_command_cannot_keep(tmp_path, monkeypatch):
-    tmp_path.joinpath("config.yaml").write_text('compile_command:\n  - "true"\n')
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
-
-    result = await loop.run_one_iteration(1)
-
-    assert result.kept is False
-    assert "declares no 'correctness_command'" in result.validation_summary
-
-
-@pytest.mark.asyncio
-async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(tmp_path, monkeypatch, capsys):
-    """Non-arena runs (flydsl, fusion, the examples) must keep working.
-
-    There is no canonical suite to consult, so the SNR verdict still decides --
-    but the operator is told the KEEP carries nothing else behind it.
+    The SNR probe passes, the candidate is 5% faster, and the suite the assembly
+    backend declares rejects it. That candidate must not be kept, and the
+    tolerance it broke -- not the dB figure -- has to reach the agent.
     """
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    from kernelforge.tests.test_numerical_contract import _task, evidence
+
+    _task(tmp_path, evidence())
+    tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
 
     result = await loop.run_one_iteration(1)
 
-    assert result.kept is True
-    assert "[canonical] UNVERIFIED" in capsys.readouterr().out
+    assert result.kept is False
+    assert result.validation_passed is False
+    assert result.validation_outcome == "canonical_correctness_failure"
+    assert "0.02468" in result.error_output
+    assert "[canonical] FAIL" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
-async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
+async def test_assembly_acceptance_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
     """The suite is the expensive check; a slower candidate is reverted anyway."""
-    workspace = _canonical_workspace(tmp_path, "raise AssertionError('this must never run')")
+    workspace = _git_workspace(_canonical_workspace(tmp_path, "raise AssertionError('this must never run')"))
     loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(candidate_ms=2.0), workspace_dir=workspace)
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
 
     result = await loop.run_one_iteration(1)
 
@@ -4183,6 +4176,56 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     }
 
 
+def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
+    tmp_path,
+    monkeypatch,
+):
+    """The next round is told the review never happened, not that it passed."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+    )
+    critic = PlanCriticOutcome(
+        verdict="NOT_REVIEWED",
+        error="TimeoutError: plan critic exceeded 600s",
+        verdict_source="error",
+    )
+    result = SimpleNamespace(
+        optimization_plans=("# Draft plan\nVectorize global loads.",),
+        optimization_plan_draft="# Draft plan\nVectorize global loads.",
+        optimization_plan_executable=True,
+        dispatch_plan=None,
+        specialist_outcomes=(),
+        structured_output_diagnostics={"plan_critic": critic.to_dict()},
+        plan_critic=critic,
+        plan_revised=False,
+    )
+
+    class OrchestrationService:
+        async def run(self, _context, **_kwargs):
+            return result
+
+    plan_path, error = asyncio.run(
+        loop._run_orchestration(
+            iteration=1,
+            orchestration_service=OrchestrationService(),
+        )
+    )
+    root = workspace / "forge_experiments" / "orchestration" / "iter_001"
+
+    assert error == ""
+    assert plan_path is not None
+    # The plan still publishes -- an outage costs this round its review, not its round.
+    assert plan_path.read_text().startswith("# Draft plan")
+    assert loop._last_critic_verdict == "NOT_REVIEWED"
+    assert (root / "critic_review.md").read_text().startswith("STATUS: CRITIC_ERROR")
+    # No review exists to resume, so a later process inherits no ruling at all.
+    assert loop.run_state.last_critic.verdict == ""
+
+
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     tmp_path,
     monkeypatch,
@@ -4391,6 +4434,9 @@ def test_keep_defers_incremental_analysis_until_next_request(
             analysis_calls.append(context.analysis_commit)
             incrementals.append(incremental)
             return Bundle(context.analysis_commit)
+
+        def apply_checkpoint(self, context):
+            return context
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "keep one candidate"

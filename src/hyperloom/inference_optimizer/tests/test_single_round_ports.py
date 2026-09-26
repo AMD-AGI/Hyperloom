@@ -160,7 +160,7 @@ def _worker(cmd, paths, *, remaining=30, ready=False):
         env={"HYPERLOOM_BENCHMARK_BACKEND": "bypass", "PORT": "8888", "ROCR_VISIBLE_DEVICES": "99"},
         cwd=None,
         timeout_s=20,
-        soft_deadline_sec=None,
+        silence_timeout_sec=None,
         server_log_path=None,
         server_already_ready=ready,
         session_remaining_sec=remaining,

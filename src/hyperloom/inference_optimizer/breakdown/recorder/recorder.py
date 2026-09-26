@@ -99,6 +99,10 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "warm_start_read": "item",
     "warm_replay_event": "item",
     "warm_replay_gate": "item",
+    # Rows rather than a tally on the event: the plan's counts already say how
+    # many landed, and what a reader needs from a replay that lost is which
+    # item it was that did not.
+    "warm_replay_apply": "item",
     "framework_event": "item",
     "framework_plateau": "item",
     "framework_run": "item",
@@ -223,46 +227,68 @@ class Recorder:
             self._seq += 1
             return self._seq
 
+    def _park_spool_failure(self, section: str, error: BaseException) -> None:
+        """Park a spool/binding failure. Projection bugs are not passed here."""
+        from .recorder_warnings import note_failure
+
+        note_failure(section=section, error=error, producer=self._producer)
+
     def record_singleton(
         self,
         section: str,
         payload: Mapping[str, Any],
-    ) -> Path:
+    ) -> Path | None:
         """Write/overwrite this producer's single final blob for ``section``,
-        which must be declared ``singleton``-shaped."""
-        self._check_shape(section, "singleton")
-        filename = f"{_slug(section)}__{self._producer}.json"
-        return self._write(section, "singleton", payload, filename=filename)
+        which must be declared ``singleton``-shaped.
+
+        Spool and binding failures are parked and return ``None``. Anything
+        else raises: this is the write-side owner of :data:`RECORDING_ERRORS`.
+        """
+        from .recorder_warnings import RECORDING_ERRORS
+
+        try:
+            self._check_shape(section, "singleton")
+            filename = f"{_slug(section)}__{self._producer}.json"
+            return self._write(section, "singleton", payload, filename=filename)
+        except RECORDING_ERRORS as exc:
+            self._park_spool_failure(section, exc)
+            return None
 
     def record_upsert_singleton(
         self,
         section: str,
         payload: Mapping[str, Any],
-    ) -> Path:
+    ) -> Path | None:
         """Merge and atomically rewrite this producer's singleton fragment."""
-        self._check_shape(section, "singleton")
-        filename = f"{_slug(section)}__{self._producer}.json"
-        target = self._dir / filename
-        with self._lock:
-            previous: Mapping[str, Any] | None = None
-            try:
-                current = json.loads(target.read_text(encoding="utf-8"))
-                current_payload = current.get("payload") if isinstance(current, dict) else None
-                if isinstance(current_payload, Mapping):
-                    previous = current_payload
-                    merged = _merge_mappings(current_payload, payload)
-                else:
+        from .recorder_warnings import RECORDING_ERRORS
+
+        try:
+            self._check_shape(section, "singleton")
+            filename = f"{_slug(section)}__{self._producer}.json"
+            target = self._dir / filename
+            with self._lock:
+                previous: Mapping[str, Any] | None = None
+                try:
+                    current = json.loads(target.read_text(encoding="utf-8"))
+                    current_payload = current.get("payload") if isinstance(current, dict) else None
+                    if isinstance(current_payload, Mapping):
+                        previous = current_payload
+                        merged = _merge_mappings(current_payload, payload)
+                    else:
+                        merged = dict(payload)
+                except (OSError, ValueError, TypeError):
                     merged = dict(payload)
-            except (OSError, ValueError, TypeError):
-                merged = dict(payload)
-            return self._write(
-                section,
-                "singleton",
-                merged,
-                filename=filename,
-                operation="upsert",
-                previous=previous,
-            )
+                return self._write(
+                    section,
+                    "singleton",
+                    merged,
+                    filename=filename,
+                    operation="upsert",
+                    previous=previous,
+                )
+        except RECORDING_ERRORS as exc:
+            self._park_spool_failure(section, exc)
+            return None
 
     def record_item(
         self,
@@ -270,7 +296,7 @@ class Recorder:
         payload: Mapping[str, Any],
         *,
         key: str | None = None,
-    ) -> Path:
+    ) -> Path | None:
         """Append one event fragment to the ``item``-shaped ``section`` stream.
 
         ``key`` is a stable per-item identity; when given, the fragment
@@ -278,15 +304,21 @@ class Recorder:
         rather than duplicates and the write is idempotent across retries and
         resume. Without one, a pid/sequence-unique filename is used.
         """
-        self._check_shape(section, "item")
-        seq: int | None = None
-        if key:
-            filename = self._stable_item_filename(section, key)
-        else:
-            # One number serves both filename and envelope, so ``seq=N`` in a trace line locates the file that write produced.
-            seq = self._next_seq()
-            filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
-        return self._write(section, "item", payload, filename=filename, seq=seq)
+        from .recorder_warnings import RECORDING_ERRORS
+
+        try:
+            self._check_shape(section, "item")
+            seq: int | None = None
+            if key:
+                filename = self._stable_item_filename(section, key)
+            else:
+                # One number serves both filename and envelope, so ``seq=N`` in a trace line locates the file that write produced.
+                seq = self._next_seq()
+                filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
+            return self._write(section, "item", payload, filename=filename, seq=seq)
+        except RECORDING_ERRORS as exc:
+            self._park_spool_failure(section, exc)
+            return None
 
     def _stable_item_filename(self, section: str, key: str) -> str:
         """Name the fragment file that holds ``key``'s item in ``section``.
@@ -302,6 +334,9 @@ class Recorder:
         prefix = f"{_slug(section)}__{self._producer}__{slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
         filename = f"{prefix}-{digest}.json"
+        if len(filename.encode("utf-8")) > 180:
+            short_digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            return f"{_slug(section)}__{self._producer}__id-{short_digest}.json"
         legacy = self._dir / f"{prefix}.json"
         if slug != key:
             if legacy.exists():
@@ -324,34 +359,40 @@ class Recorder:
         payload: Mapping[str, Any],
         *,
         key: str,
-    ) -> Path:
+    ) -> Path | None:
         """Merge and atomically rewrite one stable item fragment."""
-        self._check_shape(section, "item")
-        if not key:
-            raise ValueError("upsert key must be non-empty")
-        filename = self._stable_item_filename(section, key)
-        target = self._dir / filename
-        merged: dict[str, Any] = {}
-        with self._lock:
-            previous: Mapping[str, Any] | None = None
-            try:
-                current = json.loads(target.read_text(encoding="utf-8"))
-                current_payload = current.get("payload") if isinstance(current, dict) else None
-                if isinstance(current_payload, Mapping):
-                    previous = current_payload
-                    merged = _merge_mappings(current_payload, payload)
-                else:
+        from .recorder_warnings import RECORDING_ERRORS
+
+        try:
+            self._check_shape(section, "item")
+            if not key:
+                raise ValueError("upsert key must be non-empty")
+            filename = self._stable_item_filename(section, key)
+            target = self._dir / filename
+            merged: dict[str, Any] = {}
+            with self._lock:
+                previous: Mapping[str, Any] | None = None
+                try:
+                    current = json.loads(target.read_text(encoding="utf-8"))
+                    current_payload = current.get("payload") if isinstance(current, dict) else None
+                    if isinstance(current_payload, Mapping):
+                        previous = current_payload
+                        merged = _merge_mappings(current_payload, payload)
+                    else:
+                        merged = dict(payload)
+                except (OSError, ValueError, TypeError):
                     merged = dict(payload)
-            except (OSError, ValueError, TypeError):
-                merged = dict(payload)
-            return self._write(
-                section,
-                "item",
-                merged,
-                filename=filename,
-                operation="upsert",
-                previous=previous,
-            )
+                return self._write(
+                    section,
+                    "item",
+                    merged,
+                    filename=filename,
+                    operation="upsert",
+                    previous=previous,
+                )
+        except RECORDING_ERRORS as exc:
+            self._park_spool_failure(section, exc)
+            return None
 
     def item_fragment_exists(self, section: str, *, key: str) -> bool:
         """Whether an item fragment under ``key`` has already been written.

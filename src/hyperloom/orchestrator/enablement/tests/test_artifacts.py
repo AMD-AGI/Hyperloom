@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.delivery.archive import (
+from hyperloom.inference_optimizer.breakdown.round_archive import (
     ROLE_ARTIFACT_PREIMAGE,
     ROLE_ARTIFACT_SOURCE,
     ROLE_LAUNCH_CONFIG,

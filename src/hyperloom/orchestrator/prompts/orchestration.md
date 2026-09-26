@@ -152,8 +152,7 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep'}` once you judge the current phase exhausted (this is
-shared with Robustness — it is **not** Robustness-only; see Hard rules).
+'skip_to_sweep'}` once you judge the current phase exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting one of these two hints is the **correct,
 expected** move when the current phase has no remaining actionable lever —
@@ -293,10 +292,10 @@ exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
 reloop gives OPTIMIZE another round.
 
-**Source-level failures can go straight to a specialist.** A variant
-crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
-`delegate{action_name='specialist', params={scope='freeform', ...}}`
-is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
+**Integrate defers while the kernel pipeline runs.** The Coordinator holds the
+benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
+that arrives while it is running will be returned as `deferred`; re-send it on
+the next turn.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
@@ -368,7 +367,6 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
-  PolicyGate allows this intent from both Robustness and Orchestration —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed

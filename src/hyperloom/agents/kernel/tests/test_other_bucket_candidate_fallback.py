@@ -17,8 +17,8 @@ _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import tracelens_analysis as tla  # noqa: E402
-import tracelens_skill_runner as tlr  # noqa: E402
+import tracelens_analysis as tla
+import tracelens_skill_runner as tlr
 
 _TRITON_MOE_SRC = "/sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py"
 

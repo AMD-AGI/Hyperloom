@@ -169,6 +169,73 @@ def test_integrated_kernel_classifies_correctly(tmp_path: Path) -> None:
     assert "integrated" in out["by_kernel"][0]["summary"].lower()
 
 
+def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tmp_path: Path) -> None:
+    """Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
+    kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
+    ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"). It never wrote
+    kernel_opt_task_attempts and never shares a kernel_id/source_file with the roofline trace's k001.
+    Without operator-name reconciliation, this kernel falsely reports as "never attempted" even though it
+    is the exact kernel that landed the session's validated gain."""
+    state = _make_state(
+        top15=[
+            _top15_entry(
+                "k001",
+                name="_fwd_grouped_kernel_stage1",
+                source_file="/sgl-workspace/aiter/op_tests/triton_tests/utils/mla_decode_ref.py",
+            )
+        ],
+    )
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "target_file": "/sgl-workspace/sglang/python/sglang/kernels/ops/attention/decode_attention.py",
+            "ts": "2026-09-21T18:30:06.535892+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "k001"
+    assert row["category"] == CATEGORY_INTEGRATED
+    # This kernel's real gain is recorded elsewhere in optimization_stack -- this row must never
+    # print a fabricated "measured 0.000x" for a micro benchmark that never ran.
+    assert "0.000x" not in row["summary"]
+    assert "micro_speedup=" not in row["summary"]
+    # The raw field must agree with the summary text: absent, not 0.0, so nothing reading the JSON
+    # directly (bypassing the rendered string) sees a fabricated zero either.
+    assert row["last_micro_speedup"] is None
+
+
+def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> None:
+    """Reproduces a real session: the winning optimization was a gemm_tuning KEEP (one campaign
+    retuning 14 GEMM shapes through a CSV), which never writes kernel_opt_task_attempts and has no
+    single roofline top15 kernel_id to match against. Without a standalone entry, this session's
+    kernel_optimization_summary.json reports attempted:0 / kernel_opt_outcome:skip even though the
+    session's current_best came from exactly this KEEP."""
+    state = _make_state(top15=[])
+    state.optimization_stack = [
+        {
+            "action": "gemm_tuning",
+            "variant_name": "forge_fmoe_ck",
+            "gain_pct": 6.957474814637951,
+            "tput": 1263.3585977736439,
+            "ts": "2026-09-18T14:19:56.765419+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "forge_fmoe_ck"
+    assert row["category"] == CATEGORY_INTEGRATED
+    assert "micro_speedup=" not in row["summary"]
+    assert row["last_micro_speedup"] is None
+
+
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],
@@ -668,3 +735,81 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
     assert breakdown.get("preprocess_failed") == 1, breakdown
     assert breakdown.get("timeout") == 1, breakdown
     assert breakdown.get("other", 0) == 0, f"new buckets should absorb root causes, leaving other empty: {breakdown}"
+
+
+def test_geak_accepted_kernel_is_counted_as_e2e_success(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.geak_result = {
+        "status": "ok",
+        "accepted_kernels": [{"kernel_name": "rms_norm", "e2e_delta_pct": 3.05}],
+    }
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["schema_version"] == 2
+    assert out["totals"]["attempted"] == 1
+    assert out["lane_totals"]["geak"] == {
+        "attempted": 1,
+        "success": 1,
+        "unvalidated": 0,
+        "failed": 0,
+        "outcome": "success",
+    }
+
+
+def test_forge_micro_winners_without_e2e_are_unvalidated(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.gemm_tuning_attempts = [
+        {
+            "status": "ok",
+            "engine": "forge",
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "tuner": f"tuner-{index}",
+                    "kept": index < 22,
+                    "best_micro_speedup": 1.05 if index < 22 else 1.0,
+                }
+                for index in range(23)
+            ],
+        }
+    ]
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["lane_totals"]["gemm_tuning"] == {
+        "attempted": 23,
+        "success": 0,
+        "unvalidated": 22,
+        "failed": 1,
+        "outcome": "unvalidated",
+    }
+    assert out["kernel_opt_outcome"] == "unvalidated"
+
+
+def test_only_never_run_lanes_are_skipped(tmp_path: Path) -> None:
+    out = build_kernel_optimization_summary(_make_state(top15=[]), tmp_path)
+
+    assert out["lane_totals"] == {
+        "source_level": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "geak": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "gemm_tuning": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+    }

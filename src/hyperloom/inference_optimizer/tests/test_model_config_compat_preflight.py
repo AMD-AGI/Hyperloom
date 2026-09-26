@@ -1028,7 +1028,7 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
 
 
 def test_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )
@@ -1276,7 +1276,7 @@ def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
 def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
     calls: dict[str, list] = {"flush": [], "patch": [], "record": []}
     from hyperloom.inference_optimizer import breakdown as bd
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "flush_session", lambda sd: calls["flush"].append(Path(sd)))
     monkeypatch.setattr(bd, "patch_breakdown_langfuse", lambda sd: calls["patch"].append(Path(sd)))
@@ -1338,7 +1338,7 @@ def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
     sd = tmp_path / "session_raise"
     _seed_state(sd, monkeypatch)
 
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     def _boom(*a, **k):
         raise RuntimeError("langfuse down")

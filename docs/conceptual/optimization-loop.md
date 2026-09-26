@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. ENABLEMENT is only entered when a baseline fails and enablement is admitted. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom's control plane delegates kernel optimization to GEAK's execution plane through handoff, result, and kernel-journey artifacts. The current phase order and write-path contracts are described below.
 :class: hl-lightbox-trigger
 ```
 
@@ -56,7 +56,7 @@ must be able to:
 - Create or resume a session directory,
 - Write `manifest.json`, `state.json`, `storage/coordinator.db`, action
   run workspaces, reports, and `session_breakdown.json`,
-- Route intents through the Orchestration, Critic, and Robustness LLM roles,
+- Route intents through the Orchestration and Critic LLM roles,
   and dispatch kernel work to programmatic Python handlers,
 - Produce a final report and a dashboard-consumable breakdown.
 
@@ -87,6 +87,11 @@ the ``=== Phase ===`` block for the five middle phases.
 actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing might be enqueued internally even
 when the LLM is not allowed to propose them.
+
+Every phase transition is a GPU barrier: the Coordinator stops every running
+action and drops queued work the next phase does not allow, and commits the
+transition only once no task is left running. Each phase therefore starts on
+quiet GPUs, and its entry hook runs on the transition itself.
 
 ## PRELUDE
 
@@ -251,17 +256,17 @@ gates.
 What the phase actually does depends on the kernel backend, and the branches
 look very different from Orchestration's side:
 
-- **Default (`geak`)**: entering the phase hands it to a single
-  Coordinator-owned whole-pipeline GEAK e2e run, which then sets the
+- **Default (`geak`)**: entering the phase enqueues one Coordinator-owned
+  `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
+  `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
+  whole-pipeline GEAK e2e run, which then sets the
   `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
   honours the hint immediately and the phase closes without Orchestration ever
   taking a turn in it.
-- **On a GEAK win**, the Coordinator enqueues a same-harness revalidation
-  rebench and marks `geak_pending.status = "awaiting_rebench"` with the task id.
-  `kernel_work_pending` then reports `True`, and `exit_normal_kernel` refuses the
-  `skip_to_sweep` handoff while work is pending — so KERNEL stays open, and
-  Orchestration does tick until the rebench lands (or the revalidation turns out
-  to be unavailable, which drops the pending slot and lets the exit through).
+- **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
+  the orchestrator's own harness under the lanes it already holds, and writes
+  the headline from that measurement before it returns. KERNEL leaves once the
+  task settles, or when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
@@ -273,16 +278,13 @@ entry-hook branch order.
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
-- `kernel_opt`
 - `integrate`
-- `gemm_tuning`
-- `specialist`
 - `roofline`
 - `profile`
-- `recover`
+- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
 
 Within the kernel-agent request channel, the handler dispatches request kinds
-such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
+such as `trace_analyze` and `integrate`
 (`request_handlers.py`); these are handler kinds, not phase actions.
 
 Kernel-owned results are recorded separately from non-kernel action
@@ -339,13 +341,16 @@ turn never depends on what an earlier turn happened to remember.
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so Critic review, the accuracy gate,
-  Robustness escalation, and PolicyGate's invariants (path sandbox,
+  and PolicyGate's invariants (path sandbox,
   resource leases, phase ordering, data dependencies, single-writer
   rules) apply to every turn. Repetition is checked against state — the
   tested-variant ledger and the action-failure log — not against agent
   recall.
 
-Critic and Robustness are likewise reactive and stateless per tick.
+Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
+supervision are not roles in this loop. Stopped sessions require an explicit
+operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+offline.
 
 ## Feedback loops
 
@@ -355,8 +360,6 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- Robustness watches stalls, crashes, config-only loops, specialist
-  storms, and recovery signals.
 - PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
   and invalid envelopes before they mutate runtime state.
 

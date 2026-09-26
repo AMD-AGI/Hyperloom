@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.framework import paths as fp
+from hyperloom.inference_optimizer import framework_paths as fp
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.framework.paths import probe_framework_source_roots_for_env
+from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
@@ -166,6 +166,14 @@ class TestResolveKernelSearchRoots:
         checkout.mkdir()
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
+
+    def test_includes_the_inferencex_checkout(self, monkeypatch, tmp_path):
+        """Its recipes decide how the server boots, so a patch has to reach them."""
+        checkout = tmp_path / "InferenceX"
+        checkout.mkdir()
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
         assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
 
@@ -666,7 +674,7 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     ws = tmp_path / "sgl-workspace" / "sglang"
     ws.mkdir(parents=True)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths._DEFAULT_SOURCE_ROOTS",
+        "hyperloom.inference_optimizer.framework_paths._DEFAULT_SOURCE_ROOTS",
         (str(ws) + "/",),
     )
     out = probe_framework_source_roots_for_env()

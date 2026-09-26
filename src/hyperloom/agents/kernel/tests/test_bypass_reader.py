@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_trace_reader as reader  # noqa: E402
+import _bypass_trace_reader as reader
 
 # A minimal but representative trace: - one attributed GEMM kernel (Cijk, corr 5 -> aten::mm) - one
 # cudagraph-replay-style unlinked SDPA kernel (corr 999, no runtime) - one device memcpy - one ProfilerStep annotation

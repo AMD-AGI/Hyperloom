@@ -30,12 +30,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 _CLI_STUB = SimpleNamespace(
     _load_model_max_position_embeddings=lambda _model: 32768,
     _model_has_dual_chunk_attention=lambda _model: False,
-    _model_is_moe=lambda _model: False,
     _model_moe_runner_requires_aiter=lambda _model: False,
     _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
-    # Supported, i.e. leave the server args alone: these tests assert what the trust/tokenizer path writes, not what
-    # the aiter MoE shape gate strips.
-    model_supports_aiter_ck_fused_moe=lambda _model, _tp: True,
 )
 
 
@@ -695,7 +691,6 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/path/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
     _write_yaml(base)

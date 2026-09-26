@@ -5,12 +5,29 @@ description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session with the
 
 # Hyperloom Qwen3-14B-FP8 12h Run (Forge Kernel Backend)
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
+Load `.env` with the preamble below and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
 
 This is the [`hyperloom-qwen3-14b-fp8-12h`](../hyperloom-qwen3-14b-fp8-12h/SKILL.md)
 demo with **one** difference: the KERNEL_AGENT phase runs the per-kernel
 KernelForge backend instead of GEAK. The workload, budget, and phase split are
 identical on purpose, so the two runs stay directly comparable.
+
+## Execution Shell
+
+Run this in the current Hyperloom workspace before setup or runtime installation.
+Repeat it in each new execution shell, including inside Docker; the shared loader
+fills dotenv gaps without replacing existing non-empty exports.
+
+```bash
+set -e
+export REPO_ROOT="$(pwd -P)"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+```
 
 ## Kernel Backend
 
@@ -78,9 +95,9 @@ skip the user-approval step (#1314).
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
+- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -179,33 +196,20 @@ step must happen before launching.
 For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:
 
+Use the [execution-shell preamble](#execution-shell) first, then run:
+
 ```bash
-export REPO_ROOT="$(pwd -P)"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a; . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+load_dotenv_no_clobber
+: "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
-if [ ! -f "$INSTALL_SH" ]; then
-  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
-fi
 bash "$INSTALL_SH"
-. "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
-If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
-checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
-
-Sourcing `.env` in the block above sets `KERNEL_OPT_BACKEND_ORDER` to whatever
-the file carries, and `eval "$_dotenv_prev"` then replays the caller's
-pre-existing exports on top of it. Either value can win, so export `forge`
-**after** this block, and verify it right before launching:
+Startup preflight loads `kernel-agent.env.sh` in process. Do not source the
+generated file in the launch shell.
+Confirm this demo's backend before launching:
 
 ```bash
 export KERNEL_OPT_BACKEND_ORDER=forge
@@ -249,7 +253,10 @@ Check this right after launch and report the value. If it is `geak`, stop and
 tell the user the environment variable did not reach the optimizer, instead of
 letting a 12-hour run continue as an unlabelled GEAK run.
 
-During monitoring, print a short summary at each 300-second check:
+On each requested status check, read persisted state and print a short summary.
+Use platform-scheduled invocations if recurring checks are requested; do not
+start a background watchdog, hold a blocking polling connection, or auto-resume.
+Busy logs alone are not evidence of useful progress. Include:
 
 - process alive/stopped;
 - phase and `stop_reason`;
@@ -262,20 +269,20 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 ## Launch Requirements
 
-1. Run the pre-launch runtime install above and source
-   `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Export `KERNEL_OPT_BACKEND_ORDER=forge` in the launching shell, after
-   sourcing `kernel-agent.env.sh`, and confirm the value before launch. In
-   docker mode, set it inside the same `docker exec` that runs `optimize`.
-3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
-   and critic subprocesses can import `hyperloom.agents` after changing cwd.
-4. Run in background with `setsid nohup`.
+1. Run the pre-launch runtime install above; startup preflight loads the generated
+   runtime environment in process.
+2. Export `KERNEL_OPT_BACKEND_ORDER=forge` in the launching shell and confirm it
+   before launch. In docker mode, set it inside the same `docker exec` that runs
+   `optimize`.
+3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
+   critic subprocesses can import `hyperloom.agents` after changing cwd.
+4. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
    this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT), and
    `--no-kernel` would skip the very phase this demo exists to exercise.
 7. Report the session ID, log path, PID, and initial health check result.
-8. Monitor the process every 300 seconds until work is done.
-9. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `KERNEL_OPT_BACKEND_ORDER=forge` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+8. Inspect persisted state on requested status checks; report when work stops.
+9. After diagnosing an unexpected crash and obtaining explicit resume approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `KERNEL_OPT_BACKEND_ORDER=forge` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 10. If `stop_reason` in the current session `state.json` is final, stop and exit.

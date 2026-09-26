@@ -16,9 +16,9 @@ rather than at author time: the step vocabulary is checked so a producer that
 starts emitting a new step name surfaces as a warning instead of passing
 unnoticed.
 
-What the agent itself raised is not here. It is recorded per turn by
-:mod:`..recorder.robustness_out` and exported as the top-level ``robustness``
-key; this block carries only the close-out's own verdict about it.
+Historical per-turn agent fragments are exported as the top-level
+``robustness`` key; the close block preserves historical close-out findings
+without fetching new findings.
 
 **The section is written twice, and the first pass is deliberately partial.**
 ``session_breakdown`` is itself a step in the middle of the sequence, so when
@@ -57,6 +57,7 @@ _KNOWN_STEPS = frozenset(
     {
         "sequencer_started",
         "geak_rebench_drain",
+        "stack_revalidation",
         "fact_finalize",
         "report",
         "session_breakdown",

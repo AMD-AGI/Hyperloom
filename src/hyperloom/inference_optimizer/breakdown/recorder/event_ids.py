@@ -11,6 +11,7 @@ from typing import NamedTuple
 __all__ = [
     "EVENT_ID_SEGMENTS",
     "EVENT_ID_SEPARATOR",
+    "INLINE_EVENT_PARAM",
     "EventId",
     "event_id",
     "fragment_key",
@@ -22,6 +23,19 @@ EVENT_ID_SEPARATOR = ":"
 
 #: How many segments an event id has, for callers validating one they parsed.
 EVENT_ID_SEGMENTS = 3
+
+#: Task param naming the event an inline measurement's rows belong to. A phase
+#: that owns a timeline event puts its event id here when it dispatches a
+#: measurement that is a sub-step of that event, and that one string is the
+#: whole of the difference between the inline and standalone modes: with it the
+#: rows join the enclosing event, which lifts them into its own ``ext``, and
+#: without it the measurement leaves an event of its own.
+#:
+#: It is a param the caller sets rather than something the executor infers,
+#: because whether a run is a sub-step is a property of the caller and nothing
+#: on the task says it: these arrive as tasks indistinguishable from a
+#: dispatched one.
+INLINE_EVENT_PARAM = "sbd_event_id"
 
 # Author-time tokens: phase names, component names, row-type names.
 _TOKEN = re.compile(r"^[a-z0-9][a-z0-9_]*$")
