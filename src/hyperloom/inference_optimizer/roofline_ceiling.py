@@ -1190,12 +1190,13 @@ def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | N
 import dataclasses as _dc
 
 
-def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
+def _fused_moe_flops(*, M: int, K: int, N: int, topk: int) -> float:
     """FLOPs for one gated SwiGLU MoE forward (gate+up+down projections)."""
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
 
 def _fused_moe_bytes(
+    *,
     M: int,
     K: int,
     N: int,
@@ -1243,12 +1244,13 @@ class PerfModelBreakdown:
     peak_achievable_tflops: float
 
 
-def _gemm_flops(M: int, N: int, K: int) -> float:
+def _gemm_flops(*, M: int, N: int, K: int) -> float:
     """FLOPs for a bias-free matrix multiply (2*M*N*K)."""
     return 2.0 * M * N * K
 
 
 def _gemm_bytes(
+    *,
     M: int,
     N: int,
     K: int,
@@ -1389,8 +1391,8 @@ def compute_roofline_from_perfmodel(
         op_rows: list[OpBreakdown] = []
         M = batch * s_q
         for name, K, N, rep in linears:
-            fl = _gemm_flops(M, N, K)
-            by = _gemm_bytes(M, N, K, bpe, act_bpe)
+            fl = _gemm_flops(M=M, N=N, K=K)
+            by = _gemm_bytes(M=M, N=N, K=K, weight_bpe=bpe, act_bpe=act_bpe)
             t, side, t_mem, t_cmp = _roofline_time(fl, by)
             total_t += t * rep
             total_mem_t += t_mem * rep
@@ -1410,15 +1412,15 @@ def compute_roofline_from_perfmodel(
         if is_moe and n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
-            fl_moe = _fused_moe_flops(M, moe_hidden, meta.moe_intermediate_size, meta.experts_per_tok)
+            fl_moe = _fused_moe_flops(M=M, K=moe_hidden, N=meta.moe_intermediate_size, topk=meta.experts_per_tok)
             by_moe = _fused_moe_bytes(
-                M,
-                moe_hidden,
-                meta.moe_intermediate_size,
-                meta.num_experts,
-                meta.experts_per_tok,
-                expert_bpe,
-                act_bpe,
+                M=M,
+                K=moe_hidden,
+                N=meta.moe_intermediate_size,
+                num_experts=meta.num_experts,
+                topk=meta.experts_per_tok,
+                weight_bpe=expert_bpe,
+                act_bpe=act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_moe_layers

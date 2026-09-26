@@ -156,9 +156,7 @@ def test_synthesized_add_applies_to_git_tree(tmp_path):
 def test_vllm_localization_action_and_refresh(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
     a = get_adapter("vllm")
-    act = a.build_localization_action(
-        _gap(), framework="vllm", model="m", candidate_ref="PR:1234", repo_url="https://github.com/ROCm/vllm.git"
-    )
+    act = a.build_localization_action(_gap(), candidate_ref="PR:1234", repo_url="https://github.com/ROCm/vllm.git")
     assert act is not None and act.kind == "pr_backport" and act.pr_number == 1234
     argv = a.editable_refresh_argv("/v/bin/python", "/co")
     assert argv == ["/v/bin/python", "-m", "pip", "install", "-e", "/co", "--no-deps"]
@@ -166,45 +164,23 @@ def test_vllm_localization_action_and_refresh(monkeypatch):
 
 def test_vllm_localization_resource_constraint_none():
     a = get_adapter("vllm")
-    assert (
-        a.build_localization_action(
-            _gap(RESOURCE_CONSTRAINT), framework="vllm", model="m", candidate_ref="PR:1", repo_url="https://x"
-        )
-        is None
-    )
+    assert a.build_localization_action(_gap(RESOURCE_CONSTRAINT), candidate_ref="PR:1", repo_url="https://x") is None
 
 
 def test_atom_localizes_no_refresh(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
     at = get_adapter("atom")
-    act = at.build_localization_action(
-        _gap(), framework="atom", model="m", candidate_ref="PR:55", repo_url="https://github.com/ROCm/ATOM.git"
-    )
+    act = at.build_localization_action(_gap(), candidate_ref="PR:55", repo_url="https://github.com/ROCm/ATOM.git")
     assert act is not None and act.pr_number == 55
     assert at.editable_refresh_argv("/v/py", "/co") is None
 
 
 def test_xdit_and_unknown_localization_none():
-    assert (
-        get_adapter("xdit").build_localization_action(
-            _gap(), framework="xdit", model="m", candidate_ref="PR:1", repo_url="https://x"
-        )
-        is None
-    )
-    assert (
-        get_adapter("nope").build_localization_action(
-            _gap(), framework="nope", model="m", candidate_ref="PR:1", repo_url="https://x"
-        )
-        is None
-    )
+    assert get_adapter("xdit").build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://x") is None
+    assert get_adapter("nope").build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://x") is None
 
 
 def test_origin_allowlist_blocks_unlisted(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", "https://github.com/ROCm")
     a = get_adapter("vllm")
-    assert (
-        a.build_localization_action(
-            _gap(), framework="vllm", model="m", candidate_ref="PR:1", repo_url="https://evil.example/x.git"
-        )
-        is None
-    )
+    assert a.build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://evil.example/x.git") is None

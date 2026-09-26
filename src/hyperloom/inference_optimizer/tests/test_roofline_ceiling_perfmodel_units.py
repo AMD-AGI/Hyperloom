@@ -18,16 +18,16 @@ from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def test_gemm_flops_is_two_mnk():
-    assert rc._gemm_flops(4, 8, 16) == 2.0 * 4 * 8 * 16
+    assert rc._gemm_flops(M=4, N=8, K=16) == 2.0 * 4 * 8 * 16
 
 
 def test_gemm_bytes_separates_activation_from_weight_precision():
     """A quantized weight is read at its own width; activations stay bf16."""
     m, n, k = 4, 8, 16
-    both_fp8 = rc._gemm_bytes(m, n, k, weight_bpe=1.0)
+    both_fp8 = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0)
     assert both_fp8 == m * k * 1.0 + k * n * 1.0 + m * n * 1.0
 
-    split = rc._gemm_bytes(m, n, k, weight_bpe=1.0, act_bpe=2.0)
+    split = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0, act_bpe=2.0)
     assert split == m * k * 2.0 + k * n * 1.0 + m * n * 2.0
     # Only the weight read stays narrow, so the split total is the larger one.
     assert split > both_fp8
@@ -64,7 +64,7 @@ def test_sdpa_bytes_ignores_causal():
 def test_fused_moe_flops_counts_gate_up_down_and_aggregation():
     m, k, n, topk = 4, 16, 32, 2
     expected = 2.0 * m * k * n * topk * 2 + 2.0 * m * k * n * topk + m * k * (2 * topk - 1)
-    assert rc._fused_moe_flops(m, k, n, topk) == expected
+    assert rc._fused_moe_flops(M=m, K=k, N=n, topk=topk) == expected
 
 
 def test_fused_moe_active_experts_saturate_with_batch_size():
@@ -73,7 +73,7 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
     def _expert_bytes(m):
         # Subtract the activation terms to leave the expert-weight reads.
-        return rc._fused_moe_bytes(m, k, n, num_experts, topk, bpe) - 2 * m * k * bpe
+        return rc._fused_moe_bytes(M=m, K=k, N=n, num_experts=num_experts, topk=topk, weight_bpe=bpe) - 2 * m * k * bpe
 
     one_token = _expert_bytes(1)
     assert one_token == pytest.approx(topk * n * k * bpe * 3)
@@ -84,8 +84,8 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
 
 def test_fused_moe_bytes_defaults_activations_to_the_weight_width():
-    args = (4, 16, 32, 8, 2)
-    assert rc._fused_moe_bytes(*args, 1.0) == rc._fused_moe_bytes(*args, 1.0, act_bpe=1.0)
+    shape = dict(M=4, K=16, N=32, num_experts=8, topk=2)
+    assert rc._fused_moe_bytes(**shape, weight_bpe=1.0) == rc._fused_moe_bytes(**shape, weight_bpe=1.0, act_bpe=1.0)
 
 
 # ---- compute_roofline_from_perfmodel ----
