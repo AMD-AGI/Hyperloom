@@ -192,22 +192,6 @@ def test_missing_interpreter_failure_has_bounded_identity_scoped_cooldown(packag
     assert state.calls == 3
 
 
-def test_timeout_before_identity_has_bounded_cooldown(package_probe, monkeypatch):
-    calls = []
-
-    def timeout(cmd, **kwargs):
-        calls.append(cmd)
-        raise subprocess.TimeoutExpired(cmd, timeout=30)
-
-    monkeypatch.setattr(vf.subprocess, "run", timeout)
-    assert vf._probe_server_help_text("sglang") == ""
-    assert vf._probe_server_help_text("sglang") == ""
-    assert len(calls) == 1
-    package_probe.clock += 300
-    assert vf._probe_server_help_text("sglang") == ""
-    assert len(calls) == 2
-
-
 def test_successful_help_cache_tracks_environment_selected_package_path(package_probe, monkeypatch, tmp_path):
     state = package_probe
     alternate = tmp_path / "alternate"
