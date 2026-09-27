@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.bringup import trees
-from hyperloom.orchestrator.delivery import parse_deliverable
+from hyperloom.orchestrator.delivery import Artifact, Deliverable, parse_deliverable
 from hyperloom.orchestrator.delivery import ledger
 
 
@@ -67,9 +67,112 @@ def test_legacy_keys_are_read_on_input_and_never_emitted() -> None:
     assert parsed.envs == {"A": "1"}
     assert parsed.server_args == "--flag"
     assert parsed.setup_commands == ("pip install x",)
-    emitted = parsed.to_dict()
-    for legacy in ("patches_written", "artifacts_written", "extra_envs", "extra_server_args"):
-        assert legacy not in emitted
+    assert parsed.to_dict() == {
+        "tree_id": "tree-1",
+        "targets": [],
+        "patches": ["/w/patches/one.patch"],
+        "artifacts": [],
+        "envs": {"A": "1"},
+        "server_args": "--flag",
+        "setup_commands": ["pip install x"],
+    }
+
+
+def test_empty_deliverable_keeps_every_wire_key() -> None:
+    assert parse_deliverable({}, default_tree_id="tree-1").to_dict() == {
+        "tree_id": "tree-1",
+        "targets": [],
+        "patches": [],
+        "artifacts": [],
+        "envs": {},
+        "server_args": "",
+        "setup_commands": [],
+    }
+
+
+def test_declared_values_take_precedence_over_legacy_input() -> None:
+    parsed = parse_deliverable(
+        {
+            "deliverable": {
+                "tree_id": " tree-2 ",
+                "targets": [" pkg/mod.py ", "pkg/mod.py", "", "pkg/other.py"],
+                "patches": (" /w/new.patch ", "/w/new.patch"),
+                "artifacts": [{"target": "pkg/new.py", "source": "/w/new.py"}],
+                "envs": {"NEW": 1, "": "ignored"},
+                "server_args": " --new ",
+                "setup_commands": [" prepare ", "prepare"],
+            },
+            "patches_written": ["/w/old.patch"],
+            "extra_envs": {"OLD": "1"},
+            "extra_server_args": "--old",
+            "setup_commands": ["old setup"],
+        },
+        default_tree_id="tree-1",
+    )
+    assert parsed.to_dict() == {
+        "tree_id": "tree-2",
+        "targets": ["pkg/mod.py", "pkg/other.py"],
+        "patches": ["/w/new.patch"],
+        "artifacts": [],
+        "envs": {"NEW": "1"},
+        "server_args": "--new",
+        "setup_commands": ["prepare"],
+    }
+
+
+@pytest.mark.parametrize("declared", [None, [], "bad", {"patches": "bad", "envs": [], "setup_commands": "bad"}])
+def test_invalid_declared_shapes_preserve_legacy_fallbacks(declared) -> None:
+    parsed = parse_deliverable(
+        {
+            "deliverable": declared,
+            "patches_written": ["/w/old.patch"],
+            "extra_envs": {"A": 1},
+            "extra_server_args": " --old ",
+            "setup_commands": ["old setup"],
+        },
+        default_tree_id="tree-1",
+    )
+    assert parsed.patches == ("/w/old.patch",)
+    assert parsed.envs == {"A": "1"}
+    assert parsed.server_args == "--old"
+    assert parsed.setup_commands == ("old setup",)
+    assert parsed.to_dict()["artifacts"] == []
+
+
+def test_explicit_empty_declared_values_suppress_legacy_fallbacks() -> None:
+    parsed = parse_deliverable(
+        {
+            "deliverable": {"patches": [], "envs": {}, "server_args": "", "setup_commands": []},
+            "patches_written": ["/w/old.patch"],
+            "extra_envs": {"OLD": "1"},
+            "extra_server_args": "--old",
+            "setup_commands": ["old setup"],
+        },
+        default_tree_id="tree-1",
+    )
+    assert parsed.to_dict() == Deliverable(tree_id="tree-1").to_dict()
+
+
+def test_constructed_whole_file_artifact_keeps_its_wire_shape() -> None:
+    artifact = Artifact("pkg/config.json", "tree-2", "/w/config.json", "config", "runtime settings")
+    declared = Deliverable(tree_id="tree-1", artifacts=(artifact,))
+    assert declared.to_dict() == {
+        "tree_id": "tree-1",
+        "targets": [],
+        "patches": [],
+        "artifacts": [
+            {
+                "target": "pkg/config.json",
+                "tree_id": "tree-2",
+                "source": "/w/config.json",
+                "kind": "config",
+                "description": "runtime settings",
+            }
+        ],
+        "envs": {},
+        "server_args": "",
+        "setup_commands": [],
+    }
 
 
 def test_the_backup_ledger_outlives_the_process_that_wrote_it(tmp_path: Path) -> None:

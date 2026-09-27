@@ -13,7 +13,10 @@ from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
-from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+    is_valid_stop_reason,
+)
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -50,6 +53,9 @@ _NO_REVALIDATION_STOP_REASONS: frozenset[str] = frozenset(
         "supervisor_coordinator_died",
         "supervisor_tick_stalled",
         "unknown",
+        # The run stopped because the framework tree still holds patches nothing
+        # measured against. Re-benching the stack here would measure that tree.
+        PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
     }
 )
 
@@ -105,6 +111,11 @@ class ClosePhase(CoordinatorCollaborator):
         # only run on a normal converged close.
         if bool(getattr(self.shared_state, "closing_phase", False)):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
+            return
+        if str(getattr(self.shared_state, "stop_reason", "") or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
+            # Profiling the tree the run just refused to trust would attribute
+            # the reading to a baseline that is not on disk.
+            log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
             return
         if self._internal_analysis_kind() != "roofline":
             # Roofline disabled for this run; nothing to profile.
