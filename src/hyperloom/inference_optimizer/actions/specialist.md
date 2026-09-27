@@ -101,6 +101,9 @@ it directly** — build a targeted per-component eval for the uncovered phase an
 price its Amdahl ceiling before you rank it, deprioritise it, or declare it
 saturated. Being blocked on the phase profiler is not a reason to fall back to
 "optimise what I can see"; it is a reason to instrument the phase you cannot.
+On an agentic workload a prefill miss is surfaced for you as a high-severity
+`#phase_unmeasured:prefill` gap in `SharedState.gaps[]`, so the missing phase
+arrives as a ranked target rather than an advisory you have to notice.
 
 ## Inputs (task.params)
 

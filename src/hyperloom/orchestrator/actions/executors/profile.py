@@ -302,6 +302,10 @@ def _build_trace_validate(
         "framework": str(framework or ""),
         "verdict": certificate.get("verdict") or {},
         "steady_state_forecast": _steady_state_forecast(certificate),
+        # Which serving phases the split captured; a partial capture drops the missing phase out of the Amdahl
+        # denominator, so the gap refresh reads these to steer instrumentation rather than let the phase go unseen.
+        "phase_coverage_partial": bool(health.get("phase_coverage_partial")),
+        "phase_coverage_missing": str(health.get("phase_coverage_missing") or ""),
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
         "chunk_level": [],
@@ -741,13 +745,20 @@ def _validate_trace_structure(
             len(issues),
         )
     phase_coverage_row = next((c for c in checks if c["check_id"] == CHECK_PHASE_COVERAGE), None)
+    phase_coverage_partial = bool(phase_coverage_row and phase_coverage_row["status"] == "failed")
+    # The phase the split is missing (the one the gap refresh must steer instrumentation toward), or "" when covered.
+    phase_coverage_missing = ""
+    if phase_coverage_partial:
+        detail = phase_coverage_row.get("detail") or {}
+        phase_coverage_missing = "prefill" if not detail.get("prefill") else "decode"
     return {
         "issues": issues,
         "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
         "capture_traces_present": capture_traces_present,
         "zero_ops": zero_ops,
         # Hoisted from ``checks`` so the gap composer can key on a missing phase without re-scanning the vocabulary.
-        "phase_coverage_partial": bool(phase_coverage_row and phase_coverage_row["status"] == "failed"),
+        "phase_coverage_partial": phase_coverage_partial,
+        "phase_coverage_missing": phase_coverage_missing,
         "checks": checks,
     }
 
