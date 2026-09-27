@@ -362,9 +362,6 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
     return types.SimpleNamespace(
         task_id=task_id,
         params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "cand-e",
-            "framework_batch_id": "batch-e",
             "enablement": True,
             "enablement_before_observation_path": "/s/reports/bringup/round-abc-000.json",
             "enablement_setup_commands": ["pip install -U vllm==0.21.0"],

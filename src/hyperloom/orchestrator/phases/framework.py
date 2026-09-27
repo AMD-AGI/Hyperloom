@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
@@ -2794,7 +2795,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Route a FRAMEWORK config-lever deliverable through integrate_patch.
 
         Companion to :meth:`_maybe_autosubmit_specialist_patches`: fires when a
-        FRAMEWORK authoring specialist returns NO source patch but a config-lever
+        FRAMEWORK authoring or ENABLEMENT specialist returns NO source patch but a config-lever
         ``proposal_set`` (extra_args / extra_envs). The levers go into
         integrate_patch's ``config_changes`` channel (apply + bench + accuracy
         gate + KEEP/REVERT), which owns the terminal FRAMEWORK row. Idempotent
@@ -2805,7 +2806,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             done_payload: Its ``specialist_done`` payload.
         """
         spec_params = getattr(task, "params", None) or {}
-        if not bool(spec_params.get("framework_agent_authoring")):
+        if not is_authoring_specialist(spec_params):
             return
         # A patch deliverable is handled by the patch autosubmit bridge.
         patches = done_payload.get("patches_written") or []

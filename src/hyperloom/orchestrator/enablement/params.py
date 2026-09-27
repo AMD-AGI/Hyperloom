@@ -136,8 +136,7 @@ class EnablementParams(CoordinatorCollaborator):
                 so a progressing bring-up is never told to change approach.
 
         Returns:
-            dict | None: Specialist task params (tagged ``enablement`` +
-            ``framework_agent_authoring``) or ``None``.
+            dict | None: Specialist task params (tagged ``enablement``) or ``None``.
         """
         text = (launch_log or "").strip()
         if not text:
