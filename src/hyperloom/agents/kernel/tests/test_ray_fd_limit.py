@@ -17,7 +17,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
     if d not in sys.path:
         sys.path.insert(0, d)
 
-import ray_runtime  # noqa: E402
+import ray_runtime
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
@@ -406,7 +406,7 @@ def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     _assert_declares_serving_slot(starts[0])
 
 
-import pytest  # noqa: E402
+import pytest
 
 
 _ISO_ENV_VARS = ("HL_RAY_HEAD_PORT", "RAY_ADDRESS")

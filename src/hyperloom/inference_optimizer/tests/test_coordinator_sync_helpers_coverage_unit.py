@@ -705,7 +705,7 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
 
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _first_present
+    from hyperloom.orchestrator.loop.conversation import _first_present
 
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
@@ -714,7 +714,7 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _lifecycle_paths
+    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
@@ -722,7 +722,7 @@ def test_lifecycle_paths() -> None:
 
 
 def test_format_inbox_event_variants() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     delegated = Message.new(

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +32,22 @@ def _coordinator(session_dir: Path):
             payload={"topic": "heartbeat", "body_md": "ok"},
         ),
     )
-    return Coordinator(
+    coord = Coordinator(
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="orch"),
             "critic": MockCriticBackend(),
         },
     )
+    coord.sub.register_executor("kernel_agent", coord._run_kernel_agent)
+    return coord
+
+
+async def _settle_unjoined_actions(coord: Any) -> None:
+    """Let the actions the pump dispatched without joining run to completion."""
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
+    if handles:
+        await asyncio.gather(*handles)
 
 
 def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
@@ -46,9 +56,10 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from hyperloom.orchestrator.kernel import controller_submit, request_handlers
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
+    from hyperloom.orchestrator.kernel import controller_submit
 
-    real_tool_path = request_handlers._kernel_agent_tool_path
+    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
 
     def _tool_path_without_geak_runner(tool_name: str) -> Path:
         if tool_name == "backends/geak_runner.py":
@@ -57,7 +68,7 @@ def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
-    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
@@ -141,8 +152,8 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
 
         for tick in range(1, 12):
             await coord.tick(tick)
-            # KERNEL entry runs out of band and holds the phase until it returns.
-            await coord._await_kernel_entry_task()
+            # The kernel_agent task is not joined by the pump and holds the phase until it returns.
+            await _settle_unjoined_actions(coord)
 
         assert state.phase == ps.PHASE_CLOSE
         assert getattr(state, result_field)[result_key] == expected

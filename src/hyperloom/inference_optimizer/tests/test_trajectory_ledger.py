@@ -15,9 +15,9 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.trace import langfuse_emitter as lfe
-from hyperloom.orchestrator.trace import trajectory_projection as trajmap
-from hyperloom.orchestrator.trace import trajectory_trace as tt
+from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
+from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
 from .test_langfuse_emitter import _enable_env, _FakeClient, _install_fake_sdk, _write_manifest
 

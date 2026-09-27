@@ -13,8 +13,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
-from hyperloom.orchestrator.trace import context_events as ce
-from hyperloom.orchestrator.trace import trajectory_trace as tt
+from hyperloom.inference_optimizer.trace import context_events as ce
+from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
 _PROMPT = "\n".join(
     [

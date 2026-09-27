@@ -110,14 +110,12 @@ def discover_agent_providers(*, force: bool = False) -> None:
         _plugins_loaded = True
         try:
             discovered = metadata.entry_points()
-
-            def _select(group: str):
-                if hasattr(discovered, "select"):
-                    return list(discovered.select(group=group))
-                return list(discovered.get(group, []))
-
-            entries = _select(PROVIDER_ENTRY_POINT_GROUP)
-            legacy = [e for e in _select(LEGACY_PROVIDER_ENTRY_POINT_GROUP) if e.name not in {x.name for x in entries}]
+            entries = list(discovered.select(group=PROVIDER_ENTRY_POINT_GROUP))
+            legacy = [
+                e
+                for e in discovered.select(group=LEGACY_PROVIDER_ENTRY_POINT_GROUP)
+                if e.name not in {x.name for x in entries}
+            ]
             if legacy:
                 warnings.warn(
                     f"Agent provider entry-point group {LEGACY_PROVIDER_ENTRY_POINT_GROUP!r} is deprecated; "

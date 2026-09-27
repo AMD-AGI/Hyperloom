@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
-from hyperloom.orchestrator.actions.executors._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
 
 def _clear_env(monkeypatch):

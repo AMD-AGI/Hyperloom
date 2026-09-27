@@ -549,7 +549,7 @@ class _StoppedBackend:
         return AgentRunResult(end_reason=self._end_reason)
 
 
-@pytest.mark.parametrize("end_reason", ["turn_cap", "sdk_error", ""])
+@pytest.mark.parametrize("end_reason", ["turn_cap", "sdk_error", "sdk_no_result", ""])
 def test_an_abnormal_agent_end_is_not_mistaken_for_a_finished_integration(
     tmp_path,
     monkeypatch,

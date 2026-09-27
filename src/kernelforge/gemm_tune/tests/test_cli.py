@@ -190,8 +190,11 @@ def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monk
     assert not (output / "plan.json").exists()
 
 
-def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list[str], extra: list[str]) -> list[str]:
-    """Invoke ``gemm-tune run`` over a fixed routed set and report what executed."""
+def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list, extra: list[str]) -> list[str]:
+    """Invoke ``gemm-tune run`` over a fixed routed set and report what executed.
+
+    A ``routed`` entry is a tuner name, or a ``(name, skip_reason)`` pair for one the router refused.
+    """
     _stub_preflight(monkeypatch)
     model = _model_dir(tmp_path)
     executed: list[str] = []
@@ -207,15 +210,22 @@ def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list[str], extra: list[s
     from kernelforge.gemm_tune import router as router_mod
     from kernelforge.gemm_tune.router import TunerSpec
 
+    def _spec(index, entry):
+        name, skip_reason = entry if isinstance(entry, tuple) else (entry, None)
+        return TunerSpec(
+            name,
+            skip_reason=skip_reason,
+            priority=10 * (index + 1),
+            estimated_minutes=0 if skip_reason else 20,
+        )
+
     monkeypatch.setattr(cli_mod, "_create_tuner", lambda name, ctx: _Tuner(name))
     # The CLI imports select_tuners inside the command body, so the patch has to land on the router module it reads
     # from.
     monkeypatch.setattr(
         router_mod,
         "select_tuners",
-        lambda *_a, **_k: [
-            TunerSpec(name, priority=10 * (index + 1), estimated_minutes=20) for index, name in enumerate(routed)
-        ],
+        lambda *_a, **_k: [_spec(index, entry) for index, entry in enumerate(routed)],
     )
     result = CliRunner().invoke(
         gemm_tune,
@@ -272,3 +282,19 @@ def test_a_ceiling_wider_than_the_routed_set_drops_nothing(tmp_path, monkeypatch
     )
 
     assert executed == ["fmoe_ck", "a8w8"]
+
+
+def test_a_router_skipped_tuner_does_not_spend_a_ceiling_slot(tmp_path, monkeypatch):
+    """A refused tuner books no time, so the share still pays for as many tuners as can actually run."""
+    executed = _run_with_ceiling(
+        tmp_path,
+        monkeypatch,
+        routed=[
+            ("vllm_moe_triton", "MoE Triton sweep measures bf16 only; awq is not tuned"),
+            "a8w8",
+            "dense_bf16",
+        ],
+        extra=["--max-tuners", "2"],
+    )
+
+    assert executed == ["a8w8", "dense_bf16"]

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -29,11 +30,11 @@ class SessionBreakdownExecutor:
         params = ctx.task.params or {}
         output_path = params.get("output_path")
 
-        from hyperloom.inference_optimizer.breakdown import build, write_breakdown_json
+        from hyperloom.inference_optimizer.breakdown import write_breakdown_json
 
         try:
             target = write_breakdown_json(session_dir, output_path=output_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("session_breakdown export failed")
             return {
                 "status": "failed",
@@ -41,10 +42,8 @@ class SessionBreakdownExecutor:
             }
 
         # Surface warnings + size to the bus event.
-        try:
-            warnings = (build(session_dir).get("metadata") or {}).get("warnings") or []
-        except Exception:  # noqa: BLE001
-            warnings = []
+        doc = json.loads(target.read_text(encoding="utf-8"))
+        warnings = (doc.get("metadata") or {}).get("warnings") or []
 
         log.info(
             "session_breakdown_executor: wrote %s (%d warnings)",

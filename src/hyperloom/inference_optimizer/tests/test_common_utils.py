@@ -81,7 +81,8 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_INT", " 7 ")
     assert env.env_int("HL_INT") == 7
     monkeypatch.setenv("HL_INT", "bad")
-    assert env.env_int("HL_INT", default=3) == 3
+    with pytest.raises(env.EnvValueError):
+        env.env_int("HL_INT", default=3)
 
     monkeypatch.setenv("HL_FLOAT", " 2.5 ")
     assert env.env_float("HL_FLOAT") == pytest.approx(2.5)
@@ -89,11 +90,12 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
 
-def test_env_float_invalid_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common.env import env_float
+def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.common.env import EnvValueError, env_float
 
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
-    assert env_float("HL_BAD_FLOAT", 3.5) == 3.5
+    with pytest.raises(EnvValueError):
+        env_float("HL_BAD_FLOAT", 3.5)
 
 
 # common.io
@@ -162,9 +164,9 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        parse_custom_headers,
         resolve_openai_client_config,
     )
+    from hyperloom.common.llm_headers import parse_custom_headers
 
     assert parse_custom_headers(None) == {}
     assert parse_custom_headers("   ") == {}
@@ -285,12 +287,13 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -318,7 +321,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -337,7 +340,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()
@@ -377,7 +380,8 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
@@ -399,7 +403,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: rebuilt.append(s) or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: rebuilt.append(s) or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda _s: None)
     monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda _s: None)
@@ -514,20 +518,22 @@ def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.Monkey
     """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
+    def runtime_env():
+        return mn_cli._forward_runtime_env(mn_cli.per_round_forward_overrides())
+
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
 
     monkeypatch.setenv(
         "HYPERLOOM_MN_EXTRA_FWD_ENV",
         json.dumps({"SGLANG_USE_AITER": "0", "LD_PRELOAD": "/evil.so"}),
     )
-    payload = mn_cli._forward_runtime_env()
-    assert payload == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
+    assert runtime_env() == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps(["not", "a", "dict"]))
-    assert mn_cli._forward_runtime_env() is None
+    assert runtime_env() is None
 
 
 def _restart_args(**overrides) -> argparse.Namespace:
@@ -640,7 +646,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -836,6 +842,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
 
+    no_overrides = {"set": {}, "unset": []}
     agg_state = {
         "last_restart_framework": "sglang",
         "last_restart_model": "/m",
@@ -843,9 +850,17 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": no_overrides,
     }
     agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
+
+    # A state written before the launch env was recorded cannot show what the running servers were launched with,
+    # so it relaunches rather than benchmarking an environment it cannot account for.
+    pre_upgrade_state = {k: v for k, v in agg_state.items() if k != "last_restart_forward_env"}
+    assert inf._infera_restart_config_matches(pre_upgrade_state, agg_args, "sglang", "aggregated") is False
     assert (
         inf._infera_restart_config_matches(
             agg_state, argparse.Namespace(model="/m", tp=4, ep=8, extra_args="--foo 1"), "sglang", "aggregated"
@@ -862,6 +877,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_extra_args": "",
         "last_restart_pd_prefill_nodes": 1,
         "last_restart_pd_decode_nodes": 1,
+        "last_restart_forward_env": no_overrides,
         "prefill_pod_ips": ["10.0.0.1"],
         "decode_pod_ips": ["10.0.0.2"],
     }
@@ -882,6 +898,64 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
     assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
 
     assert inf._infera_servers_alive({}, [], timeout=5) is False
+
+
+@pytest.mark.parametrize(
+    ("recorded", "extra_fwd", "unset_fwd"),
+    [
+        ({"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": []}, '{"SGLANG_MOE_A2A_BACKEND": "deepep"}', ""),
+        ({"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": []}, "", ""),
+        ({"set": {}, "unset": []}, '{"SGLANG_MOE_A2A_BACKEND": "mori"}', ""),
+        ({"set": {}, "unset": []}, "", '["SGLANG_MOE_A2A_BACKEND"]'),
+    ],
+)
+def test_a_changed_per_round_forward_env_blocks_an_infera_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: dict,
+    extra_fwd: str,
+    unset_fwd: str,
+) -> None:
+    """The SSH path forwards these to the servers it launches, so a round that changes only them must relaunch.
+
+    Without this the prior servers keep running with the previous round's environment and the benchmark reports
+    the new one, with nothing failing.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", extra_fwd)
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", unset_fwd)
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": recorded,
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+
+    assert inf._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_an_unchanged_per_round_forward_env_still_allows_an_infera_resume(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-sending the same overrides is not a change, so the resume fast path must survive it."""
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", '{"SGLANG_MOE_A2A_BACKEND": "mori"}')
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", '["MORI_STALE"]')
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_forward_env": {"set": {"SGLANG_MOE_A2A_BACKEND": "mori"}, "unset": ["MORI_STALE"]},
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+
+    assert inf._infera_restart_config_matches(state, args, "sglang", "aggregated") is True
 
     state = {"ssh_key_path": "/tmp/k"}
     targets = [{"podIP": "10.0.0.1", "sshPort": 2222}]
@@ -924,7 +998,10 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "",
+        "last_restart_forward_env": {"set": {}, "unset": []},
     }
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
     monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
@@ -1649,10 +1726,9 @@ def test_llm_prompt_parse_response_edges() -> None:
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False
-    assert sp._coerce_bool("yes", default=False) is True
-    assert sp._coerce_bool(None, default=True) is True
-    assert sp._coerce_bool("???", default=True) is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "yes"}).bench is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "off"}).bench is False
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "???"}).bench is sp.DEFAULT_BENCH
 
     profile = sp.resolve_specialist_profile({})
     assert profile.scope == sp.SCOPE_FREEFORM
@@ -1680,20 +1756,20 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# orchestrator.trace.trace_env
+# inference_optimizer.trace.trace_env
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.trace import trace_env
+    from hyperloom.common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
-    assert trace_env.env_flag("HL_TEST_FLAG") is True
+    assert common_env.env_flag("HL_TEST_FLAG") is True
     monkeypatch.setenv("HL_TEST_FLAG", "off")
-    assert trace_env.env_flag("HL_TEST_FLAG") is False
+    assert common_env.env_flag("HL_TEST_FLAG") is False
     monkeypatch.setenv("HL_TEST_FLAG", "maybe")
-    assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
+    assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
+    assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
 # orchestrator.bus.gpu_pool._parse_gpu_list

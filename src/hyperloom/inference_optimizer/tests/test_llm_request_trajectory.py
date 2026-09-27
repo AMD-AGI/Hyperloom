@@ -22,8 +22,8 @@ from hyperloom.orchestrator.roles.claude_requests import (
     ClaudeRequestTracker,
 )
 from hyperloom.orchestrator.roles.critic_agent import CriticAgentBackend
-from hyperloom.orchestrator.trace import parse_usage as pu
-from hyperloom.orchestrator.trace import trajectory_trace as tt
+from hyperloom.inference_optimizer.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
 sdk_types = pytest.importorskip("claude_agent_sdk.types")
 

@@ -123,7 +123,7 @@ def run_scriptable(
     with ExitStack() as stack:
         stdout_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stdout.log"))
         stderr_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stderr.log"))
-        proc = subprocess.Popen(  # noqa: S603 — cmd is this module's own bash entrypoint
+        proc = subprocess.Popen(
             cmd,
             env=env,
             stdout=stdout_sink,

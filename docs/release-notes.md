@@ -1304,10 +1304,10 @@ This release contains various fixes highlighted below.
   `INFERENCE_OPTIMIZER_RESCUE_PATHS=/workspace/` in your launcher, or update the
   script to write to `$RESULT_DIR`.
 
-- **`kernel_optimization.py` drops `--test-command` and `--test-harness-path`** *(breaking change — callers that pass these flags will now fail at startup)*:
-  The unittest-harness contract they fed had no reachable caller. Remove both
-  flags from any script or tool that invokes `kernel_optimization.py` directly;
-  argparse will exit with an error if either is still present.
+- **Retired `kernel_optimization.py` CLI** *(historical — the wrapper is gone)*:
+  Kernel work is dispatched by the Coordinator KERNEL handlers and, for Forge,
+  `kernelforge forge-loop`. Direct invocation of `kernel_optimization.py` is no
+  longer a supported entry point.
 
 ### 1.0.0b1 highlights
 

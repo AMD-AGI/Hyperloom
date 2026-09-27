@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from _bypass_roofline import compute_roofline  # noqa: E402
+from _bypass_roofline import compute_roofline
 
 
 def test_large_square_gemm_is_compute_bound():

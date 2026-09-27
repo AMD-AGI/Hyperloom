@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.knowledge import research_hints as rh
+from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 from hyperloom.inference_optimizer.session import session_paths
 
 

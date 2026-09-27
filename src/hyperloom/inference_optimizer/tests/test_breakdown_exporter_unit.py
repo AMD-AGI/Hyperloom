@@ -270,7 +270,7 @@ def test_write_minimal_final_json_fields(tmp_path):
 
 
 def test_patch_breakdown_langfuse_success(tmp_path):
-    from hyperloom.orchestrator.trace.langfuse_emitter import _receipt_path
+    from hyperloom.inference_optimizer.trace.langfuse_emitter import _receipt_path
 
     ex.write_breakdown_json(tmp_path)
     receipt_path = _receipt_path(tmp_path)
@@ -498,18 +498,20 @@ def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tm
 
 def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close(tmp_path):
     """A resume clears the reason in state, but the old CLOSE row stays in ``phase_history``."""
+    from hyperloom.orchestrator.phases import machine_state
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     now = datetime.now(timezone.utc)
     state = SharedState.load_or_init(tmp_path)
     state.session_id = "sess-1178"
-    state.record_phase_transition(
+    machine_state.record_phase_transition(
+        state,
         to_phase="CLOSE",
         reason="time_exhausted",
         ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
     )
     state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
-    state.record_phase_transition(to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)
@@ -662,6 +664,15 @@ def test_the_recorder_fragment_overlays_the_collected_section():
     assert merged["image"] == "registry.example/hyperloom:test"
 
 
+def test_a_missing_collector_keeps_recorded_lifecycle_fields():
+    merged = ex._merge_session(
+        {"stop_reason": "target_reached", "ended_at_utc": "2026-08-08T02:00:00Z"},
+        None,
+    )
+    assert merged["stop_reason"] == "target_reached"
+    assert merged["ended_at_utc"] == "2026-08-08T02:00:00Z"
+
+
 def test_a_section_with_no_fragment_is_returned_untouched():
     section = {"session_id": "sess-1178"}
     assert ex._merge_session(None, section) is section
@@ -694,15 +705,21 @@ def test_the_live_phase_stays_in_the_section_even_when_blank():
     assert merged["phase"] == ""
 
 
-def test_the_merged_section_measures_its_own_elapsed_time():
+def test_derived_session_fields_stay_collector_owned():
     merged = ex._merge_session(
         {
-            "start_ts": "2026-08-08T00:00:00+00:00",
+            "stop_reason": "time_exhausted",
             "ended_at_utc": "2026-08-08T02:00:00+00:00",
-            "stop_reason": "target_reached",
+            "elapsed_minutes": 1.0,
         },
-        {"elapsed_minutes": 0.0},
+        {
+            "stop_reason": "accuracy_stop",
+            "ended_at_utc": "2026-08-08T02:05:00+00:00",
+            "elapsed_minutes": 120.0,
+        },
     )
+    assert merged["stop_reason"] == "accuracy_stop"
+    assert merged["ended_at_utc"] == "2026-08-08T02:05:00+00:00"
     assert merged["elapsed_minutes"] == 120.0
 
 

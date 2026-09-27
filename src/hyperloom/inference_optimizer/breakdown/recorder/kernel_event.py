@@ -642,44 +642,18 @@ def record_trace_analyze_request(
 
 
 def _republish_closed_event(event: str) -> None:
-    """Re-assemble a closed event so a fragment written after it is published.
+    """Re-assemble a closed event so a fragment written after it is published."""
+    from .construct import republish_closed_event
 
-    The export reads the durable timeline rather than re-assembling it, so a
-    closed event's published ``ext`` is whatever the close assembled. A row
-    that lands afterwards is in the spool but not in the event, and would stay
-    that way. Re-assembling and updating the same storage sequence is what
-    puts it there -- the same write the close makes, made again.
-
-    An event still running is left alone: its own close will assemble the row
-    along with everything else, and publishing a half-finished event here
-    would show it closed.
-
-    Never raises: the row this re-publishes is already in the spool, so a
-    re-assembly that cannot read it costs the caller nothing it can act on.
-    """
-    from ...session.sbd_v6 import timeline_sequence
-    from .recorder_warnings import RECORDING_ERRORS, note_failure
-
-    try:
-        parts = event_parts(EVENT_SECTIONS, event=event)
-        rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-        header = rows[0] if rows else {}
-        end_time = _text(header.get("end_time"))
-        if not end_time:
-            return
-        ext, derived = assemble_kernel_ext(parts, event=event)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
-            sequence=timeline_sequence(header),
-            status=derived,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=_text(header.get("start_time")) or "",
-            end_time=end_time,
-        )
-    except RECORDING_ERRORS as exc:
-        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
+    republish_closed_event(
+        event,
+        section=SECTION_EVENT,
+        event_type=EVENT_TYPE,
+        kind=EVENT_KIND,
+        load_parts=lambda: event_parts(EVENT_SECTIONS, event=event),
+        assemble=assemble_kernel_ext,
+        end_time=lambda _parts, header: _text(header.get("end_time")),
+    )
 
 
 def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2364,38 +2338,19 @@ def make_kernel_recorder(
     resumed: bool = False,
     code_revision: str = "",
 ) -> KernelEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when no session is bound.
 
-    KERNEL behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
-    declines too: writing the timeline into whatever the working directory
-    happens to be is worse than not recording.
-
-    Returns:
-        KernelEventRecorder | None: The recorder, or ``None`` when it could not
-            be built.
+    An unbound session declines rather than writing the timeline into an
+    arbitrary directory. Construction itself is not swallowed.
     """
-    from ...session.session_binding import session_is_bound
+    from .construct import decline_unbound
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "kernel timeline: no session bound; this phase entry's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the entry ran outside the session's context"
-            )
-            return None
-        return KernelEventRecorder(
-            macro_cycle=macro_cycle,
-            route=route,
-            route_reason=route_reason,
-            resumed=resumed,
-            code_revision=code_revision,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-        log.warning(
-            "kernel timeline: recorder construction failed; this phase entry's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("kernel"):
         return None
+    return KernelEventRecorder(
+        macro_cycle=macro_cycle,
+        route=route,
+        route_reason=route_reason,
+        resumed=resumed,
+        code_revision=code_revision,
+    )

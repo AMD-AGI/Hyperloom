@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @dataclass
@@ -28,10 +29,11 @@ class _StubTask:
     params: dict[str, Any] = field(default_factory=dict)
 
 
-class _StubSharedState:
-    """SharedState stand-in that records the bookkeeping calls."""
+class _StubSharedState(SharedState):
+    """SharedState that records the bookkeeping calls instead of persisting them."""
 
     def __init__(self):
+        super().__init__()
         self.specialist_rounds: list[dict[str, Any]] = []
         self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0

@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import Any
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -26,12 +26,15 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
 
 
-class SweepPhase(PhaseHandler):
+class SweepPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
         state = self.shared_state
+        # An unwind a previous leg left owed still has the stack's patches on the
+        # tree, so settle it before the drain below applies anything on top.
+        await self._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
@@ -78,7 +81,7 @@ class SweepPhase(PhaseHandler):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
+        except Exception as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -142,9 +145,11 @@ class SweepPhase(PhaseHandler):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
+        lanes, _ = self._registry_lanes_ttl("conc_sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="conc_sweep",
             params=params,
+            requires_lanes=lanes,
             idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
         )

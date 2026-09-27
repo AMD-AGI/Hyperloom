@@ -147,8 +147,10 @@ def _source_digest(source_files: list[str]) -> str:
         digest.update(b"\0")
         try:
             digest.update(path.read_bytes())
-        except OSError:
-            digest.update(b"<unreadable>")
+        except FileNotFoundError:
+            # Absence is a state of its own; a source that is present but unreadable is not, and letting it stand in
+            # for its own bytes would key every later edit of it to the shard already holding the stale .so.
+            digest.update(b"<absent>")
         digest.update(b"\0")
     return digest.hexdigest()[:24]
 

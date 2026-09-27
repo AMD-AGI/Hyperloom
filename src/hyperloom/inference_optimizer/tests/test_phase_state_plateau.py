@@ -10,31 +10,32 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
+from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     ESCALATE_HINT_BUDGET_BUMP_CAP,
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    ESCALATE_HINT_SKIP_TO_CLOSE,
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    ESCALATE_HINT_SKIP_TO_SWEEP,
-    ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
-    STOP_REASON_VOCAB,
     _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
     compute_plateau_kernel,
     exit_normal_optimize,
     exit_normal_kernel,
-    is_valid_escalate_hint,
-    is_valid_stop_reason,
     kernel_work_pending,
 )
 from hyperloom.orchestrator.state import shared_state
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import (
+    ESCALATE_HINT_SKIP_TO_CLOSE,
+    ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
+    ESCALATE_HINT_VOCAB,
+    SharedState,
+    is_valid_escalate_hint,
+)
 
 
 def test_escalate_hint_vocab_closed():
@@ -659,9 +660,9 @@ def test_set_stop_reason_empty_string_clears():
 def test_a_later_stop_reason_does_not_move_the_stop_time(monkeypatch):
     """CLOSE stops the session on entry and ships the breakdown; a later write must not re-date it."""
     s = SharedState()
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
     s.set_stop_reason("time_exhausted")
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
     s.set_stop_reason("target_reached")
     assert s.stop_reason == "target_reached"
     assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
@@ -670,9 +671,9 @@ def test_a_later_stop_reason_does_not_move_the_stop_time(monkeypatch):
 def test_rewriting_the_same_stop_reason_does_not_move_the_stop_time(monkeypatch):
     """The Coordinator's ``finally`` re-asserts the reason CLOSE already wrote."""
     s = SharedState()
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
     s.set_stop_reason("time_exhausted")
-    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:04:00.000000+00:00")
+    monkeypatch.setattr(shared_state, "now_iso", lambda: "2026-08-08T00:04:00.000000+00:00")
     s.set_stop_reason(s.stop_reason)
     assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
 

@@ -23,8 +23,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from ..prompts.transport import TRANSPORT_TOOLS
-from ..trace.llm_trace import new_call_id
-from ..trace.trajectory_trace import current_context
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import (
     BackendError,
     BackendTurnResult,

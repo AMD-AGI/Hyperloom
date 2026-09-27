@@ -12,11 +12,12 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.orchestrator.trace import trajectory_projection as trajmap
-from hyperloom.orchestrator.trace import trajectory_trace as tt
+from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
+from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
 
 def _rows(session_dir: Path, event_type: str) -> list[dict]:
@@ -76,7 +77,7 @@ def test_a_phase_transition_is_a_point_event_in_the_new_phase(tmp_path):
     state = SharedState()
     state.phase = "BASELINE"
     with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
-        state.record_phase_transition(to_phase="EXPLORE", reason="baseline_done")
+        machine_state.record_phase_transition(state, to_phase="EXPLORE", reason="baseline_done")
     (row,) = _rows(tmp_path, tt.EVENT_PHASE)
     assert row["status"] == tt.STATUS_POINT
     assert row["phase"] == "EXPLORE"

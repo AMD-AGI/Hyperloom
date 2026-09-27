@@ -598,44 +598,29 @@ def make_warm_replay_recorder(
     recipe_suppressed: Any = None,
     open_event_on_timeline: bool = True,
 ) -> WarmReplayEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when no session is bound.
 
-    Replay behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event", and an unbound session declines too. A
-    false ``open_event_on_timeline`` rebinds to an event a previous tick
+    A false ``open_event_on_timeline`` rebinds to an event a previous tick
     opened, which is how the promote seam records onto the enqueue seam's arc.
     """
-    from ...session.session_binding import session_is_bound
+    from .construct import decline_unbound
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "warm replay timeline: no session bound; this replay's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the replay ran outside the session's context"
-            )
-            return None
-        recorder = WarmReplayEventRecorder(
-            make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
-            task_id=task_id,
-            tier=tier,
-            config_source=config_source,
-            config_donor_tier=config_donor_tier,
-            donor=donor,
-            expected_gain_pct=expected_gain_pct,
-            confidence=confidence,
-            min_reproduce_pct=min_reproduce_pct,
-            session_baseline_tput=session_baseline_tput,
-            kernel_count=kernel_count,
-            recipe_suppressed=recipe_suppressed,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-        log.warning(
-            "warm replay timeline: recorder construction failed; this replay's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("warm replay"):
         return None
+    recorder = WarmReplayEventRecorder(
+        make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
+        task_id=task_id,
+        tier=tier,
+        config_source=config_source,
+        config_donor_tier=config_donor_tier,
+        donor=donor,
+        expected_gain_pct=expected_gain_pct,
+        confidence=confidence,
+        min_reproduce_pct=min_reproduce_pct,
+        session_baseline_tput=session_baseline_tput,
+        kernel_count=kernel_count,
+        recipe_suppressed=recipe_suppressed,
+    )
     if open_event_on_timeline:
         recorder.begin()
     return recorder

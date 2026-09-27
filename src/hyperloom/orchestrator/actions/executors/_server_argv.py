@@ -15,9 +15,9 @@ import yaml
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import tokenize_server_args_preserving_json
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
 
 

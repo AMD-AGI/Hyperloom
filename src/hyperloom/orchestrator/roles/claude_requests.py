@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ..trace.context_events import COMPACT_BOUNDARY, compaction_attributes
-from ..trace.tool_events import tool_attributes, tool_status
-from ..trace.trajectory_trace import (
+from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
+from hyperloom.inference_optimizer.trace.tool_events import tool_attributes, tool_status
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_CONTEXT_COMPACTION,
     EVENT_LLM_REQUEST,
     EVENT_TOOL,

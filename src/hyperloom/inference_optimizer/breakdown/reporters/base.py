@@ -231,7 +231,7 @@ def render_section(
     """Run one renderer so a failing section costs itself, not the report."""
     try:
         return fn(breakdown)
-    except Exception as exc:  # noqa: BLE001 — one bad section must not lose the report
+    except Exception as exc:
         log.exception("report section %s failed to render", section_id)
         return RenderedSection(
             section_id=section_id,

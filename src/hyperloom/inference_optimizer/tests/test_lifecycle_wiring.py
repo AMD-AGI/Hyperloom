@@ -14,10 +14,8 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
 )
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _lifecycle_paths,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -302,7 +300,7 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
         new=fake_profile,
     )
     p2 = patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
     executor = RooflineExecutor(shared_state=state)

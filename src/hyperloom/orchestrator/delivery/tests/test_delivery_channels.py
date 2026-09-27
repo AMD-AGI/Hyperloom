@@ -142,36 +142,56 @@ def test_the_replay_script_matches_the_tree_kind() -> None:
     assert nogit_script.rstrip().endswith("python3 -m sglang.launch_server --model-path=$MODEL")
 
 
-def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path, caplog) -> None:
-    # A non-git tree's patch targets are only known once a strip level is
-    # detected, so the pre-round baseline cannot cover them. The apply's ledger
-    # is the record that can.
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
 
     root = tmp_path / "wheel"
     root.mkdir()
     target = root / "mod.py"
     target.write_text("pre-round\n", encoding="utf-8")
-    backup_root = tmp_path / "backups"
-    ledger.append_record(
+    recovery_root = tmp_path / "recovery"
+    backup_root = recovery_root / "patch_backups"
+    backup_root.mkdir(parents=True)
+    backup = backup_root / "mod.bak"
+    backup.write_bytes(target.read_bytes())
+    assert ledger.append_record(
         backup_root,
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup_root / "mod.bak"),
+            "backup_path": str(backup),
             "revert_action": "restore",
             "pre_image_sha256": file_digest(target),
         },
     )
+    assert ledger.mark_prepared(backup_root)
+    original_ledger = ledger.ledger_path(backup_root).read_bytes()
+    backup.unlink()
 
-    executor = IntegratePatchExecutor(session_dir=tmp_path)
-    executor._nogit_backup_root = backup_root
+    def pending() -> dict:
+        return {
+            "framework_source_root": str(root),
+            "patches": ["candidate.patch"],
+            "artifacts": [],
+            "recovery": {"version": 1, "phase": "applied", "root": str(recovery_root)},
+        }
 
-    with caplog.at_level("ERROR"):
-        executor._log_residual_drift(root)
-    assert not caplog.records, "a tree restored to its pre-image was reported as drifted"
+    restored = pending()
+    assert restore_pending_integrate(restored) == {
+        "reversed": ["candidate.patch"],
+        "artifacts_reverted": [],
+        "failed": [],
+    }, "a tree restored to its pre-image was reported as drifted"
+    assert restored["recovery"]["phase"] == "restored"
 
-    target.write_text("what the revert failed to undo\n", encoding="utf-8")
-    with caplog.at_level("ERROR"):
-        executor._log_residual_drift(root)
-    assert any("still differs from its pre-round state" in r.getMessage() for r in caplog.records)
+    remaining = "what the revert failed to undo\n"
+    target.write_text(remaining, encoding="utf-8")
+    interrupted = pending()
+    result = restore_pending_integrate(interrupted)
+
+    assert result["reversed"] == []
+    assert result["artifacts_reverted"] == []
+    assert result["failed"] == [f"{target}: missing or corrupt backup: {target}"]
+    assert interrupted["recovery"]["phase"] == "applied"
+    assert target.read_text(encoding="utf-8") == remaining
+    assert ledger.ledger_path(backup_root).read_bytes() == original_ledger

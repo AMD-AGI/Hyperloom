@@ -327,8 +327,10 @@ class LocalRecipeStore:
                 "precision": precision,
                 "best_config": dict(best_config or {}),
                 "best_throughput": float(best_throughput),
-                "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
-                "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
+                # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
+                # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
+                "what_worked": _coerce_dicts(what_worked),
+                "what_failed": _coerce_dicts(what_failed),
                 "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
                 "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
@@ -669,6 +671,16 @@ def _collection_counts(row: dict[str, Any] | None) -> dict[str, int]:
     for key in _COUNTED_COLLECTIONS:
         value = row.get(key) if isinstance(row, dict) else None
         out[key] = len(value) if isinstance(value, list) else 0
+    return out
+
+
+def _coerce_dicts(items: list[Any] | None) -> list[dict[str, Any]]:
+    """Coerce each item to a dict, dropping entries that are not row-shaped at all."""
+    out: list[dict[str, Any]] = []
+    for it in items or []:
+        d = _coerce_dict(it)
+        if d is not None:
+            out.append(d)
     return out
 
 

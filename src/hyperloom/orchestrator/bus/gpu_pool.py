@@ -29,9 +29,6 @@ _RAY_OBS_ID_BASE = 100000
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-_now_iso = now_iso
-
-
 def _parse_gpu_list(raw: str) -> list[int]:
     """Parse a GPU-id list through the shared visible-device parser."""
     return parse_device_list(raw)
@@ -86,7 +83,7 @@ def resolve_whole_machine_devices() -> list[int]:
     if mask_present:
         return mask_ids
     # No mask: fall back to the detected machine GPU count.
-    from ..policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return list(range(max(0, int(detect_gpu_count() or 0))))
 
@@ -131,7 +128,7 @@ class SpecialistGpuPool:
         if n <= 0 or n > self.capacity:
             return None
         now_ts = time.time()
-        now_iso = _now_iso()
+        stamp = now_iso()
         expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
         expires_iso = datetime.fromtimestamp(
             expires_ts,
@@ -153,7 +150,7 @@ class SpecialistGpuPool:
                     acquired_at = existing_rows[0]["acquired_at"]
                     cur.execute(
                         "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
-                        (expires_iso, now_iso, holder_id, task_id),
+                        (expires_iso, stamp, holder_id, task_id),
                     )
                     return GpuLease(
                         holder_id=holder_id,
@@ -185,13 +182,13 @@ class SpecialistGpuPool:
                         acquired_at, expires_at, heartbeat_at
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (gpu_id, holder_id, task_id, now_iso, expires_iso, now_iso),
+                    (gpu_id, holder_id, task_id, stamp, expires_iso, stamp),
                 )
         return GpuLease(
             holder_id=holder_id,
             task_id=task_id,
             gpu_ids=tuple(selected),
-            acquired_at=now_iso,
+            acquired_at=stamp,
             expires_at=expires_iso,
         )
 
@@ -206,7 +203,7 @@ class SpecialistGpuPool:
         """Admit a GPU specialist under single-node Ray by COUNT, not physical id."""
         limit = max(1, int(pending_limit or 1))
         now_ts = time.time()
-        now_iso = _now_iso()
+        stamp = now_iso()
         expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
         expires_iso = datetime.fromtimestamp(
             expires_ts,
@@ -234,13 +231,13 @@ class SpecialistGpuPool:
                     acquired_at, expires_at, heartbeat_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (slot, holder_id, task_id, now_iso, expires_iso, now_iso),
+                (slot, holder_id, task_id, stamp, expires_iso, stamp),
             )
         return GpuLease(
             holder_id=holder_id,
             task_id=task_id,
             gpu_ids=(slot,),
-            acquired_at=now_iso,
+            acquired_at=stamp,
             expires_at=expires_iso,
         )
 
@@ -259,11 +256,11 @@ class SpecialistGpuPool:
     async def extend(self, task_id: str, ttl_sec: int) -> int:
         """Push a task's GPU rows out to ``ttl_sec`` from now."""
         expires_iso = datetime.fromtimestamp(time.time() + max(0, int(ttl_sec)), tz=timezone.utc).isoformat()
-        now_iso = _now_iso()
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             cur.execute(
                 "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                (expires_iso, now_iso, task_id),
+                (expires_iso, stamp, task_id),
             )
             return int(cur.rowcount or 0)
 

@@ -119,12 +119,7 @@ def test_atomic_write_text_preserves_file_mode(tmp_path: Path):
     target.write_text("#!/bin/sh\n", encoding="utf-8")
     target.chmod(0o755)
     pre_mode = target.stat().st_mode
-    assert mp.atomic_write_text(
-        target,
-        "#!/bin/sh\npatched\n",
-        tmp_prefix=".bench.sh.hyperloom_",
-        log_prefix="_magpie_patcher",
-    )
+    assert mp.atomic_write_text(target, "#!/bin/sh\npatched\n", log_prefix="_magpie_patcher")
     assert target.stat().st_mode == pre_mode
 
 

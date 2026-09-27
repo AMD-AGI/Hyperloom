@@ -21,7 +21,16 @@ async def run_lease_and_db_reclaim(
     """Report confirmed-dead cleanup and prune retained database history.
 
     Shared by periodic maintenance and cycle soft-restart. Resource ownership
-    is resolved by the reconciler, never inferred from elapsed lease budgets.
+    is resolved by the reconciler: owners it proved dead, and lanes whose holder
+    both ended and proved nothing is still using them -- never inferred from
+    elapsed lease budgets.
+
+    ``leases_unverifiable`` rides the same summary because it is the other half
+    of that answer: lanes still held by a holder that ended without confirming
+    its cleanup. Nothing decides those -- no identity available to this process
+    survives a served process that setsid's away from it -- so they are retained
+    on purpose. A number that stays put while the queue does not drain is where
+    an operator starts; the remedy for each one is logged once by the diagnostic.
 
     Args:
         host: Coordinator exposing ``reconciler`` and ``db``.
@@ -31,8 +40,17 @@ async def run_lease_and_db_reclaim(
     try:
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
+        summary["leases_unverifiable"] = report.leases_unverifiable
+        # Whether retained lanes are an accident or the ordinary outcome. Every
+        # portable way to release them automatically was refuted (see
+        # docs/task-containment.md), and the one candidate left is
+        # safety-critical, so this is the number that decides whether anyone
+        # should build it.
+        unconfirmed, ended = await host.reconciler.cleanup_confirmation_rate()
+        if ended:
+            summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
@@ -40,7 +58,7 @@ async def run_lease_and_db_reclaim(
         res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("%s: DB retention failed", reason)
 
 
@@ -61,12 +79,9 @@ class MaintenanceCollaborator:
         """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
-        try:
-            disk = self._maybe_prune_runs_for_disk()
-            if disk is not None:
-                summary["disk"] = disk
-        except Exception:  # noqa: BLE001
-            log.exception("maintenance: disk monitor failed")
+        disk = self._maybe_prune_runs_for_disk()
+        if disk is not None:
+            summary["disk"] = disk
         log.info("maintenance tick %d: %s", tick, summary)
         return summary
 

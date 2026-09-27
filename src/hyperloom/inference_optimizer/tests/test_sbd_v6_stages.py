@@ -228,8 +228,13 @@ def _baseline_event(*actions: dict) -> dict:
 #: What ``outcome.baseline.perf`` reads on a round that measured no graded axis.
 _UNMEASURED_AXES = {
     "e2e_norm_intvty_p90": None,
+    "e2e_norm_intvty_p50": None,
     "total_throughput": None,
+    "output_tput_per_gpu": None,
     "input_throughput": None,
+    "ttft_p50_ms": None,
+    "ttft_p90_ms": None,
+    "tpot_p50_ms": None,
     "tpot_p90_ms": None,
 }
 

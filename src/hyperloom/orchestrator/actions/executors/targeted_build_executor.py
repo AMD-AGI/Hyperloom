@@ -105,11 +105,19 @@ class TargetedBuildExecutor:
                     confirmed_dead = ensure_build_dead(handle)
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise ExecutionCleanupUnconfirmed(
-                        f"task={task.task_id}: targeted build cleanup failed: {exc}", result=cleanup_result
+                        f"task={task.task_id}: targeted build cleanup failed: {exc}",
+                        result=cleanup_result,
+                        # ``BuildHandle`` already resolved the group the build
+                        # was detached into (``enablement/runtime/targeted_build``
+                        # spawns with ``start_new_session``); ``proc.pid`` stops
+                        # naming anything once the root exits.
+                        tree_pgid=handle.pgid,
                     ) from exc
                 if not confirmed_dead:
                     raise ExecutionCleanupUnconfirmed(
-                        f"task={task.task_id}: targeted build cleanup unconfirmed", result=cleanup_result
+                        f"task={task.task_id}: targeted build cleanup unconfirmed",
+                        result=cleanup_result,
+                        tree_pgid=handle.pgid,
                     )
                 if shared_state is not None:
                     shared_state.pending_targeted_build = {}

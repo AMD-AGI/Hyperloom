@@ -37,9 +37,9 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
 ## Path resolution (do not guess)
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching
-agent does not need to recreate that logic in shell; it only needs to run
-`install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read the
-session dir printed by the CLI.
+agent does not need to recreate that logic in shell. Prepare the runtime with
+`install.sh`; optimizer preflight loads `runtime/kernel-agent.env.sh` in process.
+Read the session directory from the CLI's launch-info output.
 
 | Concept | Env / helper | Meaning |
 |---|---|---|

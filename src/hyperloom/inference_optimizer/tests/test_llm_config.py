@@ -40,10 +40,10 @@ from hyperloom.common.llm_config import (
     openai_client_kwargs,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
-    parse_custom_headers,
     provider_model_defaults,
     resolve_forge_llm_model,
 )
+from hyperloom.common.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))

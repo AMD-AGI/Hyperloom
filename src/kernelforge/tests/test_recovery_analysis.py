@@ -101,7 +101,7 @@ def test_failed_analysis_attempt_does_not_advance_published_commit(tmp_path):
     service = _service(tmp_path, _BundleBackend())
 
     class FailingPublishService(AnalysisAgentService):
-        def _publish_generation(self, staging_root, commit_root):  # noqa: ANN001
+        def _publish_generation(self, staging_root, commit_root):
             raise OSError("simulated publish failure")
 
     failing = FailingPublishService(

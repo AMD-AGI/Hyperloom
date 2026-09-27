@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from hyperloom.common.env import env_bool
 
 # All module loggers descend from this root.
 _ROOT_NAME = "framework_agent"
@@ -51,7 +52,7 @@ def _resolve_level(explicit: str | int | None) -> int:
 class _JsonLineFormatter(logging.Formatter):
     """Emit one JSON object per log record (machine-friendly sink)."""
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+    def format(self, record: logging.LogRecord) -> str:
         """Serialise a log record to a single JSON line."""
         payload: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
@@ -75,7 +76,7 @@ def configure_logging(
     quiet_third_party: bool = True,
 ) -> logging.Logger:
     """Initialise the framework-agent root logger and return it."""
-    use_json = json_output if json_output is not None else os.environ.get(_JSON_ENV, "").strip() in ("1", "true", "yes")
+    use_json = json_output if json_output is not None else env_bool(_JSON_ENV)
     effective_level = _resolve_level(level)
     resolved_file = log_file if log_file is not None else os.environ.get(_FILE_ENV)
 
@@ -147,7 +148,7 @@ def stage_log(
     ctx: dict[str, Any] = dict(base)
     try:
         yield ctx
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         wall = time.monotonic() - started
         ctx["wall_sec"] = round(wall, 3)
         ctx["error"] = type(exc).__name__

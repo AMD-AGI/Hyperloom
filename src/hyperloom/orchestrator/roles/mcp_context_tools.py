@@ -39,7 +39,7 @@ class ContextProvider:
         """Invoke a projection callable, never letting it crash the reactor."""
         try:
             out = fn()
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+        except Exception as exc:
             log.exception("context tool %s failed", label)
             return f"(context tool {label} unavailable: {exc!r})"
         return out if isinstance(out, str) and out else f"({label}: empty)"
@@ -111,7 +111,7 @@ class ContextProvider:
             return "(run_action_now not wired)"
         try:
             out = await self.action_runner(action_name, dict(params or {}))
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+        except Exception as exc:
             log.exception("context tool %s failed", "run_action_now")
             return f"(context tool run_action_now unavailable: {exc!r})"
         return out if isinstance(out, str) and out else "(run_action_now: empty)"
@@ -381,7 +381,7 @@ def _make_handler(
                 text = await method(**kwargs)
             else:
                 text = method(**kwargs)
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+        except Exception as exc:
             log.exception("context tool handler %s raised", method_name)
             return {
                 "content": [{"type": "text", "text": f"error: {exc!r}"}],

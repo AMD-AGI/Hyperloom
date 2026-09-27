@@ -24,6 +24,7 @@ from typing import Any, Callable, NamedTuple
 # ``TERM_GRACE_SECONDS`` is this module's name for the shared SIGTERM-to-SIGKILL
 # grace: a driver-side teardown of a server a round left behind waits for the
 # same thing on the same signal, so it waits exactly as long.
+from hyperloom.common.env import env_flag
 from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
 from hyperloom.common.proctree import collect_tree, group_alive, kill_tree, signal_group
 
@@ -795,7 +796,7 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     """
     if not server_log_path:
         return None
-    if os.environ.get(_KV_METRICS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
+    if not env_flag(_KV_METRICS_ENV, default=True):
         return None
     try:
         from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder
@@ -855,7 +856,7 @@ def run_with_session_kill(
     try:
         with cancel_scope_listener() as cancel_scope:
             started_at = time.monotonic()
-            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

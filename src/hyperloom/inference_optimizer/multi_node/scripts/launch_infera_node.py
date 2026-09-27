@@ -6,13 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from server_args_safety import find_denied_flags, find_unsafe_flag_values
+from sglang_shape_gate import activate_kernel_shape_tool
 
 # Rendezvous port for torch.distributed (matches SaFE common.InferaMultinodeDistInitPort = 5000).
 _DEFAULT_DIST_INIT_PORT = 5000
@@ -21,98 +23,6 @@ _RAY_GCS_PORT = 6379
 # Default HTTP port the infera engine binds via --port (no CLI override is declared); the rank-0 readiness probe uses
 # --health-port (default 8000).
 _DEFAULT_ENGINE_PORT = 30000
-
-# Keep in sync with multi_node/_internal/server_args_safety.py
-_DENIED_SERVER_FLAGS = frozenset(
-    {
-        "--adapter-model-path",
-        "--adapter-path",
-        "--allowed-local-media-path",
-        "--chat-template",
-        "--code-revision",
-        "--config",
-        "--download-dir",
-        "--hf-overrides",
-        "--lora-dirs",
-        "--lora-modules",
-        "--lora-path",
-        "--lora-paths",
-        "--model",
-        "--model-id",
-        "--model-path",
-        "--quantization-param-path",
-        "--revision",
-        "--tokenizer",
-        "--tokenizer-path",
-        "--tokenizer-revision",
-    }
-)
-_DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
-# Tuning knobs exempt from the suffix rule by name only; their values stay constrained by _unsafe_path_value_reason.
-_SUFFIX_EXEMPT_SERVER_FLAGS = frozenset({"--speculative-draft-model-path"})
-
-
-def _is_denied_server_flag(flag: str) -> bool:
-    """Return whether a single ``--flag`` token is denied at the pod boundary."""
-    name = (flag or "").strip()
-    if not name.startswith("--"):
-        return False
-    if name in _DENIED_SERVER_FLAGS:
-        return True
-    if name in _SUFFIX_EXEMPT_SERVER_FLAGS:
-        return False
-    return any(name.endswith(suffix) for suffix in _DENIED_SERVER_FLAG_SUFFIXES)
-
-
-def _unsafe_path_value_reason(value: str | None) -> str:
-    """Return why an exempt flag's path value is unsafe ("" when acceptable)."""
-    val = (value or "").strip()
-    if not val:
-        return "missing value"
-    if not val.startswith("/"):
-        return "must be an absolute path, not a repo id or URI"
-    if ".." in PurePosixPath(val).parts:
-        return "must not traverse with '..'"
-    return ""
-
-
-def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
-    """Return ``(flag, value)`` pairs for both ``--flag=value`` and ``--flag value``."""
-    pairs: list[tuple[str, str | None]] = []
-    for idx, tok in enumerate(tokens):
-        if not tok.startswith("--"):
-            continue
-        if "=" in tok:
-            name, _, val = tok.partition("=")
-            pairs.append((name, val))
-            continue
-        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
-        pairs.append((tok, None if (nxt is None or nxt.startswith("--")) else nxt))
-    return pairs
-
-
-def _denied_extra_args(raw: str) -> list[str]:
-    """Return rejected CLI flags in a pod-side extra-args string."""
-    text = (raw or "").strip()
-    if not text:
-        return []
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        return ["<unparseable>"]
-    out: list[str] = []
-    for flag, value in _flag_value_pairs(tokens):
-        if _is_denied_server_flag(flag):
-            if flag not in out:
-                out.append(flag)
-            continue
-        if flag not in _SUFFIX_EXEMPT_SERVER_FLAGS:
-            continue
-        reason = _unsafe_path_value_reason(value)
-        entry = f"{flag}: {reason}"
-        if reason and entry not in out:
-            out.append(entry)
-    return out
 
 
 def _log(msg: str) -> None:
@@ -361,7 +271,7 @@ def _reap_stale_engine_ports() -> None:
     try:
         import re as _re
         import signal as _signal
-    except Exception:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         return
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     for port in _REAP_PORTS:
@@ -372,7 +282,7 @@ def _reap_stale_engine_ports() -> None:
                 text=True,
                 timeout=15,
             ).stdout
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             continue
         for m in _re.finditer(r"pid=(\d+)", out or ""):
             try:
@@ -410,46 +320,6 @@ def _reap_stale_engine_ports() -> None:
                 if gone:
                     _log(f"reaper: freed port {port} (pid={pid}, signal {int(sig)})")
                     break
-
-
-# SGLang >= 0.5.18 no-patch shape tool; gate mirrored inline (no hyperloom import).
-_KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
-_SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
-
-
-def _sglang_shape_mode() -> str:
-    """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
-    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return "patched"
-    if override == "sitecustomize":
-        return "sitecustomize"
-    version = ""
-    try:
-        import sglang  # type: ignore
-
-        version = (getattr(sglang, "__version__", "") or "").strip()
-    except Exception:  # noqa: BLE001
-        version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
-    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
-    if not m:
-        return "patched"
-    vt = tuple(int(p) for p in m.group(1).split("."))
-    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
-
-
-def _maybe_activate_kernel_shape_tool(env: dict[str, str]) -> None:
-    """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
-    root = (env.get("TRACELENS_ROOT") or os.environ.get("TRACELENS_ROOT") or "").strip()
-    if not root or _sglang_shape_mode() != "sitecustomize":
-        return
-    tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
-    if not tool.is_dir():
-        _log(f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled")
-        return
-    existing = (env.get("PYTHONPATH") or "").strip()
-    env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)
-    env.setdefault("TRACELENS_SHAPE_DISCOVERY", "1")
 
 
 def _build_sglang_cmd(
@@ -748,7 +618,7 @@ def main() -> int:
         _log("ERROR --model and --tp are required unless --kill-only")
         return 2
 
-    denied = _denied_extra_args(args.extra_args)
+    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")
         return 2
@@ -765,7 +635,7 @@ def main() -> int:
     if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
         log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
     if args.framework == "sglang":
-        _maybe_activate_kernel_shape_tool(env)
+        activate_kernel_shape_tool(env)
         cmd = _build_sglang_cmd(args, node_rank, leader, advertise_host=advertise_host)
         pid = _detach_launch(cmd, log_file, pid_file, env)
     else:
@@ -798,7 +668,7 @@ def main() -> int:
                 int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
             )
             summary["gpu_metrics_csv"] = _samp_csv
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
             _log(f"GPU sampler start failed: {exc}")
 
     # Only the leader serves a local HTTP endpoint; workers have none.

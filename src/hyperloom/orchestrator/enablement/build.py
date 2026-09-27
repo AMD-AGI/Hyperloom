@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
@@ -19,24 +20,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-
-def _derive_gpu_arch(gpu_type: str) -> str:
-    """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
-    _MAP = {
-        "mi355x": "gfx950",
-        "mi300x": "gfx942",
-        "mi308x": "gfx942",
-        "mi300": "gfx942",
-        "mi250x": "gfx90a",
-        "mi250": "gfx90a",
-        "mi210": "gfx90a",
-    }
-    gt = (gpu_type or "").strip().lower()
-    for key, arch in _MAP.items():
-        if key in gt:
-            return arch
-    return ""
 
 
 def _repo_matches_targeted_build_component(repo_url: str, component: str) -> bool:
@@ -181,7 +164,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=reason,
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
@@ -200,7 +183,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     loaded.degraded or "-",
                     task_id,
                 )
-        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
     async def _maybe_enqueue_specialist_requested_build(
@@ -288,7 +271,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 reason=f"specialist request: {reason}",
                 repo_url=repo_url,
                 ref=ref,
-                gpu_arch=_derive_gpu_arch(gpu_type),
+                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
@@ -303,7 +286,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     ref or "(autoselect)",
                     build_task_id,
                 )
-        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+        except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
@@ -332,7 +315,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 else:
                     await self._route_failed_build(task)
                 return
-        except Exception:  # noqa: BLE001 — never wedge the tick
+        except Exception:
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
     async def _route_failed_build(self, task: "Task") -> None:

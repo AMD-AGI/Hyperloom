@@ -242,17 +242,6 @@ def test_cheap_summary_picks_best_mean_case_speedup_without_distilling_records()
     assert out["lessons"] == ""
 
 
-def test_cheap_summary_survives_broken_archive():
-    class _Bad:
-        def load_index(self):
-            raise RuntimeError("boom")
-
-    out = integ._cheap_summary(_Bad())
-    assert out == {"category": "", "strategy": "", "recipe": "", "lessons": ""}
-
-
-# --------------------------------------------------------------------------- # kb_warmstart error path
-# --------------------------------------------------------------------------- #
 def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 

@@ -991,7 +991,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
 
 
 # --- eval-origin enablement routing (flag on) ------------------------------
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E402
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,

@@ -30,7 +30,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     CHECK_TRACE_HAS_OPS,
     _build_trace_validate,
 )
-from hyperloom.orchestrator.kernel.request_handlers import _analysis_steady_state
+from hyperloom.orchestrator.actions.executors.trace_analyze import _analysis_steady_state
 
 
 @pytest.fixture(autouse=True)

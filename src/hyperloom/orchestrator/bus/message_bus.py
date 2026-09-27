@@ -62,9 +62,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
 }
 
 
-_now_iso = now_iso
-
-
 @dataclass
 class Message:
     """One bus message persisted in the ``events`` table."""
@@ -75,7 +72,7 @@ class Message:
     topic: str
     payload: dict[str, Any]
     in_reply_to: str | None = None
-    ts: str = field(default_factory=_now_iso)
+    ts: str = field(default_factory=now_iso)
     seq: int | None = None  # DB-assigned on insert
 
     @classmethod
@@ -167,6 +164,22 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
+    def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> list[Message]:
+        """Read an uncapped recipient inbox, including all topics and self-sent events."""
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
+            (after_seq, to_agent),
+        )
+        return [Message.from_row(row) for row in rows]
+
+    def recent_outcomes_context_sync(self, *, limit: int) -> list[Message]:
+        """Read the latest outcomes, newest first."""
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
+            (limit,),
+        )
+        return [Message.from_row(row) for row in rows]
+
     async def replay_for(
         self,
         to_agent: str,
@@ -176,7 +189,8 @@ class MessageBus:
     ) -> list[Message]:
         """Inbox for one agent: subscribed topics only, never its own messages.
 
-        Raw-DB readers (``lookup_by_id``, ``tail``) bypass both rules.
+        Raw-DB readers (``lookup_by_id``, ``tail``, ``inbox_context_sync``,
+        ``recent_outcomes_context_sync``) bypass both rules.
         """
         subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
         if not subscribed:

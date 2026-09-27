@@ -545,18 +545,13 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
     assert cli._require_lane_provider_capabilities("claude", 2) is None
 
 
-def test_the_builtin_hookless_provider_runs_lanes_and_is_warned(capsys):
-    """Codex applies the session environment and runs none of our hooks.
-
-    It is the provider this distinction exists for: refusing it left the
-    rewrite pipeline's OPTIMIZE phase unreachable on Codex, because that phase
-    never passes ``--lanes`` and so inherits the default above 1.
-    """
+def test_the_builtin_codex_provider_runs_concurrent_lanes(capsys):
+    """Codex applies the session environment; hooks stay off the lane path."""
     assert cli._require_lane_provider_capabilities("codex", 2) is None
-
     warning = capsys.readouterr().out
     assert "codex" in warning
     assert "stop_hooks" in warning
+    assert "WARNING" in warning
 
 
 @pytest.mark.parametrize(

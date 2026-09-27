@@ -70,13 +70,10 @@ def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None
     except (TypeError, ValueError):
         return None
     commit = str(manifest.get("commit_hash") or "").strip()
-    try:
-        complete = publisher.describes_current_best(
-            iteration=iteration,
-            commit_hash=commit,
-        )
-    except Exception:
-        complete = False
+    complete = publisher.describes_current_best(
+        iteration=iteration,
+        commit_hash=commit,
+    )
     if (
         not commit
         or manifest.get("correctness_passed") is not True
@@ -246,7 +243,7 @@ def recover_task_result(
             patch_dir=patch_dir,
             best_commit=best_commit,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recovery must not mask the original failure
         log.warning(
             "could not publish result for %s: %s",
             task.operator_id,

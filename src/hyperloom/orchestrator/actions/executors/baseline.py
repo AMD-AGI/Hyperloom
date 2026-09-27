@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark."""
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
+
+``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one;
+``BaselineExecutor`` adds the baseline timeline event, the benchmark watchdog and the
+InferenceX eval patching.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -43,7 +48,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -64,7 +69,6 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # launch needs.
 from ._grid_runner import (
     SessionDirField,
-    _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
@@ -83,7 +87,6 @@ from ._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 from ._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES,
     materialized_run_eval_disabled,
 )
 from ._agentx_timeouts import (
@@ -106,6 +109,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
     ensure_eval_probe_patched,
+    ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
     failed_patch_anchors_in,
@@ -516,7 +520,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)
@@ -867,55 +871,40 @@ def _revert_patches(
     snapshot_manifest: Any = None,
 ) -> dict[str, Any]:
     """Restore exact patch-touched state without broad reset/clean."""
+    manifest, error = _validated_restore_manifest(repo_path, pre_sha, snapshot_manifest)
+    result = {"ok": False, "errors": [error]} if error else _restore_patch_snapshot(manifest)
+    if not result["ok"]:
+        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
+    return result
+
+
+def _validated_restore_manifest(
+    repo_path: str,
+    pre_sha: str,
+    snapshot_manifest: Any,
+) -> tuple[dict[str, Any], str]:
+    """Load the snapshot manifest and check it was taken of ``repo_path`` at ``pre_sha``.
+
+    Returns ``(manifest, "")`` when the restore may proceed, else ``({}, error)``.
+    """
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
-            result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"manifest_read:{exc}"
     if not isinstance(manifest, dict):
-        result = {"ok": False, "errors": ["missing_manifest"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest"
     manifest_repo_value = str(manifest.get("repo_path") or "").strip()
     if not manifest_repo_value:
-        result = {"ok": False, "errors": ["missing_manifest_repo"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest_repo"
     try:
         caller_repo = Path(repo_path).resolve(strict=True)
         manifest_repo = Path(manifest_repo_value).resolve(strict=True)
     except (OSError, ValueError) as exc:
-        result = {
-            "ok": False,
-            "errors": [f"repo_validation:{type(exc).__name__}:{exc}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_validation:{type(exc).__name__}:{exc}"
     if caller_repo != manifest_repo:
-        result = {
-            "ok": False,
-            "errors": [f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
     if pre_sha:
         try:
             head = subprocess.run(
@@ -937,29 +926,10 @@ def _revert_patches(
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
         ) as exc:
-            result = {
-                "ok": False,
-                "errors": [f"head_validation:{type(exc).__name__}:{exc}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"head_validation:{type(exc).__name__}:{exc}"
         if head != pre_sha:
-            result = {
-                "ok": False,
-                "errors": [f"head_mismatch:expected={pre_sha}:actual={head}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
-    result = _restore_patch_snapshot(manifest)
-    if not result["ok"]:
-        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
-    return result
+            return {}, f"head_mismatch:expected={pre_sha}:actual={head}"
+    return manifest, ""
 
 
 def _three_way_residue_snapshot(
@@ -1591,6 +1561,62 @@ def _revert_legacy_warm_patch_trees(
     )
 
 
+def restore_warm_kernel_snapshots(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Restore exact kernel target bytes captured before each mutation."""
+    errors: list[str] = []
+    for snapshot in reversed(snapshots):
+        target = Path(str(snapshot.get("target") or ""))
+        try:
+            if snapshot.get("existed"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(Path(str(snapshot.get("backup") or "")).read_bytes())
+                if snapshot.get("mode") is not None:
+                    target.chmod(int(snapshot["mode"]))
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            if snapshot.get("existed"):
+                expected = Path(str(snapshot.get("backup") or "")).read_bytes()
+                if not target.is_file() or target.read_bytes() != expected:
+                    raise OSError("kernel restore verification failed")
+            elif target.exists() or target.is_symlink():
+                raise OSError("kernel target still exists after restore")
+        except OSError as exc:
+            errors.append(f"{target}:{type(exc).__name__}:{exc}")
+    return {"ok": not errors, "errors": errors}
+
+
+def revert_warm_kernel_patches(
+    applied: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Rollback kernels exactly, reporting every failure."""
+    from ._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    errors: list[str] = []
+    for apply_result in reversed(applied):
+        if not apply_result.get("manifest_path"):
+            continue
+        try:
+            reverted = _maybe_revert_kernel_patch(apply_result)
+            if reverted.get("status") != "ok":
+                raise RuntimeError(
+                    str(
+                        reverted.get("error")
+                        or reverted.get("reason")
+                        or f"kernel revert status={reverted.get('status')}"
+                    )
+                )
+        except Exception as exc:
+            log.warning("warm-kernel KB: revert failed", exc_info=True)
+            errors.append(f"{type(exc).__name__}:{exc}")
+    if snapshots:
+        restored = restore_warm_kernel_snapshots(snapshots)
+        errors.extend(restored.get("errors") or [])
+    return {"ok": not errors, "errors": errors}
+
+
 def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
@@ -1598,18 +1624,43 @@ def _rollback_warm_kernel_apply_results(
     """Rollback kernel mutations and report whether every restore succeeded."""
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...phases.prelude import PreludePhase
 
-    return PreludePhase._revert_warm_kernel_patches(
+    return revert_warm_kernel_patches(
         [r for r in results if isinstance(r, dict)],
         list(snapshots) if isinstance(snapshots, list) else None,
     )
 
 
-class BaselineExecutor:
-    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
+_LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
 
-    benchmark_watchdog = True
+
+def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, tail)`` for each known log under *root*, over at most *limit* files."""
+    seen = 0
+    try:
+        for path in root.rglob("*.log"):
+            if path.name not in _LOG_NAMES:
+                continue
+            seen += 1
+            if seen > limit:
+                break
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(0, 2)
+                    size = handle.tell()
+                    handle.seek(max(0, size - max_bytes))
+                    tail = handle.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            yield path, tail
+    except OSError:
+        return
+
+
+class BenchmarkRunExecutor:
+    """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
+
+    benchmark_watchdog = False
     session_dir = SessionDirField()
 
     def __init__(
@@ -1622,7 +1673,7 @@ class BaselineExecutor:
         default_timeout_sec: int | None = None,
         cwd: Path | str | None = None,
     ):
-        """Initialize the baseline executor with launch defaults."""
+        """Initialize the executor with launch defaults."""
         # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
@@ -1635,8 +1686,8 @@ class BaselineExecutor:
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
-        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
-        return _default_baseline_config()
+        """Resolve the benchmark YAML the round runs when the task names none."""
+        raise NotImplementedError
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
         """Pick the per-task workspace dir."""
@@ -1659,15 +1710,8 @@ class BaselineExecutor:
 
     def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
         """Peek the one-shot eager fallback flag WITHOUT consuming it."""
-        try:
-            state = self._resolve_shared_state(shared_state)
-            return bool(getattr(state, "baseline_eager_fallback", False))
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
-            log.debug(
-                "baseline_executor: eager-fallback flag peek failed",
-                exc_info=True,
-            )
-            return False
+        state = self._resolve_shared_state(shared_state)
+        return bool(getattr(state, "baseline_eager_fallback", False))
 
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
@@ -1678,7 +1722,7 @@ class BaselineExecutor:
             state.baseline_eager_fallback = False
             state.save(self.session_dir)
             return True
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
+        except Exception:
             log.debug(
                 "baseline_executor: eager-fallback flag check failed",
                 exc_info=True,
@@ -1691,207 +1735,13 @@ class BaselineExecutor:
             return resolve_benchmark_timeouts()[1]
         return float(params.get("timeout_sec") or self.default_timeout_sec)
 
-    @staticmethod
-    def _client_script_from_config(config_path: Path) -> str | None:
-        """Name the client script this round will run, or ``None`` if unknown.
-
-        Magpie selects ``<framework>_<runner_type>.sh``. Naming it keeps the
-        tokenizer check to the script that matters: the multimodal variants carry
-        the same ``--result-dir`` marker with a different client call, and judging
-        them would let an unrelated shape veto a workload whose own script is fine.
-        """
-        try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            return None
-        bench = (cfg.get("benchmark") if isinstance(cfg, dict) else {}) or {}
-        override = str(bench.get("benchmark_script") or "").strip()
-        if override:
-            return override
-        framework = str(bench.get("framework") or "").strip().lower()
-        runner = str(bench.get("runner_type") or "").strip().lower()
-        if not framework or not runner:
-            return None
-        return f"{framework}_{runner}.sh"
-
-    @staticmethod
-    def _model_from_config(config_path: Path) -> str:
-        """Read the benchmark model path out of the materialized config."""
-        try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            return ""
-        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
-        return str((bench or {}).get("model") or "").strip()
-
-    @staticmethod
-    def _inferencex_root_from_config(config_path: Path) -> str:
-        """Resolve the InferenceX checkout the subprocess will ``cd`` into."""
-        try:
-            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
-            path = str((bench or {}).get("inferencex_path") or "").strip()
-        except (OSError, yaml.YAMLError):
-            path = ""
-        return path or os.environ.get("INFERENCEX_PATH", "").strip()
-
     def _after_materialize_config(
         self,
         config_path: Path,
         output_dir: Path,
     ) -> dict[str, Any] | None:
-        """Hook after YAML materialization, before launch."""
-        ix_root = self._inferencex_root_from_config(config_path)
-        if ix_root:
-            ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
-            ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
-        # client, which runs whether or not lm-eval does. Independent of the fail-soft
-        # eval-concurrency result: a missing tokenizer hook is
-        # fatal only for a model whose tokenizer has to be named, and for that model it is
-        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
-        # no throughput result, and the round is graded a boot failure with the server serving.
-        tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
-        if tok_mode:
-            try:
-                hook_ok = ensure_client_tokenizer_hook(
-                    inferencex_dir=ix_root or None,
-                    script_name=self._client_script_from_config(config_path),
-                )
-            except OSError as exc:
-                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-                hook_ok = False
-            if not hook_ok:
-                msg = (
-                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-                    f"the hook could not be installed in InferenceX's benchmark scripts "
-                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
-                    "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
-                    "would die before issuing a request and the round would be graded a boot "
-                    "failure with the server up."
-                )
-                log.error("baseline_executor: %s", msg)
-                return {
-                    "status": "failed",
-                    "error_class": "client_tokenizer_unpatchable",
-                    "error": msg,
-                }
-        if not materialized_run_eval_disabled(config_path):
-            # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
-            # rather than failing every eval run.
-            probe_root = Path(ix_root) if ix_root else None
-            if not ensure_eval_probe_patched(probe_root):
-                msg = (
-                    "the generation-pathology probe is not installed "
-                    "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
-                    f"{ix_root or '<unset>'}, INFERENCEX_PATH="
-                    f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
-                    "A model that never emits EOS will run the accuracy eval to "
-                    "the full max_tokens budget on every sample and consume the "
-                    "entire baseline timeout."
-                )
-                if eval_probe_targets_exist(probe_root):
-                    log.error("baseline_executor: %s", msg)
-                    return {
-                        "status": "failed",
-                        "error_class": "eval_probe_unpatchable",
-                        "error": msg,
-                    }
-                log.warning("baseline_executor: %s", msg)
-            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot be removed AND this run is meant
-            # to execute lm-eval: the benchmark is guaranteed to abort in run_lm_eval, and the accuracy gate then
-            # stops the whole session.
-            try:
-                compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
-            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
-                log.error(
-                    "baseline_executor: eval-concurrency compat patch raised for %s: %s",
-                    ix_root,
-                    exc,
-                )
-                compat_ok = False
-            if not compat_ok:
-                msg = (
-                    "accuracy eval cannot run: the redundant "
-                    "'--concurrent-requests' flag could not be removed from the "
-                    "Magpie benchmark scripts (MAGPIE_PATH="
-                    f"{os.environ.get('MAGPIE_PATH', '') or '<unset>'}) and/or "
-                    "InferenceX's run_lm_eval arg parser could not be made to "
-                    f"tolerate it (inferencex={ix_root or '<unset>'}). "
-                    "InferenceX resolves eval concurrency from "
-                    "EVAL_CONCURRENT_REQUESTS (fallback CONC); the flag is "
-                    "rejected as 'Unknown parameter: --concurrent-requests' and "
-                    "aborts the benchmark before any results*.json is written. "
-                    "Fix the run_eval line (or re-run install.sh against the "
-                    "Magpie tree that is actually imported at run time) — do "
-                    "NOT work around this with RUN_EVAL=false."
-                )
-                log.error("baseline_executor: %s", msg)
-                return {
-                    "status": "failed",
-                    "error_class": "eval_concurrency_flag_unpatchable",
-                    "error": msg,
-                }
-            anchor_result = self._eval_patch_anchors_result(ix_root)
-            if anchor_result is not None:
-                return anchor_result
+        """Hook after YAML materialization, before launch; a returned dict aborts the round with it."""
         return None
-
-    # Scoped to the line-replacement patches this hook applies.
-    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
-    # Of those, the one whose silent absence corrupts the accuracy gate rather than degrading it: without
-    # ``eval_dest`` the results file lands in the cwd and no score is ever parsed.
-    _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
-
-    def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
-        """Fail the launch when an eval-critical patch can no longer be applied.
-
-        The ``ensure_*`` calls above report a miss as ``False`` and no caller
-        reads it, so an upstream edit that moves an anchor takes the patch
-        offline silently -- the run still looks healthy and only the symptom (no
-        score) shows up much later. This is the same failure mode that took the
-        probe offline before it was re-homed to a real file. Checked only when
-        this run executes lm-eval; anchors that merely degrade something are
-        logged, not fatal.
-
-        Scoped to the checkout Magpie will benchmark. Env-wide discovery also
-        reaches the InferenceX bundled with the installed Magpie, which a run
-        that pins ``benchmark.inferencex_path`` never executes — judging it
-        aborts every eval run on rot in a tree nothing here reads.
-
-        Args:
-            ix_root: The resolved InferenceX root for this run, if any.
-
-        Returns:
-            An early-return failure dict, or ``None`` to proceed.
-        """
-        rotted = failed_patch_anchors_in(ix_root) if ix_root else failed_patch_anchors(None)
-        broken = [s for s in rotted if s.name in self._EVAL_HOOK_ANCHORS]
-        if not broken:
-            return None
-        for status in broken:
-            log.error("baseline_executor: InferenceX patch anchor broken — %s", status.describe())
-        fatal = [s for s in broken if s.name in self._EVAL_CRITICAL_ANCHORS]
-        if not fatal:
-            return None
-        msg = (
-            "accuracy eval cannot run: Hyperloom redirects lm-eval's results file "
-            "by matching exact upstream text, and that text is no longer there "
-            f"(inferencex={ix_root or '<unset>'}). Broken: "
-            + "; ".join(s.describe() for s in fatal)
-            + ". Re-anchor the patch in _inferencex_patcher.py against the "
-            "checkout in use, or pin INFERENCEX_REF back to a revision it "
-            "matches. Continuing would leave every results*.json in the "
-            "benchmark's cwd, where the accuracy parser never looks, so the gate "
-            "would see no score at all — do NOT work around this with "
-            "RUN_EVAL=false."
-        )
-        log.error("baseline_executor: %s", msg)
-        return {
-            "status": "failed",
-            "error_class": "inferencex_patch_anchor_broken",
-            "error": msg,
-        }
 
     @staticmethod
     def _failure_carries_markers(
@@ -1921,28 +1771,7 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if _hit(chunk):
-                    return True
-        except OSError:
-            return False
-        return False
+        return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
     def _record_baseline_convergence(
@@ -1972,7 +1801,7 @@ class BaselineExecutor:
                         measured,
                     )
             result["baseline_convergence"] = record
-        except Exception:  # noqa: BLE001 - observability must never break a baseline
+        except Exception:
             log.debug("baseline convergence record failed", exc_info=True)
 
     @staticmethod
@@ -2003,34 +1832,16 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False, ""
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                w = _window(chunk)
-                if w is not None:
-                    return True, f"{path.name}: {w}"
-        except OSError:
-            return False, ""
+        for path, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES):
+            window = _window(tail)
+            if window is not None:
+                return True, f"{path.name}: {window}"
         return False, ""
 
     @staticmethod
     def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline result was caused by the accuracy eval."""
-        return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
+        return BenchmarkRunExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
     def _is_server_unreachable_eval_failure(result: dict[str, Any]) -> bool:
@@ -2056,141 +1867,37 @@ class BaselineExecutor:
         root = Path(out_dir)
         if not root.is_dir():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
-                    return True
-        except OSError:
-            return False
-        return False
+        return any(
+            marker in tail
+            for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES)
+            for marker in _EVAL_SERVER_UNREACHABLE_MARKERS
+        )
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline died on the MoE runner backend in use."""
-        return BaselineExecutor._failure_carries_markers(
+        return BenchmarkRunExecutor._failure_carries_markers(
             result,
             _MOE_RUNNER_MISSING_MARKERS,
             _MOE_SCHEME_CONTEXT_MARKERS,
         )
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        """Run the Magpie baseline, recording it as a timeline event."""
+        """Run the action inside the session the context names."""
         from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
 
         # Only a context that names its session binds one.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
-            return await self._run_recorded(ctx)
+            return await self._run(ctx)
 
-    async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
-        """Open the baseline event, run the action, and close it either way."""
-        params = ctx.task.params or {}
-        streak, total = self._failure_counters(ctx)
-        recorder = make_baseline_recorder(
-            self._resolve_sink(ctx),
-            task_id=str(getattr(ctx.task, "task_id", "") or ""),
-            task_kind=str(getattr(ctx.task, "kind", "") or ""),
-            reason=str(params.get("reason") or ""),
-            framework=self._resolve_framework(ctx),
-            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-            params=params,
-            failure_streak_before=streak,
-            total_failures_before=total,
-            owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
-        )
-        try:
-            result = await self._run_retrying(ctx, recorder=recorder)
-        except BaseException as exc:
-            if recorder is not None:
-                recorder.finish_crashed(exc)
-            raise
-        if recorder is not None:
-            recorder.finish(result)
-        return result
-
-    def _resolve_sink(self, ctx: RunnerContext) -> Any:
-        """Decide which event this measurement's rows belong to."""
-        from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
-        from hyperloom.inference_optimizer.session.session_binding import session_is_bound
-
-        params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "baseline timeline: no session bound; this measurement's whole event will "
-                    "be missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            inline = str(params.get(INLINE_EVENT_PARAM) or "")
-            if inline:
-                return make_sink(inline, producer=_RECORDER_PRODUCER)
-            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
-            event = baseline_event_id(
-                str(getattr(state, "phase", "") or "unphased"),
-                int(getattr(state, "macro_cycle", 0) or 0),
-            )
-            return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
-            log.warning(
-                "baseline timeline: could not resolve an event to record into; this "
-                "measurement's whole event will be missing from the breakdown",
-                exc_info=True,
-            )
-            return None
-
-    def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
-        """The session's baseline failure counts as this measurement starts.
-
-        Read here, at the dispatch, because the counters are advanced by the
-        write-back once this action has returned -- so the event cannot see its
-        own effect on them, and the value it can see is the one that says what
-        this attempt was dispatched into.
-
-        Args:
-            ctx (RunnerContext): The runner context.
-
-        Returns:
-            tuple[int | None, int | None]: The consecutive-failure streak and
-                the session total, or ``(None, None)`` when no state is bound.
-        """
-        with suppress(Exception):
-            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
-            return (
-                int(getattr(state, "baseline_failure_streak", 0) or 0),
-                int(getattr(state, "baseline_total_failures", 0) or 0),
-            )
-        return (None, None)
-
-    def _resolve_framework(self, ctx: RunnerContext) -> str:
-        """Name the serving framework this measurement runs against."""
-        params = ctx.task.params or {}
-        with suppress(Exception):
-            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
-            return str(
-                params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
-            ).strip()
-        return str(params.get("framework") or os.environ.get("FRAMEWORK", "")).strip()
+    async def _run(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the action inside the bound session."""
+        return await self._run_retrying(ctx)
 
     async def _run_pass(
         self,
@@ -2221,9 +1928,7 @@ class BaselineExecutor:
         params = ctx.task.params or {}
         # A failed required patch timeline means the donor is incompatible with the current tree.
         _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = (
-            "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        )
+        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
@@ -2583,10 +2288,7 @@ class BaselineExecutor:
             result.setdefault("nonfatal_warnings", [])
             result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
-            try:
-                shared_state.baseline_accuracy = acc_val
-            except Exception:  # noqa: BLE001 — salvage must never break baseline
-                log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            shared_state.baseline_accuracy = acc_val
         return acc_val
 
     def _salvage_sibling_baseline_accuracy(
@@ -2605,7 +2307,7 @@ class BaselineExecutor:
             from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
-        except Exception:  # noqa: BLE001 — salvage must never break the stop path
+        except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
         if _finite_score(eval_data.get("accuracy")) is None:
@@ -2751,7 +2453,7 @@ class BaselineExecutor:
                 _cfg_envs = _cfg_bench.setdefault("envs", {})
                 apply_runtime_override(_cfg_envs, _rt_from_params)
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+            except Exception:
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
@@ -2759,16 +2461,15 @@ class BaselineExecutor:
         # their say by here, and after the launch the same answer can only be
         # guessed at by parsing the server's own log back.
         if recorder is not None:
-            with suppress(Exception):
-                recorder.record_invocation(
-                    run_index=run_index,
-                    framework_args=effective_extra_server_args,
-                    extra_envs=base_extra_envs,
-                    config_path=materialized_config_path,
-                    framework=fw,
-                    model_path=resolved_model,
-                    args_mode=str(params.get("args_mode") or "append"),
-                )
+            recorder.record_invocation(
+                run_index=run_index,
+                framework_args=effective_extra_server_args,
+                extra_envs=base_extra_envs,
+                config_path=materialized_config_path,
+                framework=fw,
+                model_path=resolved_model,
+                args_mode=str(params.get("args_mode") or "append"),
+            )
         # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
         # capability-preflight aiperf before Magpie runs the materialized config.
         # Baseline/profile shell out here (not via _run_magpie), so without this the
@@ -2805,7 +2506,7 @@ class BaselineExecutor:
 
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
-        lifecycle = self._resolve_lifecycle_params(materialized_config_path)
+        lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
             ctx_extra=extra,
@@ -2885,7 +2586,7 @@ class BaselineExecutor:
             live_shared_state.warm_replay_pending = pending
             try:
                 live_shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "combined warm replay recipe snapshot persist failed",
                     exc_info=True,
@@ -2955,7 +2656,7 @@ class BaselineExecutor:
                             live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.warning(
                             "combined warm replay cleanup persist failed",
                             exc_info=True,
@@ -2987,7 +2688,7 @@ class BaselineExecutor:
                 live_shared_state.warm_replay_pending = pending
                 try:
                     live_shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.debug(
                         "combined warm replay pending persist failed",
                         exc_info=True,
@@ -3320,7 +3021,7 @@ class BaselineExecutor:
             return result
         finally:
             # Defensive teardown so no persistent server leaks.
-            self._teardown_lifecycle_server(
+            _lifecycle.teardown_lifecycle_server(
                 pid_dir=pid_dir,
                 framework=framework,
                 port=port,
@@ -3423,19 +3124,12 @@ class BaselineExecutor:
             session_dir = Path(str(extra.get("session_dir") or self.session_dir))
             state = SharedState.load_or_init(session_dir)
             return bool(getattr(state, "baseline_double_run", False))
-        except Exception:  # noqa: BLE001 - keep baseline fallback double-run.
+        except Exception:
             log.debug(
                 "baseline_executor: could not resolve baseline_double_run from session state",
                 exc_info=True,
             )
             return True
-
-    def _resolve_lifecycle_params(
-        self,
-        materialized_config_path: Path,
-    ) -> dict[str, Any]:
-        """Inspect the materialized YAML for server_lifecycle eligibility."""
-        return _lifecycle.resolve_lifecycle_params(materialized_config_path)
 
     def _write_lifecycle_config(
         self,
@@ -3472,7 +3166,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round."""
+        """Remove the pid/json files a previous round left for this framework and port."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -3481,29 +3175,6 @@ class BaselineExecutor:
                     p.unlink()
             except OSError:
                 pass
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
-        try:
-            await asyncio.to_thread(_kill_stale_servers)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
-                exc,
-            )
-
-    def _teardown_lifecycle_server(
-        self,
-        *,
-        pid_dir: Path,
-        framework: str,
-        port: int,
-    ) -> None:
-        """Best-effort teardown of a persistent server left by the double-run rounds."""
-        _lifecycle.teardown_lifecycle_server(
-            pid_dir=pid_dir,
-            framework=framework,
-            port=port,
-        )
 
     async def _run_reported_round(
         self,
@@ -3771,7 +3442,7 @@ class BaselineExecutor:
         # depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
         # Pin Magpie's InferenceX resolution to the same per-task checkout rendered into benchmark.inferencex_path and
-        # patched by ProfileExecutor.
+        # patched by the ``_after_materialize_config`` hook.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts that ignore it are caught by the
@@ -4349,6 +4020,301 @@ class BaselineExecutor:
         return result
 
 
+class BaselineExecutor(BenchmarkRunExecutor):
+    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
+
+    benchmark_watchdog = True
+
+    def _resolve_default_config(self) -> Path:
+        """Resolve the benchmark YAML the round runs when the task names none."""
+        return _default_baseline_config()
+
+    @staticmethod
+    def _client_script_from_config(config_path: Path) -> str | None:
+        """Name the client script this round will run, or ``None`` if unknown.
+
+        Magpie selects ``<framework>_<runner_type>.sh``. Naming it keeps the
+        tokenizer check to the script that matters: the multimodal variants carry
+        the same ``--result-dir`` marker with a different client call, and judging
+        them would let an unrelated shape veto a workload whose own script is fine.
+        """
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return None
+        bench = (cfg.get("benchmark") if isinstance(cfg, dict) else {}) or {}
+        override = str(bench.get("benchmark_script") or "").strip()
+        if override:
+            return override
+        framework = str(bench.get("framework") or "").strip().lower()
+        runner = str(bench.get("runner_type") or "").strip().lower()
+        if not framework or not runner:
+            return None
+        return f"{framework}_{runner}.sh"
+
+    @staticmethod
+    def _model_from_config(config_path: Path) -> str:
+        """Read the benchmark model path out of the materialized config."""
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return ""
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        return str((bench or {}).get("model") or "").strip()
+
+    @staticmethod
+    def _inferencex_root_from_config(config_path: Path) -> str:
+        """Resolve the InferenceX checkout the subprocess will ``cd`` into."""
+        try:
+            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+            path = str((bench or {}).get("inferencex_path") or "").strip()
+        except (OSError, yaml.YAMLError):
+            path = ""
+        return path or os.environ.get("INFERENCEX_PATH", "").strip()
+
+    def _after_materialize_config(
+        self,
+        config_path: Path,
+        output_dir: Path,
+    ) -> dict[str, Any] | None:
+        """Hook after YAML materialization, before launch."""
+        ix_root = self._inferencex_root_from_config(config_path)
+        if ix_root:
+            ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
+            ensure_benchmark_lib_eval_start_patched(Path(ix_root))
+        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
+        # client, which runs whether or not lm-eval does. Independent of the fail-soft
+        # eval-concurrency result: a missing tokenizer hook is
+        # fatal only for a model whose tokenizer has to be named, and for that model it is
+        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
+        # no throughput result, and the round is graded a boot failure with the server serving.
+        tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
+        if tok_mode:
+            try:
+                hook_ok = ensure_client_tokenizer_hook(
+                    inferencex_dir=ix_root or None,
+                    script_name=self._client_script_from_config(config_path),
+                )
+            except OSError as exc:
+                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
+                hook_ok = False
+            if not hook_ok:
+                msg = (
+                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
+                    f"the hook could not be installed in InferenceX's benchmark scripts "
+                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+                    "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
+                    "would die before issuing a request and the round would be graded a boot "
+                    "failure with the server up."
+                )
+                log.error("baseline_executor: %s", msg)
+                return {
+                    "status": "failed",
+                    "error_class": "client_tokenizer_unpatchable",
+                    "error": msg,
+                }
+        if not materialized_run_eval_disabled(config_path):
+            # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
+            # rather than failing every eval run.
+            probe_root = Path(ix_root) if ix_root else None
+            # Best-effort, unlike the probe below: without it a refused connection ends the round on
+            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+            # was already going to fail -- not a reason to refuse to start one.
+            ensure_eval_unbound_outputs_patched(probe_root)
+            if not ensure_eval_probe_patched(probe_root):
+                msg = (
+                    "the generation-pathology probe is not installed "
+                    "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
+                    f"{ix_root or '<unset>'}, INFERENCEX_PATH="
+                    f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
+                    "A model that never emits EOS will run the accuracy eval to "
+                    "the full max_tokens budget on every sample and consume the "
+                    "entire baseline timeout."
+                )
+                if eval_probe_targets_exist(probe_root):
+                    log.error("baseline_executor: %s", msg)
+                    return {
+                        "status": "failed",
+                        "error_class": "eval_probe_unpatchable",
+                        "error": msg,
+                    }
+                log.warning("baseline_executor: %s", msg)
+            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot be removed AND this run is meant
+            # to execute lm-eval: the benchmark is guaranteed to abort in run_lm_eval, and the accuracy gate then
+            # stops the whole session.
+            try:
+                compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
+            except OSError as exc:
+                log.error("baseline_executor: eval-concurrency compat patch failed for %s: %s", ix_root, exc)
+                compat_ok = False
+            if not compat_ok:
+                msg = (
+                    "accuracy eval cannot run: the redundant "
+                    "'--concurrent-requests' flag could not be removed from the "
+                    "Magpie benchmark scripts (MAGPIE_PATH="
+                    f"{os.environ.get('MAGPIE_PATH', '') or '<unset>'}) and/or "
+                    "InferenceX's run_lm_eval arg parser could not be made to "
+                    f"tolerate it (inferencex={ix_root or '<unset>'}). "
+                    "InferenceX resolves eval concurrency from "
+                    "EVAL_CONCURRENT_REQUESTS (fallback CONC); the flag is "
+                    "rejected as 'Unknown parameter: --concurrent-requests' and "
+                    "aborts the benchmark before any results*.json is written. "
+                    "Fix the run_eval line (or re-run install.sh against the "
+                    "Magpie tree that is actually imported at run time) — do "
+                    "NOT work around this with RUN_EVAL=false."
+                )
+                log.error("baseline_executor: %s", msg)
+                return {
+                    "status": "failed",
+                    "error_class": "eval_concurrency_flag_unpatchable",
+                    "error": msg,
+                }
+            anchor_result = self._eval_patch_anchors_result(ix_root)
+            if anchor_result is not None:
+                return anchor_result
+        return None
+
+    # Scoped to the line-replacement patches this hook applies.
+    _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
+    # Of those, the one whose silent absence corrupts the accuracy gate rather than degrading it: without
+    # ``eval_dest`` the results file lands in the cwd and no score is ever parsed.
+    _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
+
+    def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
+        """Fail the launch when an eval-critical patch can no longer be applied.
+
+        The ``ensure_*`` calls above report a miss as ``False`` and no caller
+        reads it, so an upstream edit that moves an anchor takes the patch
+        offline silently -- the run still looks healthy and only the symptom (no
+        score) shows up much later. This is the same failure mode that took the
+        probe offline before it was re-homed to a real file. Checked only when
+        this run executes lm-eval; anchors that merely degrade something are
+        logged, not fatal.
+
+        Scoped to the checkout Magpie will benchmark. Env-wide discovery also
+        reaches the InferenceX bundled with the installed Magpie, which a run
+        that pins ``benchmark.inferencex_path`` never executes — judging it
+        aborts every eval run on rot in a tree nothing here reads.
+
+        Args:
+            ix_root: The resolved InferenceX root for this run, if any.
+
+        Returns:
+            An early-return failure dict, or ``None`` to proceed.
+        """
+        rotted = failed_patch_anchors_in(ix_root) if ix_root else failed_patch_anchors(None)
+        broken = [s for s in rotted if s.name in self._EVAL_HOOK_ANCHORS]
+        if not broken:
+            return None
+        for status in broken:
+            log.error("baseline_executor: InferenceX patch anchor broken — %s", status.describe())
+        fatal = [s for s in broken if s.name in self._EVAL_CRITICAL_ANCHORS]
+        if not fatal:
+            return None
+        msg = (
+            "accuracy eval cannot run: Hyperloom redirects lm-eval's results file "
+            "by matching exact upstream text, and that text is no longer there "
+            f"(inferencex={ix_root or '<unset>'}). Broken: "
+            + "; ".join(s.describe() for s in fatal)
+            + ". Re-anchor the patch in _inferencex_patcher.py against the "
+            "checkout in use, or pin INFERENCEX_REF back to a revision it "
+            "matches. Continuing would leave every results*.json in the "
+            "benchmark's cwd, where the accuracy parser never looks, so the gate "
+            "would see no score at all — do NOT work around this with "
+            "RUN_EVAL=false."
+        )
+        log.error("baseline_executor: %s", msg)
+        return {
+            "status": "failed",
+            "error_class": "inferencex_patch_anchor_broken",
+            "error": msg,
+        }
+
+    async def _run(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Open the baseline event, run the action, and close it either way."""
+        params = ctx.task.params or {}
+        streak, total = self._failure_counters(ctx)
+        recorder = make_baseline_recorder(
+            self._resolve_sink(ctx),
+            task_id=str(getattr(ctx.task, "task_id", "") or ""),
+            task_kind=str(getattr(ctx.task, "kind", "") or ""),
+            reason=str(params.get("reason") or ""),
+            framework=self._resolve_framework(ctx),
+            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+            params=params,
+            failure_streak_before=streak,
+            total_failures_before=total,
+            owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
+        )
+        try:
+            result = await self._run_retrying(ctx, recorder=recorder)
+        except BaseException as exc:
+            if recorder is not None:
+                recorder.finish_crashed(exc)
+            raise
+        if recorder is not None:
+            recorder.finish(result)
+        return result
+
+    def _resolve_sink(self, ctx: RunnerContext) -> Any:
+        """Decide which event this measurement's rows belong to."""
+        from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.session.session_binding import session_is_bound
+
+        params = ctx.task.params or {}
+        if not session_is_bound():
+            log.warning(
+                "baseline timeline: no session bound; this measurement's whole event will "
+                "be missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
+            )
+            return None
+        inline = str(params.get(INLINE_EVENT_PARAM) or "")
+        if inline:
+            return make_sink(inline, producer=_RECORDER_PRODUCER)
+        state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+        event = baseline_event_id(
+            str(getattr(state, "phase", "") or "unphased"),
+            int(getattr(state, "macro_cycle", 0) or 0),
+        )
+        return make_sink(event, producer=_RECORDER_PRODUCER)
+
+    def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
+        """The session's baseline failure counts as this measurement starts.
+
+        Read here, at the dispatch, because the counters are advanced by the
+        write-back once this action has returned -- so the event cannot see its
+        own effect on them, and the value it can see is the one that says what
+        this attempt was dispatched into.
+
+        Args:
+            ctx (RunnerContext): The runner context.
+
+        Returns:
+            tuple[int | None, int | None]: The consecutive-failure streak and
+                the session total, or ``(None, None)`` when no state is bound.
+        """
+        with suppress(AttributeError, TypeError, ValueError):
+            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+            return (
+                int(getattr(state, "baseline_failure_streak", 0) or 0),
+                int(getattr(state, "baseline_total_failures", 0) or 0),
+            )
+        return (None, None)
+
+    def _resolve_framework(self, ctx: RunnerContext) -> str:
+        """Name the serving framework this measurement runs against."""
+        params = ctx.task.params or {}
+        with suppress(AttributeError, TypeError, ValueError):
+            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+            return str(
+                params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
+            ).strip()
+        return str(params.get("framework") or os.environ.get("FRAMEWORK", "")).strip()
+
+
 baseline_executor = BaselineExecutor()
 
 
@@ -4360,6 +4326,7 @@ __all__ = [
     "agentx_warmup_grace_conc",
     "agentx_warmup_grace_sec",
     "BaselineExecutor",
+    "BenchmarkRunExecutor",
     "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

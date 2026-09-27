@@ -54,11 +54,11 @@ _FAKE_PR_PATCHES = [
 class _FakeHandler(BaseHTTPRequestHandler):
     """Minimal handler routing the five endpoints framework-agent uses."""
 
-    def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
+    def log_message(self, format: str, *args) -> None:
         """Silence the default access log so pytest output stays clean."""
         return
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib signature
+    def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         if path == "/v1/healthz":
             self._send_json({"status": "ok"})

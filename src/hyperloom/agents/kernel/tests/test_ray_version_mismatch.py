@@ -18,7 +18,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
     if d not in sys.path:
         sys.path.insert(0, d)
 
-import ray_runtime  # noqa: E402
+import ray_runtime
 
 
 _VERSION_MISMATCH_MSG = (

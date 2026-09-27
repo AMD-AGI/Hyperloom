@@ -20,7 +20,7 @@ from hyperloom.common.jsonio import read_json
 
 # Re-exported: callers have always named the section tuples through the
 # assembler, and they now live in a leaf module the event writers can share.
-from .sections import (  # noqa: F401
+from .sections import (
     BASELINE_EVENT_SECTIONS,
     CONC_SWEEP_EVENT_SECTIONS,
     ENABLEMENT_EVENT_SECTIONS,

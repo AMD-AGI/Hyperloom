@@ -44,7 +44,7 @@ def collect_langfuse(
         ``receipt_source`` of ``receipt_file`` / ``live_emitter`` /
         ``config_only`` depending on which tier resolved.
     """
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     # Tier 1: the persisted post-flush receipt (final counts).
     try:
@@ -66,7 +66,7 @@ def collect_langfuse(
 
     # Tier 3 fallback: config-only view straight from env + manifest, so the
     # breakdown still records whether the feature was configured at all.
-    from hyperloom.orchestrator.trace import trace_env as tenv
+    from hyperloom.inference_optimizer.trace import trace_env as tenv
 
     creds = tenv.langfuse_credentials()
     return {

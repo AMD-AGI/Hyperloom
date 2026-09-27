@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
+from itertools import chain
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 # Matches a ```json or ``` fenced block, capturing its content as group 1.
 _FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
@@ -139,6 +141,19 @@ def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str,
     return read_json(path, default=fallback, require_dict=True)
 
 
+def _qualifying(chunks: Iterable[str], required_key: str | None) -> Iterator[dict[str, Any]]:
+    """Every JSON object in ``chunks``, in order, that carries ``required_key``."""
+    for chunk in chunks:
+        for data in _iter_json_objects(chunk):
+            if required_key is None or required_key in data:
+                yield data
+
+
+def _last(objects: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
+    tail = deque(objects, maxlen=1)
+    return tail[0] if tail else None
+
+
 def extract_first_json_with_key(
     text: str,
     required_key: str | None = None,
@@ -149,25 +164,10 @@ def extract_first_json_with_key(
     """Pull a JSON object out of a model reply."""
     if not text:
         return None
-
-    def _qualifies(data: Any) -> bool:
-        return isinstance(data, dict) and (required_key is None or required_key in data)
-
-    found: dict[str, Any] | None = None
-    for m in _FENCED_BLOCK_RE.finditer(text):
-        for data in _iter_json_objects(m.group(1)):
-            if _qualifies(data):
-                if not last:
-                    return data
-                found = data
-    if bare_re is not None:
-        for m in bare_re.finditer(text):
-            for data in _iter_json_objects(m.group(1)):
-                if _qualifies(data):
-                    if not last:
-                        return data
-                    found = data
-    return found
+    fenced = (m.group(1) for m in _FENCED_BLOCK_RE.finditer(text))
+    bare = (m.group(1) for m in bare_re.finditer(text)) if bare_re is not None else ()
+    candidates = _qualifying(chain(fenced, bare), required_key)
+    return _last(candidates) if last else next(candidates, None)
 
 
 def extract_last_json_with_key(
@@ -177,19 +177,8 @@ def extract_last_json_with_key(
     """Return the last JSON object in *text* (by start offset) that qualifies."""
     if not text:
         return None
-
-    def _qualifies(data: Any) -> bool:
-        return isinstance(data, dict) and (required_key is None or required_key in data)
-
-    found: dict[str, Any] | None = None
-    for m in _FENCED_BLOCK_RE.finditer(text):
-        for data in _iter_json_objects(m.group(1)):
-            if _qualifies(data):
-                found = data
-    for data in _iter_json_objects(text):
-        if _qualifies(data):
-            found = data
-    return found
+    fenced = (m.group(1) for m in _FENCED_BLOCK_RE.finditer(text))
+    return _last(_qualifying(chain(fenced, (text,)), required_key))
 
 
 def iter_sse_objects(raw: str) -> Iterator[Any]:

@@ -11,10 +11,11 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import strip_path_components
 from pathlib import Path
 from typing import Any
 
-from ...delivery.ledger import append_record, merge_records
+from ...delivery.ledger import append_record, mark_prepared, merge_records
 from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
@@ -58,14 +59,6 @@ def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
     if not dropped:
         return patch_text, 0
     return "".join(kept), dropped
-
-
-def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
-    if level <= 0:
-        return path
-    parts = path.split("/")
-    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
 
 
 def _is_within(child: Path, root: Path) -> bool:
@@ -232,6 +225,14 @@ def _apply_patch_no_git(
         # (the patch that really made those edits owns the backups needed for a
         # correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
+            if not mark_prepared(backup_root):
+                err_msg = "backup prepare record could not be persisted"
+                return (
+                    False,
+                    err_msg,
+                    [],
+                    ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=err_msg),
+                )
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
@@ -239,10 +240,7 @@ def _apply_patch_no_git(
             return True, "", [], None
         combined_stderr = "\n".join(dry_run_stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            source_ctx = ""
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -273,7 +271,7 @@ def _apply_patch_no_git(
 
     def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
         """Resolve a raw diff-header path to (rel, abs, error)."""
-        rel = Path(_strip_path_prefix(raw, detected_level))  # type: ignore[arg-type]
+        rel = Path(strip_path_components(raw, detected_level))  # type: ignore[arg-type]
         if rel.is_absolute() or ".." in rel.parts:
             return None, None, f"patch target escapes framework root: {raw}"
         abs_path = (framework_root_resolved / rel).resolve()
@@ -431,6 +429,9 @@ def _apply_patch_no_git(
             if err:
                 return _fail(err, backups)
 
+    if not mark_prepared(backup_root):
+        return _fail("backup prepare record could not be persisted", backups)
+
     # Apply for real.
     rej_dir = backup_root / "rej"
     rej_dir.mkdir(parents=True, exist_ok=True)
@@ -457,11 +458,7 @@ def _apply_patch_no_git(
         # Collect any .rej files left next to the target files.
         rejected_hunks = _collect_rej_files(framework_root, patch_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
-        source_ctx = ""
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            pass
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -491,7 +488,7 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
             except OSError:
                 # Best-effort scan: skip unreadable/racing .rej files.
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
     return "\n\n".join(parts)
 
@@ -559,5 +556,4 @@ __all__ = [
     "_is_within",
     "_revert_patches_no_git",
     "_sanitize_git_index_lines",
-    "_strip_path_prefix",
 ]

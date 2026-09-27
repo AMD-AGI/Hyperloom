@@ -777,16 +777,6 @@ def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
     assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
-def test_agentx_kb_blocked_matches_agentx_active(monkeypatch):
-    # agentx_kb_blocked delegates to agentx_active; both signals still work.
-    _clear_env(monkeypatch)
-    assert we.agentx_kb_blocked() is False
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert we.agentx_kb_blocked() is True
-    _clear_env(monkeypatch)
-    assert we.agentx_kb_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
-
-
 # Scriptable baseline sampling cost (measurement contract values)
 
 

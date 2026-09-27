@@ -254,31 +254,54 @@ def derive_implementation_symbols(
             and not _ITANIUM_MANGLED_RE.match(value)
         }
 
+    sources = _declared_source_texts(
+        kernel_path=kernel_path,
+        source_files=source_files,
+        workspace=workspace,
+        source_contents=source_contents,
+    )
     source_symbols: set[str] = set()
     try:
         from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 
-        seen_paths: set[str] = set()
-        for raw in [kernel_path, *(source_files or [])]:
-            if not raw or str(raw) in seen_paths:
-                continue
-            seen_paths.add(str(raw))
-            try:
-                source = None
-                if source_contents is not None:
-                    source = source_contents.get(str(raw))
-                if source is None:
-                    path = Path(raw)
-                    if not path.is_absolute() and workspace:
-                        path = Path(workspace) / path
-                    source = path.read_text(errors="replace")
-            except OSError:
-                continue
+        for source in sources:
             source_symbols.update(stable(derive_kernel_names(source)))
-    except Exception:
-        # Identity extraction is best-effort; callers safely fall back to path identity.
+    except OSError:
+        # Reading the sources is strict above; naming symbols inside them is best-effort, and a source that names
+        # none leaves the path identity to tell the implementations apart.
         pass
     return sorted(source_symbols)
+
+
+def _declared_source_texts(
+    *,
+    kernel_path: str,
+    source_files: Iterable[str] | None,
+    workspace: str,
+    source_contents: dict[str, str] | None,
+) -> list[str]:
+    """Read every declared implementation source, in declaration order.
+
+    A path that is not a file is one the declaration outruns and it contributes nothing. A file that is present but
+    unreadable is not the same thing: dropping it would hash a subset of the sources the signature claims to cover,
+    giving two different implementations one address, so it raises instead.
+    """
+    texts: list[str] = []
+    seen_paths: set[str] = set()
+    for raw in [kernel_path, *(source_files or [])]:
+        if not raw or str(raw) in seen_paths:
+            continue
+        seen_paths.add(str(raw))
+        source = source_contents.get(str(raw)) if source_contents is not None else None
+        if source is None:
+            path = Path(raw)
+            if not path.is_absolute() and workspace:
+                path = Path(workspace) / path
+            if not path.is_file():
+                continue
+            source = path.read_text(errors="replace")
+        texts.append(source)
+    return texts
 
 
 def implementation_signature(

@@ -22,7 +22,7 @@ from pathlib import Path
 # package import to succeed, the same way ``profile.py`` arranges it before certifying.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from hyperloom.agents.kernel.tools.trace_selfcert import (  # noqa: E402
+from hyperloom.agents.kernel.tools.trace_selfcert import (
     build_verdict,
     certify_capture_sidecars,
     certify_trace_dir,

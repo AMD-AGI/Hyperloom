@@ -30,7 +30,10 @@ from typing import Sequence
 from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
 from hyperloom.agents.framework.repo_map import bridge_repo_urls
-from ..framework.paths import resolve_kernel_search_roots, summarise_framework_root_discovery
+from hyperloom.inference_optimizer.framework_paths import (
+    resolve_kernel_search_roots,
+    summarise_framework_root_discovery,
+)
 
 
 # ---------------------------------------------------------------------------

@@ -251,7 +251,7 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_ERROR_CLASS,
     )
-    from hyperloom.orchestrator.phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 
     task = Task(
         task_id="baseline-agentx-preflight",
@@ -440,7 +440,7 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
 async def test_harvest_specialist_findings_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
     """LLM-authored competitor numbers must never be persisted as a consumable competitor target."""
     from hyperloom.inference_optimizer.session import session_paths
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     await coord._harvest_specialist_findings(
         {
@@ -475,7 +475,7 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     )
 
@@ -488,7 +488,7 @@ async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.orchestrator.state.shared_state import (
         ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     )
 
@@ -719,7 +719,7 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
 
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
     """A reverted integrate_patch reaches the fact hook with kept=True (``status != failed`` is promotable), yet the journal must record REVERT with the REAL measured delta (from delta_pct)."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_REVERT,
     )
     from hyperloom.orchestrator.state.task_registry import Task
@@ -750,7 +750,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
 
 
 def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(
@@ -821,7 +821,7 @@ def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> 
 
 # -- advisory blocks enabled paths -----------------------------------------
 def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: {"name": "comp"})
     monkeypatch.setattr(rh, "gap_analysis", lambda *a, **k: {"primary_gap": "throughput"})
@@ -835,7 +835,7 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
 
 
 def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     target = {
         "benchmark_mode": "agentx",
@@ -857,7 +857,7 @@ def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator
 
 
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: None)
     coord.shared_state.target_advisory_enabled = True

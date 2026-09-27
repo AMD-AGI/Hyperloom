@@ -17,7 +17,7 @@ from .gate import GateDecision, should_generate
 from .generate import generate_tuner
 from .ledger import record_outcome, script_digest
 from .mandate import build_mandate, write_mandate
-from .referee import Judgement, judge_candidates
+from .referee import CaptureFailed, Judgement, judge_candidates
 from .sandbox import run_generated_tuner
 
 log = logging.getLogger(__name__)
@@ -148,11 +148,17 @@ def attempt_generated_tuner(
         return outcome
 
     for shape, cands in candidates.items():
+        try:
+            baseline = make_baseline(shape)
+        except CaptureFailed as exc:
+            log.warning("tier3 %s: shape skipped, the baseline cannot be timed: %s", shape, exc)
+            outcome.judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
+            continue
         outcome.judgements.append(
             judge_candidates(
                 shape,
                 cands,
-                baseline=make_baseline(shape),
+                baseline=baseline,
                 dispatch=make_dispatch(shape),
                 is_correct=make_correctness(shape) if make_correctness else None,
                 sync=sync,

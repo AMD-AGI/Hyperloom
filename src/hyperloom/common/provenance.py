@@ -243,12 +243,12 @@ def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> st
                 name = (found.metadata["Name"] or "").strip().lower().replace("_", "-")
                 if name == dist:
                     return (found.version or "").strip()
-        except Exception:  # noqa: BLE001 — an unreadable venv is not a failure.
-            return ""
+        except OSError:
+            pass
         return ""
     try:
         return (_im.version(dist) or "").strip()
-    except Exception:  # noqa: BLE001 — a missing package is normal.
+    except _im.PackageNotFoundError:
         return ""
 
 

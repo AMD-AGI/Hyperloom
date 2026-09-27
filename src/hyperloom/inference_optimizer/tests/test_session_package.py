@@ -387,7 +387,7 @@ def test_manifest_never_claims_a_file_the_zip_lacks(tmp_path: Path, monkeypatch:
     _build_session(sd)
     real_write = zipfile.ZipFile.write
 
-    def _flaky(self, filename, arcname=None, **kw):  # noqa: ANN001, ANN202
+    def _flaky(self, filename, arcname=None, **kw):
         if arcname == "reports/final.json":
             raise OSError("disk gone")
         return real_write(self, filename, arcname=arcname, **kw)
@@ -416,7 +416,7 @@ def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, monkeypatch: py
     dest = tmp_path / "workspace"
     real_copy = sp.shutil.copy2
 
-    def _flaky(src, dst, **kw):  # noqa: ANN001, ANN202
+    def _flaky(src, dst, **kw):
         if Path(dst).name == "final.json":
             raise OSError("disk gone")
         return real_copy(src, dst, **kw)

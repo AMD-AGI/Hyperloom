@@ -195,7 +195,7 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
     root = Path(workspace)
     try:
         payload = gpu_metrics_from_report(report)
-    except Exception:  # noqa: BLE001 - a malformed block must not fail the round
+    except Exception:
         log.warning("gpu_metrics: could not normalise telemetry for %s", root, exc_info=True)
         return None
     if not payload:
@@ -206,7 +206,7 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
         from hyperloom.common.io import atomic_write_json
 
         atomic_write_json(out, payload)
-    except Exception:  # noqa: BLE001 - the round's measurement outranks its description
+    except Exception:
         log.warning("gpu_metrics: telemetry was read but could not be written to %s", out, exc_info=True)
         return None
     return str(out)

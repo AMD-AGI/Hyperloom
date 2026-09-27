@@ -163,10 +163,14 @@ the AMD ladder. Inside a campaign there are exactly two honest ways to use them:
 
 - **Make them travel with the candidate** — set them from the kernel module's own import path (e.g.
   `os.environ.setdefault(...)` before the first compile) so any measurement of that source includes
-  them, and the committed kernel keeps behaving the way it was measured. This is usually right, because
-  the flags are properties of the kernel design, not of the run.
+  them, and the committed kernel keeps behaving the way it was measured. These flags are properties of
+  the kernel design, not of the run, and Triton reads them only from the environment. That makes this
+  the narrow exception to the rule that a submitted kernel reads no `os.environ`: name the flag, say
+  in a comment that Triton exposes it no other way, and set nothing else that way. A dispatch constant
+  of your own is not covered — that one is a literal.
 - **Sweep them explicitly** as `FORGE_SWEEP_*` knobs when the question is whether they help. One data
-  point per command, echoed, per `common_methodology/optimization/lever_cheap_sweeps.md`.
+  point per command, echoed, and collapsed to the chosen setting before the turn ends, per
+  `common_methodology/optimization/lever_cheap_sweeps.md`.
 
 What is **not** honest is exporting them in your shell and then reporting the number as the kernel's.
 The loop's own canonical measurement will not have them set, and the candidate will regress on the

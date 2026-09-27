@@ -140,17 +140,26 @@ class V6MetadataLangfuse(TypedDict, total=False):
 
 
 class V6GradedAxes(TypedDict, total=False):
-    """The four axes an AgentX measurement is ranked on.
+    """The axes an AgentX measurement is ranked and reported on.
+
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``, which is not a
+    member here -- the verdict reads it off the measurement, not off this block. ``output_tput_per_gpu`` is the
+    frontier's y axis and the latency percentiles are the detail view: reported, never graded.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero". A synthetic run
-    carries four nulls.
+    carries nulls throughout.
     """
 
     e2e_norm_intvty_p90: float | None
+    e2e_norm_intvty_p50: float | None
     total_throughput: float | None
+    output_tput_per_gpu: float | None
     input_throughput: float | None
+    ttft_p50_ms: float | None
+    ttft_p90_ms: float | None
+    tpot_p50_ms: float | None
     tpot_p90_ms: float | None
 
 
@@ -998,7 +1007,7 @@ class V6ConcSweepExt(TypedDict, total=False):
 class V6ArchivedFile(TypedDict, total=False):
     """One copy an enablement round's archive holds, and what it is.
 
-    ``role`` is a ``delivery.archive.ROLE_*`` value. It distinguishes a patch
+    ``role`` is a ``round_archive.ROLE_*`` value. It distinguishes a patch
     the round applied from one it refused, which the round's own result cannot.
     """
 

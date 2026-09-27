@@ -10,8 +10,8 @@ import json
 import pytest
 
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
-from hyperloom.orchestrator.trace import tool_events as te
-from hyperloom.orchestrator.trace import trajectory_trace as tt
+from hyperloom.inference_optimizer.trace import tool_events as te
+from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
 sdk_types = pytest.importorskip("claude_agent_sdk.types")
 

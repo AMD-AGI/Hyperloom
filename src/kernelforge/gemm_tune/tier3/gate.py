@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 from .coverage import CoverageGap
 
 log = logging.getLogger(__name__)
@@ -49,7 +51,7 @@ def _allowed_tables() -> set[str]:
 
 
 def _disabled() -> bool:
-    return os.environ.get(DISABLE_ENV, "").strip().lower() in ("1", "true", "yes")
+    return env_bool(DISABLE_ENV)
 
 
 def should_generate(gaps: list[CoverageGap]) -> GateDecision:

@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
@@ -19,6 +17,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
+from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
 
 log = logging.getLogger(__name__)
@@ -263,7 +262,6 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -368,41 +366,6 @@ def resolve_forge_llm_model(
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
-
-
-def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
-    source = env if env is not None else os.environ
-
-    def repl(match: re.Match[str]) -> str:
-        return str(source.get(match.group(1), ""))
-
-    return _ENV_REF_RE.sub(repl, raw)
-
-
-def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Parse custom LLM headers from env."""
-    if not raw:
-        return {}
-    expanded = _expand_env_refs(raw, env)
-    text = expanded.strip()
-    if not text:
-        return {}
-    if text.startswith(("{", "[")):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if parsed is not None:
-            if isinstance(parsed, dict):
-                return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
-            return {}
-
-    headers: dict[str, str] = {}
-    for line in expanded.splitlines():
-        name, sep, value = line.partition(":")
-        if sep and name.strip():
-            headers[name.strip()] = value.strip()
-    return headers
 
 
 def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
@@ -650,7 +613,7 @@ def claude_sdk_env_options(
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
     # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
     if source.get("ANTHROPIC_CUSTOM_HEADERS"):
-        source["ANTHROPIC_CUSTOM_HEADERS"] = _expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
+        source["ANTHROPIC_CUSTOM_HEADERS"] = expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
     # Disable the advisor-tool beta header by default since strict gateways reject it.
     source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
@@ -1143,7 +1106,6 @@ __all__ = [
     "is_openai_only",
     "openai_agent_credentialed",
     "openai_client_kwargs",
-    "parse_custom_headers",
     "preferred_agent_backend",
     "provider_model_defaults",
     "resolve_forge_llm_model",

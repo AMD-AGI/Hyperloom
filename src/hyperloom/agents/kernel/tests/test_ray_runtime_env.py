@@ -12,7 +12,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(_TOOLS_DIR / "backends"))
 sys.path.insert(0, str(_TOOLS_DIR))
 
-import ray_runtime  # noqa: E402
+import ray_runtime
 
 # Every key alias derived by safe_runtime_env, split by provider protocol.
 _OPENAI_KEYS = ("OPENAI_API_KEY",)

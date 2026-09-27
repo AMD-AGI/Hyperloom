@@ -139,7 +139,7 @@ def probe_environment_closure(
         return {}, {}
     env = dict(env)
     try:
-        completed = subprocess.run(  # noqa: S603  # nosec B603 - argv-only, no shell.
+        completed = subprocess.run(  # nosec B603 - argv-only, no shell.
             [interpreter, "-c", _PROBE_SCRIPT],
             capture_output=True,
             text=True,

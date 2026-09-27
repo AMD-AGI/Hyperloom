@@ -663,7 +663,7 @@ class CodexBackend:
             """Run the blocking SDK turn in a bounded daemon thread."""
             try:
                 outcome["result"] = turn.run()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
             finally:
                 completed.set()
@@ -692,7 +692,7 @@ class CodexBackend:
                 )
                 worker.start()
                 if not completed.wait(timeout_sec):
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(Exception):  # broad-suppress: interrupt must not shadow the timeout
                         turn.interrupt()
                     raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
@@ -764,19 +764,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,
@@ -803,7 +803,7 @@ class CodexBackend:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
                     _ = await turn_task
 
         result = _normalize_sdk_result(sdk_result, thread_id)
@@ -819,7 +819,7 @@ class CodexBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.file_changes = actual_changes
