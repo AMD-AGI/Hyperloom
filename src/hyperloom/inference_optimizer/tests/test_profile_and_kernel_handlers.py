@@ -2562,6 +2562,64 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
     assert not any("subdirectory missing" in issue for issue in health["issues"])
 
 
+def _split_trace_dir(root, *, phases):
+    """Write a ``trace_split/`` with one steady-state chunk per requested phase (``"extend"`` / ``"decode"``)."""
+    split = root / "trace_split"
+    split.mkdir(parents=True, exist_ok=True)
+    for phase in phases:
+        with gzip.open(split / f"steady_state_{phase}_0.json.gz", "wt", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"traceEvents": [{"name": "execute_context_0(0)_generation_R(74)"}]}))
+    return split
+
+
+def test_both_phases_present_passes_phase_coverage(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["extend", "decode"])
+    health = pf._validate_trace_structure(tmp_path, "vllm")
+
+    row = _check_row(health, pf.CHECK_PHASE_COVERAGE)
+    assert row["status"] == "passed"
+    assert row["detail"] == {"prefill": True, "decode": True}
+    assert health["phase_coverage_partial"] is False
+    assert not any(issue.startswith("[8]") for issue in health["issues"])
+
+
+def test_decode_only_split_flags_missing_prefill(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["decode"])
+    health = pf._validate_trace_structure(tmp_path, "vllm")
+
+    row = _check_row(health, pf.CHECK_PHASE_COVERAGE)
+    assert row["status"] == "failed"
+    assert row["detail"] == {"prefill": False, "decode": True}
+    assert health["phase_coverage_partial"] is True
+    # The advisory names the missing phase so the loop instruments it instead of reading the shares as complete.
+    assert any(issue.startswith("[8]") and "prefill" in issue for issue in health["issues"])
+
+
+def test_prefill_only_split_flags_missing_decode(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["extend"])
+    health = pf._validate_trace_structure(tmp_path, "vllm")
+
+    row = _check_row(health, pf.CHECK_PHASE_COVERAGE)
+    assert row["status"] == "failed"
+    assert row["detail"] == {"prefill": True, "decode": False}
+    assert any(issue.startswith("[8]") and "decode" in issue for issue in health["issues"])
+
+
+def test_phase_coverage_skips_without_a_split_dir(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    health = pf._validate_trace_structure(tmp_path, "vllm")
+
+    assert _check_row(health, pf.CHECK_PHASE_COVERAGE)["status"] == "skipped"
+    assert health["phase_coverage_partial"] is False
+
+
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
