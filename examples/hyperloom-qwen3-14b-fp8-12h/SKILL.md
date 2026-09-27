@@ -86,7 +86,7 @@ After that, run all remaining commands for this demo inside the same container w
 **Do not use `docker exec -d` to launch optimize.** Detached `docker exec`
 discards stdout and stderr, so an optimizer that dies on startup looks like
 "backgrounding does not work." Use one **attached**
-`docker exec -w "$REPO_ROOT" "$HYPERLOOM_CONTAINER_NAME" bash -lc '…'` that
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc '…'` that
 runs the Launch recipe in `@${HYPERLOOM_SKILL_PATH}`. Startup preflight loads
 `kernel-agent.env.sh`; do not source it. Under Claw, hand that attached exec
 to the bash tool with `run_in_background=true` and no `setsid`, `nohup`, or

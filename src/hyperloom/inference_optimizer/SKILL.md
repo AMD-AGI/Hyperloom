@@ -1205,7 +1205,7 @@ not the optimizer PID.
 **Docker.** Do **not** wrap this launch in `docker exec -d`. Detached exec
 discards stdout and stderr, so an optimizer that dies on startup looks like
 "backgrounding failed." Run one attached
-`docker exec -w "$REPO_ROOT" "$HYPERLOOM_CONTAINER_NAME" bash -lc` that runs
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc` that runs
 this same launch block. Preflight loads `kernel-agent.env.sh`; do not source
 it. Under Claw, hand that attached exec to the bash tool with
 `run_in_background=true` and no `setsid`, `nohup`, or trailing `&`. Everywhere
