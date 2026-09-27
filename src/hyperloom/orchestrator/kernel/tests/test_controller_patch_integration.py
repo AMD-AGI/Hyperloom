@@ -25,8 +25,13 @@ from hyperloom.orchestrator.kernel.controller_patch_integration import (
 )
 from hyperloom.orchestrator.kernel.kth_contract import sha256_digest
 from hyperloom.orchestrator.kernel.kth_qualification import (
+    KthConfigurationError,
     KthQualificationProvider,
     KthQualificationResult,
+)
+from hyperloom.orchestrator.kernel.kth_shadow import (
+    KthShadowObservation,
+    KthShadowObserver,
 )
 from hyperloom.orchestrator.kernel.tests.kth_fakes import FakeKth
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -210,6 +215,7 @@ async def _integrate(
     shared_state: SharedState,
     validator,
     kth_provider: KthQualificationProvider | None = None,
+    kth_shadow_observer=None,
 ):
     """Integrate through the production KEEP recorder bound to *shared_state*.
 
@@ -224,6 +230,7 @@ async def _integrate(
         shared_state=shared_state,
         record_keep=coordinator.writeback._record_integrate_keep,
         validator=validator,
+        kth_shadow_observer=kth_shadow_observer,
         kth_provider=kth_provider,
     )
 
@@ -1903,3 +1910,104 @@ async def test_installed_kth_gates_controller_integration_end_to_end(
     attestation = json.loads((Path(result.kth["artifacts_dir"]) / "attestation.json").read_text(encoding="utf-8"))
     assert attestation["request_id"] == result.kth["request_id"]
     assert attestation["subject_digest"] == result.kth["subject_digest"]
+
+
+@dataclass(frozen=True)
+class _ScriptedShadow(KthShadowObserver):
+    """A shadow observer whose underlying provider answers as scripted."""
+
+    statuses: tuple[str, ...] = ()
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    error: type[BaseException] | None = None
+
+    def observe(
+        self, publication, *, base_commit, patch, changed_paths, artifacts_root, integration_outcome="", session_id=""
+    ):
+        if self.error is not None:
+            raise self.error("scripted shadow failure")
+        self.calls.append({"base_commit": base_commit, "changed_paths": changed_paths})
+        status = self.statuses[len(self.calls) - 1]
+        return KthShadowObservation(observed_status=status, observed_verdict=f"scripted {status}")
+
+
+def _shadow_files(patches_root: Path) -> list[dict[str, Any]]:
+    """The shadow observations, read from where the integration wrote them."""
+    root = Path(patches_root).resolve().parent.parent / "integration" / "results"
+    return [json.loads(path.read_text()) for path in sorted(root.glob("*.kth_shadow.json"))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["blocked", "inconclusive", "failed"])
+async def test_shadow_mode_records_a_refusal_and_keeps_the_patch_anyway(tmp_path: Path, status: str) -> None:
+    """The whole point: KTH says no, and nothing happens because of it."""
+    repo, base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+    observer = _ScriptedShadow(provider=KthQualificationProvider(), statuses=(status, status))
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_shadow_observer=observer,
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert seen == ["first", "second"]
+    assert all(result.kth == {} for result in summary.results)
+    assert _git(repo, "rev-list", "--count", f"{base}..HEAD") == "2"
+
+    recorded = _shadow_files(Path(patches))
+    assert [item["observed_status"] for item in recorded] == [status, status]
+    assert all(item["recorded_only"] is True for item in recorded)
+    assert all("OBSERVATION ONLY" in item["label"] for item in recorded)
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_observation_that_crashes_changes_nothing(tmp_path: Path) -> None:
+    """A recording instrument must not be able to fail the thing it records."""
+    repo, base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_shadow_observer=_ScriptedShadow(provider=KthQualificationProvider(), error=RuntimeError),
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert seen == ["first", "second"]
+    assert _git(repo, "rev-list", "--count", f"{base}..HEAD") == "2"
+
+
+def test_an_observation_carries_no_value_anything_could_enforce_on() -> None:
+    """The structural guard, not a convention.
+
+    The integration path admits a patch by reading ``qualified.eligible``. An
+    observation has no such attribute and no other boolean summarising the
+    outcome, so it cannot be substituted for a qualification.
+    """
+    observation = KthShadowObservation(observed_status="eligible")
+    assert not hasattr(observation, "eligible")
+    assert not hasattr(observation, "performance_admitted")
+    booleans = {name for name, value in vars(observation).items() if isinstance(value, bool)}
+    assert booleans == {"recorded_only"}
+    assert observation.recorded_only is True
+
+
+def test_enabling_the_gate_and_shadow_mode_together_is_refused(monkeypatch) -> None:
+    """Silently preferring one would give an operator what they did not ask for."""
+    monkeypatch.setenv("HYPERLOOM_KTH_SHADOW_ENABLE", "1")
+    monkeypatch.setenv("HYPERLOOM_KTH_ENABLE", "1")
+    with pytest.raises(KthConfigurationError, match="Choose one"):
+        KthShadowObserver.from_env()
+
+
+def test_shadow_mode_is_off_unless_its_own_flag_is_set(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_KTH_SHADOW_ENABLE", raising=False)
+    monkeypatch.setenv("HYPERLOOM_KTH_ENABLE", "1")
+    assert KthShadowObserver.from_env() is None

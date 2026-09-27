@@ -145,3 +145,39 @@ In particular, the adaptive path returns `Inconclusive` for any artifact KTH
 has no host-registered adapter for, so an unmapped kernel cannot be kept while
 the gate is on. The subprocess contract is
 [`docs/hyperloom_provider_contract.md`](https://github.com/AMD-AI/kernel-trust-harness/blob/49154fb80508bb37d008f87f8bfae8759209742f/docs/hyperloom_provider_contract.md).
+
+## Shadow mode
+
+Before giving the gate authority over integration, it is worth knowing what it
+would have done. Shadow mode answers that: with `HYPERLOOM_KTH_SHADOW_ENABLE`
+set, each applied patch is qualified for the record and **nothing else
+happens**. No patch is reverted, no benchmark is skipped, no KEEP is affected,
+and the patch's status is exactly what it would have been with the flag unset.
+
+It is enabled by its own variable. Turning the enforcing gate on does not turn
+shadow mode on, and setting both is a configuration error rather than a silent
+precedence rule — otherwise an operator who asked to observe could end up
+enforcing.
+
+Observations land in `integration/results/NNNN.kth_shadow.json`, beside that
+publication's `NNNN.json`, so the two join on the index. Every observation
+carries `"recorded_only": true` and a `label` reading
+`OBSERVATION ONLY - this KTH result affected nothing`.
+
+Three properties are enforced by construction rather than by convention,
+because the failure mode worth designing against is shadow mode quietly
+becoming enforcement:
+
+- `KthShadowObservation` has no `eligible` attribute and no other boolean
+  summarising the outcome. The enforcement path admits a patch by reading
+  `qualified.eligible`, so an observation cannot be substituted for a
+  qualification without failing at the point it is written.
+- `_observe_in_shadow` returns `None`. There is no value for the integration
+  loop to branch on, and the observation is never placed in the same object as
+  the integration result.
+- Every failure — in the observer, in the provider, in writing the artifact —
+  becomes a recorded observation with `shadow_error` set. A recording
+  instrument cannot fail the thing it records.
+
+Shadow observations are never bound to a performance admission. `qualify` is
+called, `mark_performance_admitted` is not.
