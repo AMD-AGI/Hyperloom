@@ -1160,12 +1160,19 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
     return vae_scale, latent_channels
 
 
-def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
-    """Memory-roofline ceiling for diffusion image throughput (images/sec)."""
+def compute_diffusion_mem_img_per_sec(
+    *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int, resolver: Any = None
+) -> float:
+    """Memory-roofline ceiling for diffusion image throughput (images/sec).
+
+    CSV interface (A consumer, §6.3b peak-swap): the HBM bandwidth peak-swaps to
+    ``gpu_arch_peaks.csv`` via :func:`_hbm_bw_gbps` when a resolver is supplied (external-CSV
+    mode); native/disabled → ``None`` resolver → the vendor ``HW_SPECS`` table, unchanged.
+    """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
-    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    bw = _hbm_bw_gbps(spec, gpu_type, resolver) * 1e9 * max(num_gpus, 1)
     if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
         return 0.0
     per_step_s = weight_bytes / bw
@@ -1255,9 +1262,17 @@ def compute_diffusion_compute_img_per_sec(
     num_layers: int,
     hidden_size: int,
     num_steps: int,
+    resolver: Any = None,
 ) -> float:
-    """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    """Compute-roofline ceiling for diffusion image throughput (images/sec).
+
+    CSV interface (A consumer, §6.3b peak-swap): the achievable TFLOPS peak-swaps to
+    ``gpu_arch_peaks.csv`` when a resolver is supplied (external-CSV mode); native/disabled →
+    ``None`` resolver → ``HW_SPECS_ACHIEVABLE``, then the dense-vendor fallback, unchanged.
+    """
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag, resolver) or _resolve_peak_tflops(
+        gpu_type, precision_tag
+    )
     if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
     linear = 2.0 * dit_params * latent_tokens
@@ -1294,6 +1309,12 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
 
     # Per step only the DiT runs, so per-step memory IO is the DiT-only weight bytes; fall back to the full checkpoint
     # when DiT geometry is unavailable.
+    # CSV interface (A consumer): peak-swap the diffusion ceilings' HBM bw + achievable TFLOPS
+    # from gpu_arch_peaks.csv in external-CSV mode. Built here because the xDiT branch in
+    # _compute_roofline_breakdown_native returns before that function builds its own resolver, so
+    # diffusion ceilings would otherwise never honor MAIDAS-authored peaks. Native/disabled →
+    # None → the vendor tables, byte-identical to prior behavior.
+    resolver = _arch_peak_resolver(state)
     cmp_img_s = 0.0
     mem_bytes = meta_bytes
     if dit is not None:
@@ -1313,12 +1334,14 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
                 num_layers=num_layers,
                 hidden_size=hidden,
                 num_steps=num_steps,
+                resolver=resolver,
             )
     mem_img_s = compute_diffusion_mem_img_per_sec(
         gpu_type=runtime.gpu_type,
         num_gpus=runtime.tp,
         weight_bytes=mem_bytes,
         num_steps=num_steps,
+        resolver=resolver,
     )
     if mem_img_s <= 0 and cmp_img_s <= 0:
         return _EMPTY_BREAKDOWN

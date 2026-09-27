@@ -325,3 +325,66 @@ def test_diffusion_breakdown_is_empty_without_weights_or_geometry(tmp_path):
     empty = tmp_path / "nothing"
     empty.mkdir()
     assert rc.compute_roofline_breakdown_from_state(_xdit_state(tmp_path, str(empty))) == rc._EMPTY_BREAKDOWN
+
+
+# --------------------------------------------------------------------------- #
+# CSV interface (A consumer, G7): the diffusion ceilings peak-swap the arch peaks
+# from an external gpu_arch_peaks.csv (RooflineResolver) in external-CSV mode,
+# mirroring the LLM ceilings; native/miss falls back to the vendor HW_SPECS table.
+# --------------------------------------------------------------------------- #
+
+from hyperloom.orchestrator.kernel import roofline_csv as _rcsv  # noqa: E402
+
+
+def test_diffusion_mem_ceiling_peak_swaps_hbm_bw_from_csv(tmp_path):
+    # A resolver carrying this device's HBM bw overrides the vendor HW_SPECS value.
+    _rcsv.write_arch_peaks(
+        [{"name": "MI300X", "mem_bw_gbps": 9999.0}],  # distinct from HW_SPECS mi300x (5300)
+        tmp_path / "gpu_arch_peaks.csv",
+    )
+    res = _rcsv.RooflineResolver(tmp_path)
+    kw = dict(gpu_type="mi300x", num_gpus=1, weight_bytes=10 * 1024**3, num_steps=25)
+    swapped = rc.compute_diffusion_mem_img_per_sec(**kw, resolver=res)
+    native = rc.compute_diffusion_mem_img_per_sec(**kw)  # resolver=None -> table
+    bw = 9999.0 * 1e9 * 1
+    expected = 1.0 / (25 * (10 * 1024**3 / bw))
+    assert swapped == pytest.approx(expected)  # CSV bw drove the denominator
+    assert swapped != pytest.approx(native)  # and it differs from the vendor-table value
+
+
+def test_diffusion_compute_ceiling_peak_swaps_tflops_from_csv(tmp_path):
+    _rcsv.write_arch_peaks(
+        [{"name": "MI300X", "mem_bw_gbps": 8000.0, "matrix_bf16_tflops": 4242.0}],
+        tmp_path / "gpu_arch_peaks.csv",
+    )
+    res = _rcsv.RooflineResolver(tmp_path)
+    kw = dict(
+        gpu_type="mi300x", num_gpus=1, precision_tag="bf16", dit_params=1_000_000_000,
+        latent_tokens=1024, num_layers=40, hidden_size=4096, num_steps=25,
+    )
+    swapped = rc.compute_diffusion_compute_img_per_sec(**kw, resolver=res)
+    linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
+    attn = 4.0 * kw["num_layers"] * (kw["latent_tokens"] ** 2) * kw["hidden_size"]
+    expected = (4242.0 * 1e12 * 1) / (kw["num_steps"] * (linear + attn))
+    assert swapped == pytest.approx(expected)  # CSV achievable-TFLOPS drove the ceiling
+    assert swapped != pytest.approx(rc.compute_diffusion_compute_img_per_sec(**kw))  # != table
+
+
+def test_diffusion_ceilings_fall_back_to_table_when_resolver_lacks_device(tmp_path):
+    # Resolver present but this device absent -> both ceilings use the vendor table (== native).
+    _rcsv.write_arch_peaks(
+        [{"name": "SOME_OTHER_GPU", "mem_bw_gbps": 1.0, "matrix_bf16_tflops": 1.0}],
+        tmp_path / "gpu_arch_peaks.csv",
+    )
+    res = _rcsv.RooflineResolver(tmp_path)
+    mem_kw = dict(gpu_type="mi300x", num_gpus=1, weight_bytes=10 * 1024**3, num_steps=25)
+    assert rc.compute_diffusion_mem_img_per_sec(**mem_kw, resolver=res) == pytest.approx(
+        rc.compute_diffusion_mem_img_per_sec(**mem_kw)
+    )
+    cmp_kw = dict(
+        gpu_type="mi300x", num_gpus=1, precision_tag="bf16", dit_params=1_000_000_000,
+        latent_tokens=1024, num_layers=40, hidden_size=4096, num_steps=25,
+    )
+    assert rc.compute_diffusion_compute_img_per_sec(**cmp_kw, resolver=res) == pytest.approx(
+        rc.compute_diffusion_compute_img_per_sec(**cmp_kw)
+    )
