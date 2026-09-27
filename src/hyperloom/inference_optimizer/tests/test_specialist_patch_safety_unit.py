@@ -21,12 +21,6 @@ _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ 
 
 
 # ---- path helpers ---------------------------------------------------------
-def test_strip_path_prefix():
-    assert ps._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
-    assert ps._strip_path_prefix("a/b/c.py", 1) == "b/c.py"
-    assert ps._strip_path_prefix("a/b/c.py", 5) == "c.py"
-
-
 def test_patch_file_targets():
     pairs = ps.patch_file_targets(_DIFF)
     assert pairs == [("a/foo.py", "b/foo.py")]

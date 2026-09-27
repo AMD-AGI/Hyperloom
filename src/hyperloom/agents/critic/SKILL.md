@@ -54,9 +54,9 @@ Critic is the horizontal review and memory layer for the optimizer:
    Brier calibration.
 
 Critic does **not** own server lifecycle, resource locks, patch
-application, RCA, or benchmark execution. Those responsibilities stay
-with Conductor, Orchestration, Kernel, Robustness, and task-specific
-sub-agents.
+application, or benchmark execution. Those responsibilities stay with
+Conductor, Orchestration, Kernel, and task-specific sub-agents. Critic does not
+provide runtime RCA or recovery.
 
 ## Two-Phase Loop
 
@@ -139,7 +139,7 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
   the strict class demands, so blocking them on missing benchmark
   evidence creates a circular deadlock.
 - For **`framework_op`** proposals (`baseline` / `target_analysis` /
-  `recover` / `report` / `session_breakdown`): approve by default; Critic is
+  `report` / `session_breakdown`): approve by default; Critic is
   not a useful gatekeeper for framework-level operations. An upstream-PR
   pre-screen also routes here — an `integrate_patch` proposal carrying a
   top-level `framework_agent_candidate_id` and no `patches` — and the
@@ -155,7 +155,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
 | `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
-| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`; plus an `integrate_patch` carrying `framework_agent_candidate_id` and no `patches` (the upstream-PR pre-screen) | None — approve by default; Critic is not a useful gatekeeper here. A pre-screen's landing is re-reviewed strictly as `integrate_patch`. |
+| `framework_op` | `baseline`, `target_analysis`, `report`, `session_breakdown`; plus an `integrate_patch` carrying `framework_agent_candidate_id` and no `patches` (the upstream-PR pre-screen) | None — approve by default; Critic is not a useful gatekeeper here. A pre-screen's landing is re-reviewed strictly as `integrate_patch`. |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
@@ -189,8 +189,8 @@ also exports the per-class checklists in
   or write to shared state.
 - Do not `delegate`, `request`, or `propose_action` (PolicyGate will
   reject those intents anyway).
-- Do not perform RCA. RCA, recovery, and handle behavior belong to
-  Robustness.
+- Do not perform runtime RCA or recovery. Review the supplied failure evidence
+  without inventing a recovery role or executing repair actions.
 - Do not call KB endpoints directly — always go through `hyperloom.agents.critic.runtime.cli`.
 
 ## Approve Standard
@@ -206,8 +206,8 @@ Return `approve` only when all blocker risks are cleared:
 - Accuracy gate passes or has a documented waiver.
 - Rollback path is clear.
 - Build, cache, dispatch, and runtime implications are addressed.
-- Robustness findings and known failure patterns do not contradict the
-  decision.
+- Recorded execution evidence and known failure patterns do not contradict
+  the decision.
 
 ### `enablement_landing` proposals — structural-only
 
@@ -256,7 +256,7 @@ the action will produce.
 ### `framework_op` proposals — bypass
 
 Return `approve` by default. Critic is not a useful gatekeeper for
-`baseline` / `target_analysis` / `recover` / `report` /
+`baseline` / `target_analysis` / `report` /
 `session_breakdown`. Only emit a non-`approve` verdict when the proposal is
 structurally malformed (missing required params, wrong phase, etc.). For an
 upstream-PR pre-screen a `reject` means "do not spend a GPU bench on this

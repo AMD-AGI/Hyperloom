@@ -212,14 +212,7 @@ def teardown_lifecycle_server(
         else:
             # Server is setsid'd, so pgid == pid unless the pid file gave one.
             pgid = server_pgid if server_pgid is not None else server_pid
-            _signal_group(pgid, signal.SIGTERM)
-            deadline = time.monotonic() + TERM_GRACE_SECONDS
-            while time.monotonic() < deadline:
-                if not _process_group_alive(pgid):
-                    break
-                time.sleep(0.1)
-            if _process_group_alive(pgid):
-                _signal_group(pgid, signal.SIGKILL)
+            _terminate_group(pgid)
             log.info(
                 "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
                 pgid,
@@ -232,6 +225,16 @@ def teardown_lifecycle_server(
         except OSError:
             # Already gone or unremovable; teardown must not raise.
             pass
+
+
+def _terminate_group(pgid: int) -> None:
+    """SIGTERM a process group, then SIGKILL it if any member outlives the grace."""
+    _signal_group(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + TERM_GRACE_SECONDS
+    while time.monotonic() < deadline and _process_group_alive(pgid):
+        time.sleep(0.1)
+    if _process_group_alive(pgid):
+        _signal_group(pgid, signal.SIGKILL)
 
 
 def _pid_cmdline(pid: int) -> str:
@@ -336,14 +339,7 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             )
             continue
 
-        _signal_group(server_pgid, signal.SIGTERM)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if not _process_group_alive(server_pgid):
-                break
-            time.sleep(0.1)
-        if _process_group_alive(server_pgid):
-            _signal_group(server_pgid, signal.SIGKILL)
+        _terminate_group(server_pgid)
         reaped.append(server_pid)
         log.warning(
             "orphan-reaper: reaped leftover server pid=%d pgid=%d from %s "

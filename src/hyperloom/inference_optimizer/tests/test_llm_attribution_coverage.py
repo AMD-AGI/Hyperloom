@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace.llm_trace import VALID_COMPONENTS
+from hyperloom.inference_optimizer.trace.llm_trace import VALID_COMPONENTS
 
 #: Entry points that only tag a call when the caller names a component, so an
 #: untagged call site is spend the gateway cannot attribute to anything.

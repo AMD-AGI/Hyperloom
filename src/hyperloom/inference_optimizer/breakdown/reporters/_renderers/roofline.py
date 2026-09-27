@@ -107,7 +107,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     # The one definition of which ceilings may be compared and which deltas
     # survive a moved one. Re-deriving it here is how the report would come to
     # disagree with the analysis it is reporting on.
-    from hyperloom.orchestrator.kernel.roofline_snapshot import build_roofline_comparison_from_history
+    from hyperloom.inference_optimizer.roofline_snapshot import build_roofline_comparison_from_history
 
     comparison = as_dict(build_roofline_comparison_from_history(snapshots))
     baseline = as_dict(comparison.get("baseline"))

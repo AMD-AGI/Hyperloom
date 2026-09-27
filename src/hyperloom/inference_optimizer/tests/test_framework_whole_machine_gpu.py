@@ -50,7 +50,7 @@ def _build_coord(
     state.save(tmp_path)
 
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {name: MockBackend(idle) for name in ("orchestration", "critic", "robustness")}
+    backends = {name: MockBackend(idle) for name in ("orchestration", "critic")}
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
@@ -104,7 +104,7 @@ def test_framework_gpu_params_request_whole_machine(tmp_path, monkeypatch):
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.framework_gpu_pool.capacity == 4
     gpu_params = coord._framework_gpu_params()
-    assert coord._coerce_needs_gpu(gpu_params.get("needs_gpu")) is True
+    assert gpu_params.get("needs_gpu") is True
     assert gpu_params.get("gpu_count") == 4
 
 
@@ -118,7 +118,7 @@ def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
     params = coord._build_enablement_specialist_params(log)
     assert params is not None
     assert params.get("framework_agent_authoring") is True
-    assert coord._coerce_needs_gpu(params.get("needs_gpu")) is True
+    assert params.get("needs_gpu") is True
     assert params.get("gpu_count") == 4
 
 

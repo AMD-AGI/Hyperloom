@@ -95,7 +95,7 @@ def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device
         _launch_on_current_stream(launch_fn, x, out, rows)
 
     # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave `out` at its
-    # dirtied value and fail verify -> eager).
+    # dirtied value and fail verify, which raises).
     result = cuda_graph_bench(
         step,
         warmup=warmup,

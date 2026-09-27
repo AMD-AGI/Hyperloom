@@ -34,7 +34,7 @@ class _FakeResp:
 def _install_urlopen(monkeypatch, handler) -> None:
     """Replace urllib.request.urlopen used by github backend."""
 
-    def fake(req, timeout):  # noqa: ARG001
+    def fake(req, timeout):
         return handler(req)
 
     monkeypatch.setattr(gh.urllib.request, "urlopen", fake)

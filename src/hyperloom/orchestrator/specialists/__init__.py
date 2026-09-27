@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Config-arm specialist search (published as "Arbor")."""
+"""Specialist substrate: domain catalogue, dispatch helpers, patch safety, and runner."""

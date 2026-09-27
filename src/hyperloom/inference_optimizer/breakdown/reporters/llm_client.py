@@ -31,7 +31,7 @@ __all__ = [
 class NullClient:
     """No-op client; compose treats this exactly like ``llm_client=None``."""
 
-    def complete(self, *, system: str, user: str) -> str:  # noqa: D401
+    def complete(self, *, system: str, user: str) -> str:
         """Return an empty string, disabling the narrative pass."""
         return ""
 

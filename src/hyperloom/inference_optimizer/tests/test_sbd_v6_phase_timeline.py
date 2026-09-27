@@ -477,3 +477,36 @@ def test_a_proposal_the_critic_never_reached_is_not_a_refused_one(tmp_path):
     assert proposals["reviewed"] == 1
     assert proposals["materialized"] == 0
     assert "critic_review" not in proposals["rows"][1]
+
+
+def test_an_unreadable_spool_on_exit_does_not_raise(tmp_path, monkeypatch):
+    """``record_exit`` must keep its Never-raises contract when the close-time
+    read of the spool fails. ``_open_segment`` already goes through the guarded
+    boundary; ``_finish`` must not let the same ``OSError`` escape one call later.
+    """
+    _enter("PRELUDE", sequence=1, at=10.0)
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    _exit("PRELUDE", at=20.0, to_phase="FRAMEWORK_AGENT")
+
+
+def test_a_malformed_spool_event_id_does_not_raise_out_of_exit(tmp_path, monkeypatch):
+    """A segment row whose ``event_id`` will not parse must not escape the exit.
+
+    ``EventSink.record`` already swallows that ``ValueError`` on write;
+    ``_open_segment`` used to hand the same id to ``_sink`` / ``_finish``, which
+    then resurfaced it via ``parse_event_id``.
+    """
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.recorded_section",
+        lambda _section, **_kw: [
+            {
+                "event_id": "prelude:abc:phase",
+                "sequence": 1,
+                "entered_unix": 10.0,
+            }
+        ],
+    )
+    _exit("PRELUDE", at=20.0, to_phase="FRAMEWORK_AGENT")

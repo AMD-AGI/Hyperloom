@@ -69,6 +69,31 @@ def test_a_misspelled_flag_fails_fast(typo):
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--robustness-mock",
+        "--robustness-agent",
+        "--robustness-llm-rca",
+        "--no-robustness-llm-rca",
+        "--robustness-disable-local-probe",
+        "--no-robustness-disable-local-probe",
+        "--robustness-disable-server-probe",
+        "--no-robustness-disable-server-probe",
+        "--explore-overtime-kill-ratio",
+        "--explore-variant-timeout-sec",
+        "--explore-variant-timeout-safety-margin",
+        "--conc-sweep-timeout-sec",
+    ],
+)
+def test_retired_watchdog_flags_are_rejected(flag, capsys):
+    values = ["1"] if flag.startswith(("--explore-", "--conc-sweep-")) else []
+    with pytest.raises(SystemExit) as exc:
+        _parse(flag, *values)
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
 def test_unambiguous_abbreviations_still_work():
     """Strictness must not cost argparse's normal prefix matching."""
     assert _parse("--max-hour", "10").max_hours == 10.0

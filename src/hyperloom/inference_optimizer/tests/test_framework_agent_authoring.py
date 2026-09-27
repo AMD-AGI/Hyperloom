@@ -155,7 +155,7 @@ def _pump_then_materialize(stub: _Stub) -> None:
 
 
 def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m-fpr",
@@ -227,7 +227,7 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     stub = _Stub(tmp_path, authoring=True)
 
@@ -713,7 +713,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 def test_config_levers_helper_extracts_from_proposal_set():
     """Proposal args and envs retain separate channels; patches take precedence."""
-    from hyperloom.orchestrator.loop.coordinator import (
+    from hyperloom.orchestrator.phases.framework import (
         _framework_config_levers_from_done,
     )
 
@@ -733,10 +733,20 @@ def test_config_levers_helper_extracts_from_proposal_set():
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }
 
-    # A patch deliverable is NOT a config-only outcome.
-    assert (
-        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
-    )
+    # A patch alongside a non-atomic lever, while optimizing: the patch is its own
+    # outcome and the lever is judged on its own, so nothing rides with the patch.
+    patched = {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
+    assert _framework_config_levers_from_done(patched) == {}
+    # The same deliverable in an ENABLEMENT round: the pair is jointly what makes
+    # the model boot, so the lever rides with the patch.
+    coupled = _framework_config_levers_from_done(patched, levers_ride_with_patches=True)
+    assert coupled.get("extra_envs") == {"VLLM_USE_MTP": "1"}
+    # An explicitly atomic lever rides with the patch on either lane.
+    atomic = {
+        "patches_written": ["p.patch"],
+        "proposal_set": [{**done["proposal_set"][0], "atomic": True}],
+    }
+    assert _framework_config_levers_from_done(atomic).get("extra_envs") == {"VLLM_USE_MTP": "1"}
     # No levers → empty.
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}

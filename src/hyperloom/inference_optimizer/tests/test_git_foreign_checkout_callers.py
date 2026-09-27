@@ -56,13 +56,13 @@ def foreign_repo(tmp_path, monkeypatch):
 
 def test_patch_snapshot_base_comes_from_head_not_the_dirty_worktree(foreign_repo, tmp_path):
     """The on-disk fallback exists for non-git frameworks, not for a refusal."""
-    from hyperloom.orchestrator.kernel import request_handlers
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
 
     (foreign_repo / "kern.py").write_text(_DIRTY, encoding="utf-8")
     patch = tmp_path / "fusion.patch"
     patch.write_text(_PATCH, encoding="utf-8")
 
-    snap = request_handlers.materialize_unified_patch_snapshot(
+    snap = _kernel_agent_tool.materialize_unified_patch_snapshot(
         patch_path=patch,
         repo_root=foreign_repo,
         snapshot_dir=tmp_path / "snap",
@@ -79,7 +79,7 @@ def test_patch_snapshot_base_comes_from_head_not_the_dirty_worktree(foreign_repo
 _BLOCKED_VERBS = ("rev-parse", "status", "tag", "show", "clean", "ls-files", "checkout", "reset")
 
 _GUARDED_MODULES = (
-    "orchestrator/kernel/request_handlers.py",
+    "orchestrator/actions/executors/_kernel_agent_tool.py",
     "orchestrator/enablement/runtime/targeted_build.py",
     "orchestrator/actions/executors/baseline.py",
 )

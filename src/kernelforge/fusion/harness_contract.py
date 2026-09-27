@@ -39,10 +39,16 @@ It must, guarded by {flags}:
   - On a hybrid/Mamba model where the decode microbench cannot init on ROCm, set
     "skipped": true + "skip_reason" (parity still required); on compile failure set
     "compiled": false + "error" with the real message.
+  - "fused_us" may be null ONLY together with "skipped": true and a "skip_reason"
+    saying why. With "skipped": false the loop needs a number: a null fused time
+    there claims the microbench ran and measured nothing, and the iteration fails
+    on it.
   - The loop runs this file ONCE BEFORE any fusion exists, to anchor the speedup
     on the unfused framework. With the fused module missing or empty, time the
     eager op for BOTH arms rather than failing, and still report
-    "compiled": true -- that run IS the baseline. "compiled": false means a real
+    "compiled": true -- that run IS the baseline. The driver reads the fused
+    module to see that nothing is fused yet and anchors on the eager time there,
+    so the pristine run is never the failure above. "compiled": false means a real
     compile failure: the driver reports it as a crash, so the loop starts with no
     per-case timings and aborts before its first iteration.
 Do NOT hard-code metrics; compute them live. Parity uses an \

@@ -237,18 +237,17 @@ def test_capability_table_shows_unadopted_outcomes() -> None:
                 {
                     "type": "kernel",
                     "ext": {
-                        "outcome": {
-                            "by_source": {
-                                "kernel_rewrite": {
-                                    "attempted": 3,
-                                    "keeps": 0,
-                                    "micro_only_keeps": 2,
-                                    "needs_review": 1,
-                                    "reverts": 1,
-                                    "e2e_gain_pct": 4.5,
-                                }
-                            }
-                        }
+                        "attempts": [
+                            # Adopted without the gate ever ruling: a micro-only keep.
+                            {"source_kind": "kernel_rewrite", "outcome": "adopted"},
+                            {"source_kind": "kernel_rewrite", "outcome": "adopted"},
+                            {"source_kind": "kernel_rewrite", "outcome": "needs_review"},
+                            {
+                                "source_kind": "kernel_rewrite",
+                                "outcome": "rejected",
+                                "e2e": {"decision": "REVERT", "e2e_gain_pct": 4.5},
+                            },
+                        ]
                     },
                 }
             ]

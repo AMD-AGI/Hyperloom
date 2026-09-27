@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -155,13 +154,9 @@ def read_top_solutions(
             read_status=read_status,
         )
     except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
-        error = sanitize_read_error(
-            exc,
-            secrets=(
-                str(getattr(config, "gbrain_token", "") or ""),
-                os.environ.get("GBRAIN_TOKEN", ""),
-            ),
-        )
+        from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
+
+        error = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience top-k read failed (cold start): %s", error)
         _set_read_status(
             read_status,

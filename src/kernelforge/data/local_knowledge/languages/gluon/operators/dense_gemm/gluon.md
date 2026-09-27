@@ -80,7 +80,7 @@ registers, so they are not independent.
 ## Numerics
 FP16/BF16 operands, **FP32 accumulate**. Nothing operator-specific beyond the usual: the accumulation
 order changes when you change the pipeline or the slicing, so a tolerance that passed at v3 can fail at
-v7. The task's own `correctness_command` decides — see
+v7. The driver's correctness suite decides — see
 [`../../skills/optimize/gluon_levers/forge_integration.md`](../../skills/optimize/gluon_levers/forge_integration.md).
 
 ## Cross-links

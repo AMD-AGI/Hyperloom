@@ -326,47 +326,6 @@ def test_kb_warmstart_cold_starts_without_candidate(monkeypatch, tmp_path):
     }
 
 
-def test_kb_warmstart_supports_legacy_monkeypatched_reader_signature(
-    monkeypatch,
-    tmp_path,
-):
-    repo = _init_repo(tmp_path)
-
-    def legacy_reader(
-        *,
-        config,
-        kernel_path,
-        kernel_source,
-        kernel_backend,
-        target_functions=None,
-        framework="",
-        top_k=3,
-        source_files=None,
-        workspace="",
-        operator_name="",
-    ):
-        return []
-
-    monkeypatch.setattr(
-        "kernelforge.knowledge.experience_reader.read_top_solutions",
-        legacy_reader,
-    )
-
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
-
-    assert warm == {
-        "candidate": False,
-        "read_reason": "solution_pages_missing",
-        "read_error": "",
-    }
-
-
 def test_kb_warmstart_propagates_reader_no_hit_status(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 

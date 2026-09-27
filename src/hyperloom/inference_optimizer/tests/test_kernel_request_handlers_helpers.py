@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 from hyperloom.orchestrator.kernel import lane_budget
+from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
@@ -211,38 +212,38 @@ def test_geak_selected_payload_cannot_override_exact_env_forge(monkeypatch) -> N
 
 # -- _artifact_paths_from_payload -----------------------------------------
 def test_artifact_paths_string_wrapped() -> None:
-    assert krh._artifact_paths_from_payload({"artifact_paths": "/a/b.so"}) == ["/a/b.so"]
+    assert kernel_agent_tool._artifact_paths_from_payload({"artifact_paths": "/a/b.so"}) == ["/a/b.so"]
 
 
 def test_artifact_paths_list_filters_falsy() -> None:
-    out = krh._artifact_paths_from_payload(
+    out = kernel_agent_tool._artifact_paths_from_payload(
         {"compiled_artifact_paths": ["/a", "", None, "/b"]},
     )
     assert out == ["/a", "/b"]
 
 
 def test_artifact_paths_other_type() -> None:
-    assert krh._artifact_paths_from_payload({"artifact_paths": 42}) == []
-    assert krh._artifact_paths_from_payload({}) == []
+    assert kernel_agent_tool._artifact_paths_from_payload({"artifact_paths": 42}) == []
+    assert kernel_agent_tool._artifact_paths_from_payload({}) == []
 
 
 # -- _kernel_result_rank --------------------------------------------------- -- _parse_tool_stdout /
 # _shape_tool_result ------------------------------
 def test_parse_tool_stdout_whole_json() -> None:
-    assert krh._parse_tool_stdout('{"status": "ok", "x": 1}') == {"status": "ok", "x": 1}
+    assert kernel_agent_tool._parse_tool_stdout('{"status": "ok", "x": 1}') == {"status": "ok", "x": 1}
 
 
 def test_parse_tool_stdout_empty() -> None:
-    assert krh._parse_tool_stdout("   ") == {}
+    assert kernel_agent_tool._parse_tool_stdout("   ") == {}
 
 
 def test_parse_tool_stdout_last_line_json() -> None:
-    out = krh._parse_tool_stdout('noise line\nmore noise\n{"status": "ok"}')
+    out = kernel_agent_tool._parse_tool_stdout('noise line\nmore noise\n{"status": "ok"}')
     assert out == {"status": "ok"}
 
 
 def test_parse_tool_stdout_no_json_returns_tail() -> None:
-    out = krh._parse_tool_stdout("just plain text, no json here")
+    out = kernel_agent_tool._parse_tool_stdout("just plain text, no json here")
     assert "raw_stdout_tail" in out
 
 
@@ -266,7 +267,7 @@ TraceLens SDK orchestrator produced 43 hot kernels
 
 def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
     """The shape a tool with a lot to say actually emits."""
-    out = krh._parse_tool_stdout(_PRETTY_TOOL_STDOUT)
+    out = kernel_agent_tool._parse_tool_stdout(_PRETTY_TOOL_STDOUT)
 
     assert out["status"] == "ok"
     assert out["trace_report_path"] == "/s/tracelens/analysis.md"
@@ -275,7 +276,7 @@ def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
 
 def test_shape_tool_result_will_not_call_unreadable_output_a_success() -> None:
     """Inferring ``ok`` from rc==0 made a tool whose output could not be read indistinguishable from one that worked, so the caller recorded an empty analysis over a real one and reported the leg as succeeded."""
-    out = krh._shape_tool_result(0, "progress chatter, no json at all", "")
+    out = kernel_agent_tool._shape_tool_result(0, "progress chatter, no json at all", "")
 
     assert out["status"] == "failed"
     assert out["error_class"] == "tool_output_unparseable"
@@ -283,12 +284,12 @@ def test_shape_tool_result_will_not_call_unreadable_output_a_success() -> None:
 
 
 def test_shape_tool_result_uses_parsed_json() -> None:
-    out = krh._shape_tool_result(0, '{"status": "ok", "kernel_id": "k1"}', "")
+    out = kernel_agent_tool._shape_tool_result(0, '{"status": "ok", "kernel_id": "k1"}', "")
     assert out["status"] == "ok" and out["kernel_id"] == "k1"
 
 
 def test_shape_tool_result_infers_status_and_stderr_tail() -> None:
-    out = krh._shape_tool_result(1, '{"kernel_id": "k1"}', "boom error")
+    out = kernel_agent_tool._shape_tool_result(1, '{"kernel_id": "k1"}', "boom error")
     assert out["status"] == "failed"
     assert out["returncode"] == 1
     assert out["stderr_tail"].endswith("boom error")
@@ -296,7 +297,7 @@ def test_shape_tool_result_infers_status_and_stderr_tail() -> None:
 
 def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     # empty stdout -> _parse_tool_stdout returns {} -> synthesize branch
-    out = krh._shape_tool_result(2, "", "the stderr")
+    out = kernel_agent_tool._shape_tool_result(2, "", "the stderr")
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
 
 

@@ -12,12 +12,12 @@ from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
 
-class KernelStackPhase(PhaseHandler):
+class KernelStackPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _drain_pending_keep_integrates(self) -> None:
@@ -57,7 +57,7 @@ class KernelStackPhase(PhaseHandler):
                     if str(result.get("decision") or "").upper() == "KEEP":
                         await self._record_integrate_keep(result)
                 state.save(self.session_dir)
-            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+            except Exception as exc:
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
@@ -230,7 +230,7 @@ class KernelStackPhase(PhaseHandler):
 
     async def _recover_interrupted_stack_validation(self) -> bool:
         """Resume or abort a stack validation interrupted by crash."""
-        from ..kernel.request_handlers import _maybe_revert_kernel_patch
+        from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
         if isinstance(pending, dict) and pending:
@@ -345,14 +345,18 @@ class KernelStackPhase(PhaseHandler):
         entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
-        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+        from ..actions.executors.baseline import BaselineExecutor
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
-        from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
+        from ..actions.executors.benchmark_result import is_valid_measurement
         from ..kernel.patch_lifecycle import cleanup_verdict, lifecycle_complete
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _grade_integrate_accuracy,
+        )
+        from ..actions.executors._kernel_agent_tool import (
             _maybe_apply_kernel_patch,
             _maybe_finalize_kernel_patch,
             _maybe_revert_kernel_patch,
@@ -396,9 +400,9 @@ class KernelStackPhase(PhaseHandler):
                     # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
                     # on throughput alone.
                     "quality_ref_exempt": True,
-                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it leaves no
-                    # baseline event.
-                    SBD_INNER_STEP_PARAM: True,
+                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
+                    # that event rather than leaving a baseline event of its own.
+                    INLINE_EVENT_PARAM: kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
@@ -433,7 +437,16 @@ class KernelStackPhase(PhaseHandler):
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
-                if graded.verdict != VERDICT_KEEP:
+                if not graded.comparable:
+                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
+                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
+                    # is a call for a human, and the revert path below still leaves the tree clean either way.
+                    log.info(
+                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
+                    )
+                    graded_verdict = graded.verdict
+                    decision = "NEEDS_REVIEW"
+                elif graded.verdict != VERDICT_KEEP:
                     log.info(
                         "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
                         stack_id,
@@ -443,37 +456,29 @@ class KernelStackPhase(PhaseHandler):
                         graded.tput_reference,
                         graded.tput_candidate,
                     )
-                graded_verdict = graded.verdict
-                decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
-                if not graded.comparable:
-                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
-                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
-                    # is a call for a human, and the revert path below still leaves the tree clean either way.
-                    log.info(
-                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
-                    )
-                    decision = "NEEDS_REVIEW"
+                    graded_verdict = graded.verdict
+                    decision = "REVERT"
+                else:
+                    graded_verdict = graded.verdict
+                    decision = "KEEP"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
-                try:
-                    accuracy_gate = _grade_integrate_accuracy(
-                        bench_result,
-                        session_dir=self.session_dir,
-                        workspace=workspace,
-                        # The args the bench server ran under, so a serving context too small to host an eval is not
-                        # read as a broken eval.
-                        server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                accuracy_gate = _grade_integrate_accuracy(
+                    bench_result,
+                    session_dir=self.session_dir,
+                    workspace=workspace,
+                    # The args the bench server ran under, so a serving context too small to host an eval is not
+                    # read as a broken eval.
+                    server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                )
+                if accuracy_gate.get("blocked"):
+                    decision = "NEEDS_REVIEW"
+                    log.info(
+                        "stack-validate: accuracy gate blocked KEEP for %s: %s",
+                        stack_id,
+                        accuracy_gate.get("reason"),
                     )
-                    if accuracy_gate.get("blocked"):
-                        decision = "NEEDS_REVIEW"
-                        log.info(
-                            "stack-validate: accuracy gate blocked KEEP for %s: %s",
-                            stack_id,
-                            accuracy_gate.get("reason"),
-                        )
-                except Exception:  # noqa: BLE001
-                    log.debug("stack-validate: accuracy gate failed", exc_info=True)
 
             finalize_results: list[dict[str, Any]] = []
             stack_reverts: list[dict[str, Any]] = []
@@ -514,8 +519,7 @@ class KernelStackPhase(PhaseHandler):
                 "bench_result": bench_result,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
-                # A stack cannot be left half-applied, so RECORDED reverts like
-                # REVERT does; the verdict says which one it was.
+                # A stack cannot be left half-applied, so anything short of KEEP reverts it whole.
                 "graded_verdict": graded_verdict,
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),

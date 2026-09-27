@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     PRODUCER_SEED_GRID,
     PRODUCER_SPECIALIST,
     ROLE_AUTHORING,
+    ROLE_CONFIG,
     ROLE_DISCOVERY,
     STEP_ATTEMPTED,
     STEP_AUTHORED,
@@ -413,6 +414,28 @@ def test_entry_with_no_work_reads_as_skipped(_bound_session):
     assert _one(_bound_session)["status"] == "skipped"
 
 
+def test_work_without_a_dispatch_is_not_a_skipped_entry(_bound_session):
+    """Reducing over an empty run list yields ``skipped``, which would report an
+    entry that proposed a grid and left before it completed as one that never ran."""
+    recorder = make_framework_recorder(macro_cycle=0)
+    recorder.record_proposal("p-1", arm=ARM_CONFIG, producer=PRODUCER_ORCHESTRATION)
+    recorder.finish(exit_reason="optimize_budget_cap")
+
+    assert _one(_bound_session)["status"] == "succeeded"
+
+
+def test_a_rejected_attempt_is_not_a_failed_entry(_bound_session):
+    """A search that measured its variants and rejected every one did its job."""
+    recorder = make_framework_recorder(macro_cycle=0)
+    recorder.record_run("r-1", role=ROLE_CONFIG, arm=ARM_CONFIG, status="succeeded")
+    recorder.record_attempt("a-1", arm=ARM_CONFIG, task_id="r-1", outcome="REVERT", adopted=False)
+    recorder.finish(exit_reason="both_arms_plateaued")
+
+    event = _one(_bound_session)
+    assert event["status"] == "succeeded"
+    assert event["ext"]["attempts"][0]["adopted"] is False
+
+
 def test_all_runs_failing_is_not_a_success(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_run("r-1", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="failed")
@@ -421,18 +444,30 @@ def test_all_runs_failing_is_not_a_success(_bound_session):
     assert _one(_bound_session)["status"] == "failed"
 
 
-def test_failed_entry_records_its_own_failure(_bound_session):
+def test_a_fault_the_entry_survived_is_named_on_the_event(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
-    recorder.record_run("r-1", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="failed")
-    recorder.finish(
-        exit_reason="task_failed",
-        failure={"failed_task_id": "r-1", "error_class": "WorktreeError", "error": "patch did not apply"},
-    )
+    recorder.record_run("r-1", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded")
+    recorder.record_fault(stage="framework_pump:tick", error_class="WorktreeError", message="patch did not apply")
+    # The fault does not end the entry: it is closed on its own exit evidence.
+    recorder.finish(exit_reason="both_arms_plateaued")
 
     event = _one(_bound_session)
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["failed_task_id"] == "r-1"
-    assert event["ext"]["failure"]["error_class"] == "WorktreeError"
+    assert event["ext"]["exit"]["reason"] == "both_arms_plateaued"
+    assert event["ext"]["failure"] == {
+        "stage": "framework_pump:tick",
+        "error_class": "WorktreeError",
+        "message": "patch did not apply",
+    }
+
+
+def test_only_the_first_fault_is_kept(_bound_session):
+    recorder = make_framework_recorder(macro_cycle=0)
+    recorder.record_fault(stage="framework_pump:tick", error_class="WorktreeError", message="the cause")
+    recorder.record_fault(stage="phase_entered", error_class="RuntimeError", message="its consequence")
+    recorder.finish(exit_reason="both_arms_plateaued")
+
+    assert _ext(_bound_session)["failure"]["message"] == "the cause"
 
 
 def test_crash_closes_the_event_with_the_exception(_bound_session):

@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.timeutil import now_iso
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
@@ -28,6 +30,7 @@ if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
     from hyperloom.common.perf_metric import GradedComparison
 
 from . import kernel_decision_settings as _kernel_decision_settings
+from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
 
 log = logging.getLogger(__name__)
@@ -39,9 +42,31 @@ _CRASH_TIMESTAMP_CAP: int = 200
 _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
-_now_iso = _kernel_decision_settings._now_iso
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
+
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_sweep`` is the
+# non-terminal "exhausted the current lever" signal: from FRAMEWORK_AGENT it advances to KERNEL, from KERNEL it
+# winds down to SWEEP → CLOSE.
+ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
+ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
+ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
+ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
+ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
+    {
+        ESCALATE_HINT_SKIP_TO_KERNEL,
+        ESCALATE_HINT_SKIP_TO_SWEEP,
+        ESCALATE_HINT_SKIP_TO_CLOSE,
+        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    }
+)
+
+
+def is_valid_escalate_hint(hint: str) -> bool:
+    """Return True for any hint Coordinator should act on (closed vocab)."""
+    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def first_positive_tput(d: Any) -> float:
@@ -62,16 +87,6 @@ def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, 
     return snapshot_tput, False
 
 
-def framework_is_scriptable(framework: str | None) -> bool:
-    """Whether *framework* reports an image-quality gate instead of token throughput."""
-    name = str(framework or "").strip()
-    if not name:
-        return False
-    from hyperloom.inference_optimizer import framework_registry
-
-    return bool(framework_registry.is_scriptable(name))
-
-
 def resolve_grading_anchor_tput(state: Any) -> float:
     """Output throughput a new candidate is composed on top of."""
     if state is None:
@@ -81,12 +96,6 @@ def resolve_grading_anchor_tput(state: Any) -> float:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
-
-
-#: ``anchor_perf`` value meaning "this round has already degraded to the output
-#: axis". Distinct from ``None``, which means "no explicit anchor supplied" and
-#: resolves the session anchor instead.
-ANCHOR_DEGRADED: Any = object()
 
 
 def resolve_graded_comparison(
@@ -99,46 +108,36 @@ def resolve_graded_comparison(
     anchor_tput: float | None = None,
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
-    # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
-    # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
-    # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade to output throughput together and ``degrade_reason`` says why.
-    #
-    # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
-    # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round, and ANCHOR_DEGRADED holds a round on the output axis rather than
-    # re-resolving the session anchor the way None does.
+    # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
+    # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
+    # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
+    # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
+    # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
+    # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
+    # with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
-        AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
+        AGENTX_KEEP_P50_THRESHOLD_PCT,
         GRADED_INTVTY,
+        GRADED_INTVTY_P50,
         GRADED_OUTPUT,
         GradedComparison,
         VERDICT_KEEP,
-        VERDICT_RECORDED,
         VERDICT_REVERT,
-        intvty_of,
-        intvty_serving_grading_enabled,
+        axis_of,
+        holds_within_band,
         output_tput_of,
-        passes_intvty_gate,
-        passes_tput_guard,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
+        rounds_are_comparable,
         total_tput_of,
     )
+    from hyperloom.inference_optimizer.grading import resolved_grading
 
+    on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
-    if intvty_serving_grading_enabled(
-        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-    ):
-        if anchor_perf is ANCHOR_DEGRADED:
-            # Already on the output axis for this round. Re-resolving the
-            # session anchor here would grade later variants on interactivity
-            # against the round's opening state while they stack on top of a
-            # KEEP that was graded on output.
-            ref_perf, reason = None, "round_degraded"
-        elif anchor_perf is not None:
+    if on_intvty:
+        if anchor_perf is not None:
             ref_perf, reason = anchor_perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
@@ -147,27 +146,23 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if ref_perf and cand_perf:
-            gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
-            threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
-            if threshold > keep_threshold_pct:
-                log.info(
-                    "graded: raising keep_threshold %.2f%% -> %.2f%% (AgentX floor; "
-                    "the slow-tail percentile's own variance is unmeasured)",
-                    keep_threshold_pct,
-                    threshold,
-                )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf)
-            if gain is not None and gain >= threshold and tput_holds:
-                verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf) and not tput_holds:
-                verdict = VERDICT_REVERT
-            else:
-                verdict = VERDICT_RECORDED
+            gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
+            # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
+            # holds identically per GPU.
+            guards_hold = holds_within_band(
+                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
+            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
+            keep = (
+                gain is not None
+                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
+                and guards_hold
+                and rounds_are_comparable(cand_perf, ref_perf)
+            )
             return GradedComparison(
-                objective=GRADED_INTVTY,
-                candidate=intvty_of(cand_perf),
-                reference=intvty_of(ref_perf),
-                verdict=verdict,
+                objective=GRADED_INTVTY_P50,
+                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
+                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
+                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
             )
@@ -181,11 +176,17 @@ def resolve_graded_comparison(
         reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
+    if degrade_reason:
+        # The output-axis figures are diagnostic only. A degraded AgentX pair
+        # must not read as a throughput KEEP at the resolver chokepoint.
+        verdict = VERDICT_REVERT
+    else:
+        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT,
+        verdict=verdict,
         degrade_reason=degrade_reason,
     )
 
@@ -236,37 +237,6 @@ def inject_stack_base_params(
             _put(key, value)
 
 
-# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
-_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
-    ("decoder_type", "decoder"),
-    ("attention", "attention"),
-    ("layer_mix", "layers"),
-    ("kv_cache_per_token", "kv/token"),
-    ("active_params", "params"),
-    ("num_experts", "experts"),
-    ("experts_per_tok", "experts/tok"),
-    ("mtp", "mtp"),
-    ("swa_window", "swa_window"),
-    ("norm", "norm"),
-)
-
-
-def render_model_arch_compact(arch: dict | None) -> str:
-    """Render the advisory ``model_arch`` profile as a single compact line (``\"\"`` when empty/not a dict)."""
-    if not isinstance(arch, dict) or not arch:
-        return ""
-    parts: list[str] = []
-    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
-        val = arch.get(key)
-        if val is None or val == "":
-            continue
-        parts.append(f"{label}={val}")
-    notes = str(arch.get("notes") or "").strip()
-    if notes:
-        parts.append(f"notes={notes}")
-    return "; ".join(parts)
-
-
 # Integration faults (environment / apply / bench crashes) are distinct from a genuine gate REVERT; a fault means the
 # patch was never fairly measured, so it gets its own small retry budget instead of burning the REVERT quota.
 _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
@@ -281,6 +251,8 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
         "framework_script_mismatch",
+        # The recipe cannot carry the lever, so the patch was never benchmarked.
+        "recipe_lever_unavailable",
         "bench_exception",
         "subtask_exception",
         "handler_exception",
@@ -298,45 +270,11 @@ _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 30
 
-# phase_history cap (record_phase_transition).
-_PHASE_HISTORY_CAP = 100
-
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
-
-# gap ledger caps; both enforced in upsert_gap.
-_GAPS_MAX_ENTRIES = 50
-_GAPS_ATTEMPTS_HISTORY = 20
-
-# Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
-_INTERVENTION_MIX_CAP = 500
-_SPECIALIST_ROUNDS_CAP = 200
-_SEEN_PR_IDS_CAP = 2000
-_WINNERS_HISTORY_CAP = 200
-# Negative ledger (explore_search["tested"]); oldest insertion-order keys evicted first.
-_EXPLORE_TESTED_CAP = 5000
-
-# Per-action audit trail kinds; kernel_agent-owned actions excluded (dedicated structures).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "explore",
-        # ``roofline`` runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
-
-# audit-action name -> (result-dict key, key_metric_kind).
-_KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
-    "baseline": ("output_throughput", "output_throughput"),
-    "profile": ("output_throughput", "output_throughput"),
-    "explore": ("best_gain_pct", "gain_pct"),
-    "roofline": ("snapshot_id", "snapshot_id"),
-}
 
 
 #: top-level state.json schema version, stamped on every save.
@@ -365,58 +303,15 @@ def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
             recorder(name, time.monotonic() - started)
 
 
-def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
-    """Bound the explore_search negative ledger for multi-day runs."""
-    if not isinstance(tested, dict) or len(tested) <= _EXPLORE_TESTED_CAP:
-        return tested if isinstance(tested, dict) else {}
-    keys = list(tested.keys())[-_EXPLORE_TESTED_CAP:]
-    return {k: tested[k] for k in keys}
-
-
-def _stamp_cycle_on_tested(
-    tested: dict[str, Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> dict[str, Any]:
-    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(tested, dict):
-        return {}
-    bn = (bottleneck or "").strip()
-    for v in tested.values():
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return tested
-
-
-def _stamp_cycle_on_rejected(
-    rejected: list[Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> list[Any]:
-    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(rejected, list):
-        return []
-    bn = (bottleneck or "").strip()
-    for v in rejected:
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return rejected
-
-
 from ._shared_state.render import _RenderMixin
 
 
-from ._shared_state.explore_state import _ExploreStateMixin
+from ._shared_state.phase_state import _PhaseStateMixin
+from .gaps import GapsStateMixin
 
 
 @dataclass
-class SharedState(_RenderMixin, _ExploreStateMixin):
+class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # versioned state.json schema; bumped by from_dict migration. Fresh sessions born at latest.
     schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
@@ -467,14 +362,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
+    # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
+    # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
+    # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
+    # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
+    grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by ``_parse_conc_sweep_concs``.
     conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
-    # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
-    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
@@ -571,12 +470,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # The card's compute-partition shape this session was measured in, as observed at launch: mode, partition count,
     # CU and memory per partition, streams per partition.
     compute_partition: dict[str, Any] = field(default_factory=dict)
-    # ``--nodes``, feeding the robustness defaults and the IR-8 check.
+    # ``--nodes``, feeding the IR-8 check.
     nodes: int = 1
     # Per-agent Unix timestamp of the most recent completed reactor pass.
     agent_last_active: dict[str, float] = field(default_factory=dict)
-    # Resolved robustness-agent ``request.options``; a resume layers its own flags on top, per-key.
-    robustness_options: dict[str, Any] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
@@ -591,6 +488,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
+    # Bumped by every lift into ``current_best``; stamped onto ``validated_recipe_generation`` by every validation.
+    # Unequal => ``current_best`` is not the Recipe the validated gain was measured on, even at the same stack depth.
+    working_recipe_generation: int = 0
+    validated_recipe_generation: int = 0
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False
@@ -623,7 +524,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
-    start_ts: str = field(default_factory=_now_iso)
+    start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
     # Absolute unix deadline for a bounded session. Stamped once from
     # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
@@ -668,6 +569,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
     roofline_failure_streak: int = 0
+    # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
+    # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
+    gpu_trace_unsupported_reason: str = ""
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
@@ -675,6 +579,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
+    # One row per measured attempt on any lever; the per-lever dryness judgment
+    # reads it. One writer per lever: writeback for config, the dispatcher for
+    # patches, both through ``attempt_ledger``.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
     # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(
         default_factory=list,
@@ -717,13 +625,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
-    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio
-    # (outcome='KILLED_OVERTIME').
-    explore_overtime_kill_ratio: float = 2.0
-    # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
-    explore_variant_timeout_sec_override: int = 0
-    # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
-    explore_variant_timeout_safety_margin: float = 0.5
     # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
@@ -845,8 +746,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Durable sum of completed optimisation-phase segments.
-    explore_elapsed_accum_s: float | None = 0.0
     # Durable per-phase sum of COMPLETED segments, keyed by phase name.
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
@@ -1154,15 +1053,32 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return inst
 
     @classmethod
+    def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
+        """Reject damaged crash evidence and agent text before migrating a persisted state."""
+        for name, expected in cls.AGENT_UPDATE_FIELDS.items():
+            if name in raw and not isinstance(raw[name], expected):
+                raise ValueError(f"state.json.{name} must be {expected.__name__}, got {type(raw[name]).__name__}")
+        if "crash_count" in raw:
+            count = raw["crash_count"]
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError(f"state.json.crash_count must be int, got {type(count).__name__}")
+        if "crash_timestamps" in raw:
+            timestamps = raw["crash_timestamps"]
+            if not isinstance(timestamps, list):
+                raise ValueError(f"state.json.crash_timestamps must be list, got {type(timestamps).__name__}")
+            for index, timestamp in enumerate(timestamps):
+                if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+                    raise ValueError(
+                        f"state.json.crash_timestamps[{index}] must be a number, got {type(timestamp).__name__}"
+                    )
+
+    @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping."""
+        """Construct state from a mapping, refusing invalid crash evidence or agent text with ``ValueError``."""
+        cls._validate_resume_fields(raw)
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A pre-telemetry state may already have completed optimisation segments, but their exact sum cannot be
-        # reconstructed once phase_history has been capped.
-        if "explore_elapsed_accum_s" not in raw:
-            filtered["explore_elapsed_accum_s"] = None
         # A state written before per-phase totals existed still records every transition in phase_history, so the
         # completed segments are reconstructible.
         if not isinstance(filtered.get("phase_elapsed_totals"), dict):
@@ -1207,7 +1123,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         existing: Any,
     ) -> dict[str, Any]:
         """Shape the unified ``explore_search`` ledger at load time."""
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
@@ -1291,12 +1207,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-            instrument.snapshot_state_sections(session_dir, self)
-        except Exception:  # noqa: BLE001 — author-time capture must never block save
-            log.debug("snapshot_state_sections failed", exc_info=True)
+        instrument.snapshot_state_sections(session_dir, self)
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:
@@ -1321,7 +1234,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     text,
                     encoding="utf-8",
                 )
-        except Exception:  # noqa: BLE001 — derived artifact, never fatal
+        except Exception:
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
             try:
@@ -1331,10 +1244,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             log.warning("current_setting.sh render failed", exc_info=True)
         # Live status mirror: reflect the persisted snapshot into Langfuse for real-time status.
         try:
-            from ..trace.langfuse_emitter import record_status as _lf_record_status
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:  # noqa: BLE001 — status mirror must never block save
+        except Exception:
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
@@ -1380,17 +1293,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
         try:
-            from ..phases.machine_state import explore_elapsed_seconds
+            from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
 
             session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
             summary["session_elapsed_s"] = int(round(session_elapsed_s))
-            explore_elapsed_s = explore_elapsed_seconds(self)
-            if explore_elapsed_s is not None:
-                summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
-                summary["explore_ratio"] = (
-                    round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
-                )
-        except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
+            explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
+            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
+            summary["explore_ratio"] = (
+                round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
+            )
+        except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
@@ -1428,24 +1340,63 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ..policy import gate as _m
+        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
 
-        return _m.record_policy_denial(
-            self,
-            action_name=action_name,
-            rule=rule,
-            hint=hint,
-            intent_type=intent_type,
-            tick=tick,
-            intent_payload=intent_payload,
-        )
+        Records a capped rolling history entry and increments the
+        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
+
+        Args:
+            action_name (str): The action the denied intent targeted (empty
+                is normalized to ``"*"`` in the streak key).
+            rule (str): The PolicyGate rule id that fired.
+            hint (str): Human-readable remediation hint surfaced to the LLM.
+            intent_type (str): The denied intent's type.
+            tick (int): The Coordinator tick at which the denial occurred.
+            intent_payload (dict[str, Any] | None): Optional intent payload;
+                when present, its sorted keys are recorded for context.
+
+        Returns:
+            int: The new consecutive-denial streak value for this
+                (action, rule) pair.
+        """
+        key = f"{action_name or '*'}:{rule}"
+        streak = int(self.policy_denial_streak.get(key, 0)) + 1
+        self.policy_denial_streak[key] = streak
+        entry = {
+            "tick": int(tick),
+            "action_name": action_name or "",
+            "rule": rule,
+            "hint": hint or "",
+            "intent_type": intent_type,
+            "streak": streak,
+            "ts": now_iso(),
+        }
+        if intent_payload:
+            entry["intent_payload_keys"] = sorted(intent_payload.keys())
+        history = list(self.policy_denial_history or [])
+        history.append(entry)
+        if len(history) > self._POLICY_DENIAL_HISTORY_CAP:
+            history = history[-self._POLICY_DENIAL_HISTORY_CAP :]
+        self.policy_denial_history = history
+        return streak
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ..policy import gate as _m
+        """Clear all consecutive-denial streaks for a given action.
 
-        return _m.reset_policy_denial_streak(self, action_name)
+        Drops every ``policy_denial_streak`` entry whose key begins with
+        ``"<action_name>:"`` — called when the action finally succeeds so a
+        later denial starts a fresh streak.
+
+        Args:
+            action_name (str): The action whose streaks should be reset; a
+                falsy value is a no-op.
+        """
+        if not action_name:
+            return
+        prefix = f"{action_name}:"
+        self.policy_denial_streak = {
+            k: v for k, v in (self.policy_denial_streak or {}).items() if not k.startswith(prefix)
+        }
 
     # stop_reason ENUM validator
     def set_stop_reason(
@@ -1455,7 +1406,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         strict: bool | None = None,
     ) -> str:
         """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``\"unknown\"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written."""
-        from ..phases.machine_state import STOP_REASON_VOCAB, is_valid_stop_reason
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 
         text = str(value or "").strip()
         if not text:
@@ -1465,15 +1416,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if is_valid_stop_reason(text):
             return self._commit_stop_reason(text)
         if strict is None:
-            strict_env = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_STRICT_STOP_REASON",
-                    "",
-                )
-                .strip()
-                .lower()
-            )
-            strict = strict_env in ("1", "true", "yes")
+            strict = env_bool("INFERENCE_OPTIMIZER_STRICT_STOP_REASON")
         if strict:
             raise ValueError(f"stop_reason={text!r} not in STOP_REASON_VOCAB ({sorted(STOP_REASON_VOCAB)!r})")
         # Lenient: map to "unknown" and warn.
@@ -1491,14 +1434,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Write a validated stop reason, stamping the end time on the first one."""
         self.stop_reason = reason
         if not self.stop_ts:
-            self.stop_ts = _now_iso()
+            self.stop_ts = now_iso()
         return reason
 
     # escalate hint plumbing
     def set_pending_escalate_hint(self, hint: str) -> str:
         """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
-        from ..phases.machine_state import is_valid_escalate_hint
-
         text = str(hint or "").strip()
         if text and not is_valid_escalate_hint(text):
             return ""
@@ -1512,7 +1453,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = _now_iso()
+        self.last_consumed_escalate_hint_ts = now_iso()
         return hint
 
     def discard_pending_escalate_hint(self) -> str:
@@ -1522,44 +1463,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_discarded_escalate_hint = hint
-        self.last_discarded_escalate_hint_ts = _now_iso()
+        self.last_discarded_escalate_hint_ts = now_iso()
         return hint
-
-    # phase machine writer (Coordinator-only, single writer)
-    def record_phase_transition(
-        self,
-        *,
-        to_phase: str,
-        reason: str,
-        evidence: dict[str, Any] | None = None,
-        ts: str | None = None,
-        ts_unix: float | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.record_phase_transition(
-            self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix
-        )
-
-    def append_phase_history_event(
-        self,
-        *,
-        reason: str,
-        evidence: dict[str, Any] | None = None,
-        ts: str | None = None,
-        ts_unix: float | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.append_phase_history_event(
-            self,
-            reason=reason,
-            evidence=evidence,
-            ts=ts,
-            ts_unix=ts_unix,
-        )
 
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` (\"\" when none)."""
@@ -1605,33 +1510,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             self.clear_bottleneck_switch()
             return True
         return False
-
-    def record_lifecycle_event(
-        self,
-        *,
-        step: str,
-        status: str,
-        phase: str | None = None,
-        label: str | None = None,
-        artifacts: dict[str, str] | None = None,
-        detail: str = "",
-        duration_s: float | None = None,
-        ts: str | None = None,
-    ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
-        from ..phases import machine_state as _m
-
-        return _m.record_lifecycle_event(
-            self,
-            step=step,
-            status=status,
-            phase=phase,
-            label=label,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
-            ts=ts,
-        )
 
     def merge_lifecycle_events(self, incoming: Any) -> None:
         """Union ``incoming`` lifecycle rows into this state, ordered by timestamp."""
@@ -1687,7 +1565,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Persist a compact Coordinator exception summary for postmortems."""
         entry = {
             "tick": int(tick or 0),
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "stage": str(stage or ""),
             "agent": str(agent or ""),
             "type": str(exc_type or ""),
@@ -1697,27 +1575,55 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.last_tick_exception = entry
         return entry
 
+    AGENT_UPDATE_FIELDS: ClassVar[dict[str, type]] = {
+        "current_action": str,
+        "target_summary": str,
+    }
+
+    @classmethod
+    def agent_update_errors(cls, changes: Mapping[str, Any]) -> dict[str, str]:
+        """Describe forbidden fields and invalid types; unknown keys remain soft rejections.
+
+        The untrusted path serves one caller -- an agent's UPDATE_STATE intent --
+        and the prompt advertises exactly the fields in
+        :data:`AGENT_UPDATE_FIELDS`. Everything else on the state is the
+        Coordinator's to write through its own actions, so a field outside that
+        set is refused by name rather than landing and surfacing later as a
+        confusing failure in the loop; an advertised field is refused when its
+        type is wrong.
+        """
+        known = {f.name for f in fields(cls)}
+        errors: dict[str, str] = {}
+        for key, value in changes.items():
+            if key not in known:
+                continue
+            expected = cls.AGENT_UPDATE_FIELDS.get(key)
+            if expected is None:
+                errors[key] = "Coordinator-owned field"
+            elif not isinstance(value, expected):
+                errors[key] = f"must be {expected.__name__}, got {type(value).__name__}"
+        return errors
+
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written."""
+        """Apply known fields, dropping each write an untrusted caller may not make.
+
+        A core field never reaches here: PolicyGate refuses that whole intent
+        upstream. Everything this method refuses -- a non-core field outside
+        :data:`AGENT_UPDATE_FIELDS`, a wrong value type -- is dropped per key
+        while the rest of the same call is applied, and the caller reports the
+        difference as ``rejected``.
+        """
         if not changes:
             return {}
-        core_fields: frozenset[str] = frozenset()
-        if not allow_core:
-            # Lazy import to avoid a shared_state <-> policy import cycle.
-            from ..policy.gate import CORE_STATE_FIELDS
-
-            core_fields = CORE_STATE_FIELDS
+        errors = {} if allow_core else self.agent_update_errors(changes)
         applied: dict[str, Any] = {}
         # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is not writable here.
         writable = {f.name for f in fields(self)}
         for key, value in changes.items():
             if key not in writable:
                 continue
-            if key in core_fields:
-                log.warning(
-                    "apply_changes: dropping core state field %r (allow_core=False)",
-                    key,
-                )
+            if key in errors:
+                log.warning("apply_changes: dropping state field %r (allow_core=False): %s", key, errors[key])
                 continue
             setattr(self, key, value)
             applied[key] = value
@@ -1785,38 +1691,35 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         if not isinstance(entry, dict):
             return
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
-            last = (entry.get("attempts") or [{}])[-1]
-            last = last if isinstance(last, dict) else {}
-            rejected = entry.get("rejected")
-            record_integrate_verdict(
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                integration_id=str(entry.get("integration_id") or ""),
-                kernel_id=str(entry.get("kernel_id") or ""),
-                decision=str(entry.get("last_decision") or ""),
-                status=str(entry.get("last_status") or ""),
-                attempt_count=entry.get("attempt_count"),
-                fault_count=entry.get("fault_count"),
-                gain_pct=entry.get("best_gain_pct"),
-                accuracy_pass=last.get("accuracy_pass"),
-                validation_tier=str(last.get("validation_tier") or ""),
-                patch_path=str(entry.get("patch_path") or ""),
-                target_file=str(entry.get("target_file") or ""),
-                error_class=str(entry.get("last_error_class") or ""),
-                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
-                retryable=bool(entry.get("retryable")),
-                settled_at=str(entry.get("updated_at") or ""),
-                extra_server_args=str(entry.get("extra_server_args") or ""),
-                basis=str(entry.get("basis") or ""),
-                alignment_status=str(entry.get("alignment_status") or ""),
-                # Absent means attributable: every writer that cannot pin the
-                # gain on this one kernel says so explicitly.
-                gain_attributed=bool(entry.get("validated", True)),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("integrate verdict capture failed", exc_info=True)
+        last = (entry.get("attempts") or [{}])[-1]
+        last = last if isinstance(last, dict) else {}
+        rejected = entry.get("rejected")
+        record_integrate_verdict(
+            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+            integration_id=str(entry.get("integration_id") or ""),
+            kernel_id=str(entry.get("kernel_id") or ""),
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            fault_count=entry.get("fault_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            accuracy_pass=last.get("accuracy_pass"),
+            validation_tier=str(last.get("validation_tier") or ""),
+            patch_path=str(entry.get("patch_path") or ""),
+            target_file=str(entry.get("target_file") or ""),
+            error_class=str(entry.get("last_error_class") or ""),
+            rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+            retryable=bool(entry.get("retryable")),
+            settled_at=str(entry.get("updated_at") or ""),
+            extra_server_args=str(entry.get("extra_server_args") or ""),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            # Absent means attributable: every writer that cannot pin the
+            # gain on this one kernel says so explicitly.
+            gain_attributed=bool(entry.get("validated", True)),
+        )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -1990,7 +1893,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except (TypeError, ValueError):
             key_metric = None
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "task_id": str(task_id or ""),
             "status": str(status or ""),
             "decision": str(decision or ""),
@@ -2006,17 +1909,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
         if action == "baseline":
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
+            from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-                record_action_decision(
-                    phase=str(getattr(self, "phase", "") or "unphased"),
-                    macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                    task_id=str(entry.get("task_id") or ""),
-                    decision=str(entry.get("decision") or ""),
-                )
-            except Exception:  # noqa: BLE001 — author-time capture must never block record
-                log.debug("baseline decision capture failed", exc_info=True)
+            record_action_decision(
+                phase=str(getattr(self, "phase", "") or "unphased"),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                task_id=str(entry.get("task_id") or ""),
+                decision=str(entry.get("decision") or ""),
+            )
         return entry
 
     def record_action_failure(
@@ -2030,7 +1930,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
         result = result or {}
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             **self._common_result_fields(result),
@@ -2146,11 +2046,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it."""
         try:
-            from ..kernel.roofline_ceiling import (
+            from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
             )
-            from ..kernel.roofline_snapshot import (
+            from hyperloom.inference_optimizer.roofline_snapshot import (
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2159,18 +2059,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         achieved = self._resolve_baseline_achieved_tput()
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-        try:
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm="baseline",
-            )
-        except Exception:  # noqa: BLE001 — ceiling is best-effort
-            pass
+        breakdown = compute_roofline_breakdown_from_state(
+            self,
+            arm="baseline",
+        )
         peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
         if peak_tput <= 0:
             return {}
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         ceiling = build_roofline_snapshot(
             snapshot_id=None,
             ts=ts_iso,
@@ -2280,7 +2177,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(task_groups, list):
             task_groups = []
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "steady_state_trace": str(steady_state_trace),
@@ -2434,13 +2331,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         # Append compact history for report-side Roofline Comparison; best-effort.
         try:
-            from ..kernel.roofline_snapshot import (
+            from hyperloom.inference_optimizer.roofline_snapshot import (
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
 
             # Stamp decode-roofline ceiling + measured tput.
-            from ..kernel.roofline_ceiling import (
+            from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
             )
@@ -2471,13 +2368,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 achieved_tput = self._resolve_baseline_achieved_tput()
             # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(
-                    self,
-                    arm=snapshot_arm,
-                )
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
+            breakdown = compute_roofline_breakdown_from_state(
+                self,
+                arm=snapshot_arm,
+            )
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).
@@ -2508,7 +2402,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
             try:
-                from ..kernel.roofline_snapshot import direction_saturation
+                from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
 
                 sat = direction_saturation(history_entry)
                 direction = str(sat.get("direction") or "")
@@ -2586,7 +2480,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "status": str(result.get("status") or "succeeded"),
             "skip_reason": str(result.get("skip_reason") or ""),
             "was_skipped": bool(result.get("was_skipped", False)),
@@ -2800,8 +2694,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``)."""
-        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
+        """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""
+        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
+            self.working_recipe_generation
+        ) != int(self.validated_recipe_generation)
 
 
-__all__ = ["SharedState", "render_model_arch_compact", "timed_teardown_step"]
+__all__ = ["SharedState", "timed_teardown_step"]

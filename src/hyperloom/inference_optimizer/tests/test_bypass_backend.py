@@ -21,6 +21,30 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
 )
 
 
+def test_bypass_client_partial_output_reaches_outer_watchdog(tmp_path, monkeypatch):
+    import sys
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3]))
+    code = (
+        "import os,pathlib,sys\n"
+        "from hyperloom.orchestrator.actions.executors.bypass_runner import _run_subprocess\n"
+        "(pathlib.Path(sys.argv[1]) / 'server.log').write_text('Application startup complete')\n"
+        "client = 'import os,time\\nfor _ in range(30): os.write(1,b\".\"); time.sleep(.15)'\n"
+        "rc = _run_subprocess([sys.executable,'-c',client],5,pathlib.Path(sys.argv[1]),'client')\n"
+        "sys.stdout.flush(); sys.stderr.flush(); os._exit(rc)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", code, str(tmp_path)],
+        timeout=10,
+        server_log_path=str(tmp_path / "server.log"),
+        silence_timeout_sec=2.0,
+    )
+    assert cp.returncode == 0
+    assert cp.stdout == "." * 30
+    assert (tmp_path / "client_stdout.log").read_text(encoding="utf-8") == "." * 30
+
+
 def test_bypass_backend_selected(monkeypatch):
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
     backend = bb.resolve_backend()
@@ -152,6 +176,32 @@ def test_server_command_sglang():
     assert cmd[:3] == ["python3", "-m", "sglang.launch_server"]
     assert "--tensor-parallel-size" in cmd and "2" in cmd
     assert cmd[-2:] == ["--foo", "1"]
+
+
+def test_the_backend_trace_dir_wins_over_the_preflight_placeholder():
+    """EXTRA_VLLM_ARGS carries a trace dir only so the argv preflight accepts the bounds beside it.
+
+    ProfilerConfig refuses ``profiler=torch`` without a ``torch_profiler_dir``, so the probed
+    fragment has to name one; it is a placeholder, and the launcher's own value has to win vLLM's
+    last-wins merge or the trace lands where this backend's discovery never looks.
+    """
+    cmd = bypass_engine.build_server_command(
+        framework="vllm",
+        model="/m",
+        tp=1,
+        port=8888,
+        max_model_len=None,
+        extra_args=[
+            "--profiler-config.profiler",
+            "torch",
+            "--profiler-config.torch_profiler_dir",
+            "/round-dir",
+        ],
+        profile_dir="/ws/torch_trace",
+    )
+
+    dirs = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--profiler-config.torch_profiler_dir"]
+    assert dirs[-1] == "/ws/torch_trace"
 
 
 def test_sglang_atom_server_command_honors_python_exe():
@@ -440,6 +490,7 @@ def test_bypass_run_end_to_end(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -545,6 +596,7 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -597,6 +649,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -750,6 +803,7 @@ def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     # cleanup=False -> server must NOT be torn down.
     rc = bypass_runner.run_benchmark(
@@ -832,6 +886,7 @@ def _fake_client_run(monkeypatch, tput=700.0):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
 
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
@@ -990,6 +1045,7 @@ def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1070,6 +1126,7 @@ def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc, error = bs.run_scriptable(
         framework="xdit",
@@ -1294,6 +1351,7 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
     assert captured.get("num_prompts") == "37"
@@ -1384,6 +1442,7 @@ def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
         return _E()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
 
 def test_eval_failure_propagates_as_run_failure(tmp_path, monkeypatch):
@@ -1646,6 +1705,7 @@ def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
 
     rc = bypass_runner._run_subprocess(["client"], 0.01, tmp_path, "client")
     assert rc == 124
@@ -1937,6 +1997,7 @@ def test_ensure_eval_deps_present_skips_install(monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
 
     assert len(calls) == 1  # probe only
@@ -1957,6 +2018,7 @@ def test_ensure_eval_deps_installs_when_missing(monkeypatch):
         return _P()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
     bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
 
     assert len(calls) == 2

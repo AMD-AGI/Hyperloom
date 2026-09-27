@@ -22,11 +22,9 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, create_in_cursor
 
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    PendingProposal,
-    _extract_enablement_launch_log,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
 
 
 _MISSING_ARCH_LOG = (
@@ -778,6 +776,39 @@ async def test_rearm_kept_stores_accepted_config():
 
 
 @pytest.mark.asyncio
+async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make():
+    """A KEEP that observed nothing must not inherit the previous KEEP's map.
+
+    The closure and the assertion set describe the image and interpreter of the
+    KEEP that observed them, so a standing value left in place would present
+    another KEEP's evidence as this one's and read as verified.
+    """
+    fake = _enqueue_self()
+    fake.shared_state.enablement.environment_closure = {"distributions": {"torch": "2.6"}}
+    fake.shared_state.enablement.installed_versions_at_keep = {"torch": "2.6"}
+    fake.shared_state.enablement.launch_evidence = {"recipe_digest": "sha256:old"}
+
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
+
+    assert fake.shared_state.enablement.environment_closure == {}
+    assert fake.shared_state.enablement.installed_versions_at_keep == {}
+    assert fake.shared_state.enablement.launch_evidence == {}
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_leaves_the_accepted_stack_records_a_round_did_not_touch():
+    """Stack identity accumulates: a round contributing none clears none."""
+    fake = _enqueue_self()
+    fake.shared_state.enablement.roots = [{"id": "r1", "path": "/fr"}]
+    fake.shared_state.enablement.base_sha = "a" * 40
+
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
+
+    assert fake.shared_state.enablement.roots == [{"id": "r1", "path": "/fr"}]
+    assert fake.shared_state.enablement.base_sha == "a" * 40
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     """The path the round reports is under runs/, which never reaches the archive."""
     cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "integrate_patch.with_envs.yaml"
@@ -1172,7 +1203,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
+    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
     return Coordinator(session_dir, backends=backends)
 
 
@@ -1218,7 +1249,7 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
 @pytest.mark.asyncio
 async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     """After _AUTHORED_LANE_MAX_ATTEMPTS, the next call stamps a terminal row."""
-    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
 
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/100"
@@ -1391,3 +1422,37 @@ async def test_rearm_advanced_deduplicates_artifacts(monkeypatch):
         }
     )
     assert len(fake.shared_state.enablement.kept_artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "status,accepted",
+    [("kept", True), ("apply_failed", False), ("no_patches", False), ("reverted", False)],
+)
+async def test_rearm_records_the_rounds_disposition_on_the_executions_it_performed(status, accepted):
+    """Only the accepted round's applied commands reach the validated launch.
+
+    A discarded round still mutated the shared venv, so its rows stay in the
+    ledger carrying the outcome the lane reported for them.
+    """
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+
+    fake = _enqueue_self()
+    fake.shared_state.enablement.setup_executions = [
+        build_execution_row(
+            seq=1,
+            round_task_id="spec-1",
+            cmd_index=0,
+            cmd="pip install -U transformers",
+            source="proposed",
+            outcome="applied",
+            env={},
+            fs_root="/nonexistent-probe-root",
+        )
+    ]
+    await fake._maybe_rearm_enablement(
+        {"enablement": True, "status": status, "specialist_task_id": "spec-1", "patches_applied": []}
+    )
+    row = fake.shared_state.enablement.setup_executions[0]
+    assert row["round_disposition"] == status
+    assert row["at_accepted_round"] is accepted
+    assert row["present_at_final_launch"] is accepted

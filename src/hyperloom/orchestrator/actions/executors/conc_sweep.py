@@ -9,7 +9,7 @@ Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
 on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed
 ``conc_sweep`` delegate is denied by PolicyGate.
 
-Inputs (``task.params``): ``concs`` (CONC ladder), ``variant_timeout_sec``,
+Inputs (``task.params``): ``concs`` (CONC ladder),
 ``total_budget_sec`` (``None`` disables the gate; ``<=0`` means no time is left
 and the sweep skips without booting a server).
 
@@ -60,7 +60,7 @@ class ConcSweepExecutor:
         # worse than not recording.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -103,7 +103,6 @@ class ConcSweepExecutor:
         else:
             concs = [int(c) for c in concs_raw]
 
-        variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
         # An explicit ``None`` means "no budget gate" and must survive as None: coercing it to 0 would instead read as
         # "no time left" and skip.
         budget_raw = params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
@@ -115,7 +114,6 @@ class ConcSweepExecutor:
                 state,
                 session_dir,
                 concs=concs,
-                variant_timeout_sec=variant_timeout,
                 total_budget_sec=total_budget,
                 recorder=recorder,
             )
@@ -151,26 +149,18 @@ class ConcSweepExecutor:
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
-        try:
-            if not session_is_bound():
-                log.warning(
-                    "conc_sweep timeline: no session bound; this sweep's whole event will be "
-                    "missing from the breakdown. The coordinator binds at startup, so this "
-                    "means either that never happened or the context did not name a session"
-                )
-                return None
-            event = conc_sweep_event_id(
-                phase=str(getattr(state, "phase", "") or "unphased"),
-                macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
-            )
-            sink = make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
+        if not session_is_bound():
             log.warning(
-                "conc_sweep timeline: could not resolve an event to record into; this "
-                "sweep's whole event will be missing from the breakdown",
-                exc_info=True,
+                "conc_sweep timeline: no session bound; this sweep's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this "
+                "means either that never happened or the context did not name a session"
             )
             return None
+        event = conc_sweep_event_id(
+            phase=str(getattr(state, "phase", "") or "unphased"),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+        )
+        sink = make_sink(event, producer=_RECORDER_PRODUCER)
         return make_conc_sweep_recorder(
             sink,
             task_id=str(getattr(ctx.task, "task_id", "") or ""),

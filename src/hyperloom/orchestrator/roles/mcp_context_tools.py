@@ -6,7 +6,7 @@ import importlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class ContextProvider:
     recent_outcomes_reader: Callable[[int], str] | None = None
     running_tasks_reader: Callable[[], str] | None = None
     # Whitelisted lane-light action runner; ``None`` => unavailable.
-    action_runner: Callable[[str, dict[str, Any]], str] | None = None
+    action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
 
@@ -39,7 +39,7 @@ class ContextProvider:
         """Invoke a projection callable, never letting it crash the reactor."""
         try:
             out = fn()
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+        except Exception as exc:
             log.exception("context tool %s failed", label)
             return f"(context tool {label} unavailable: {exc!r})"
         return out if isinstance(out, str) and out else f"({label}: empty)"
@@ -101,18 +101,20 @@ class ContextProvider:
             return "(running tasks reader not wired)"
         return self._safe(self.running_tasks_reader, "running_tasks")
 
-    def run_action_now(
+    async def run_action_now(
         self,
         action_name: str = "",
         params: dict[str, Any] | None = None,
     ) -> str:
-        """Run a whitelisted lane-light action inline."""
+        """Await a whitelisted lane-light action without occupying a worker."""
         if self.action_runner is None:
             return "(run_action_now not wired)"
-        return self._safe(
-            lambda: self.action_runner(action_name, dict(params or {})),
-            "run_action_now",
-        )
+        try:
+            out = await self.action_runner(action_name, dict(params or {}))
+        except Exception as exc:
+            log.exception("context tool %s failed", "run_action_now")
+            return f"(context tool run_action_now unavailable: {exc!r})"
+        return out if isinstance(out, str) and out else "(run_action_now: empty)"
 
     def read_reference(self, name: str = "") -> str:
         """Return the full text of a named on-demand reference document."""
@@ -375,8 +377,11 @@ def _make_handler(
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
         try:
-            text = method(**kwargs)
-        except Exception as exc:  # noqa: BLE001 — never crash a pull
+            if method_name == "run_action_now":
+                text = await method(**kwargs)
+            else:
+                text = method(**kwargs)
+        except Exception as exc:
             log.exception("context tool handler %s raised", method_name)
             return {
                 "content": [{"type": "text", "text": f"error: {exc!r}"}],

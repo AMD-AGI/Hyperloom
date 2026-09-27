@@ -187,11 +187,11 @@ class ExperienceLedger:
 
     def flush(self) -> None:
         """Persist structured JSONL and the full Markdown inspection view."""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             self.root.mkdir(parents=True, exist_ok=True)
             payload = "".join(json.dumps(asdict(entry), sort_keys=True) + "\n" for entry in self.entries)
             atomic_write_text(self.jsonl_path, payload)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             self.root.mkdir(parents=True, exist_ok=True)
             header = "# Forge experience ledger\n\n"
             self.path.write_text(header + self._render(self.entries) + "\n")

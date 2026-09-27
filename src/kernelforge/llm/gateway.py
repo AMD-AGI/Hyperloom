@@ -5,21 +5,16 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
-import logging
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from hyperloom.common.llm_headers import parse_custom_headers
+
 __all__ = [
     "LlmGateway",
-    "expand_env_refs",
-    "format_custom_headers",
     "normalize_anthropic_base_url",
-    "parse_custom_headers",
     "resolve_anthropic_gateway",
     "resolve_openai_gateway",
 ]
@@ -27,13 +22,6 @@ __all__ = [
 # Anthropic protocol, so the native x-api-key form leads and the gateway bearer token follows -- matching Hyperloom's
 # Claude paths, which order it the same way.
 _ANTHROPIC_KEY_ENVS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-
-log = logging.getLogger("kernelforge.llm")
-
-_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-# A value carrying ", Some-Name:" almost certainly meant to be two headers.
-_PACKED_PAIR_RE = re.compile(r",\s*[A-Za-z0-9][A-Za-z0-9_-]*\s*:")
 
 
 @dataclass
@@ -71,58 +59,6 @@ class LlmGateway:
             key_env=str(mapping.get("key_env") or "").strip(),
             headers=headers,
         )
-
-
-def expand_env_refs(raw: str) -> str:
-    """Substitute shell-style ``${VAR}`` references from the environment."""
-    return _ENV_REF_RE.sub(lambda m: os.environ.get(m.group(1), ""), raw)
-
-
-def parse_custom_headers(raw: str | None) -> dict[str, str]:
-    """Parse custom LLM headers (JSON object OR newline-delimited ``Name: value``)."""
-    if not raw:
-        return {}
-    expanded = expand_env_refs(raw).strip()
-    if not expanded:
-        return {}
-    headers: dict[str, str] = {}
-    parsed_json = False
-    if expanded.startswith("{"):
-        with contextlib.suppress(json.JSONDecodeError):
-            obj = json.loads(expanded)
-            if isinstance(obj, dict):
-                headers = {str(k).strip(): str(v).strip() for k, v in obj.items() if str(k).strip()}
-                parsed_json = True
-    if not parsed_json:
-        for line in expanded.splitlines():
-            name, sep, value = line.partition(":")
-            if sep and name.strip():
-                headers[name.strip()] = value.strip()
-    # An empty value usually means an unresolved ${VAR}; a blank subscription key still 401s at the gateway, so
-    # surface it rather than fail silently.
-    for name, value in headers.items():
-        if not value:
-            log.warning("custom header %r has an empty value (unresolved ${VAR}?)", name)
-    if not parsed_json:
-        dropped = sum(1 for line in expanded.splitlines() if line.strip() and ":" not in line)
-        if dropped:
-            log.warning("ignored %d custom header line(s) without a 'Name: value' colon", dropped)
-    # Comma-separated pairs on one line are not supported: a header value may legitimately contain commas, so
-    # splitting on them would corrupt real values.
-    for name, value in headers.items():
-        if _PACKED_PAIR_RE.search(value):
-            log.warning(
-                "custom header %r value %r looks like it packs more headers on one "
-                "line; put each on its own line (comma-separated is not split)",
-                name,
-                value,
-            )
-    return headers
-
-
-def format_custom_headers(headers: Mapping[str, str]) -> str:
-    """Render headers as the newline-delimited form both SDKs understand."""
-    return "\n".join(f"{name}: {value}" for name, value in headers.items())
 
 
 def normalize_anthropic_base_url(base_url: str) -> str:

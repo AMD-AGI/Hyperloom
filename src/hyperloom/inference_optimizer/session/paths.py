@@ -43,7 +43,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "reports",
     "agents/orchestration",
     "agents/critic",
-    "agents/robustness",
     "runs/baseline",
     "runs/profile",
     "runs/backends",
@@ -53,7 +52,7 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "kernel-agent-workspace",
     "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
-    "optimizer_runs",  # launcher stdout / pid / robustness monitor logs
+    "optimizer_runs",  # launcher stdout / pid logs
 )
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
@@ -166,9 +165,7 @@ def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts."""
     if os.environ.get(ENV_OVERRIDE_ASSET_ROOT):
         return asset_root() / "orchestrator" / "prompts"
-    import hyperloom.orchestrator.prompts as _prompts_pkg
-
-    return Path(_prompts_pkg.__file__).resolve().parent
+    return PACKAGE_ROOT.parent / "orchestrator" / "prompts"
 
 
 def asset_prompt_references_dir() -> Path:

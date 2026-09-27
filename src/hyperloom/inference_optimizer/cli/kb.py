@@ -238,7 +238,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
                 **event,
             }
             append_jsonl(audit_path, row, make_parents=True, sort_keys=True)
-        except Exception:  # noqa: BLE001 — audit must never break a KB op
+        except Exception:
             log.debug("recipe_snapshot audit append failed", exc_info=True)
         # The same hook feeds the warm_start event, which claims only the reads
         # served while T0's own lookup is open. Kept separate from the append
@@ -424,7 +424,7 @@ def _bootstrap_knowledge_plane(
                     indent=2,
                 )
             )
-        except OSError as exc:  # noqa: BLE001 — defensive
+        except OSError as exc:
             log.warning(
                 "pr_monitor_status marker write failed: %r (breakdown.warnings will miss pr_monitor row)",
                 exc,

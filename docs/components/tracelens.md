@@ -24,11 +24,12 @@ The orchestration runtime enters TraceLens through two paths:
 
 - The kernel request path:
   `src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
-  `trace_analyze` requests as subprocesses that run
-  `src/hyperloom/agents/kernel/tools/tracelens_analysis.py`. That script itself
-  imports and calls `run_tracelens_skill` (the skill runner) internally under
-  the agent route — the runner is not a separate subprocess dispatched by the
-  orchestrator.
+  `trace_analyze` requests to
+  `src/hyperloom/orchestrator/actions/executors/trace_analyze.py`, which runs
+  `src/hyperloom/agents/kernel/tools/tracelens_analysis.py` as a subprocess.
+  That script itself imports and calls `run_tracelens_skill` (the skill runner)
+  internally under the agent route — the runner is not a separate subprocess
+  dispatched by the orchestrator.
 - The composite roofline action: `RooflineExecutor`
   (`src/hyperloom/orchestrator/actions/executors/roofline.py`) is an atomic
   `profile` + `trace_analyze` pipeline that first profiles the workload with

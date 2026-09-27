@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,9 +96,20 @@ def _git_toplevel(repo_root: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def _require_commit(repo_root: Path, commit: str) -> None:
+def commit_exists(repo_root: Path, commit: str) -> bool:
+    """Whether ``repo_root`` can still resolve ``commit`` to a commit object.
+
+    A campaign branch is deleted on release and takes its commits with it, so a
+    result naming one is no longer exportable from here.
+    """
+    if not str(commit or "").strip():
+        return False
     result = git("cat-file", "-e", f"{commit}^{{commit}}", cwd=repo_root, check=False)
-    if result.returncode != 0:
+    return result.returncode == 0
+
+
+def _require_commit(repo_root: Path, commit: str) -> None:
+    if not commit_exists(repo_root, commit):
         raise WorktreeError(f"base commit does not exist in {repo_root}: {commit}")
 
 
@@ -373,11 +385,48 @@ def _archive_campaign_output(worktree: OperatorWorktree) -> None:
         shutil.move(str(source), str(target))
 
 
+def _archive_stale_campaign_output(repo_root: Path, destination: Path) -> None:
+    """Move a previous campaign's bookkeeping aside before this one starts.
+
+    :func:`_archive_campaign_output` clears this on the way out, but a run the
+    host killed never reaches it. forge-loop then refuses the workspace outright
+    -- "already contains a Forge campaign; pass --resume to continue it" -- and
+    recovery reads the leftover manifest as if it were this task's own result,
+    which reports the dead campaign's commit as a missing base commit. Kept
+    rather than deleted: it is the only account of what that run did.
+    """
+    source = repo_root / FORGE_LOOP_OUTPUT_DIRNAME
+    if not source.is_dir():
+        return
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}"
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.move(str(source), str(target))
+    except (OSError, shutil.Error) as exc:
+        # The borrow continues either way, and forge-loop then refuses the workspace for a
+        # leftover that is still there. Saying so here is the difference between that refusal
+        # being diagnosable and it being the undiagnosable failure this archive exists to end.
+        log.warning(
+            "could not archive a previous campaign's %s from %s (%s); the next task will be "
+            "refused for a leftover campaign until it is moved by hand",
+            FORGE_LOOP_OUTPUT_DIRNAME,
+            repo_root,
+            exc,
+        )
+        return
+    log.warning(
+        "archived a previous campaign's %s from %s; it was left by a run that did not release the repository",
+        FORGE_LOOP_OUTPUT_DIRNAME,
+        repo_root,
+    )
+
+
 def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> None:
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         git("worktree", "remove", "--force", str(workspace), cwd=repo_root, check=False)
     shutil.rmtree(workspace, ignore_errors=True)
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         git("branch", "-D", branch, cwd=repo_root, check=False)
 
 
@@ -422,6 +471,7 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
         git("branch", "-D", branch, cwd=repo_root, check=False)
         git("checkout", "-b", branch, task.base_commit, cwd=repo_root)
         kernel_path, source_files = _validate_declared_sources(repo_root, task)
+        _archive_stale_campaign_output(repo_root, layout.workspace_dir(task.operator_id))
         _ignore_forge_loop_output(repo_root)
         return OperatorWorktree(
             repo_root=repo_root,

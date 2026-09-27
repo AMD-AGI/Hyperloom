@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -15,7 +16,6 @@ from typing import Callable
 from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     NOT_IMPLEMENTED,
-    RESOURCE_CONSTRAINT,
     SERVE_FLAG,
     TOKENIZER_ERROR,
     UNSUPPORTED_DTYPE,
@@ -105,6 +105,75 @@ def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     return getattr(cp, "returncode", 1) == 0
 
 
+def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
+    """Return the commit a shallow clone landed on, or ``""``.
+
+    The provisioner clones a branch or tag verbatim, so the action's own ``ref``
+    names different bytes tomorrow; this is the identity it lacks.
+    """
+    try:
+        cp = run(["git", "-C", str(checkout), "rev-parse", "HEAD"], dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
+def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _default_run) -> dict[str, dict[str, str]]:
+    """Return ``{name: {version, artifact_digest}}`` for each installed name.
+
+    The digest is a sha256 over the distribution's own ``RECORD`` manifest, read
+    in the same interpreter: a version names the release the metadata claims,
+    not the bytes installed. A distribution publishing no ``RECORD`` carries an
+    empty digest, which is a judged condition rather than a default.
+    """
+    if not names:
+        return {}
+    # Source for the attempt interpreter, not this one: a name it cannot resolve
+    # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
+    # anything else fails the probe and is caught by the exit-status check below.
+    probe = (
+        "import hashlib,json,re,sys\n"
+        "import importlib.metadata as m\n"
+        "out={}\n"
+        # ``action.packages`` holds requirement strings -- ``vllm>=0.10``,
+        # ``vllm[all]``, ``aiter @ https://...`` -- and only a bare name resolves;
+        # everything else raised PackageNotFoundError, was skipped, and left the
+        # map empty, which reads downstream as an acquisition that pinned nothing.
+        "def _dist_name(spec):\n"
+        "    head=re.split(r'[;@]', spec, 1)[0]\n"
+        "    return re.split(r'[\\[<>=!~ ]', head.strip(), 1)[0].strip()\n"
+        "for spec in sys.argv[1:]:\n"
+        "    name=_dist_name(spec)\n"
+        "    if not name:\n"
+        "        continue\n"
+        "    try:\n"
+        "        dist=m.distribution(name)\n"
+        "    except m.PackageNotFoundError:\n"
+        "        continue\n"
+        "    digest=''\n"
+        "    try:\n"
+        "        record=dist.read_text('RECORD') or ''\n"
+        "        digest='sha256:'+hashlib.sha256(record.encode()).hexdigest() if record else ''\n"
+        "    except (OSError, ValueError):\n"
+        "        digest=''\n"
+        "    out[name]={'version': dist.version or '', 'artifact_digest': digest}\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        cp = run([python_path, "-c", probe, *names], dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if getattr(cp, "returncode", 1) != 0:
+        return {}
+    try:
+        parsed = json.loads((getattr(cp, "stdout", "") or "").strip() or "{}")
+    except ValueError:
+        return {}
+    return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in parsed.items()}
+
+
 def _installed_version(python_path: str, package: str, *, run: RunFn = _default_run) -> str:
     """Return the installed version of ``package`` in ``python_path``, or ""."""
     argv = [
@@ -132,7 +201,7 @@ class BaseAdapter:
         self._run = run
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap`` via a runtime."""
+        """Whether this adapter can attempt to repair ``gap``."""
         return False
 
     def build_stack_action(
@@ -162,13 +231,29 @@ class BaseAdapter:
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
-        """Build a code-localization action, or None (unsupported)."""
-        return None
+        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted), or None."""
+        if not self.supports(gap):
+            return None
+        pr_number = _pr_number_from_ref(candidate_ref)
+        if pr_number <= 0:
+            return None
+        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
+        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
+            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
+            return None
+        return EnablementStackAction(
+            kind="pr_backport",
+            framework=self.framework,
+            gap_id=f"gap.enablement.{gap.kind}",
+            capability=gap.kind,
+            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
+            acquisition_method="none",
+            repo_url=repo_url,
+            pr_number=pr_number,
+        )
 
     def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
         """Return the argv that re-installs an editable checkout, or None."""
@@ -204,6 +289,10 @@ class NullAdapter(BaseAdapter):
 class _VenvProvisionMixin(BaseAdapter):
     """Shared attempt-venv creation + pip-install plumbing for real adapters."""
 
+    def supports(self, gap: CapabilityGap) -> bool:
+        """True for the gaps a runtime candidate might repair."""
+        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
+
     def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
         """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python)."""
         venv_root = attempt_dir / "venv"
@@ -231,36 +320,6 @@ class _VenvProvisionMixin(BaseAdapter):
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
 
-    def build_localization_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        framework: str,
-        model: str,
-        candidate_ref: str,
-        repo_url: str,
-    ) -> EnablementStackAction | None:
-        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted)."""
-        if not self.supports(gap):
-            return None
-        pr_number = _pr_number_from_ref(candidate_ref)
-        if not repo_url or pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
-            return None
-        return EnablementStackAction(
-            kind="pr_backport",
-            framework=self.framework,
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
-            acquisition_method="none",
-            repo_url=repo_url,
-            pr_number=pr_number,
-        )
-
     def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
         """Re-install the editable checkout so localized Python changes take effect."""
         if not venv_python or not checkout:
@@ -272,12 +331,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
     """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
 
     framework = "vllm"
-
-    def supports(self, gap: CapabilityGap) -> bool:
-        """True for code-acquirable gaps (never for resource constraints)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return False
-        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
 
     def build_stack_action(
         self,
@@ -345,6 +398,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             "vllm": _installed_version(str(python_path), "vllm", run=self._run),
             "torch": _installed_version(str(python_path), "torch", run=self._run),
         }
+        resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["vllm"], run=self._run)
         runtime = FrameworkRuntime(
             bin_path=str(bin_dir),
             python_path=str(python_path),
@@ -357,6 +411,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             runtime=runtime,
             installed_versions={k: v for k, v in versions.items() if v},
             log_path=log_path,
+            resolved_packages=resolved_packages,
         )
 
     def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
@@ -382,12 +437,6 @@ class SglangAdapter(_VenvProvisionMixin):
             return ""
         root = Path(framework_root)
         return "python" if (root / "python" / "sglang").is_dir() else ""
-
-    def supports(self, gap: CapabilityGap) -> bool:
-        """True for code-acquirable gaps (never for resource constraints)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return False
-        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
 
     def build_stack_action(
         self,
@@ -447,6 +496,8 @@ class SglangAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""
+        resolved_ref = ""
+        resolved_packages: dict[str, dict[str, str]] = {}
         if action.acquisition_method == "editable_ref":
             if not action.repo_url or not action.ref:
                 return ProvisionResult(ok=False, log_path=log_path, error="editable_ref requires repo_url and ref")
@@ -462,8 +513,10 @@ class SglangAdapter(_VenvProvisionMixin):
                 )
             cp = self._pip_install(python_path, [], editable=str(checkout / "python"))
             pythonpath_prefix = str(checkout / "python")
+            resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
             cp = self._pip_install(python_path, list(action.packages) or ["sglang"], index_url=action.index_url)
+            resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["sglang"], run=self._run)
         else:
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
@@ -488,6 +541,8 @@ class SglangAdapter(_VenvProvisionMixin):
             runtime=runtime,
             installed_versions={k: v for k, v in versions.items() if v},
             log_path=log_path,
+            resolved_ref=resolved_ref,
+            resolved_packages=resolved_packages,
         )
 
 
@@ -496,33 +551,9 @@ class AtomAdapter(BaseAdapter):
 
     framework = "atom"
 
-    def build_localization_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        framework: str,
-        model: str,
-        candidate_ref: str,
-        repo_url: str,
-    ) -> EnablementStackAction | None:
-        """Build a pr_backport localization (applied via no-git; no refresh)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return None
-        pr_number = _pr_number_from_ref(candidate_ref)
-        if not repo_url or pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            return None
-        return EnablementStackAction(
-            kind="pr_backport",
-            framework="atom",
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"atom PR backport #{pr_number} for {gap.kind}",
-            repo_url=repo_url,
-            pr_number=pr_number,
-        )
+    def supports(self, gap: CapabilityGap) -> bool:
+        """Localize any code gap; the backport is applied via no-git, with no editable refresh."""
+        return True
 
 
 class XditAdapter(BaseAdapter):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _idle_gate as ig  # noqa: E402
+import _idle_gate as ig
 
 
 def test_threshold_default(monkeypatch):

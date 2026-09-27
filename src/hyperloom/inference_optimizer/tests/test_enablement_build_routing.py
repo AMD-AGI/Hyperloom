@@ -7,17 +7,18 @@ from __future__ import annotations
 
 import json
 import types as _types
+from pathlib import Path
 
 import pytest
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.enablement.build import (
-    _derive_gpu_arch,
-    _repo_matches_targeted_build_component,
-)
+from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
+from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -59,32 +60,8 @@ def coord(build_coord):
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
     )
-    build_coord._coerce_needs_gpu = bool
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
-
-
-# _derive_gpu_arch
-
-
-def test_derive_gpu_arch_mi355x():
-    assert _derive_gpu_arch("mi355x") == "gfx950"
-
-
-def test_derive_gpu_arch_mi300x():
-    assert _derive_gpu_arch("mi300x") == "gfx942"
-
-
-def test_derive_gpu_arch_unknown():
-    assert _derive_gpu_arch("unknown_gpu") == ""
-
-
-def test_derive_gpu_arch_empty():
-    assert _derive_gpu_arch("") == ""
-
-
-def test_derive_gpu_arch_case_insensitive():
-    assert _derive_gpu_arch("MI355X") == "gfx950"
 
 
 def test_targeted_build_repo_match_ignores_origin():
@@ -103,8 +80,10 @@ def test_targeted_build_repo_match_rejects_wrong_component():
 
 
 @pytest.mark.asyncio
-async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch):
-    coord.shared_state.gpu_type = "mi355x"
+@pytest.mark.parametrize(("gpu_type", "arch"), sorted((b, a) for b, (a, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items()))
+async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, arch):
+    """A build with no arch is refused at preflight, so every accepted board has to carry one."""
+    coord.shared_state.gpu_type = gpu_type
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -118,7 +97,7 @@ async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch):
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
     assert action.component == "aiter"
-    assert action.gpu_arch == "gfx950"
+    assert action.gpu_arch == arch
 
 
 @pytest.mark.asyncio
@@ -395,6 +374,26 @@ async def _verified_build(coord, root, *, gap_id, framework="vllm", ref="v1", ru
         attempt_root=str(root),
     )
     return await _enqueue_and_transition(coord, action, "succeeded")
+
+
+async def _recorded_build(coord, *, gap_id, state="succeeded"):
+    """A terminal build whose attempt row the executor already appended.
+
+    ``_maybe_route_build_outcomes`` runs against the manifest the executor left,
+    so a routing test that never records the attempt exercises an empty
+    manifest and cannot see a row that shadows the routing sentinel. The attempt
+    directory is the one routing resolves by task id, which is also the join
+    the recipe reads the build back through.
+    """
+    action = TargetedBuildAction(gap_id=gap_id, framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
+    task_id = await _enqueue_and_transition(coord, action, state)
+    root = Path(coord.session_dir) / "enablement" / "builds" / task_id
+    root.mkdir(parents=True, exist_ok=True)
+    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),), runtime_env={"X": "1"})
+    br = BuildResult(ok=state == "succeeded", attempt_root=str(root), runtime=rt)
+    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
+    TargetedBuildExecutor._record_result(br, coord.shared_state, action=action)
+    return task_id
 
 
 async def _queued_probes(coord):
@@ -826,3 +825,76 @@ async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeyp
     # Falls back to empty ref (tag autoselect) since no matching candidate
     assert action.ref == ""
     assert action.source_pr_url == ""
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_attempt_row_does_not_shadow_the_routing_sentinel(coord):
+    """The attempt row must not answer "has this build been routed?".
+
+    Routing is tracked by a sentinel keyed on ``task_id``. An attempt row
+    carrying that same key is indistinguishable from one, and since the
+    executor appends it before the build reaches a terminal state it would
+    answer for every build that has not been routed yet.
+    """
+    task_id = await _recorded_build(coord, gap_id="gr")
+
+    assert Coordinator._build_routing_record(coord, task_id) is None
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert len(await _queued_probes(coord)) == 1
+    sentinel_probe = str(Coordinator._build_routing_record(coord, task_id).get("probe_task_id") or "")
+    assert sentinel_probe
+
+    # The sentinel routing writes is the one the recipe joins its build step
+    # through, so the two contracts have to agree on the same manifest.
+    sentinel, attempt = select_linked_build(
+        {
+            "build_manifest": list(coord.shared_state.enablement.build_manifest),
+            "last_specialist_task_id": sentinel_probe,
+        }
+    )
+    assert sentinel is not None and attempt is not None
+    assert attempt.get("ok") is True and Path(str(attempt["attempt_root"])).name == task_id
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_failed_attempt_still_reaches_the_rearm_path(coord):
+    await _recorded_build(coord, gap_id="gf", state="failed")
+    coord.shared_state.enablement.last_build_failure = {
+        "failure_class": "timeout",
+        "failure_summary": "build exceeded budget",
+    }
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
+
+
+@pytest.mark.asyncio
+async def test_an_id_alone_does_not_make_a_row_a_routing_sentinel(coord):
+    """The reader names what it is looking for instead of what it will not find.
+
+    ``BuildResult.to_state`` writes no ``task_id`` today, so an attempt row
+    cannot answer the routing lookup by accident. That is an invariant of a
+    serializer two packages away: if it ever gained one, every completed build
+    would read as already routed and no launch probe would ever be enqueued.
+    The row here is exactly that hypothetical -- an attempt row carrying the
+    id -- and it must not be mistaken for a routing record.
+    """
+    task_id = await _recorded_build(coord, gap_id="gs")
+    manifest = list(coord.shared_state.enablement.build_manifest or [])
+    manifest.append({"task_id": task_id, "ok": True, "attempt_root": "/tmp/x"})
+    coord.shared_state.enablement.build_manifest = manifest
+
+    assert Coordinator._build_routing_record(coord, task_id) is None
+
+
+@pytest.mark.asyncio
+async def test_routing_a_build_with_nothing_to_say_still_marks_it_routed(coord):
+    """The merge path used to take only the caller's fields, and it had none."""
+    task_id = await _recorded_build(coord, gap_id="gt")
+    Coordinator._note_build_routed(coord, task_id)
+
+    record = Coordinator._build_routing_record(coord, task_id)
+    assert record is not None and record.get("routed") is True

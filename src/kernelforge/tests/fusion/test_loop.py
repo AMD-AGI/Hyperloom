@@ -30,7 +30,7 @@ def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", *
     return Recipe(**base)
 
 
-def _vr(*, correct=True, kept=False, speedup=None, note="", max_abs_err=None) -> ValidationResult:
+def _vr(*, correct=True, kept=False, speedup=None, note="", max_abs_err=None, measured=True) -> ValidationResult:
     return ValidationResult(
         correctness_passed=correct,
         max_abs_err=max_abs_err,
@@ -40,6 +40,7 @@ def _vr(*, correct=True, kept=False, speedup=None, note="", max_abs_err=None) ->
         fused_us=None,
         kept=kept,
         note=note,
+        correctness_measured=measured,
     )
 
 
@@ -195,6 +196,32 @@ class TestExperienceInjection:
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert "CUDA-only" in campaign.calls[1][1]
+
+    def test_an_unmeasured_recipe_does_not_teach_the_next_one_to_fix_numerics(self, tmp_path):
+        """A recipe whose correctness was never in question must not accuse the next author of it."""
+        campaign = _ScriptedCampaign(
+            [
+                _vr(
+                    correct=False,
+                    measured=False,
+                    speedup=1.21,
+                    note="forge-loop committed abc1234 but no harness report benchmarked that tree",
+                ),
+                _vr(kept=True, speedup=1.1, note="KEPT"),
+            ]
+        )
+        res = run_fusion_loop(
+            [_recipe(), _recipe(pattern_id="swiglu", env_flag="LFM2_FUSED_SWIGLU")],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(output_dir=str(tmp_path)),
+        )
+
+        assert "Fix correctness first" not in campaign.calls[1][1]
+        assert "establishes nothing about its numerics" in campaign.calls[1][1]
+        assert res.history[0].lesson == (
+            "Nothing compared this fusion against eager, so the attempt establishes nothing about its numerics."
+        )
 
 
 class TestBounds:

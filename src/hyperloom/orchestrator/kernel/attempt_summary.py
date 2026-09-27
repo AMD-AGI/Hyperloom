@@ -12,7 +12,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+
 from hyperloom.common.coerce import to_float
+
+from ._kernel_decisions import _forge_loop_entries_by_operator_in_optimization_stack
 
 
 log = logging.getLogger(__name__)
@@ -24,9 +28,10 @@ CATEGORY_KEEP_PENDING = "KEEP_PENDING"
 CATEGORY_ATTEMPTED_REJECTED = "ATTEMPTED_REJECTED"
 CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 
-#: Closed 4-value terminal kernel-outcome bucket the dashboard reads directly.
+#: Closed terminal kernel-outcome bucket the dashboard reads directly.
 #: ``IN_FLIGHT`` (no terminal decision) folds into ``fail``.
 OUTCOME_SUCCESS = "success"
+OUTCOME_UNVALIDATED = "unvalidated"
 OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
@@ -261,6 +266,63 @@ def _rejection_bucket(reason: str) -> str:
     return "other"
 
 
+def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
+    """A ledger-shaped attempt for a kernel-recipe-lane integration that never wrote ``kernel_opt_task_attempts``.
+
+    Only called for a row already known (by operator name) to be integrated, so the fields below describe a KEEP —
+    there is no partial/rejected state on this path, since a lane only ever lands a stack entry once it kept a
+    patch.
+    """
+    return {
+        "attempts": 1,
+        "partial_count": 0,
+        "failure_count": 0,
+        "last_decision": "KEEP",
+        "last_status": "integrated",
+        # Absent, not 0.0: this row was never measured at the micro level, only end to end (see
+        # _summary_integrated).
+        "last_micro_speedup": None,
+        "last_source_file": str(stack_entry.get("target_file") or stack_entry.get("source_file") or ""),
+        "last_ts": str(stack_entry.get("ts") or ""),
+        "rejected_reason": "",
+        "compile_passed": True,
+        "correctness_passed": stack_entry.get("accuracy") is not None,
+        "integration_status": "integrated",
+    }
+
+
+def _synthetic_gemm_tuning_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
+    """A ledger-shaped attempt for a gemm_tuning KEEP, which never writes ``kernel_opt_task_attempts``.
+
+    gemm_tuning retunes GEMM configs across many shapes through one CSV, not one named kernel, so
+    unlike a forge-loop integration it cannot be reconciled against a specific roofline top15 row --
+    it is surfaced as its own standalone entry instead of a match (see
+    ``_gemm_tuning_entries_in_optimization_stack``).
+    """
+    return {
+        "attempts": 1,
+        "partial_count": 0,
+        "failure_count": 0,
+        "last_decision": "KEEP",
+        "last_status": "integrated",
+        "last_micro_speedup": None,
+        "last_ts": str(stack_entry.get("ts") or ""),
+        "rejected_reason": "",
+        "compile_passed": True,
+        "correctness_passed": None,
+        "integration_status": "integrated",
+    }
+
+
+def _gemm_tuning_entries_in_optimization_stack(state: Any) -> list[dict[str, Any]]:
+    """``optimization_stack`` entries a gemm_tuning KEEP landed, in stack order."""
+    entries = []
+    for e in getattr(state, "optimization_stack", []) or []:
+        if isinstance(e, dict) and e.get("action") == "gemm_tuning":
+            entries.append(e)
+    return entries
+
+
 def _classify_attempted(
     entry: dict[str, Any],
     *,
@@ -310,13 +372,114 @@ def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
     return OUTCOME_FAIL
 
 
+def _lane_totals(
+    attempted: int,
+    success: int,
+    unvalidated: int,
+    failed: int,
+    *,
+    outcome: str = "",
+) -> dict[str, Any]:
+    """Build one lane's counters and terminal outcome."""
+    if not outcome:
+        if attempted == 0:
+            outcome = OUTCOME_SKIP
+        elif success:
+            outcome = OUTCOME_SUCCESS
+        elif unvalidated:
+            outcome = OUTCOME_UNVALIDATED
+        else:
+            outcome = OUTCOME_FAIL
+    return {
+        "attempted": attempted,
+        "success": success,
+        "unvalidated": unvalidated,
+        "failed": failed,
+        "outcome": outcome,
+    }
+
+
+def _geak_lane_totals(state: Any) -> dict[str, Any]:
+    """Summarize GEAK's E2E result independently of source rewrites."""
+    result = getattr(state, "geak_result", {}) or {}
+    if not isinstance(result, dict):
+        return _lane_totals(0, 0, 0, 0)
+    accepted = [
+        row
+        for key in ("accepted_kernels", "accepted_heads")
+        for row in (result.get(key) or [])
+        if isinstance(row, (dict, str)) and bool(row)
+    ]
+    if accepted:
+        count = len(accepted)
+        return _lane_totals(count, count, 0, 0)
+    status = str(result.get("status") or "").strip().lower()
+    if not status or status == OUTCOME_SKIP or status == "skipped":
+        return _lane_totals(0, 0, 0, 0)
+    return _lane_totals(1, 0, 0, 1)
+
+
+def _gemm_tuning_lane_totals(state: Any) -> dict[str, Any]:
+    """Summarize GEMM micro-tuning without treating candidates as E2E wins."""
+    attempts = list(getattr(state, "gemm_tuning_attempts", []) or [])
+    if not attempts:
+        last = getattr(state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict) and last:
+            attempts = [last]
+    attempted = success = unvalidated = failed = 0
+    for result in attempts:
+        if not isinstance(result, dict):
+            continue
+        rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
+        if rows:
+            winners = sum(
+                1 for row in rows if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
+            )
+            attempted += len(rows)
+            if result.get("requires_e2e_validation"):
+                unvalidated += winners
+            else:
+                success += winners
+            failed += len(rows) - winners
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if not status or status in (OUTCOME_SKIP, "skipped"):
+            continue
+        attempted += 1
+        kept = str(result.get("decision") or "").upper() == "KEEP"
+        if kept and result.get("requires_e2e_validation"):
+            unvalidated += 1
+        elif kept:
+            success += 1
+        else:
+            failed += 1
+    return _lane_totals(attempted, success, unvalidated, failed)
+
+
+def _overall_lane_outcome(lanes: dict[str, dict[str, Any]]) -> str:
+    """Roll lane outcomes up without calling unvalidated work successful."""
+    outcomes = {str(row.get("outcome") or "") for row in lanes.values()}
+    for outcome in (OUTCOME_SUCCESS, OUTCOME_UNVALIDATED, OUTCOME_TIMEOUT, OUTCOME_FAIL):
+        if outcome in outcomes:
+            return outcome
+    return OUTCOME_SKIP
+
+
 def _summary_integrated(
     entry: dict[str, Any],
     backend_ladder: list[dict[str, Any]],
     artifact_error: str,
 ) -> str:
-    """One-line summary for an ``INTEGRATED`` kernel."""
-    micro = entry.get("last_micro_speedup") or 0.0
+    """One-line summary for an ``INTEGRATED`` kernel.
+
+    ``last_micro_speedup`` is absent (``None``), not ``0.0``, for a synthetic row built from an
+    optimization_stack entry a kernel-opt ledger never measured (forge-loop, fusion, gemm_tuning) --
+    a real 0.000x would misreport a kernel this session's own stack shows was kept for a positive
+    gain.
+    """
+    micro = entry.get("last_micro_speedup")
+    if micro is None:
+        return "integrated into optimization_stack; no kernel-level micro speedup recorded"
     return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
 
 
@@ -402,7 +565,7 @@ def build_kernel_optimization_summary(
     state: Any,
     session_dir: Path | str,
     *,
-    schema_version: int = 1,
+    schema_version: int = 2,
 ) -> dict[str, Any]:
     """Build the full summary block for one session."""
     sd_path = Path(session_dir)
@@ -430,6 +593,12 @@ def build_kernel_optimization_summary(
         kid = str(entry.get("kernel_id") or "")
         if kid and entry.get("action") == "integrate":
             integrated_ids.add(kid)
+    # A kernel-recipe lane (forge-loop/flydsl/fusion) lands its optimization_stack entry under its own long-form
+    # recipe id, which never equals a top15 row's synthetic kNNN id and never touches kernel_opt_task_attempts —
+    # so without this, an integrated kernel silently reads as "never attempted" (see
+    # _forge_loop_entries_by_operator_in_optimization_stack's docstring for why the operator name is the shared
+    # identity).
+    forge_loop_entries_by_operator = _forge_loop_entries_by_operator_in_optimization_stack(state)
     last_kernel_opt = dict(getattr(state, "last_kernel_opt", {}) or {})
     keep_pending_kid = ""
     if str(last_kernel_opt.get("decision") or "").upper() == "KEEP":
@@ -459,15 +628,26 @@ def build_kernel_optimization_summary(
             continue
         processed_kids.add(kid)
         attempt = attempts_map.get(kid)
+        forge_loop_entry = (
+            forge_loop_entries_by_operator.get(normalize_operator_name(str(top_entry.get("name") or "")))
+            if attempt is None
+            else None
+        )
+        if attempt is None and forge_loop_entry is not None:
+            attempt = _synthetic_forge_loop_attempt(forge_loop_entry)
         if attempt is None:
             # A hot kernel none of the recorded lanes touched.
             continue
         counts["attempted"] += 1
-        category = _classify_attempted(
-            attempt,
-            integrated_ids=integrated_ids,
-            rejected_ids=rejected_ids,
-            kernel_id=kid,
+        category = (
+            CATEGORY_INTEGRATED
+            if forge_loop_entry is not None
+            else _classify_attempted(
+                attempt,
+                integrated_ids=integrated_ids,
+                rejected_ids=rejected_ids,
+                kernel_id=kid,
+            )
         )
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
@@ -512,6 +692,24 @@ def build_kernel_optimization_summary(
             )
         )
 
+    # gemm_tuning KEEPs: no roofline top15 row to match against (one campaign retunes many GEMM
+    # shapes at once, not one named kernel), so each lands as its own standalone entry rather than
+    # silently reading as "never attempted".
+    for gemm_entry in _gemm_tuning_entries_in_optimization_stack(state):
+        gemm_kid = str(gemm_entry.get("variant_name") or "gemm_tuning")
+        counts["attempted"] += 1
+        counts["integrated"] += 1
+        by_kernel.append(
+            _render_attempted_row(
+                {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
+                _synthetic_gemm_tuning_attempt(gemm_entry),
+                CATEGORY_INTEGRATED,
+                results_dir=results_dir,
+                session_dir=sd_path,
+                last_kernel_opt=None,
+            )
+        )
+
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
     top_takeaways = _build_top_takeaways(
         counts=counts,
@@ -519,13 +717,35 @@ def build_kernel_optimization_summary(
         rejection_breakdown=rejection_breakdown,
         failure_reason_breakdown=failure_reason_breakdown,
     )
+    source_outcome = _session_kernel_opt_outcome(by_kernel)
+    lane_totals: dict[str, dict[str, Any]] = {
+        "source_level": _lane_totals(
+            counts["attempted"],
+            counts["integrated"],
+            counts["keep_pending"] + counts["in_flight"],
+            counts["rejected"],
+            outcome=(
+                OUTCOME_UNVALIDATED
+                if counts["attempted"] and not counts["integrated"] and (counts["keep_pending"] or counts["in_flight"])
+                else source_outcome
+            ),
+        ),
+        "geak": _geak_lane_totals(state),
+        "gemm_tuning": _gemm_tuning_lane_totals(state),
+    }
+    overall_outcome = source_outcome
+    if schema_version >= 2:
+        counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
+        overall_outcome = _overall_lane_outcome(lane_totals)
+        if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
+            top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
 
-    return {
+    summary = {
         "schema_version": schema_version,
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
-        "kernel_opt_outcome": _session_kernel_opt_outcome(by_kernel),
+        "kernel_opt_outcome": overall_outcome,
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
@@ -533,6 +753,9 @@ def build_kernel_optimization_summary(
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
     }
+    if schema_version >= 2:
+        summary["lane_totals"] = lane_totals
+    return summary
 
 
 def _render_attempted_row(
@@ -613,7 +836,10 @@ def _render_attempted_row(
         "failure_count": int(attempt.get("failure_count") or 0),
         "last_decision": str(attempt.get("last_decision") or ""),
         "last_status": str(attempt.get("last_status") or ""),
-        "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")) or 0.0,
+        # Absent stays absent: a row for a kernel never benchmarked at the micro level (see
+        # _synthetic_forge_loop_attempt / _synthetic_gemm_tuning_attempt) must not publish 0.0
+        # beside a category of INTEGRATED, which reads as "measured and zero".
+        "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")),
         "last_ts": str(attempt.get("last_ts") or ""),
         "verification": verification,
         "backend_ladder": ladder,
@@ -762,6 +988,7 @@ def _to_float(v: Any) -> float | None:
 __all__ = [
     "build_kernel_optimization_summary",
     "OUTCOME_SUCCESS",
+    "OUTCOME_UNVALIDATED",
     "OUTCOME_FAIL",
     "OUTCOME_TIMEOUT",
     "OUTCOME_SKIP",

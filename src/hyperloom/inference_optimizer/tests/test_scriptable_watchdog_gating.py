@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import yaml
@@ -36,7 +37,7 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
 def _count_scans(monkeypatch) -> dict[str, int]:
     calls = {"scan": 0, "death": 0}
 
-    def _scan(server_log_path, offsets, residuals=None):
+    def _scan(server_log_path, offsets, residuals=None, identities=None):
         calls["scan"] += 1
         return sk._LogScan(
             saw_ready=False,
@@ -58,21 +59,23 @@ def _count_scans(monkeypatch) -> dict[str, int]:
 def test_no_server_log_leaves_both_watchdogs_disarmed(monkeypatch):
     calls = _count_scans(monkeypatch)
 
-    proc = sk.run_with_session_kill(["bash", "-c", "sleep 1.2"], timeout=30, server_log_path=None)
+    proc = sk.run_with_session_kill(
+        [sys.executable, "-c", "import time; time.sleep(1.2)"], timeout=30, server_log_path=None
+    )
 
     assert proc.returncode == 0
     assert calls == {"scan": 0, "death": 0}
 
 
-def test_server_log_arms_both_watchdogs(monkeypatch, tmp_path: Path):
+def test_server_log_is_scanned_without_runtime_death_markers(monkeypatch, tmp_path: Path):
     calls = _count_scans(monkeypatch)
 
     proc = sk.run_with_session_kill(
-        ["bash", "-c", "sleep 1.2"],
+        [sys.executable, "-c", "import time; time.sleep(1.2)"],
         timeout=30,
         server_log_path=str(tmp_path / "server.log"),
     )
 
     assert proc.returncode == 0
     assert calls["scan"] > 0
-    assert calls["death"] > 0
+    assert calls["death"] == 0

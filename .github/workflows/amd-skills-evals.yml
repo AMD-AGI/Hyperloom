@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: AMD Skills Checks
+
+# Runs the catalog's own harness against the skill amd/skills federates out of
+# this repo, so a break is caught in the pull request that causes it rather
+# than in the nightly import on the other side.
+#
+# ``skills`` names the exact folder rather than a glob, so moving or renaming
+# it fails here too -- that path is what amd/skills declares in
+# .github/federation.json, and the nightly importer raises on a path that is
+# no longer there.
+#
+# ``paths`` covers the skill's parent directory, so a rename still triggers:
+# git reports both the old and the new path as changed.
+#
+# Nothing outside that directory is read: skillscope is pinned below, and the
+# skill links to nothing beyond itself. A relative link out would have to be
+# listed here too, since structural resolves those and a missing target fails
+# the run.
+on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
+  push:
+    branches: [main]
+    paths:
+      - "examples/skills/**"
+      - ".github/workflows/amd-skills-evals.yml"
+  pull_request:
+    paths:
+      - "examples/skills/**"
+      - ".github/workflows/amd-skills-evals.yml"
+  workflow_dispatch:
+    inputs:
+      structural:
+        description: Structural Tests
+        type: boolean
+        default: true
+      routing:
+        description: Routing Tests
+        type: boolean
+        default: false
+      behavioral:
+        description: Behavioral Tests
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: amd-skills-evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    name: AMD Skills Checks
+    # Pinned to the version amd/skills grades this skill with.
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
+    # No ``secrets`` mapping, because there is nothing here this workflow can
+    # use. The repo's Anthropic key is an AMD APIM gateway one, which needs a
+    # base URL and a subscription-key header alongside it; ``reusable.yml``
+    # takes neither, so passing the key alone returns 401. Reaching that
+    # gateway means the wider ``skill-evals.yml``, which is a decision for
+    # whenever a paid leg earns its place here.
+    with:
+      skills: examples/skills/hyperloom-workload-optimizer
+      # Each step can be set to `required`, `optional`, or `off`.
+      structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
+      # Routing asks whether a skill wins the prompts it owns and stays quiet
+      # on its neighbours'. The neighbours live in the catalog, so the honest
+      # place to grade it is there; a run here would only ever see one skill.
+      routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
+      behavioral: ${{ github.event_name == 'workflow_dispatch' && inputs.behavioral && 'required' || 'off' }}

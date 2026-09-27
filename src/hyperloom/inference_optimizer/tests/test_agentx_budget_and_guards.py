@@ -25,8 +25,6 @@ def _budget_args(**over) -> argparse.Namespace:
         # What the parser produces when ``--max-hours`` is absent: the flag
         # carries no argparse default, so the profile sees ``None``, not 2.0.
         max_hours=None,
-        explore_overtime_kill_ratio=2.0,
-        conc_sweep_timeout_sec=1800,
         conc_sweep_total_budget_sec=9000,
     )
     base.update(over)
@@ -51,37 +49,15 @@ def test_budget_profile_is_noop_without_agentx(monkeypatch):
     assert vars(args) == vars(_budget_args())
 
 
-def test_budget_profile_widens_conc_sweep_defaults_under_agentx(monkeypatch):
+def test_budget_profile_does_not_expand_benchmark_caps(monkeypatch):
     _on(monkeypatch)
     args = _budget_args()
     _apply_agentx_budget_profile(args)
-    assert args.conc_sweep_timeout_sec > 1800
-    assert args.conc_sweep_total_budget_sec > 9000
+    assert args.conc_sweep_total_budget_sec == 9000
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-
-def test_budget_profile_leaves_the_kill_ratio_alone(monkeypatch):
-    """A duration-based replay compresses runtime spread, it does not widen it."""
-    _on(monkeypatch)
-    args = _budget_args()
-    _apply_agentx_budget_profile(args)
-    assert args.explore_overtime_kill_ratio == 2.0
-
-
-def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
-    """The layering `_compute_explore_variant_timeout` documents must hold."""
-    from hyperloom.orchestrator.actions.executors.explore import (
-        AGENTX_EXPLORE_TIMEOUT_CEILING_SEC,
-        DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
-        _compute_explore_variant_timeout,
-    )
-
-    measured_baseline = 111 * 60  # the E4 round
-    for baseline in (measured_baseline, 2 * 60 * 60):
-        soft_kill = baseline * 2.0
-        stock = _compute_explore_variant_timeout(baseline, 2.0, ceiling_sec=DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC)
-        agentx = _compute_explore_variant_timeout(baseline, 2.0, ceiling_sec=AGENTX_EXPLORE_TIMEOUT_CEILING_SEC)
-        assert agentx > soft_kill, f"layering inverted at baseline={baseline}"
-        assert agentx >= stock
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
+    assert resolve_benchmark_timeouts()[1] == 7800
 
 
 def test_budget_profile_never_touches_max_hours(monkeypatch):
@@ -109,13 +85,9 @@ def test_budget_profile_preserves_operator_values(monkeypatch):
     """A value the operator typed is left exactly as typed."""
     _on(monkeypatch)
     args = _budget_args(
-        explore_overtime_kill_ratio=1.5,
-        conc_sweep_timeout_sec=600,
         conc_sweep_total_budget_sec=1200,
     )
     _apply_agentx_budget_profile(args)
-    assert args.explore_overtime_kill_ratio == 1.5
-    assert args.conc_sweep_timeout_sec == 600
     assert args.conc_sweep_total_budget_sec == 1200
 
 
@@ -254,21 +226,17 @@ def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
 # --- inner Magpie timeout follows the AgentX cap ------------------------------
 
 
-def test_agentx_switch_raises_the_inner_magpie_timeout(monkeypatch):
+def test_agentx_switch_does_not_resolve_launch_timeout(monkeypatch):
     """The flat Magpie ``timeout_seconds`` must follow the raised AgentX cap."""
     _on(monkeypatch)
     monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
     from hyperloom.orchestrator.actions.executors._workload_envs import (
         apply_agentx_switch,
     )
-    from hyperloom.orchestrator.actions.executors.baseline import (
-        agentx_baseline_timeout_sec,
-    )
 
     bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
     apply_agentx_switch(bench)
-    assert bench["timeout_seconds"] == agentx_baseline_timeout_sec()
-    assert bench["timeout_seconds"] > 7200
+    assert bench["timeout_seconds"] == 7200
     assert bench["benchmark_script"] == "aiperf_client.sh"
 
 
@@ -455,42 +423,7 @@ def test_the_inner_cap_moves_with_the_grace(monkeypatch, tmp_path):
         )
         return int(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["timeout_seconds"])
 
-    assert _cap_for(64) > _cap_for(8)
-
-
-def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
-    """The budget gate has to charge what the round will actually be granted."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
-
-    _on(monkeypatch)
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    monkeypatch.setenv("CONC", "8")
-
-    assert agentx_variant_timeout_sec(1800, conc=64) > agentx_variant_timeout_sec(1800, conc=8)
-    assert agentx_variant_timeout_sec(1800, conc=None) == agentx_variant_timeout_sec(1800, conc=8)
-
-
-def test_the_derivation_does_not_narrate_once_per_call_site(monkeypatch, caplog):
-    """A ladder resolves this for every rung at several sites; one line each."""
-    from hyperloom.orchestrator.actions.executors import _agentx_timeouts as bl
-
-    _on(monkeypatch)
-    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    monkeypatch.setattr(bl, "_AGENTX_SAID", set())
-
-    with caplog.at_level("INFO"):
-        for _ in range(4):
-            bl.agentx_baseline_timeout_sec({"CONC": "8", "AGENTX_WARMUP_GRACE_PERIOD": "3600"})
-        bl.agentx_baseline_timeout_sec(
-            {"CONC": "64", "AGENTX_WARMUP_GRACE_PERIOD": "3600", "AGENTX_WARMUP_GRACE_CONC": "8"}
-        )
-
-    lines = [r.getMessage() for r in caplog.records if "agentx_baseline_timeout_sec:" in r.getMessage()]
-    assert len(lines) == 2, lines
+    assert _cap_for(64) == _cap_for(8) == 7200
 
 
 def test_a_rung_that_names_no_concurrency_reads_the_session(monkeypatch):

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -27,61 +28,15 @@ def conn(tmp_path):
     db.close()
 
 
-# TaskRegistry.reclaim_expired_running (watchdog)
 @pytest.mark.asyncio
-async def test_reclaim_expired_running_orphan(conn):
+@pytest.mark.parametrize("ttl", [0, 60, 600])
+async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
     reg = TaskRegistry(conn)
-    t = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="k1",
-        lease_ttl_sec=60,
-    )
-    await reg.transition(t.task_id, "running")
-    future = datetime.now(timezone.utc).timestamp() + 10_000
-    reclaimed = await reg.reclaim_expired_running(now_unix=future)
-    assert reclaimed == [t.task_id]
-    assert (await reg.get(t.task_id)).state == "failed"
-    assert await reg.reclaim_expired_running(now_unix=future) == []
-
-
-@pytest.mark.asyncio
-async def test_reclaim_leaves_fresh_and_no_ttl_running(conn):
-    reg = TaskRegistry(conn)
-    fresh = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="fresh",
-        lease_ttl_sec=600,
-    )
-    await reg.transition(fresh.task_id, "running")
-    no_ttl = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="nottl",
-        lease_ttl_sec=0,
-    )
-    await reg.transition(no_ttl.task_id, "running")
-    future = datetime.now(timezone.utc).timestamp() + 10_000
-    reclaimed = await reg.reclaim_expired_running(now_unix=future)
-    assert fresh.task_id in reclaimed
-    assert no_ttl.task_id not in reclaimed
-    assert (await reg.get(no_ttl.task_id)).state == "running"
-
-
-@pytest.mark.asyncio
-async def test_reclaim_respects_lease_window(conn):
-    reg = TaskRegistry(conn)
-    t = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="k",
-        lease_ttl_sec=600,
-    )
-    await reg.transition(t.task_id, "running")
-    soon = datetime.now(timezone.utc).timestamp() + 10
-    assert await reg.reclaim_expired_running(now_unix=soon) == []
-    assert (await reg.get(t.task_id)).state == "running"
+    task = await reg.create(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
+    await reg.transition(task.task_id, "running")
+    await conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
+    assert await reg.reclaim_dead_running() == []
+    assert (await reg.get(task.task_id)).state == "running"
 
 
 # cycle-boundary soft restart
@@ -89,14 +44,11 @@ async def test_reclaim_respects_lease_window(conn):
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(SOFT_RESTART_DISABLE_ENV, raising=False)
-    # Don't let the soft restart's /proc server sweep run against the real host.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -106,7 +58,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
     yield c
@@ -129,23 +80,11 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "failed"
 
 
 @pytest.mark.asyncio
@@ -178,22 +117,10 @@ async def test_soft_restart_can_be_disabled(cyclic_coordinator, monkeypatch):
     c._cycle_soft_restart = False
     st = c.shared_state
     _arm_sweep_loopback(st)
-    t = await c.tasks.create(
-        kind="bench",
-        params={},
-        idempotency_key="orphan2",
-        lease_ttl_sec=1,
-    )
-    await c.tasks.transition(t.task_id, "running")
-    await c.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), t.task_id),
-    )
 
     await c._advance_phase_if_needed()
 
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -209,35 +136,12 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     assert again["running_tasks_reclaimed"] == 0
 
 
-@pytest.mark.asyncio
-async def test_soft_restart_invokes_server_deep_clean(cyclic_coordinator):
-    c = cyclic_coordinator
-    # Enable the server-restart step but stub the real /proc kill.
-    c._cycle_restart_servers = True
-    calls: list[int] = []
-    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == [1]
-    assert summary["servers_restarted"] is True
-
-
-@pytest.mark.asyncio
-async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator):
-    c = cyclic_coordinator
-    assert c._cycle_restart_servers is False
-    calls: list[int] = []
-    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
-    assert calls == []
-    assert "servers_restarted" not in summary
-
-
 async def _noop_phase_side_effects(c):
     async def _noop(*_args, **_kwargs):
         return None
 
     c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.phase_explore._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
 
 
@@ -249,7 +153,7 @@ def _arm_explore_to_sweep(st):
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
     st.kernel_enabled = False
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
 
 @pytest.mark.asyncio
@@ -273,85 +177,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
-async def test_geak_revalidation_blocks_sweep_transition_while_queued(cyclic_coordinator):
-    c = cyclic_coordinator
-    await _noop_phase_side_effects(c)
-    now = datetime.now(timezone.utc)
-    st = c.shared_state
-    st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
-    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
-    st.start_ts = (now - timedelta(minutes=10)).isoformat()
-    st.max_minutes = 96 * 60
-    st.kernel_optimizer = "geak"
-    st.geak_result = {"status": "ok"}
-    st.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "geak-revalidate-1",
-    }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
-
-    queued = await c.tasks.create(
-        kind="explore",
-        params={
-            "source": "resume_stack_revalidate",
-            "geak_fallback": True,
-        },
-        idempotency_key="geak-revalidate",
-        task_id="geak-revalidate-1",
-    )
-
-    await c._advance_phase_if_needed()
-
-    assert st.phase == ps.PHASE_KERNEL_AGENT
-    assert (await c.tasks.get(queued.task_id)).state == "queued"
-
-
-@pytest.mark.asyncio
-async def test_failed_geak_revalidation_releases_sweep_transition(cyclic_coordinator):
-    c = cyclic_coordinator
-    await _noop_phase_side_effects(c)
-    now = datetime.now(timezone.utc)
-    st = c.shared_state
-    st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
-    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
-    st.start_ts = (now - timedelta(minutes=10)).isoformat()
-    st.max_minutes = 96 * 60
-    st.kernel_optimizer = "geak"
-    st.geak_result = {"status": "ok"}
-    st.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "geak-revalidate-failed",
-    }
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
-
-    task = await c.tasks.create(
-        kind="explore",
-        params={
-            "source": "resume_stack_revalidate",
-            "geak_fallback": True,
-        },
-        idempotency_key="geak-revalidate-failed",
-        task_id="geak-revalidate-failed",
-    )
-
-    await c._handle_unpromotable_result(
-        task,
-        {
-            "status": "failed",
-            "error_class": "subprocess_nonzero",
-            "error": "revalidation failed",
-        },
-    )
-    await c._advance_phase_if_needed()
-
-    assert not st.geak_pending
-    assert st.phase == ps.PHASE_SWEEP
-
-
-@pytest.mark.asyncio
-async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordinator):
+async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
@@ -364,9 +190,11 @@ async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordi
     await c.tasks.transition(running.task_id, "running")
 
     await c._advance_phase_if_needed()
+    assert c.shared_state.phase == ps.PHASE_FRAMEWORK_AGENT
 
+    await c.tasks.transition(running.task_id, "cancelled", evidence={"reason": "stopped"})
+    await c._advance_phase_if_needed()
     assert c.shared_state.phase == ps.PHASE_SWEEP
-    assert (await c.tasks.get(running.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -437,7 +265,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from .conftest import seed_target_analysis_marker
@@ -491,9 +318,7 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
 
     await coord._pump_dispatcher_once()
 
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed", (
-        "orphaned expired-running task must be failed by the pump"
-    )
+    assert (await coord.tasks.get(orphan.task_id)).state == "running", "age alone cannot establish worker death"
     assert (await coord.tasks.get(live.task_id)).state == "running", "in-window running task must not be reclaimed"
     assert (await coord.tasks.get(no_ttl.task_id)).state == "running", "no-TTL running task must never be reclaimed"
 
@@ -517,7 +342,7 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
     )
 
     await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
+    assert (await coord.tasks.get(orphan.task_id)).state == "running"
 
     await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
+    assert (await coord.tasks.get(orphan.task_id)).state == "running"

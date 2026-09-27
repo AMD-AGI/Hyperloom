@@ -358,7 +358,7 @@ class TestTheErrorMeasure:
 class _FakeTorch:
     """Just enough torch for the log read-back, which only needs a sync."""
 
-    class cuda:  # noqa: N801 - mirrors the attribute path being stood in for
+    class cuda:
         @staticmethod
         def synchronize():
             return None

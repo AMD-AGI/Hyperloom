@@ -124,7 +124,7 @@ def test_pin_uses_recipe_when_the_process_is_unmasked() -> None:
 def test_a_blank_value_shadows_a_real_pin_further_down_the_chain() -> None:
     """A blank ROCR HIDES a later HIP pin, because ROCm hides every device.
 
-    ``gpu_pool._visible_device_mask`` and ``gate.detect_gpu_count`` read
+    ``gpu_pool._visible_device_mask`` and ``visible_devices.detect_gpu_count`` read
     ``VAR=""`` as "zero devices visible"; this resolver first skipped it
     entirely, then recorded it only as a fallback that a real pin outranked.
     Both were wrong in the same direction — with a blank ROCR and a stale
