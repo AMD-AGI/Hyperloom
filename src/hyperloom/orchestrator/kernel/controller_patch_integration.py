@@ -34,6 +34,7 @@ from .controller_publication import (
 )
 from .kth_contract import sha256_digest
 from .kth_qualification import KthQualificationProvider, KthQualificationResult
+from .kth_shadow import KthShadowObservation, KthShadowObserver, shadow_record
 from .patch_conflict_merge import apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
@@ -205,6 +206,48 @@ def _qualify_applied(
         return KthQualificationResult(status="failed", reason=f"could not qualify the applied candidate: {error}")
 
 
+def _observe_in_shadow(
+    observer: KthShadowObserver,
+    publication: ControllerPatchPublication,
+    *,
+    repo: Path,
+    head: str,
+    touched: Sequence[str],
+    results_dir: Path,
+    session_dir: Path,
+    index: int,
+) -> None:
+    """Record what KTH would have said, to its own file, and return nothing.
+
+    Returning ``None`` is the design. There is no value here for the caller to
+    branch on, so a shadow observation cannot reach the integration result, the
+    benchmark or the KEEP even by mistake. The observation lands in
+    ``NNNN.kth_shadow.json`` beside that publication's ``NNNN.json``, so the
+    two join on the index without either being able to contaminate the other.
+    """
+    # The observer contains its own failures, and this contains them again.
+    # Belt and braces on purpose: the integration path must survive *any*
+    # observer, including one a later change makes less careful, and the guard
+    # that matters is the one on this side of the call.
+    try:
+        observation = observer.observe(
+            publication,
+            base_commit=head,
+            patch=_applied_candidate(repo, touched),
+            changed_paths=tuple(sorted(touched)),
+            artifacts_root=session_dir / "kth_shadow",
+            session_id=session_dir.name,
+        )
+    except BaseException as error:  # noqa: BLE001
+        observation = KthShadowObservation(shadow_error=f"{type(error).__name__}: {error}")
+    payload = {"operator_id": publication.operator_id, **shadow_record(observation)}
+    try:
+        atomic_write_json(results_dir / f"{index:04d}.kth_shadow.json", payload)
+    except OSError:
+        # An unwritable observation is still not worth failing a run for.
+        pass
+
+
 def _admit_to_performance(
     provider: KthQualificationProvider,
     publication: ControllerPatchPublication,
@@ -315,6 +358,7 @@ async def integrate_controller_patches(
     record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
     kth_provider: KthQualificationProvider | None = None,
+    kth_shadow_observer: KthShadowObserver | None = None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate complete Controller patches in task-priority order.
 
@@ -329,6 +373,11 @@ async def integrate_controller_patches(
         kth_provider: When set, every applied patch must hold a validated KTH
             ``Eligible`` attestation before the validator runs, and must still
             be those exact bytes when its KEEP is committed.
+        kth_shadow_observer: When set, each applied patch is qualified for the
+            record only. The observation is written beside the integration
+            result and changes nothing: not the patch's fate, not the
+            benchmark, not the KEEP. Mutually exclusive with ``kth_provider``,
+            which :meth:`KthShadowObserver.from_env` enforces.
     """
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
@@ -463,6 +512,19 @@ async def integrate_controller_patches(
             results.append(result)
             _write_result(results_dir, index, result)
             continue
+
+        if kth_shadow_observer is not None:
+            # Deliberately not assigned. Nothing below may read an observation.
+            _observe_in_shadow(
+                kth_shadow_observer,
+                publication,
+                repo=repo,
+                head=head_before,
+                touched=touched,
+                results_dir=results_dir,
+                session_dir=Path(session_dir),
+                index=index,
+            )
 
         qualified: KthQualificationResult | None = None
         if kth_provider is not None:

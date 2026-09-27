@@ -3807,6 +3807,7 @@ class KernelPhase(PhaseHandler):
                     integrate_controller_patches,
                 )
                 from ..kernel.kth_qualification import KthQualificationProvider
+                from ..kernel.kth_shadow import KthShadowObserver
 
                 integration = await integrate_controller_patches(
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
@@ -3814,6 +3815,7 @@ class KernelPhase(PhaseHandler):
                     shared_state=self.shared_state,
                     record_keep=self._record_integrate_keep,
                     kth_provider=KthQualificationProvider.from_env(),
+                    kth_shadow_observer=KthShadowObserver.from_env(),
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:

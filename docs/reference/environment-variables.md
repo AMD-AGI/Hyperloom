@@ -221,6 +221,8 @@ validated KTH `Eligible` attestation before it is benchmarked; `Blocked`,
 | `HYPERLOOM_KTH_PLANS` | Unset (all adaptive) | JSON object mapping a publication `kernel_path` to a KTH host-owned plan ID. Mapped kernels send a reviewed-plan request; unmapped kernels send an adaptive candidate envelope. |
 | `HYPERLOOM_KTH_EXPECTED_SHA` | Unset | Full KTH revision every attestation must name. Unset still requires a full revision. |
 | `HYPERLOOM_KTH_TIMEOUT_S` | `300` | Seconds one qualification may take; a timeout reverts the candidate. |
+| `HYPERLOOM_KTH_SHADOW_ENABLE` | Unset (off) | Boolean. On records what KTH would have said about each applied patch and enforces nothing: no patch is reverted, no benchmark is skipped and no KEEP is affected. Setting this together with `HYPERLOOM_KTH_ENABLE` is a configuration error. |
+| `HYPERLOOM_KTH_SHADOW_TIMEOUT_S` | `120` | Seconds one shadow observation may take. Shorter than the enforcing gate's, because an observation nobody acts on should not double an integration run. |
 
 ---
 
