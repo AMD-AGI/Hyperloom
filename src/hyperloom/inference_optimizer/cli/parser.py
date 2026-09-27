@@ -743,8 +743,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Protocol for the Critic's review inference. 'openai' uses the "
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential. "
+        "'auto' (default) reviews with the orchestration model over the protocol "
+        "orchestration runs on; an explicit value reviews with that side's model "
+        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
+        "credential. Preflight sends the review model one request and refuses to "
+        "start when it does not answer; there is no fallback model. "
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
     )
