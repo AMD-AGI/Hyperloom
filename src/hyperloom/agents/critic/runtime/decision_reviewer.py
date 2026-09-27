@@ -49,7 +49,7 @@ from .session_memory import SessionMemory
 ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
-# Pre-boot enablement patches (framework-agent authoring / enablement=True): a patch-landing action whose sole purpose
+# Pre-boot enablement patches (enablement=True): a patch-landing action whose sole purpose
 # is *runnability* (make the model boot at all), not throughput.
 ACTION_CLASS_ENABLEMENT_LANDING = "enablement_landing"
 
