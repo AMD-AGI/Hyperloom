@@ -912,11 +912,10 @@ class SpecialistSubprocessDispatcher:
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task is offered but no preset selects
-        # it: one tag per task would give the spend rollup as many buckets as
-        # there are tasks, which is the opposite of what it is read for. Reading
-        # spend per task needs a header of its own, not a value in this one.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
+        # under no component at all. The task tag is what attributes the
+        # requests of a child that dies before its result row -- the only
+        # place such a child's token usage survives is the gateway's log.
+        inject_attribution_env(env, component="specialist", operation="run_agent", task=task_id)
 
         backend = ""
         try:
