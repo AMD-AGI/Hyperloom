@@ -13,7 +13,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import snapshot_state_sections
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
-from hyperloom.orchestrator.kernel._recorder_trace import trace_recording_skipped
+from hyperloom.orchestrator.actions._recorder_trace import trace_recording_skipped
 
 
 def _record(session_dir, payload=None):
@@ -116,8 +116,8 @@ def test_a_nested_field_is_named_rather_than_dumped(tmp_path, traced):
     assert "deep" not in second
 
 
-def test_a_failed_write_is_traced_and_still_raises(tmp_path, traced, monkeypatch):
-    """A write that never landed is the most important one to hear about."""
+def test_a_failed_write_is_traced_and_parked(tmp_path, traced, monkeypatch):
+    """A write that never landed is parked, not thrown into the phase."""
 
     def explode(*_args, **_kwargs):
         raise OSError("no space left on device")
@@ -128,13 +128,11 @@ def test_a_failed_write_is_traced_and_still_raises(tmp_path, traced, monkeypatch
     )
     recorder = Recorder(tmp_path, producer="kernel_agent")
 
-    with pytest.raises(OSError):
-        recorder.record_item("kernel_lane_run", {"kernel_id": "k001"})
+    assert recorder.record_item("kernel_lane_run", {"kernel_id": "k001"}) is None
 
-    line = list(traced.records)[-1].getMessage()
-
-    assert "outcome=failed" in line
-    assert "error=OSError:no space left on device" in line
+    failed = [r.getMessage() for r in traced.records if "outcome=failed" in r.getMessage()]
+    assert failed
+    assert "error=OSError:no space left on device" in failed[-1]
 
 
 def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypatch):
@@ -242,16 +240,15 @@ def test_a_swallowed_writer_failure_is_traced_and_still_swallowed(tmp_path, trac
 
     _record(tmp_path)
 
-    line = list(traced.records)[-1].getMessage()
+    skipped = [record.getMessage() for record in traced.records if "outcome=skipped" in record.getMessage()]
 
-    assert "outcome=skipped" in line
-    assert "reason=writer raised" in line
-    assert "error=OSError:no space left on device" in line
+    assert skipped
+    assert any("error=OSError:no space left on device" in line for line in skipped)
 
 
 def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatch):
     def explode(*_args, **_kwargs):
-        raise RuntimeError("Authorization: Bearer tok-aaaaaaaaaaaa")
+        raise OSError("Authorization: Bearer tok-aaaaaaaaaaaa")
 
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.breakdown.recorder.recorder.atomic_write_text",
@@ -260,10 +257,12 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
     _record(tmp_path)
 
-    line = list(traced.records)[-1].getMessage()
+    lines = [record.getMessage() for record in traced.records]
+    skipped = [line for line in lines if "outcome=skipped" in line]
 
-    assert "tok-aaaaaaaaaaaa" not in line
-    assert "[REDACTED]" in line
+    assert skipped
+    assert all("tok-aaaaaaaaaaaa" not in line for line in skipped)
+    assert any("[REDACTED]" in line for line in skipped)
 
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):

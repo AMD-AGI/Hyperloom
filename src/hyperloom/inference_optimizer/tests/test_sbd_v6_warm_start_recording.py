@@ -139,6 +139,7 @@ def test_a_miss_is_a_completed_lookup_and_not_a_failure(_bound_session):
     assert event["status"] == "succeeded"
     assert event["ext"]["match_status"] == MATCH_MISS
     assert event["ext"]["matched"] is None
+    assert event["ext"]["failure"] is None
 
 
 def test_a_seed_only_match_is_a_third_state_and_not_a_bad_status(_bound_session):
@@ -157,7 +158,11 @@ def test_a_lookup_that_broke_is_separated_from_one_that_found_nothing(_bound_ses
 
     event = _event(_bound_session)
     assert event["status"] == "failed"
-    assert event["ext"]["failure"] == {"error_class": "RecipeStoreTimeout"}
+    assert event["ext"]["failure"] == {
+        "stage": "lookup",
+        "error_class": "RecipeStoreTimeout",
+        "message": "",
+    }
 
 
 def test_a_degraded_tier_is_not_reported_as_exact(_bound_session):

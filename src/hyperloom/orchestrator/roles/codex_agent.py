@@ -23,8 +23,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 
-from ..trace.llm_trace import new_call_id
-from .agent_role import DEFAULT_CODEX_MODEL
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
     BackendTurnResult,

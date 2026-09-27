@@ -387,7 +387,7 @@ def test_manifest_never_claims_a_file_the_zip_lacks(tmp_path: Path, monkeypatch:
     _build_session(sd)
     real_write = zipfile.ZipFile.write
 
-    def _flaky(self, filename, arcname=None, **kw):  # noqa: ANN001, ANN202
+    def _flaky(self, filename, arcname=None, **kw):
         if arcname == "reports/final.json":
             raise OSError("disk gone")
         return real_write(self, filename, arcname=arcname, **kw)
@@ -416,7 +416,7 @@ def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, monkeypatch: py
     dest = tmp_path / "workspace"
     real_copy = sp.shutil.copy2
 
-    def _flaky(src, dst, **kw):  # noqa: ANN001, ANN202
+    def _flaky(src, dst, **kw):
         if Path(dst).name == "final.json":
             raise OSError("disk gone")
         return real_copy(src, dst, **kw)
@@ -663,3 +663,25 @@ def test_per_attempt_server_logs_are_gzip(tmp_path: Path) -> None:
     names = _zip_names(out)
     assert "runs/measure/t1/attempts/000/server.log.gz" in names
     assert "runs/measure/t1/server.log" not in names
+
+
+def test_the_keep_source_overlay_every_snapshot_ref_points_at_is_packaged(tmp_path):
+    """A ``snapshot_ref`` the bundle does not carry is a dangling pointer.
+
+    ``capture_root_snapshots`` writes into ``optimization_stack/enablement/``
+    and ``session_breakdown.json`` references it by relative path, so the
+    replay-sufficiency verdict certifies a capture the consumer never receives
+    unless this tree ships with it.
+    """
+    from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_GLOBS, _select
+
+    overlay = tmp_path / "optimization_stack" / "enablement" / "roota" / "files" / "srt"
+    overlay.mkdir(parents=True)
+    (overlay / "module.py").write_text("value = 2\n", encoding="utf-8")
+    (tmp_path / "optimization_stack" / "enablement" / "roota" / "manifest.json").write_text("{}", encoding="utf-8")
+
+    matched, _unmatched, _refused = _select(tmp_path)
+    rels = {p.relative_to(tmp_path).as_posix() for p in matched}
+    assert "optimization_stack/enablement/roota/files/srt/module.py" in rels
+    assert "optimization_stack/enablement/roota/manifest.json" in rels
+    assert any(g.startswith("optimization_stack/") for g in PACKAGE_GLOBS)

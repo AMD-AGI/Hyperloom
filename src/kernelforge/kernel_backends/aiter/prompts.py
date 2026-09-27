@@ -7,12 +7,12 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the AITER kernel backend — a specialist in AMD's AI Tensor Engine Runtime (AITER)
@@ -69,7 +69,7 @@ the `Read` tool for {config_gpu_target} instead of relying on a remembered value
 1. IDENTIFY the target operation and check if AITER has an operator for it
 2. READ the AITER operator's API and configuration options
 3. WRITE a benchmark driver that uses the AITER operator
-4. TEST correctness by running the driver yourself, then the task's own correctness suite
+4. TEST correctness by running the driver yourself
 5. BENCH wall-clock by running the driver in bench mode
 6. COMPARE against:
    - The current implementation (if any)
@@ -77,7 +77,7 @@ the `Read` tool for {config_gpu_target} instead of relying on a remembered value
    - A quick Triton prototype (for comparison)
 7. REPORT whether AITER meets the gate, or custom kernel work is needed
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## Integration Checklist
 

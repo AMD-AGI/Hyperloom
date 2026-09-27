@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from hyperloom.orchestrator.trace import langfuse_mapping as lm
-from hyperloom.orchestrator.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lm
+from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 
 def test_stream_json_usage_skips_blank_and_nondict_lines(tmp_path):

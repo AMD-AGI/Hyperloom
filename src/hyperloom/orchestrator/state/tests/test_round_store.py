@@ -56,8 +56,8 @@ async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store
 
 
 @pytest.mark.asyncio
-async def test_an_open_round_holds_the_machine_only_while_its_lease_is_live(store, virtual_clock):
-    """The exclusion is time-bounded, so a round nobody settles frees itself."""
+async def test_an_open_round_holds_the_machine_until_explicit_settlement(store, virtual_clock):
+    """Elapsed budget is not evidence that the round's owner stopped."""
     clock = virtual_clock
     opened_at = clock.wall()
     opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")
@@ -66,15 +66,14 @@ async def test_an_open_round_holds_the_machine_only_while_its_lease_is_live(stor
     row = await store.get("r")
     assert row is not None
     assert row.excludes_at(opened_at + _LEASE - 1.0) is True
-    assert row.excludes_at(opened_at + _LEASE + 1.0) is False
+    assert row.excludes_at(opened_at + _LEASE + 1.0) is True
     assert [r.round_id for r in await store.excluding(opened_at)] == ["r"]
-    assert await store.excluding(opened_at + _LEASE + 1.0) == []
+    assert [r.round_id for r in await store.excluding(opened_at + _LEASE + 1.0)] == ["r"]
 
-    # A holder that never settled cannot keep the next round out for good.
     opened = await store.open(
         "next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=opened_at + _LEASE + 1.0, request_id="q2"
     )
-    assert opened.ok
+    assert not opened.ok
 
 
 @pytest.mark.asyncio
@@ -106,11 +105,14 @@ async def test_only_one_of_two_contending_acquires_wins_and_the_loser_is_told_wh
     assert second.reason == rs.EXCLUDED
     assert await store.get("round-b") is None
 
-    # The winner's lease is the loser's opening: once it runs out with nothing
-    # settling it, the round it excluded may finally start.
     clock.advance(_LEASE + 1.0)
     retry = await store.open("round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q3")
-    assert retry.ok
+    assert not retry.ok
+    await store.settle("round-a", holder_task_id="t-1", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="q4")
+    acquired = await store.open(
+        "round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q5"
+    )
+    assert acquired.ok
 
 
 @pytest.mark.asyncio
@@ -153,6 +155,9 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     # than silently held by work that is over.
     await tasks.transition("t-1", "running")
     await tasks.transition("t-1", "succeeded")
+    await store.settle(
+        "round-a", holder_task_id="t-1", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="settle"
+    )
     clock.advance(_LEASE + 1.0)
     with pytest.raises(TerminalTaskReuse):
         await store.open(

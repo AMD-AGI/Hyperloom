@@ -228,26 +228,30 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp_path):
-    """The ledger must name the cause, using the baseline arm's own class."""
+async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp_path, monkeypatch):
+    """The ledger must name the cause under the shared benchmark timeout policy."""
     base = _write_config(tmp_path / "base.yaml")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
 
     with (
         patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
-        patch(
-            f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
-        ),
+        patch(f"{_PATCHER}._run_magpie", wraps=_run_magpie) as run_magpie,
+        patch(f"{_PATCHER}.run_with_session_kill") as launch,
     ):
         results = await run_grid(
             base_yaml_path=base,
             base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=tmp_path / "out",
-            variant_timeout_sec=5,
+            warmup_before_measure=False,
         )
 
+    run_magpie.assert_called_once()
+    assert run_magpie.call_args.kwargs["timeout_sec"] == 7800
+    assert run_magpie.call_args.kwargs["silence_timeout_sec"] == 600
+    launch.assert_not_called()
     assert len(results) == 1
     assert results[0].status == "failed"
     assert results[0].error_class == "eval_probe_unpatchable"
@@ -291,10 +295,7 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     }
     assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
 
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs, baseline
+    from hyperloom.orchestrator.actions.executors import _grid_runner, baseline
 
     for arm in (_grid_runner, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
-    # The env materializer decides the same question from raw envs rather than a written config, so it shares the
-    # spellings instead of the reader.
-    assert _workload_envs._RUN_EVAL_FALSE_VALUES is _accuracy_gate._RUN_EVAL_FALSE_VALUES

@@ -428,8 +428,9 @@ def test_no_levers_means_no_seeding():
 
 
 def test_lever_variants_survive_the_payload_parser():
-    """The lever metadata has to reach the GridVariant, or attribution is lost."""
+    """The parsed variant keeps the name attribution joins on and the unset the leg needs, or attribution is lost."""
     from hyperloom.orchestrator.actions.executors.explore import (
+        _framework_lever_attributions,
         _grid_variants_from_payload,
         framework_lever_grid,
     )
@@ -439,8 +440,13 @@ def test_lever_variants_survive_the_payload_parser():
     payload = framework_lever_grid(state)
     variants = _grid_variants_from_payload(payload)
     assert len(variants) == len(payload)
-    assert all(getattr(v, "framework_lever_source", "") == "leave_one_out" for v in variants)
     assert all(v.unset_envs for v in variants)
+
+    outcomes = [{"variant_name": v.name, "outcome": "REVERT", "metrics": {"gain_pct": -2.0}} for v in variants]
+    attributed = _framework_lever_attributions(outcomes, payload)
+    assert {row["switch"] for row in attributed} == {str(v.get("framework_lever")) for v in payload}
+    # leave_one_out: dropping a lever that cost 2% credits it with +2%.
+    assert all(row["gain_pct"] == pytest.approx(2.0) for row in attributed)
 
 
 # attribution sign convention

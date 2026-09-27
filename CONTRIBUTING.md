@@ -6,7 +6,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 - Create a feature branch off `main`.
 - Keep changes focused and include context in the PR description (problem, approach, test coverage).
 - Ensure merge requirements and applicable GitHub checks pass before requesting review (see [CI and documentation-only changes](#ci-and-documentation-only-changes)).
-- Add a `CHANGELOG.md` entry under `[Unreleased]` for anything an operator can observe — a behaviour, an interface, a default, a flag, an artifact — in the same PR as the change. Refactors with nothing observable, and test- or docs-only changes, are exempt; say which in the PR description. See [`AGENTS.md`](AGENTS.md) § *Authoring rules of engagement*.
+- Describe anything an operator can observe — a behaviour, an interface, a default, a flag, an artifact — in the PR description; the release cut aggregates those into the [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases). Refactors with nothing observable, and test- or docs-only changes, are exempt; say which in the PR description. See [`AGENTS.md`](AGENTS.md) § *Authoring rules of engagement*.
 - Avoid committing generated artifacts.
 
 ## Proposing a new framework or platform
@@ -24,7 +24,7 @@ This repository treats **documentation-only** pushes and pull requests the same 
 | **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
 | **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; hard gate) | Yes (same `paths-ignore` as tests / CodeQL) |
-| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.robustness`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
+| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
 | **Mypy** | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error`; config in `[tool.mypy]`) | Yes (same `paths-ignore`) |
 
 If you add standalone workflows for **pytest**, **ruff**, **pylint**, or similar, copy the **same** `paths-ignore` blocks as in `tests-coverage.yml` / `codeql.yml` so documentation-only PRs stay consistent and cheap.
@@ -110,7 +110,7 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 
 ## Before opening a PR
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`, or the PR description says why the change is unobservable.
+- [ ] PR description states the observable effect, or says why the change is unobservable.
 - [ ] Tests pass (`pytest`) when you changed executable code or behavior-affecting config.
 - [ ] Lint clean (`ruff check .`) when you changed Python sources.
 - [ ] Type checks clean (`mypy ...`) when you changed typed packages.

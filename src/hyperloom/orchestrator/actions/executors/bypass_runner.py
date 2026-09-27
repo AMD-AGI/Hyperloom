@@ -17,14 +17,13 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
 from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
-
-_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -58,12 +57,18 @@ def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
     raw = bench_envs.get("RUN_EVAL")
     if raw is None:
         raw = os.environ.get("RUN_EVAL", "false")
-    return str(raw).strip().lower() not in _FALSE_VALUES
+    return is_truthy(raw, default=True)
 
 
 def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
     """Return the framework's extra server args as a token list."""
-    key = {"sglang": "EXTRA_SGLANG_ARGS", "vllm": "EXTRA_VLLM_ARGS", "atom": "EXTRA_ATOM_ARGS"}.get(framework, "")
+    from hyperloom.inference_optimizer.framework_registry import extra_args_env, is_supported
+
+    # An unregistered framework has no args variable of its own, and the registry's
+    # default would hand back another framework's.
+    if not is_supported(framework):
+        return []
+    key = extra_args_env(framework)
     raw = str(os.environ.get(key) or bench_envs.get(key) or "").strip()
     if not raw:
         return []
@@ -107,7 +112,7 @@ def run_benchmark(
     framework = str(bench.get("framework") or "sglang").lower()
     model = str(bench.get("model") or os.environ.get("MODEL", ""))
     bench_envs = dict(bench.get("envs") or {})
-    timeout_s = _as_float(bench.get("timeout_seconds"), 3600.0)
+    timeout_s = float(bench["timeout_seconds"])
 
     # Scriptable (server-less) frameworks (e.g. xDiT diffusion): no server, no HTTP client.
     from hyperloom.inference_optimizer import framework_registry
@@ -777,7 +782,7 @@ def _server_env(
 
 def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
     """Launch the server in its own session, redirecting logs to server.log."""
-    log_fh = open(server_log, "w", encoding="utf-8")  # noqa: SIM115 - closed on terminate
+    log_fh = open(server_log, "w", encoding="utf-8")
     proc = subprocess.Popen(
         cmd,
         env=env,
@@ -821,10 +826,11 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
 
 def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str) -> int:
     """Run a client/eval subprocess, appending logs; return its exit code."""
+    from ._subprocess_kill import run_with_session_kill
+
     try:
-        proc = subprocess.run(
+        proc = run_with_session_kill(
             cmd,
-            capture_output=True,
             text=True,
             timeout=timeout_s,
             env=build_benchmark_env(),
@@ -965,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    cleanup = str(getattr(args, "server_lifecycle_cleanup", "true")).strip().lower() not in _FALSE_VALUES
+    cleanup = is_truthy(getattr(args, "server_lifecycle_cleanup", "true"), default=True)
     return run_benchmark(
         Path(args.benchmark_config),
         Path(args.output_dir),

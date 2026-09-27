@@ -390,6 +390,21 @@ class TestTheAgentXValidityGate:
         assert out["accuracy"] == 1.0
 
 
+@pytest.mark.parametrize("errors,summary,expected", [(None, [], 1.0), (25, None, 0.0), (None, None, 0.0)])
+def test_mapped_profiling_result_reaches_agentx_gate(tmp_path, errors, summary, expected):
+    from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
+
+    export = {"request_count": {"avg": 75}, "error_summary": summary}
+    if errors is not None:
+        export["error_request_count"] = {"avg": errors}
+    mapped = map_aiperf(export)
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
+    result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
+    assert result["accuracy"] == expected
+    assert result["task"] == "agentx_error_rate"
+    assert result["error_rate"] == mapped["request_error_rate"]
+
+
 class TestParseAgentXErrorRate:
     def test_reads_the_rate_from_the_result(self, tmp_path):
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.02}), encoding="utf-8")

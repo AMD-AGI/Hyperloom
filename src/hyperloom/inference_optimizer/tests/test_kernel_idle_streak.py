@@ -20,7 +20,6 @@ def kernel_coordinator(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -30,7 +29,6 @@ def kernel_coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
 
@@ -38,7 +36,7 @@ def kernel_coordinator(tmp_path, monkeypatch):
         return None
 
     c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.phase_explore._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.phase_machine._on_phase_entered = _noop  # type: ignore[method-assign]
     yield c
@@ -112,8 +110,8 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
     _stall_the_ledger(st)
 
     build = await c.tasks.create(
-        kind="kernel_opt",
-        params={"kernel_id": "k000"},
+        kind="kernel_agent",
+        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
         idempotency_key="long-running-build",
     )
     await c.tasks.transition(build.task_id, "running")
@@ -268,25 +266,3 @@ def test_fingerprint_tracks_inflight_task_ids():
     assert ps.compute_kernel_progress_fingerprint(
         state, inflight_task_ids=("t2", "t1")
     ) == ps.compute_kernel_progress_fingerprint(state, inflight_task_ids=("t1", "t2"))
-
-
-@pytest.mark.asyncio
-async def test_running_specialist_counts_as_kernel_lane_work(kernel_coordinator):
-    """A specialist admitted to KERNEL must reach ``_inflight_kernel_task_ids``."""
-    c = kernel_coordinator
-    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-idle")
-    await c.tasks.transition(task.task_id, "running")
-    assert task.task_id in await c.phase_machine._inflight_kernel_task_ids()
-
-
-@pytest.mark.asyncio
-async def test_queued_specialist_survives_the_transition_into_kernel(kernel_coordinator):
-    """``cancel_queued_not_allowed`` reads the same allowlist, so the task lives."""
-    c = kernel_coordinator
-    task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-keep")
-    cancelled = await c.tasks.cancel_queued_not_allowed(
-        allowed_kinds=ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT],
-        reason="phase_transition:EXPLORE->KERNEL_AGENT",
-    )
-    assert task.task_id not in cancelled
-    assert (await c.tasks.get(task.task_id)).state == "queued"

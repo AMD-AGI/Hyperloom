@@ -149,7 +149,7 @@ def test_run_controller_subprocess_recovers_after_hard_timeout(
 def test_forge_loop_spend_reaches_the_llm_ledger(tmp_path: Path) -> None:
     # The Controller is a child process and cannot append to this ledger while it runs, so a campaign's model spend is
     # only accounted for if what it recorded is filed after the child exits.
-    from hyperloom.orchestrator.trace.llm_trace import llm_calls_path
+    from hyperloom.inference_optimizer.trace.llm_trace import llm_calls_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -189,7 +189,7 @@ def test_a_controller_result_without_usage_files_nothing(tmp_path: Path) -> None
 
 def test_the_analysis_spend_reaches_the_ledger_beside_the_forge_loops(tmp_path: Path) -> None:
     """The sessions that spent most and bought least were reporting nothing."""
-    from hyperloom.orchestrator.trace.llm_trace import llm_calls_path
+    from hyperloom.inference_optimizer.trace.llm_trace import llm_calls_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()

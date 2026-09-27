@@ -230,7 +230,7 @@ def cleanup_workspace(
                 cwd=repo_dir,
                 timeout_sec=60,
             )
-        except Exception:  # noqa: BLE001 — fall back to plain rmtree
+        except Exception:
             log.debug(
                 "cleanup_workspace: git worktree remove failed; falling back to rmtree",
                 exc_info=True,

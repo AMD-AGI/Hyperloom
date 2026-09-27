@@ -9,17 +9,18 @@ import csv
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
-import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.phases.machine_state import record_lifecycle_event
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -90,15 +91,15 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
 def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path):
     """Neither the live state's nor the inline Roofline's rows may be dropped."""
     coord = _coord(tmp_path)
-    coord.shared_state.record_lifecycle_event(step="explore", status="END", ts="2026-01-01T00:00:00Z")
+    record_lifecycle_event(coord.shared_state, step="explore", status="END", ts="2026-01-01T00:00:00Z")
     coord.shared_state.save(tmp_path)
     # Recorded on the live state only; never persisted before the sync.
-    coord.shared_state.record_lifecycle_event(step="live_only", status="START", ts="2026-01-01T00:00:05Z")
+    record_lifecycle_event(coord.shared_state, step="live_only", status="START", ts="2026-01-01T00:00:05Z")
 
     selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
     persisted = SharedState.load_or_init(tmp_path)
     persisted.last_trace_analyze = {"steady_state_trace": selected_trace}
-    persisted.record_lifecycle_event(step="profile", status="END", ts="2026-01-01T00:00:03Z")
+    record_lifecycle_event(persisted, step="profile", status="END", ts="2026-01-01T00:00:03Z")
     persisted.save(tmp_path)
 
     result = {
@@ -130,7 +131,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -415,7 +415,11 @@ class TestQueueFusionSiblings:
     """A KEPT fusion nomination is queued as sibling records, not integrated inline."""
 
     @pytest.mark.asyncio
-    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
+    @pytest.mark.parametrize("override, expected", [(None, 1.0), ("invalid", 1.0), ("2.5", 2.5)])
+    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path, monkeypatch, override, expected):
+        monkeypatch.delenv("HYPERLOOM_FUSION_KEEP_PCT", raising=False)
+        if override is not None:
+            monkeypatch.setenv("HYPERLOOM_FUSION_KEEP_PCT", override)
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -458,9 +462,8 @@ class TestQueueFusionSiblings:
         assert rec_a["action_label"] == "fusion"
         assert rec_a["artifact_path"] == "/out/fuse_a.patch"
         assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
-        # The fusion-specific keep bar (default 3.0%) rides on the record so the generic drain grades against it
-        # rather than the integrate default.
-        assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
+        # The fusion-specific keep bar rides on the record rather than the integrate default.
+        assert rec_a["keep_threshold_pct"] == pytest.approx(expected)
         assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
     @pytest.mark.asyncio
@@ -748,7 +751,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -849,7 +852,7 @@ class TestForgeGemmRuntimeConfigMerge:
             }
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -909,7 +912,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return responses[len(calls) - 1]
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -950,6 +953,8 @@ class TestForgeGemmRuntimeConfigMerge:
             "gemm_tune_fmoe_ck",
             "gemm_tune_dense_bf16",
         ]
+        assert calls[0]["keep_threshold_pct"] == pytest.approx(1.0)
+        assert calls[1]["keep_threshold_pct"] == pytest.approx(1.0)
         assert calls[0]["base_tput"] == 110.0
         assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": str(fmoe_candidate)}
@@ -1087,7 +1092,7 @@ class TestBf16DenseFallbackIsInternalToForge:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+        await coord._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning"]
         # No second, bf16-flavoured subprocess is launched.
@@ -1531,11 +1536,20 @@ class TestKernelE2EMeasurementPromotion:
             framework="sglang",
             benchmark_mode="agentx",
             baseline_tput=100.0,
-            baseline_perf={"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
+            baseline_perf={
+                "total_throughput": 1000.0,
+                "e2e_norm_intvty_p90": 100.0,
+                "e2e_norm_intvty_p50": 100.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
+            },
             current_best={
                 "tput": 100.0,
                 "total_throughput": 1000.0,
                 "e2e_norm_intvty_p90": 100.0,
+                "e2e_norm_intvty_p50": 100.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
                 "extra_envs": {"BASE_ENV": "1"},
             },
         )
@@ -1543,13 +1557,16 @@ class TestKernelE2EMeasurementPromotion:
         return coord
 
     @staticmethod
-    def _bench(output=90.0, total=1200.0, *, name="first", intvty=120.0):
+    def _bench(output=98.0, total=1200.0, *, name="first", intvty=120.0):
         return {
             "status": "succeeded",
             "output_throughput": output,
             "total_token_throughput": total,
             "input_throughput": total - output,
             "e2e_norm_intvty_p90": intvty,
+            "e2e_norm_intvty_p50": intvty,
+            "duration_seconds": 900.0,
+            "request_error_rate": 0.0,
             "intvty_p90": 100.0,
             "tpot_p90_ms": 10.0,
             "ttft_mean_ms": 12.0,
@@ -1596,8 +1613,8 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("outer_output", [90.0, 9000.0])
-    async def test_gemm_nested_intvty_keep_can_lower_output(self, coord, monkeypatch, outer_output):
-        bench = self._bench(total=1080.0)
+    async def test_gemm_nested_measurement_owns_the_verdict(self, coord, monkeypatch, outer_output):
+        bench = self._bench(output=98.0, total=1080.0)
         fake = _make_integrate(
             [{"decision": "KEEP", "new_tput": outer_output, "gain_pct": 20.0, "bench_result": bench}]
         )
@@ -1619,12 +1636,12 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(20.0)
         assert coord.shared_state.cumulative_gain_validated_stack_len == 1
         assert coord.shared_state.current_best["total_throughput"] == 1080.0
-        assert coord.shared_state.current_best["input_throughput"] == 990.0
+        assert coord.shared_state.current_best["input_throughput"] == 982.0
         assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == 120.0
         assert coord.shared_state.current_best["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
         assert coord.shared_state.current_best["extra_server_args"] == ""
         assert result["tuned_file"] == "/candidate.csv"
-        assert result["e2e_results"]["kept"][0]["tput"] == 90.0
+        assert result["e2e_results"]["kept"][0]["tput"] == 98.0
         assert coord.shared_state.optimization_stack[0]["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv"}
         assert "source_snapshot" not in coord.shared_state.optimization_stack[0]
         self._assert_measurement(coord, bench)
@@ -1640,6 +1657,7 @@ class TestKernelE2EMeasurementPromotion:
         from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
             ROUTE_FORGE,
+            SOURCE_GEMM_TUNING,
             assemble_kernel_ext,
         )
         from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -1674,8 +1692,8 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
         # The gain is graded on the session's own axis, and the run says which
         # one, so an interactivity gain is never read back as an output gain.
-        [run] = ext["forge"]["lanes"]["gemm_tuning_runs"]
-        assert run["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
+        [run] = [row for row in ext["attempts"] if row["source_kind"] == SOURCE_GEMM_TUNING]
+        assert run["detail"]["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p50")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):
@@ -1812,6 +1830,9 @@ class TestKernelE2EMeasurementPromotion:
             tput=110.0,
             total_throughput=1100.0,
             e2e_norm_intvty_p90=110.0,
+            e2e_norm_intvty_p50=110.0,
+            duration_seconds=900.0,
+            request_error_rate=0.0,
             extra_server_args="--page-size 16",
             extra_envs=dict(entry_envs),
             final_overlay="/prior/overlay",
@@ -2543,13 +2564,10 @@ class TestValidateForgeGemmTuningE2E:
         assert result["e2e_results"]["reverted"] == []
 
     @pytest.mark.asyncio
-    async def test_timeout_fallback_when_explore_helper_raises(self, tmp_path, monkeypatch):
+    async def test_gemm_validation_uses_fixed_benchmark_budget(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
 
-        def _raise(**kwargs):
-            raise ValueError("no runtime budget")
-
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", _raise)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
 
         captured: dict[str, object] = {}
 
@@ -2576,8 +2594,7 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_gemm_tuning_e2e(result)
 
-        # Fallback budget is 15 minutes.
-        assert captured["budget"] == 15
+        assert captured["budget"] == 130
 
     @pytest.mark.asyncio
     async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):

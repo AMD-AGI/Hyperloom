@@ -817,6 +817,11 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     kernel.write_text("VALUE = 1\n")
     driver = tmp_path / "forge_driver.py"
     driver.write_text("print('allclose: True')\n")
+    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "KernelForge Test")
+    _git(tmp_path, "config", "user.email", "kernelforge-test@example.invalid")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "base")
     config = Config(
         workspace=str(tmp_path),
         agent_backend="codex",

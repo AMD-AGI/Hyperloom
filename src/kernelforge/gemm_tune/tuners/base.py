@@ -7,11 +7,43 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..model_analyzer import ModelProfile
+
+
+def published_metric(value: float | None) -> float | None:
+    """A micro metric as it is published: four decimals, or null when unmeasured."""
+    return None if value is None else round(value, 4)
+
+
+class MicroMetrics(NamedTuple):
+    """The micro figures a tuner publishes: winners, best and mean speedup."""
+
+    improved: int | None
+    best: float | None
+    avg: float | None
+
+
+def micro_metrics(
+    shape_results: Iterable[Mapping[str, Any]],
+    won: Callable[[Mapping[str, Any]], bool] = lambda row: bool(row.get("improved")),
+) -> MicroMetrics:
+    """The three micro figures over the shapes that were timed against an untuned baseline.
+
+    A row carries a numeric ``speedup`` exactly when the tuner had a baseline for that shape, so all three figures
+    describe that one set of shapes and go null together. A run that measured nothing must not publish a count of
+    zero, which reads as a measurement that found no gain; a run that timed every shape and won none must publish
+    that zero beside the speedups it did measure, not the nulls of a run that measured nothing.
+    """
+    measured = [row for row in shape_results if isinstance(row.get("speedup"), (int, float))]
+    if not measured:
+        return MicroMetrics(None, None, None)
+    speedups = [row["speedup"] for row in measured]
+    return MicroMetrics(sum(1 for row in measured if won(row)), max(speedups), sum(speedups) / len(speedups))
 
 
 @dataclass
@@ -29,13 +61,14 @@ class TuneResult:
     candidate: bool = False  # True when E2E validation should test this artifact.
     # Metrics
     total_shapes: int = 0
-    improved_shapes: int = 0
+    # None when no shape had a comparable untuned baseline, which is not the same as none having improved.
+    improved_shapes: int | None = None
     # Shapes handed to the tuner.
     expected_shapes: int = 0
     # Shapes that were tuned but have no comparable untuned baseline, so improved_shapes cannot count them.
     unverified_shapes: int = 0
-    best_micro_speedup: float = 1.0
-    avg_micro_speedup: float = 1.0
+    best_micro_speedup: float | None = None
+    avg_micro_speedup: float | None = None
     # Per-shape detail (list of dicts with keys: token/M, default_us, tuned_us, speedup)
     shape_results: list[dict[str, Any]] = field(default_factory=list)
     # Rows removed from the deployed artifact because the tuner's own accuracy check found them wrong.
@@ -47,13 +80,12 @@ class TuneResult:
     error_class: str = ""
     # Skip reason (from router)
     skip_reason: str = ""
-    # Where the tuned shapes/keys came from: "runtime_observed" when the caller supplied them from a live dispatch
-    # log, "config_derived" when this tuner inferred them from the model config.
+    # Where the tuned shapes/keys came from; "runtime_observed" means a live dispatch log or a caller-supplied CSV.
     key_source: str = ""
 
     @property
     def has_improvement(self) -> bool:
-        return self.candidate or (self.improved_shapes > 0 and self.best_micro_speedup > 1.0)
+        return self.candidate or ((self.improved_shapes or 0) > 0 and (self.best_micro_speedup or 0.0) > 1.0)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -73,8 +105,8 @@ class TuneResult:
         if self.total_shapes:
             d["total_shapes"] = self.total_shapes
             d["improved_shapes"] = self.improved_shapes
-            d["best_micro_speedup"] = round(self.best_micro_speedup, 4)
-            d["avg_micro_speedup"] = round(self.avg_micro_speedup, 4)
+            d["best_micro_speedup"] = published_metric(self.best_micro_speedup)
+            d["avg_micro_speedup"] = published_metric(self.avg_micro_speedup)
         if self.expected_shapes:
             d["expected_shapes"] = self.expected_shapes
             # A row the accuracy check removed was tuned; it is missing from the artifact but it was not missed by the
@@ -172,7 +204,7 @@ class BaseTuner(ABC):
             result = self.run()
             result.elapsed_s = time.time() - started
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - tuner body is subclass-supplied
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",

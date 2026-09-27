@@ -585,3 +585,68 @@ def test_releasing_a_borrowed_repository_twice_is_harmless(tmp_path: Path, edita
     again = create_operator_worktree(task, layout)
     assert again.inplace is True
     release_operator_worktree(again)
+
+
+def test_a_leftover_campaign_is_archived_before_the_next_borrow(
+    tmp_path: Path,
+    editable,
+) -> None:
+    """forge-loop refuses a workspace that still holds someone else's campaign.
+
+    The release archives this directory, but a run the host killed never reaches it,
+    and every in-place task in one repository is handed the same path. Left in place
+    it fails the next task at dispatch with "already contains a Forge campaign", and
+    its manifest is then read back as that task's own result.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    leftover = repo / FORGE_LOOP_OUTPUT_DIRNAME
+    leftover.mkdir(parents=True)
+    (leftover / "campaign_config.json").write_text('{"operator_name": "someone-else"}', encoding="utf-8")
+
+    borrowed = create_operator_worktree(task, layout)
+    try:
+        # The fresh campaign gets an empty directory, not the previous one's state.
+        assert not (repo / FORGE_LOOP_OUTPUT_DIRNAME / "campaign_config.json").exists()
+        # Kept, because a run that published nothing leaves this as its only account.
+        archived = layout.workspace_dir(task.operator_id) / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}"
+        assert (archived / "campaign_config.json").read_text(encoding="utf-8") == ('{"operator_name": "someone-else"}')
+    finally:
+        release_operator_worktree(borrowed)
+
+
+def test_an_archive_that_failed_says_so(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A silent failure here is the undiagnosable dispatch refusal this archive exists to end."""
+    import shutil as shutil_module
+
+    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+
+    repo = tmp_path / "repo"
+    (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree_module.shutil,
+        "move",
+        lambda *_a, **_k: (_ for _ in ()).throw(shutil_module.Error("workspace.lock is held")),
+    )
+
+    with caplog.at_level("WARNING"):
+        worktree_module._archive_stale_campaign_output(repo, tmp_path / "archive")
+
+    assert "could not archive" in caplog.text
+    assert "workspace.lock is held" in caplog.text
+
+
+def test_a_borrow_without_a_leftover_archives_nothing(tmp_path: Path, editable) -> None:
+    """The common case must not leave an empty archive behind for the sweep to read."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    try:
+        assert not (layout.workspace_dir(task.operator_id) / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}").exists()
+    finally:
+        release_operator_worktree(borrowed)

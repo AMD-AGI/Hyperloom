@@ -344,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("RuntimeAdapterError: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 - top-level safety net
+    except Exception as exc:
         log.exception("unexpected framework-agent failure")
         print(f"ERROR: unexpected framework-agent failure: {exc}", file=sys.stderr)
         return 2

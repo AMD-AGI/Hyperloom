@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import types
+import inspect
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,11 @@ class _CP:
 
 def test_now_iso():
     assert "T" in ip._now_iso()
+
+
+def test_integrate_patch_uses_shared_benchmark_deadline():
+    parameters = inspect.signature(ip.IntegratePatchExecutor).parameters
+    assert "variant_timeout_sec" not in parameters
 
 
 @pytest.mark.parametrize(
@@ -454,11 +459,25 @@ def test_restore_stash_if_needed_clean_noop(tmp_path):
     assert ip._git_restore_stash_if_needed(tmp_path, "clean", "") == ""
 
 
-def test_with_stash_restore_adds_error_on_failure(tmp_path, monkeypatch):
+def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        ip, "_run_git_cp", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="oid stash@{0}\n")
+    )
     monkeypatch.setattr(ip, "_git_restore_stash_if_needed", lambda *a, **k: "boom")
-    out = ip._with_stash_restore(tmp_path, "stashed", "stash@{0}", {"status": "kept"})
-    assert out["status"] == "kept"
-    assert out["stash_restore_error"] == "boom"
+    pending = {
+        "framework_source_root": str(tmp_path),
+        "recovery": {
+            "version": 1,
+            "phase": "ready",
+            "root": str(tmp_path / "recovery"),
+            "stash_oid": "oid",
+        },
+    }
+    out = ip.restore_pending_integrate(pending, keep=True)
+    assert out["failed"] == ["boom"]
+    assert pending["recovery"]["phase"] == "ready"
 
 
 def test_resolve_patch_paths_scan(tmp_path):
@@ -534,35 +553,28 @@ def _executor():
     return ip.IntegratePatchExecutor(session_dir=None)
 
 
-def test_revert_patches_none_root():
-    ex = _executor()
-    assert ex._revert_patches(None, [Path("/x")]) == []
-
-
-def test_revert_patches_reverse_ok(tmp_path, monkeypatch):
-    ex = _executor()
-    monkeypatch.setattr(ip, "_git_apply_reverse", lambda r, p: (True, ""))
-    applied = [tmp_path / "a.patch", tmp_path / "b.patch"]
-    reverted = ex._revert_patches(tmp_path, applied)
-    assert set(reverted) == set(applied)
-
-
-def test_revert_patches_checkout_fallback(tmp_path, monkeypatch):
-    ex = _executor()
-    monkeypatch.setattr(ip, "_git_apply_reverse", lambda r, p: (False, "boom"))
-    monkeypatch.setattr(ip, "_git_checkout_clean", lambda r: (True, ""))
-    applied = [tmp_path / "a.patch", tmp_path / "b.patch"]
-    reverted = ex._revert_patches(tmp_path, applied)
-    assert set(reverted) == set(applied)  # checkout reverts all
-
-
-def test_revert_patches_checkout_fails(tmp_path, monkeypatch):
-    ex = _executor()
-    monkeypatch.setattr(ip, "_git_apply_reverse", lambda r, p: (False, "boom"))
-    monkeypatch.setattr(ip, "_git_checkout_clean", lambda r: (False, "denied"))
-    applied = [tmp_path / "a.patch"]
-    reverted = ex._revert_patches(tmp_path, applied)
-    assert reverted == []
+@pytest.mark.parametrize("head,checkout_ok", [("base", True), ("changed", True), ("base", False)])
+def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, head, checkout_ok):
+    calls = []
+    monkeypatch.setattr(ip, "_git_head_sha", lambda _root: head)
+    monkeypatch.setattr(
+        ip, "_git_checkout_clean", lambda root, **_kwargs: (calls.append(root) or checkout_ok, "denied")
+    )
+    pending = {
+        "framework_source_root": str(tmp_path),
+        "patches": ["a.patch", "b.patch"],
+        "artifacts": [],
+        "recovery": {"version": 1, "phase": "ready", "root": str(tmp_path / "recovery"), "git_head": "base"},
+    }
+    result = ip.restore_pending_integrate(pending)
+    if head == "base" and checkout_ok:
+        assert result["failed"] == []
+        assert result["reversed"] == ["b.patch", "a.patch"]
+        assert pending["recovery"]["phase"] == "restored"
+    else:
+        assert result["failed"]
+        assert result["reversed"] == []
+    assert len(calls) == (1 if head == "base" else 0)
 
 
 class _Verdict:
@@ -611,13 +623,13 @@ def test_enforce_critic_gate_handles_state_without_verdict_method():
 def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
     """The lane fetches a diff from a remote and applies it to the live tree."""
     ex = ip.IntegratePatchExecutor(session_dir=tmp_path)
-    ctx = types.SimpleNamespace(task=types.SimpleNamespace(task_id="t-cand"))
+    attempt = ip.IntegrateAttempt(task_id="t-cand")
     params = {
         "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
         "framework_agent_candidate_id": "vllm-project/vllm#1015",
     }
 
-    out = ex._stage_resolve_upstream_pr(ctx, params, _Verdict("reject"))
+    out = ex._stage_resolve_upstream_pr(attempt, params, _Verdict("reject"))
 
     assert out is not None
     assert out["status"] == "rejected_by_critic"
@@ -684,3 +696,38 @@ def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
     from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
 
     assert harvest_realized_diff(tmp_path, [], tmp_path / "realized.patch") == ""
+
+
+def test_measured_against_reports_the_rebound_stack_not_the_dispatch_one():
+    """The anchor is the drift-resolved one the gate graded on, not params."""
+    stack = ip._measured_against(
+        {
+            "base_tput": 90.0,
+            "accuracy_baseline": 0.81,
+            "base_extra_args": "  --already-won 1  ",
+            "base_extra_envs": {"KEPT": "1"},
+            "base_remove_args": ["--drop-me"],
+            "base_unset_envs": ["STALE"],
+            "base_args_mode": "replace",
+        },
+        base_tput=100.0,
+    )
+
+    assert stack == {
+        "throughput": 100.0,
+        "accuracy": 0.81,
+        "extra_server_args": "--already-won 1",
+        "extra_envs": {"KEPT": "1"},
+        "remove_args": ["--drop-me"],
+        "unset_envs": ["STALE"],
+        "args_mode": "replace",
+    }
+
+
+def test_measured_against_leaves_an_unmeasured_anchor_null():
+    """A zero anchor is no anchor; reporting it as 0.0 would read as a measurement."""
+    stack = ip._measured_against({}, base_tput=0.0)
+
+    assert stack["throughput"] is None
+    assert stack["accuracy"] is None
+    assert stack["args_mode"] == "append"

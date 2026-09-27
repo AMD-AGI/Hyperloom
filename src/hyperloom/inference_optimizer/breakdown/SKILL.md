@@ -35,9 +35,9 @@ authoritative.
 | `metadata`          | Session identity, launch configuration, `grading` -- the axis this session was configured to rank on -- component versions, Langfuse receipt, and `warnings`, how the export itself went, reported once and only here. |
 | `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, and the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`. |
 | `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
-| `close`             | What the session settled at close: the steps the sequencer ran, the artifacts it published, the robustness findings it collected. |
+| `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. Historical robustness verdicts and recorded findings remain readable; current close-out does not fetch findings or RCA logs. |
 | `critic`            | The critic agent's own run, iteration by iteration: what it was asked about, how its rulings fell (`verdict_counts`), and the four artifacts each pass left behind. Per-proposal verdicts stay with the proposals, on the timeline. |
-| `robustness`        | What the robustness agent raised, turn by turn. Read `outcome` before counting `intents`: a turn that produced no envelope and a turn with nothing to raise are different findings. |
+| `robustness`        | Historical agent turns only. New sessions retain the fixed V6 object `{"turns": []}`; the report hides the section when no turns exist. For historical turns, read `outcome` before counting `intents`: a missing envelope is not an empty turn. |
 
 ## Who reads it
 
@@ -127,7 +127,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `timeline`  | The event fragments in the spool, closed and assembled per event; orphans left open by a killed phase are closed on first build |
 | `close`     | The CLOSE sequencer's own `close` / `close_step` fragments                                                        |
 | `critic`    | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json`, recorded as each pass returns                     |
-| `robustness`| The robustness agent's per-turn envelopes, recorded as each turn returns                                          |
+| `robustness`| Existing `robustness_turn` or assembled `robustness` fragments only; no current runtime producer or log-based reconstruction |
 
 ## What is NOT in scope
 

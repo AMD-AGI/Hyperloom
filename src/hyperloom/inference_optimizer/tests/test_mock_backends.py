@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Mock Critic + mock Robustness adapter tests."""
+"""Mock Critic adapter tests."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
@@ -22,7 +21,7 @@ def _idle_intent() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"})
 
 
-def _backends_with_mock_critic_and_robustness(
+def _backends_with_mock_critic(
     plans: dict[str, ScriptedPlan] | None = None,
 ) -> dict[str, object]:
     plans = plans or {}
@@ -30,7 +29,6 @@ def _backends_with_mock_critic_and_robustness(
     return {
         "orchestration": MockBackend(plans.get("orchestration", silent), name="o"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -71,7 +69,7 @@ async def test_mock_critic_emits_one_verdict_per_proposal():
         "Inbox for critic:\n"
         "  seq=1 msg_id=aaa1 from=orchestration topic=proposal payload={...}\n"
         "  seq=2 msg_id=bbb2 from=orchestration topic=proposal payload={...}\n"
-        "  seq=3 msg_id=ccc3 from=robustness topic=alert payload={...}"
+        "  seq=3 msg_id=ccc3 from=orchestration topic=alert payload={...}"
     )
     res = await backend.run(prompt)
     assert len(res.intents) == 2
@@ -86,28 +84,6 @@ async def test_mock_critic_idles_when_no_proposal():
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.SEND_MESSAGE
     assert res.intents[0].payload["topic"] == "observation"
-
-
-# MockRobustnessBackend (unit)
-@pytest.mark.asyncio
-async def test_mock_robustness_always_idle_intent():
-    backend = MockRobustnessBackend()
-    for _ in range(3):
-        res = await backend.run("anything")
-        assert len(res.intents) == 1
-        assert res.intents[0].payload["topic"] == "observation"
-
-
-@pytest.mark.asyncio
-async def test_mock_robustness_alert_after_n_ticks():
-    backend = MockRobustnessBackend(alert_after_ticks=2)
-    r1 = await backend.run("p")
-    r2 = await backend.run("p")
-    r3 = await backend.run("p")
-    types_per = [tuple(i.type for i in r.intents) for r in (r1, r2, r3)]
-    assert types_per[0] == (IntentType.SEND_MESSAGE,)
-    assert IntentType.ALERT in types_per[1]
-    assert types_per[2] == (IntentType.SEND_MESSAGE,)
 
 
 # E2E with Coordinator — Critic-loop closes itself
@@ -128,7 +104,7 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
             ]
         ),
     }
-    backends = _backends_with_mock_critic_and_robustness(plans)
+    backends = _backends_with_mock_critic(plans)
 
     c = Coordinator(session_dir, backends=backends)
     try:
@@ -141,18 +117,5 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
 
         pending = list(c.state.pending_proposals.values())
         assert pending and pending[0].verdict == "approve"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_e2e_mock_robustness_keeps_emitting_idle_messages(session_dir):
-    backends = _backends_with_mock_critic_and_robustness({})
-    c = Coordinator(session_dir, backends=backends)
-    try:
-        await c.tick(3)
-        beats = await c.bus.tail(topic="observation", to_agent="*")
-        assert len(beats) >= 9
-        assert any(m.from_agent == "robustness" for m in beats)
     finally:
         await c.stop()

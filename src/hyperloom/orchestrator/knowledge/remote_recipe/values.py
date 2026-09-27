@@ -127,30 +127,31 @@ def _positive_int(value: Any) -> int | None:
     return resolved if resolved > 0 else None
 
 
-#: Shape dimensions read straight off the session state at face value.
-_STATE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
+#: Every dimension either supported identity scheme may place in its scope.
+_SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 
 #: Every key ``workload_shape`` can publish. :func:`knowledge_to_warm_recipe` projects exactly these onto the warm
 #: row, derived from the writer so the projection cannot quietly drop a dimension the writer started publishing.
-SHAPE_KEYS: Final[tuple[str, ...]] = (*_STATE_SHAPE_KEYS, "ep", "partitions")
+SHAPE_KEYS: Final[tuple[str, ...]] = (*_SCOPE_SHAPE_KEYS, "ep", "partitions")
 
 
-def workload_shape(state: Any) -> dict[str, int]:
+def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str, int]:
     """Return the workload dimensions a row records about the machine it ran on.
 
+    Identity-scoped dimensions come from the same validated ``RecipeScope`` the
+    Store request uses, so AgentX never republishes its inert ISL/OSL defaults.
     ``ep`` and ``partitions`` describe the same thing the ``canonical_id``'s hardware slug now encodes, so this is a
     description of the run rather than the gate on replaying it. Both are omitted at their default value -- ``ep <=
     1`` is dense and one partition is the whole card -- which keeps a row that merely took the CLI's ``--ep`` default
     from claiming a formation it never chose.
     """
+    resolved_scope = scope or RecipeScope.from_state(state)
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
-    shape: dict[str, int] = {}
-    for key in _STATE_SHAPE_KEYS:
-        value = _positive_int(getattr(state, key, None))
-        if value is None:
-            value = _positive_int(extra.get(key))
-        if value is not None:
-            shape[key] = value
+    shape = {
+        key: value
+        for key, value in resolved_scope.as_dict().items()
+        if key != "kernel_optimizer" and isinstance(value, int)
+    }
     ep = _positive_int(getattr(state, "ep", None))
     if ep is None:
         ep = _positive_int(extra.get("ep"))
@@ -366,7 +367,7 @@ def _apply_recipe_delta(
     config: dict[str, Any],
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from ...actions.executors._grid_server_args import compose_server_args
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
     from ...loop.coordinator_helpers import _dedupe_extra_server_args
 
     mode = str(delta.get("args_mode") or "append").strip().lower()
@@ -1081,6 +1082,7 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any,
+    metrics: Mapping[str, float] | None = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     if sections is None:
@@ -1127,9 +1129,6 @@ def build_remote_knowledge(
         for item in stack
     ):
         required_columns.add(PATCH_SECTION)
-    current_best = _mapping(getattr(state, "current_best", {}))
-    optimized_throughput = _number(current_best.get("tput"))
-    validated_gain = _number(getattr(state, "cumulative_gain_validated", 0.0))
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
 
@@ -1159,9 +1158,8 @@ def build_remote_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            "optimized_throughput": optimized_throughput,
-            "validated_e2e_gain": validated_gain,
-            "workload_shape": workload_shape(state),
+            **dict(metrics or {}),
+            "workload_shape": workload_shape(state, scope=scope),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1236,7 +1234,10 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
-    validated_gain = _number(knowledge.get("validated_e2e_gain"))
+    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
+    validated_gain = (
+        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
+    )
     view = _mapping(document.get("view"))
     replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
     row = {

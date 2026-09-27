@@ -18,44 +18,47 @@ async def run_lease_and_db_reclaim(
     *,
     reason: str,
 ) -> None:
-    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
+    """Report confirmed-dead cleanup and prune retained database history.
 
-    Shared by the periodic maintenance tick and the cycle soft-restart. The
-    task reclaim is the R6 watchdog: a running task whose execution lease
-    expired is failed so a dead worker never wedges a lane indefinitely. Every
-    step is individually best-effort — maintenance never aborts the run loop.
+    Shared by periodic maintenance and cycle soft-restart. Resource ownership
+    is resolved by the reconciler: owners it proved dead, and lanes whose holder
+    both ended and proved nothing is still using them -- never inferred from
+    elapsed lease budgets.
 
-    The serving-lease sweep is not one of the steps: it runs in the reconciler,
-    at the top of every tick, because an open bring-up round holds one of those
-    leases and can only be settled there. This pass reports what that sweep did
-    rather than running a second one behind its back.
+    ``leases_unverifiable`` rides the same summary because it is the other half
+    of that answer: lanes still held by a holder that ended without confirming
+    its cleanup. Nothing decides those -- no identity available to this process
+    survives a served process that setsid's away from it -- so they are retained
+    on purpose. A number that stays put while the queue does not drain is where
+    an operator starts; the remedy for each one is logged once by the diagnostic.
 
     Args:
-        host: Anything exposing the Coordinator's ``reconciler``,
-            ``gpu_specialist_pool``, ``tasks`` and ``db``.
+        host: Coordinator exposing ``reconciler`` and ``db``.
         summary: Mutated in place with the per-step counts.
-        reason: Reclaim reason recorded on the tasks and used as the log prefix.
+        reason: Log prefix identifying the maintenance caller.
     """
     try:
-        summary["leases_reaped"] = host.reconciler.last_report.leases_reaped
-    except Exception:  # noqa: BLE001
-        log.exception("%s: reading the reconciler's lease sweep failed", reason)
-    try:
-        summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
-    except Exception:  # noqa: BLE001
-        log.exception("%s: gpu-lease reap failed", reason)
-    try:
-        reclaimed = await host.tasks.reclaim_expired_running(reason=reason)
-        summary["running_tasks_reclaimed"] = len(reclaimed)
-    except Exception:  # noqa: BLE001
-        log.exception("%s: running-task reclaim failed", reason)
+        report = host.reconciler.last_report
+        summary["leases_reaped"] = report.leases_reaped
+        summary["leases_unverifiable"] = report.leases_unverifiable
+        # Whether retained lanes are an accident or the ordinary outcome. Every
+        # portable way to release them automatically was refuted (see
+        # docs/task-containment.md), and the one candidate left is
+        # safety-critical, so this is the number that decides whether anyone
+        # should build it.
+        unconfirmed, ended = await host.reconciler.cleanup_confirmation_rate()
+        if ended:
+            summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
+        summary["running_tasks_reclaimed"] = len(report.failed_tasks)
+    except Exception:
+        log.exception("%s: reading the reconciler's cleanup report failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
 
         res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("%s: DB retention failed", reason)
 
 
@@ -73,15 +76,12 @@ class MaintenanceCollaborator:
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Reap expired leases, prune the DB, and trim ``runs/`` when disk is low; the Coordinator's wall-clock gate owns the cadence."""
+        """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
-        try:
-            disk = self._maybe_prune_runs_for_disk()
-            if disk is not None:
-                summary["disk"] = disk
-        except Exception:  # noqa: BLE001
-            log.exception("maintenance: disk monitor failed")
+        disk = self._maybe_prune_runs_for_disk()
+        if disk is not None:
+            summary["disk"] = disk
         log.info("maintenance tick %d: %s", tick, summary)
         return summary
 

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_external_env_key,
@@ -48,7 +49,6 @@ __all__ = [
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
     "action_fits_time_budget",
     "baseline_benchmark_script",
-    "coerce_needs_gpu",
     "expected_action_cost_minutes",
     "measured_baseline_runtime_sec",
     "resolve_reactor_turn_timeout_sec",
@@ -79,13 +79,6 @@ def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> fl
     return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 
 
-def coerce_needs_gpu(value: Any) -> bool:
-    """Coerce a ``needs_gpu`` specialist parameter value to a Python bool."""
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    return bool(value)
-
-
 def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:
     """Render an exception as ``\"TypeName: message\"``, optionally truncated."""
     msg = str(exc)
@@ -114,7 +107,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
                 data = json.loads(cfg.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     payload = data
-        except Exception:  # noqa: BLE001 - best effort only.
+        except Exception:
             log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
 
     # A multimodal checkpoint keeps the language model one level down, so the
@@ -219,7 +212,7 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
 # Consecutive roofline failures tolerated before the watermark stops re-arming.
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
@@ -366,12 +359,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     if "enable_torch_compile" not in out:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
         if isinstance(tc_env, str):
-            out["enable_torch_compile"] = tc_env.strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
+            out["enable_torch_compile"] = is_truthy(tc_env)
     return out
 
 
@@ -403,11 +391,6 @@ def approved_proposal_idempotency_key(action_name: str, params: dict[str, Any] |
     return f"approved:{action_name}:{digest}"
 
 
-def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio."""
-    return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-
-
 def _merge_cumulative_extra_server_args(
     base_args: str,
     candidate_args: str,
@@ -436,7 +419,7 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     # Imported here, not at module scope: ``actions.executors`` re-enters this module through ``session_breakdown``,
     # so a top-level import makes any importer that reaches ``coordinator_helpers`` first (e.g. phases.kernel) fail on
     # a partially initialised module.
-    from ..actions.executors._grid_server_args import (  # noqa: PLC0415
+    from hyperloom.inference_optimizer.grid_server_args import (
         tokenize_server_args_preserving_json,
     )
 
@@ -711,7 +694,7 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     legacy_envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
     if cfg.get("env_unparsed"):
         log.warning("GEAK accepted_config.env_unparsed reports discarded source text")
-        from ..actions.executors._grid_server_args import remove_server_args
+        from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 
         extra_flags = remove_server_args(extra_flags, cfg["env_unparsed"])
     if extra_flags:
@@ -787,7 +770,7 @@ def _geak_result_has_material(
     prev_best_controls: Any = None,
 ) -> bool:
     """Decide whether a GEAK result carries a material optimization product."""
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    from hyperloom.inference_optimizer.canonical_fingerprint import (
         canonical_fingerprint,
     )
 

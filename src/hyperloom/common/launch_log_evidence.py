@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import re
 import shlex
@@ -19,6 +20,10 @@ log = logging.getLogger(__name__)
 _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
     {
         "--model-path",
+        # vLLM's own spelling. Without it the projected argv keeps a run-local
+        # model operand the SGLang spelling has always had stripped.
+        "--model",
+        "--tokenizer",
         "--tokenizer-path",
         "--served-model-name",
         "--host",
@@ -71,6 +76,15 @@ def split_launch_flags(argv_tail: str) -> str:
     while index < len(tokens):
         token = tokens[index]
         flag = token.split("=", 1)[0]
+        # ``vllm serve <model>`` carries the model as a positional, so the
+        # flag list above cannot reach it. Left in, it would travel as an
+        # observed launch flag -- a host model path in the durable record, and
+        # a term the requested side can never match.
+        if token == "serve":
+            index += 1
+            if index < len(tokens) and not tokens[index].startswith("-"):
+                index += 1
+            continue
         if flag in _RUN_SPECIFIC_LAUNCH_FLAGS or flag in _PROFILING_LAUNCH_FLAGS:
             if "=" not in token and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
                 index += 2
@@ -91,19 +105,136 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     try:
         with open(path, encoding="utf-8", errors="ignore") as handle:
             for line in handle:
-                if marker not in line or "--model-path" not in line:
+                if marker not in line:
                     continue
                 match = pattern.search(line)
                 tail = (match.group(1) if match else "").strip()
                 if not tail:
                     start = line.find("--")
                     tail = line[start:].strip() if start >= 0 else ""
+                # The gate says "this line IS the launch command", and it says
+                # it by naming the model served. Keyed on ``--model-path``
+                # alone it was a gate only SGLang could pass: vLLM writes
+                # ``--model <m>`` or ``serve <m>``, so every vLLM session
+                # produced empty observed flags, every requested flag was read
+                # as absent, and the verdict was insufficient by construction
+                # rather than by evidence.
+                if not _names_a_model(tail):
+                    continue
                 flags = split_launch_flags(tail)
                 if flags:
                     return flags
     except OSError:
         return ""
     return ""
+
+
+#: Every spelling of the model operand the supported launchers emit. SGLang
+#: writes ``--model-path``; vLLM is launched either as ``-m ...api_server
+#: --model <model>`` or as the bare console script ``vllm serve <model>``, so a
+#: read keyed on ``--model-path`` alone is one vLLM cannot satisfy.
+_MODEL_OPERAND_FLAGS: tuple[str, ...] = ("--model-path", "--model")
+_TOKENIZER_OPERAND_FLAGS: tuple[str, ...] = ("--tokenizer-path", "--tokenizer")
+_SERVED_NAME_FLAGS: tuple[str, ...] = ("--served-model-name",)
+_TP_FLAGS: tuple[str, ...] = ("--tensor-parallel-size", "--tp-size", "--tp")
+_DP_FLAGS: tuple[str, ...] = ("--data-parallel-size", "--dp-size")
+_PP_FLAGS: tuple[str, ...] = ("--pipeline-parallel-size", "--pp-size")
+
+
+def _operand_for(tokens: list[str], flags: tuple[str, ...]) -> str:
+    """Return the operand of the first of ``flags`` present in ``tokens``."""
+    for index, token in enumerate(tokens):
+        name, separator, attached = token.partition("=")
+        if name not in flags:
+            continue
+        if separator:
+            return attached
+        if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+            return tokens[index + 1]
+    return ""
+
+
+def _serve_subcommand_operand(tokens: list[str]) -> str:
+    """Return the positional model operand of a ``serve`` subcommand."""
+    for index, token in enumerate(tokens):
+        if token != "serve":
+            continue
+        for candidate in tokens[index + 1 :]:
+            if not candidate.startswith("-"):
+                return candidate
+        return ""
+    return ""
+
+
+def _names_a_model(tail: str) -> bool:
+    """Whether a candidate launch tail names the model the server will serve.
+
+    Exact over tokens rather than a substring test: ``--model`` is a prefix of
+    ``--model-len`` and of ``--model-loader-extra-config``, neither of which
+    names a model.
+    """
+    try:
+        tokens = shlex.split(tail)
+    except ValueError:
+        tokens = tail.split()
+    return bool(_operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens))
+
+
+def _digest(value: str) -> str:
+    """Digest a model operand: it compares, while the path could not travel."""
+    text = str(value or "").strip()
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
+
+
+def _binding_from_tokens(tokens: list[str]) -> dict[str, Any]:
+    model = _operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens)
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest(model),
+        "tokenizer_digest": _digest(_operand_for(tokens, _TOKENIZER_OPERAND_FLAGS)),
+        "served_model_digest": _digest(_operand_for(tokens, _SERVED_NAME_FLAGS)),
+        "tp": _operand_for(tokens, _TP_FLAGS),
+        "dp": _operand_for(tokens, _DP_FLAGS),
+        "pp": _operand_for(tokens, _PP_FLAGS),
+    }
+
+
+def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]:
+    """Read the model and parallelism the server was actually launched with.
+
+    Read from the raw launch line, before :func:`split_launch_flags` removes
+    those operands as run-local: without it the evidence carries only the
+    *requested* model, and a server that resolved a different one yields
+    evidence that is non-empty and wrong.
+
+    Returns:
+        ``{model_digest, tokenizer_digest, served_model_digest, tp, dp, pp}``,
+        or ``{}`` for a framework whose launch line this reader cannot match.
+    """
+    marker = _LAUNCH_ARGV_MARKERS.get(str(framework or "").strip().lower())
+    if not marker:
+        return {}
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if marker not in line:
+                    continue
+                start = line.find("--")
+                serve_at = line.find(" serve ")
+                if start < 0 and serve_at < 0:
+                    continue
+                tail = line[min(x for x in (start, serve_at) if x >= 0) :].strip()
+                try:
+                    tokens = shlex.split(tail)
+                except ValueError:
+                    tokens = tail.split()
+                binding = _binding_from_tokens(tokens)
+                if binding:
+                    return binding
+    except OSError:
+        return {}
+    return {}
 
 
 _SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")
@@ -130,6 +261,167 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
         "trust_remote_code",
     }
 )
+
+
+#: vLLM never echoes an argv line. It prints the RESOLVED argument dict under
+#: this header instead, which is the authoritative record of what the server was
+#: launched with -- more so than a command line, because it is what the parser
+#: produced rather than what was typed. A reader that only looks for a command
+#: line therefore finds nothing in ANY vLLM log, successful or failed, and every
+#: requested setting is judged unconfirmed for want of an observed side.
+_VLLM_NON_DEFAULT_ARGS_RE = re.compile(r"non[-_]default args:\s*\{", re.IGNORECASE)
+
+#: The vLLM spellings of the settings the decision compares. Names differ from
+#: SGLang's, so the two identity readers cannot share one table.
+_VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "tokenizer",
+        "served_model_name",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "max_model_len",
+        "gpu_memory_utilization",
+        "quantization",
+        "dtype",
+        "kv_cache_dtype",
+        "block_size",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enable_chunked_prefill",
+        "enable_expert_parallel",
+        "enforce_eager",
+        "trust_remote_code",
+        "swap_space",
+        "cpu_offload_gb",
+    }
+)
+
+
+def _is_inside_string_literal(text: str, index: int) -> bool:
+    """Whether ``text[index]`` sits inside a quoted run earlier on the line.
+
+    A log line may QUOTE the marker while carrying no launch record at all --
+    ``WARNING ignored user text: "non-default args: {...}"`` is attacker- or
+    user-supplied text echoed into the log. Treating that as an observed launch
+    hands the decision an identity the server never ran with.
+    """
+    quote = ""
+    escaped = False
+    for char in text[:index]:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+    return bool(quote)
+
+
+def _vllm_record_marker_at(text: str) -> bool:
+    """Whether ``text`` carries the marker OUTSIDE any quoted run."""
+    return any(not _is_inside_string_literal(text, m.start()) for m in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text))
+
+
+def _vllm_record_payload(text: str) -> str:
+    """The balanced ``{...}`` belonging to a real vLLM launch record.
+
+    Anchored at the brace the MARKER matched, not at the first brace on the
+    line: a line may carry an unrelated dict before the record
+    (``context={...} non-default args: {...}``), and starting at the first
+    brace reads the unrelated one and silently ignores the actual record.
+
+    Braces inside string literals are not structure -- a model path may legally
+    contain ``}`` -- so quoting is tracked while balancing, exactly as the
+    SGLang ``ServerArgs`` extractor does.
+    """
+    for match in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text):
+        if _is_inside_string_literal(text, match.start()):
+            continue
+        start = match.end() - 1
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in "'\"":
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        # Unbalanced so far: the record continues on the next line.
+        return ""
+    return ""
+
+
+def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
+    """Parse vLLM's ``non-default args: {...}`` record into an identity.
+
+    The dict's values are not all literals -- vLLM prints object reprs such as
+    ``CompilationConfig(...)`` inside it -- so it is walked key by key and a key
+    whose value is not a literal is skipped rather than failing the whole parse.
+    A single ``literal_eval`` of the dict raises on the first such value and
+    yields nothing, which is what makes the whole record look unreadable.
+    """
+    chunks: list[str] = []
+    remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
+    parsed = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
+                line = handle.readline()
+                if not line:
+                    break
+                if len(line) > remaining:
+                    line = line[:remaining]
+                remaining -= len(line)
+                if chunks or _vllm_record_marker_at(line):
+                    chunks.append(line)
+                    parsed = _vllm_record_payload("".join(chunks))
+                    if parsed:
+                        break
+                if remaining <= 0:
+                    break
+    except OSError:
+        return {}
+    content = parsed or _vllm_record_payload("".join(chunks))
+    if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
+        return {}
+    values: dict[str, Any] = {}
+    try:
+        node = ast.parse(content, mode="eval").body
+        if not isinstance(node, ast.Dict):
+            return {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                continue
+            key = key_node.value
+            if key not in _VLLM_OBSERVED_IDENTITY_FIELDS:
+                continue
+            try:
+                values[key] = _safe_server_args_value(value_node)
+            except (ValueError, TypeError):
+                # A non-literal value (an object repr) is skipped; the rest of
+                # the record is still the observed truth.
+                continue
+    except (SyntaxError, ValueError, TypeError):
+        return {}
+    return {key: values[key] for key in sorted(values)}
 
 
 def _extract_balanced_server_args(text: str) -> str:

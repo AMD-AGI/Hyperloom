@@ -308,10 +308,10 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         framework_version="v",
         precision="p",
         what_worked=[
-            {"description": "X helped", "measured_impact": "+10%"},
+            {"name": "X helped", "gain_pct": 10.0},
         ],
         what_failed=[
-            {"description": "Y failed", "reason": "OOM"},
+            {"name": "Y failed", "reason": "OOM"},
         ],
         pitfalls=[{"description": "watch for Z"}],
         sessions=[
@@ -340,7 +340,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     assert after is not None
     assert after["best_throughput"] == 99.0
     assert len(after["what_worked"]) == 1
-    assert after["what_worked"][0]["description"] == "X helped"
+    assert after["what_worked"][0]["name"] == "X helped"
     assert len(after["what_failed"]) == 1
     assert after["what_failed"][0]["reason"] == "OOM"
     assert len(after["pitfalls"]) == 1
@@ -402,8 +402,8 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         precision="p",
         best_config={"tp": "8"},
         best_throughput=42.0,
-        what_worked=[{"description": "x", "measured_impact": "+5%"}],
-        what_failed=[{"description": "y", "reason": "OOM"}],
+        what_worked=[{"name": "x", "gain_pct": 5.0}],
+        what_failed=[{"name": "y", "reason": "OOM"}],
         remaining_gaps=[{"description": "z", "metrics": "tput"}],
         pitfalls=[{"description": "watch out"}],
         last_profiled="2026-05-28",
@@ -445,8 +445,10 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         "throughput_after",
         "actions_taken",
     }
-    assert set(on_disk["what_worked"][0]) == {"description", "measured_impact"}
-    assert set(on_disk["what_failed"][0]) == {"description", "reason"}
+    # The experience columns keep arbor's top-level names, but each row is stored exactly as the Coordinator wrote
+    # it: no projection onto a fixed field list, so a key it starts sending is not dropped on the way to disk.
+    assert on_disk["what_worked"][0] == {"name": "x", "gain_pct": 5.0}
+    assert on_disk["what_failed"][0] == {"name": "y", "reason": "OOM"}
     assert set(on_disk["remaining_gaps"][0]) == {"description", "metrics"}
     # Pitfall is arbor's ``description`` plus an optional ``severity``.
     assert set(on_disk["pitfalls"][0]) >= {"description"}

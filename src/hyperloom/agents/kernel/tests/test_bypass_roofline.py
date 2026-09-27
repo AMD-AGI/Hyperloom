@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from _bypass_roofline import compute_roofline  # noqa: E402
+from _bypass_roofline import compute_roofline
 
 
 def test_large_square_gemm_is_compute_bound():
@@ -117,6 +117,29 @@ def test_unestimable_returns_none():
     assert compute_roofline(category="Others", shape_str="(128,128) bf16", gpu_time_us=10.0) is None
     assert compute_roofline(category="GEMM", shape_str="", gpu_time_us=10.0) is None
     assert compute_roofline(category="GEMM", shape_str="(128,) bf16", gpu_time_us=10.0) is None  # only 1-D
+
+
+def test_mi355x_uses_vendor_peak_when_achievable_absent():
+    r = compute_roofline(
+        category="GEMM",
+        shape_str="(128,128) bf16<br>(128,128) bf16",
+        gpu_time_us=10.0,
+        gpu_type="mi355x",
+    )
+    assert r is not None
+    assert r["compute_peak_convention"] == "vendor"
+    assert r["compute_peak_tflops"] == 2516.6
+    assert r["bandwidth_utilization_pct"] > 0.0
+
+
+def test_unknown_gpu_returns_none():
+    r = compute_roofline(
+        category="GEMM",
+        shape_str="(128,128) bf16<br>(128,128) bf16",
+        gpu_time_us=10.0,
+        gpu_type="not-a-gpu",
+    )
+    assert r is None
 
 
 def test_efficiency_capped_flag_when_estimate_overshoots():
@@ -278,5 +301,6 @@ def test_efficiency_uses_achievable_peak_not_vendor():
     achieved_flops = (2.0 * 4096**3) / 500e-6
     eff_achievable = achieved_flops / (708.0e12) * 100.0  # ~38.8%
     eff_vendor = achieved_flops / (1307.4e12) * 100.0  # ~21.0%
+    assert r["compute_peak_convention"] == "achievable"
     assert abs(r["efficiency_percent"] - eff_achievable) < 0.5
     assert abs(r["efficiency_percent"] - eff_vendor) > 5.0
