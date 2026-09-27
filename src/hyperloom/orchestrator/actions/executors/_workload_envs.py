@@ -471,6 +471,20 @@ def build_agentx_workload_spec(
     }
 
 
+def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
+    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
+
+    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
+    carries it. A conc-sweep rung that only changes ``CONC`` would then be
+    recorded at one concurrency and measured at another.
+    """
+    if str(envs.get("HYPERLOOM_AGENTIC_BACKEND") or "").strip().lower() != "mlperf":
+        return
+    conc = envs.get("CONC")
+    if conc not in (None, ""):
+        envs["AGENTIC_CONCURRENCY"] = str(conc)
+
+
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -522,15 +536,29 @@ def apply_agentx_switch(
             envs[key] = value
     if is_mlperf_backend(_agentx_env):
         envs["HYPERLOOM_AGENTIC_BACKEND"] = "mlperf"
-        envs["PORT"] = str(os.environ.get("PORT") or envs.get("PORT") or "30000")
+        # The harness dials localhost:30000. Pin it here so a recipe PORT cannot
+        # leave the server and the client on different sockets.
+        envs["PORT"] = "30000"
         envs.setdefault("MLPERF_AGENTIC_FLOW", os.environ.get("MLPERF_AGENTIC_FLOW") or "smoke_test")
         envs.setdefault(
             "MLPERF_ENDPOINTS_DIR",
             os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints",
         )
-        envs.setdefault("AGENTIC_CONCURRENCY", str(conc or os.environ.get("CONC") or "16"))
-        envs.setdefault("MLPERF_AGENTIC_MODEL", os.environ.get("MLPERF_AGENTIC_MODEL") or "kimi-k3")
+        # The round's CONC is what the measurement is recorded under. A baseline
+        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+        if conc not in (None, "", 0):
+            envs["CONC"] = str(conc)
+        envs["AGENTIC_CONCURRENCY"] = str(envs.get("CONC") or os.environ.get("CONC") or "16")
+        envs["MLPERF_AGENTIC_MODEL"] = "kimi-k3"
         envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+        from ._server_argv import add_server_arg_unless_pinned
+
+        add_server_arg_unless_pinned(
+            envs,
+            framework,
+            "--served-model-name kimi-k3",
+            pinned_by=("served-model-name", "served_model_name"),
+        )
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()

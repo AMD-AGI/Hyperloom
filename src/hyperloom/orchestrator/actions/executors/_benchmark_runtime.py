@@ -9,7 +9,11 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
+from ._workload_envs import (
+    apply_agentx_switch,
+    apply_scriptable_runtime_defaults,
+    pin_mlperf_round_concurrency,
+)
 
 
 def apply_runtime_benchmark_overrides(
@@ -73,6 +77,8 @@ def apply_runtime_benchmark_overrides(
             if yaml_tp not in (None, 0, "", "0"):
                 continue
         envs[env_key] = int(val)
+
+    pin_mlperf_round_concurrency(envs)
 
     explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if explicit_rocr:

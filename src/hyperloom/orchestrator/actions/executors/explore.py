@@ -96,8 +96,8 @@ from ._workload_envs import (
 )
 from ._mlperf_keep import (
     clone_variant_for_mlperf_full,
-    mlperf_full_keep_block,
-    should_validate_mlperf_full,
+    mlperf_confirmation_timeout,
+    mlperf_submission_block,
 )
 
 
@@ -503,6 +503,18 @@ class ExploreExecutor:
                 "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
             }
+
+        if params.get("mlperf_submission_confirmation"):
+            return await _run_mlperf_submission_confirmation(
+                config_path=config_path,
+                output_root=output_root,
+                params=params,
+                resolved_model=resolved_model,
+                resolved_gpu=resolved_gpu,
+                override_script=override_script,
+                override_result_dir=override_result_dir,
+                shared_state=shared_state,
+            )
 
         # ----- Inputs ------------------------------------------------------ Params snapshot the anchor and the stack
         # it was measured on together; a KEEP landing while this task queued invalidates both, so refresh them as a
@@ -1162,73 +1174,6 @@ class ExploreExecutor:
                         else:
                             outcome = "KEEP"
 
-                    if outcome == "KEEP" and should_validate_mlperf_full():
-                        full_gv = clone_variant_for_mlperf_full(decision_gv)
-                        full_slot = Path(str(slot)) / "mlperf_full_keep"
-                        full_slot.mkdir(parents=True, exist_ok=True)
-                        full_results = await run_grid(
-                            base_yaml_path=config_path,
-                            base_extra_args=stack_extra_args,
-                            grid=[full_gv],
-                            output_root=full_slot,
-                            model_path=resolved_model,
-                            gpu_type=resolved_gpu,
-                            benchmark_script=override_script,
-                            result_dir=override_result_dir,
-                            server_lifecycle=variant_lifecycle,
-                            base_args_mode=stack_base_args_mode,
-                            base_extra_envs=dict(stack_extra_envs),
-                            base_remove_args=list(stack_remove_args),
-                            base_unset_envs=list(stack_unset_envs),
-                            preclean_before_run=not use_warm_decision,
-                            server_already_ready=use_warm_decision,
-                            serving_lease=variant_lease,
-                            session_deadline_sec=session_deadline_sec,
-                            variant_expected_sec=decision_expected_sec,
-                        )
-                        full_r = full_results[0] if full_results else None
-                        if full_r is not None and _stopped_by_the_run(
-                            full_r, variant=full_gv, idx=idx, round_label="mlperf_full_keep"
-                        ):
-                            break
-                        block = mlperf_full_keep_block(
-                            getattr(full_r, "workspace", None) if full_r is not None else None,
-                            status=getattr(full_r, "status", None) if full_r is not None else "failed",
-                        )
-                        if not block and full_r is not None:
-                            full_meas = {
-                                GRADED_OUTPUT: full_r.output_throughput,
-                                "input_throughput": full_r.input_throughput,
-                                "total_throughput": full_r.total_token_throughput,
-                                GRADED_INTVTY: full_r.intvty_p90,
-                                "tpot_p90_ms": full_r.tpot_p90_ms,
-                            }
-                            full_graded = resolve_graded_comparison(
-                                ss,
-                                full_meas,
-                                keep_threshold_pct=keep_threshold_pct,
-                                anchor_perf=running_base_perf,
-                                anchor_tput=running_base_tput,
-                            )
-                            if full_graded.verdict != VERDICT_KEEP:
-                                block = f"mlperf_full_{full_graded.verdict.lower()}"
-                        if block:
-                            outcome = "REVERT"
-                            reason = block
-                            log.info("explore: MLPerf full KEEP gate refused %r (%s)", gv.name, block)
-                        else:
-                            r = full_r
-                            gain = gain_pct(r.intvty_p90 or r.output_throughput, running_base_tput)
-                        decision_gates.append(
-                            {
-                                "gate": "mlperf_full_613",
-                                "passed": not block,
-                                "observed": None if full_r is None else (full_r.intvty_p90 or full_r.output_throughput),
-                                "threshold": 613,
-                                "reason": block,
-                            }
-                        )
-
                     decision_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
@@ -1625,6 +1570,75 @@ class ExploreExecutor:
             "gain_pct": best_gain_pct,
             "explore_grid_exhausted": not runnable,
         }
+
+
+async def _run_mlperf_submission_confirmation(
+    *,
+    config_path: Path,
+    output_root: Path,
+    params: dict[str, Any],
+    resolved_model: str,
+    resolved_gpu: str,
+    override_script: str | None,
+    override_result_dir: str | None,
+    shared_state: Any,
+) -> dict[str, Any]:
+    """Run online.yaml (613) once and record whether it is submission-grade.
+
+    The result is not a KEEP and is not compared to the smoke anchor. Search
+    decisions stay on the smoke measurements.
+    """
+    payload = params.get("grid") or []
+    first = payload[0] if isinstance(payload, list) and payload and isinstance(payload[0], dict) else {}
+    base = GridVariant(
+        name=str(first.get("name") or "mlperf-submission"),
+        extra_server_args=str(first.get("extra_args") or first.get("extra_server_args") or ""),
+        extra_envs=dict(first.get("extra_envs") or {}),
+        note="canonical 613 submission confirmation",
+    )
+    variant = clone_variant_for_mlperf_full(base)
+    slot = output_root / "mlperf_submission"
+    log.info("explore: MLPerf submission confirmation (613), not graded against the smoke anchor")
+    with mlperf_confirmation_timeout():
+        results = await run_grid(
+            base_yaml_path=config_path,
+            base_extra_args=str(params.get("base_extra_args") or "").strip(),
+            grid=[variant],
+            output_root=slot,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
+            base_args_mode=str(params.get("base_args_mode") or "append"),
+            base_extra_envs=dict(params.get("base_extra_envs") or {}),
+            base_remove_args=to_str_list(params.get("base_remove_args")),
+            base_unset_envs=to_str_list(params.get("base_unset_envs")),
+            session_deadline_sec=None,
+            variant_expected_sec=None,
+        )
+    full_r = results[0] if results else None
+    status = getattr(full_r, "status", None) if full_r is not None else "failed"
+    workspace = getattr(full_r, "workspace", None) if full_r is not None else None
+    block = mlperf_submission_block(workspace, status=status)
+    record = {
+        "passed": block == "",
+        "block": block,
+        "workspace": str(workspace or slot),
+        "canonical_trajectories": 613,
+        "recipe_generation": int(getattr(shared_state, "working_recipe_generation", 0) or 0),
+    }
+    if shared_state is not None:
+        shared_state.mlperf_submission = record
+    log.info("explore: MLPerf submission confirmation %s", "passed" if record["passed"] else block)
+    return {
+        "status": "succeeded" if record["passed"] else "failed",
+        "winners": [],
+        "losers": [],
+        "mlperf_submission": record,
+        "error": block,
+        "error_class": "" if record["passed"] else "mlperf_submission_confirmation",
+        "workspace": str(output_root),
+    }
 
 
 def _safe(name: str) -> str:

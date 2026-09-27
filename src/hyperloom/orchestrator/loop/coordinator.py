@@ -606,6 +606,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resume_recover_orphaned_keeps": "writeback",
         "_geak_rebench_params": "writeback",
         "_enqueue_internal_stack_rebench": "writeback",
+        "_enqueue_mlperf_submission_confirmation": "writeback",
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
         "_replay_resume_if_needed": "writeback",

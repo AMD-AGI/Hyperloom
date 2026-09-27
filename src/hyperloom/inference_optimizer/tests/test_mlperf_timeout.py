@@ -21,6 +21,12 @@ from hyperloom.inference_optimizer.cli import (
 _STOCK_SEC = 7800.0
 
 
+def _unset_timeout(monkeypatch):
+    # delenv on an absent key records nothing, so a value the CLI writes would outlive the test.
+    monkeypatch.setenv(BENCHMARK_TIMEOUT_ENV, "")
+    monkeypatch.delenv(BENCHMARK_TIMEOUT_ENV)
+
+
 def test_trajectories_default_per_flow():
     assert mlperf_trajectories({"MLPERF_AGENTIC_FLOW": "smoke_test"}) == MLPERF_SMOKE_TRAJECTORIES
     assert mlperf_trajectories({"MLPERF_AGENTIC_FLOW": "full"}) == MLPERF_CANONICAL_TRAJECTORIES
@@ -47,7 +53,7 @@ def test_cli_raises_the_cap_for_a_full_run(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     monkeypatch.setenv("MLPERF_AGENTIC_FLOW", "full")
-    monkeypatch.delenv(BENCHMARK_TIMEOUT_ENV, raising=False)
+    _unset_timeout(monkeypatch)
     _apply_mlperf_benchmark_timeout()
     assert float(os.environ[BENCHMARK_TIMEOUT_ENV]) > _STOCK_SEC
 
@@ -64,6 +70,6 @@ def test_cli_never_overrides_an_operator_pin(monkeypatch):
 def test_cli_leaves_the_aiperf_backend_alone(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
-    monkeypatch.delenv(BENCHMARK_TIMEOUT_ENV, raising=False)
+    _unset_timeout(monkeypatch)
     _apply_mlperf_benchmark_timeout()
     assert BENCHMARK_TIMEOUT_ENV not in os.environ

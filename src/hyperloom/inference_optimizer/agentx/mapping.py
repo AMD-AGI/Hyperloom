@@ -18,8 +18,10 @@ CANONICAL_ISL = {"avg": 113814, "p50": 94821, "p75": 119126, "p90": 163328, "p99
 CANONICAL_OSL = {"avg": 806, "p50": 333, "p75": 801, "p90": 1874, "p99": 6386}
 CANONICAL_PREFIX_CACHE_HIT = 0.975
 
-# MLPerf agentic v6 corpus (HYPERLOOM_AGENTIC_BACKEND=mlperf). Search uses 150
-# trajectories; KEEP validation uses the full 613-trajectory online set.
+# MLPerf agentic v6 corpus (HYPERLOOM_AGENTIC_BACKEND=mlperf). Search grades the
+# 150-trajectory smoke set against a smoke baseline. The canonical 613-trajectory
+# online run is a submission confirmation of the final stack, not a graded
+# comparison against that smoke anchor.
 CANONICAL_MLPERF_CORPUS_LOADER = "agentic_combined_v6"
 CANONICAL_MLPERF_CORPUS_ENTRIES = 613
 CANONICAL_MLPERF_SMOKE_ENTRIES = 150
@@ -260,24 +262,115 @@ def _accuracy_score(accuracy: Mapping[str, Any] | None) -> float | None:
     return None
 
 
-def _target_concurrency(summary: Mapping[str, Any]) -> float:
-    """Served concurrency, from the harness's own record of the run.
+def _positive_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
 
-    ``run_config`` is what the harness actually ran with, so it outranks the
-    flat aliases; those remain for summaries that predate it.
+
+def _series_percentile_ms(block: Any, percentile: int) -> float | None:
+    """One harness percentile in milliseconds, or ``None`` when it was not published.
+
+    Does not fall back to the average. A missing tail is not the median.
     """
-    run_config = summary.get("run_config")
-    if isinstance(run_config, dict):
-        load_pattern = run_config.get("load_pattern")
-        if isinstance(load_pattern, dict):
-            value = load_pattern.get("target_concurrency")
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-                return float(value)
-    for key in ("target_concurrency", "concurrency"):
-        value = summary.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-            return float(value)
-    return 0.0
+    if not isinstance(block, dict):
+        return None
+    perc = block.get("percentiles")
+    if not isinstance(perc, dict):
+        return None
+    wanted = float(percentile)
+    for key, value in perc.items():
+        try:
+            if float(key) != wanted:
+                continue
+        except (TypeError, ValueError):
+            continue
+        number = _positive_float(value)
+        if number is not None:
+            return _ns_to_ms(number)
+    return None
+
+
+def _percentile_of(values: list[float], quantile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    index = (len(ordered) - 1) * quantile
+    low = int(math.floor(index))
+    high = int(math.ceil(index))
+    if low == high:
+        return ordered[low]
+    weight = index - low
+    return ordered[low] * (1.0 - weight) + ordered[high] * weight
+
+
+def _intvty_from_records(records: Any) -> tuple[float | None, float | None]:
+    """Median and slow-tail of per-request output tokens per second.
+
+    The slow tail is the 10th percentile of the rate, the same inversion
+    ``map_aiperf`` applies to ``e2e_output_token_throughput``.
+    """
+    if not isinstance(records, list):
+        return None, None
+    rates: list[float] = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        tokens = _positive_float(row.get("output_tokens"))
+        if tokens is None:
+            tokens = _positive_float(row.get("osl"))
+        latency_s = _positive_float(row.get("latency_s"))
+        if latency_s is None:
+            latency_ns = _positive_float(row.get("latency_ns"))
+            latency_s = (latency_ns / 1e9) if latency_ns else None
+        if tokens and latency_s:
+            rates.append(tokens / latency_s)
+    if not rates:
+        return None, None
+    return _percentile_of(rates, 0.50), _percentile_of(rates, 0.10)
+
+
+def _intvty_from_rate_block(block: Any) -> tuple[float | None, float | None]:
+    """Explicit per-request rate percentiles, when the harness published them."""
+    if not isinstance(block, dict):
+        return None, None
+    return _positive_float(block.get("p50")), _positive_float(block.get("p10"))
+
+
+def _mlperf_interactivity(summary: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    """Median and slow-tail interactivity, or ``(None, None)`` when unknown.
+
+    Preference order:
+
+    1. An explicit per-request ``e2e_output_token_throughput`` block (p50 and
+       p10), the same axis ``map_aiperf`` grades.
+    2. Per-request records (``output_tokens`` and latency) on the summary.
+    3. The harness TPOT percentiles inverted to tokens/s. Those percentiles are
+       computed from per-request samples; ``1/TPOT`` is decode interactivity
+       and moves independently of system ``tps``.
+
+    System throughput divided by concurrency is not a percentile. It is never
+    written into these keys. A missing percentile stays missing so grading
+    fails closed instead of treating an aggregate as a tail.
+    """
+    median, slow = _intvty_from_rate_block(summary.get("e2e_output_token_throughput"))
+    if median is not None or slow is not None:
+        return median, slow
+    median, slow = _intvty_from_records(summary.get("request_records"))
+    if median is not None or slow is not None:
+        return median, slow
+    tpot = summary.get("tpot") if isinstance(summary.get("tpot"), dict) else None
+    if tpot is None and isinstance(summary.get("itl"), dict):
+        tpot = summary["itl"]
+    median_ms = _series_percentile_ms(tpot, 50)
+    slow_ms = _series_percentile_ms(tpot, 90)
+    median = (1000.0 / median_ms) if median_ms else None
+    slow = (1000.0 / slow_ms) if slow_ms else None
+    return median, slow
 
 
 def map_mlperf(
@@ -310,29 +403,21 @@ def map_mlperf(
     error_rate = (100.0 * failed / denom) if denom > 0 else (None if failed else 0.0)
     complete = bool(summary.get("complete"))
     interrupted = bool(summary.get("interrupted") or summary.get("error"))
-    # Interactivity is system throughput per concurrent user, the axis AgentX
-    # grades on. The harness publishes no such field -- measured: a v6 summary
-    # carries tps/ttft/tpot/latency/qps and nothing else -- so it is derived,
-    # matching utility/sweep.py's own definition. A run whose concurrency cannot
-    # be read leaves it 0.0, which the graded comparison treats as incomparable
-    # rather than as a perfect score.
-    intvty = summary.get("e2e_avg_interactivity")
-    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
-        intvty = summary.get("interactivity")
-    if not isinstance(intvty, (int, float)) or isinstance(intvty, bool):
-        conc = _target_concurrency(summary)
-        intvty = (float(out_tput) / conc) if (conc and out_tput) else 0.0
+    intvty_p50, intvty_p90 = _mlperf_interactivity(summary)
     ttft = summary.get("ttft") or {}
     tpot = summary.get("tpot") or summary.get("itl") or {}
     latency = summary.get("latency") or summary.get("e2e") or {}
     acc_score = _accuracy_score(accuracy)
-    reasons = list(extra)
+    # Non-canonical (smoke, or anything short of 613) is still a measurement.
+    # ``submission_valid`` is what AgentX will grade. ``canonical_submission``
+    # is the leaderboard bar, and a smoke KEEP must not be read as one.
+    reasons: list[str] = []
     if not complete:
         reasons.append("incomplete_run")
     if interrupted:
         reasons.append("interrupted")
-    verdict = complete and not interrupted and not extra
-    return {
+    verdict = not reasons
+    mapped = {
         "request_throughput": req_tput,
         "output_throughput": float(out_tput or 0.0),
         "input_throughput": float(in_tput or 0.0),
@@ -350,7 +435,6 @@ def map_mlperf(
         "p90_tpot_ms": _series_ms(tpot, 90),
         "p99_tpot_ms": _series_ms(tpot, 99),
         "std_tpot_ms": _ns_to_ms((tpot or {}).get("std") if isinstance(tpot, dict) else 0.0),
-        "e2e_norm_intvty_p90": float(intvty or 0.0),
         "mean_itl_ms": _series_ms(tpot, avg=True),
         "median_itl_ms": _series_ms(tpot, 50),
         "p99_itl_ms": _series_ms(tpot, 99),
@@ -362,6 +446,8 @@ def map_mlperf(
         "theoretical_prefix_cache_hit": float(summary.get("prefix_cache_hit") or 0.0),
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
+        "canonical_submission": verdict and not extra,
+        "noncanonical_reasons": list(extra),
         "request_error_rate": error_rate,
         "corpus_loader": str(summary.get("corpus_loader") or CANONICAL_MLPERF_CORPUS_LOADER),
         "isl_distribution": _seq_distribution(summary.get("input_sequence_lengths")),
@@ -369,3 +455,8 @@ def map_mlperf(
         "accuracy_score": acc_score,
         "mlperf_complete": complete,
     }
+    if intvty_p50 is not None:
+        mapped["e2e_norm_intvty_p50"] = intvty_p50
+    if intvty_p90 is not None:
+        mapped["e2e_norm_intvty_p90"] = intvty_p90
+    return mapped

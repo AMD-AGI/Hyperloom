@@ -362,6 +362,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on
+    # sessions that predate the field; resume treats those as aiperf. Compared
+    # on resume so the two workloads cannot anchor each other without bumping
+    # the measurement epoch (which would invalidate unchanged aiperf sessions).
+    agentx_backend: str = ""
+    # Canonical 613 confirmation of the final stack. Empty until CLOSE runs it.
+    # Not a search KEEP and not graded against the smoke anchor.
+    mlperf_submission: dict[str, Any] = field(default_factory=dict)
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis

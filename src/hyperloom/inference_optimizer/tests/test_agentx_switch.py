@@ -315,3 +315,19 @@ def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
     assert spec.get("flow") == "smoke_test"
     assert bench["envs"]["PORT"] == "30000"
     assert bench["envs"]["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+    assert bench["envs"]["AGENTIC_CONCURRENCY"] == "16"
+    assert "--served-model-name kimi-k3" in bench["envs"]["EXTRA_SGLANG_ARGS"]
+
+
+def test_mlperf_concurrency_follows_the_round_not_the_baseline(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("AGENTIC_CONCURRENCY", "16")
+    src = _write(
+        tmp_path / "base.yaml",
+        framework="sglang",
+        envs={"CONC": 4, "AGENTIC_CONCURRENCY": "16"},
+    )
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/kimi-k3")
+    assert bench["envs"]["AGENTIC_CONCURRENCY"] == "4"

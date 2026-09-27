@@ -336,3 +336,29 @@ def check_mlperf_harness(env: Mapping[str, str]) -> None:
             "HYPERLOOM_AGENTIC_BACKEND=mlperf needs inference-endpoint or uv on PATH.",
             repairable=False,
         )
+    framework = str(env.get("FRAMEWORK") or "").strip().lower()
+    if framework and "sglang" not in framework:
+        raise AgentXPreflightError(
+            "HYPERLOOM_AGENTIC_BACKEND=mlperf drives the Kimi-K3 SGLang recipe; "
+            f"refusing framework {framework!r}.",
+            repairable=False,
+        )
+    model = str(env.get("MODEL") or env.get("MODEL_PATH") or "").strip().lower()
+    if model and "kimi" not in model:
+        raise AgentXPreflightError(
+            "HYPERLOOM_AGENTIC_BACKEND=mlperf only measures Kimi-K3; "
+            f"refusing model {model!r}.",
+            repairable=False,
+        )
+    port = str(env.get("PORT") or "30000").strip()
+    if port != "30000":
+        raise AgentXPreflightError(
+            f"MLPerf harness targets localhost:30000; refusing PORT={port!r}.",
+            repairable=False,
+        )
+    model_key = str(env.get("MLPERF_AGENTIC_MODEL") or "kimi-k3").strip().lower()
+    if model_key not in {"kimi-k3", "kimi_k3"}:
+        raise AgentXPreflightError(
+            f"MLPerf agentic client only measures kimi-k3 (got {model_key!r}).",
+            repairable=False,
+        )

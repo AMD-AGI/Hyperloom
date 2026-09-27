@@ -7,8 +7,9 @@
 # mlperf_agentic_client.sh — AgentX client that keeps Magpie server lifecycle
 # and drives MLPerf ``utility/run_agentic.sh`` against localhost:30000.
 #
-# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. Search uses
-# smoke.yaml (150 trajectories); KEEP validation sets MLPERF_AGENTIC_FLOW=full.
+# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. Search measures
+# smoke.yaml (150 trajectories) against a smoke baseline. The canonical 613
+# confirmation sets MLPERF_AGENTIC_FLOW=full once, on the final stack.
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,7 +17,37 @@ log() { echo "[mlperf_agentic_client] $*"; }
 
 : "${MODEL:?MODEL required}"
 : "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
-PORT="${PORT:-30000}"
+# The harness always dials localhost:30000. A different PORT would benchmark
+# whatever already answers there, then have the exit trap kill it.
+if [ -n "${PORT:-}" ] && [ "$PORT" != "30000" ]; then
+  log "ERROR: MLPerf harness targets localhost:30000; refusing PORT=${PORT}"
+  exit 2
+fi
+PORT=30000
+export PORT
+
+MODEL_KEY="${MLPERF_AGENTIC_MODEL:-kimi-k3}"
+case "$MODEL_KEY" in
+  kimi-k3|kimi_k3) ;;
+  *)
+    log "ERROR: MLPerf agentic client only measures kimi-k3 (got ${MODEL_KEY})"
+    exit 2
+    ;;
+esac
+
+_port_open() {
+  python3 - "$1" <<'PY'
+import socket
+import sys
+
+sock = socket.socket()
+sock.settimeout(0.5)
+try:
+    sys.exit(0 if sock.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+finally:
+    sock.close()
+PY
+}
 
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
@@ -39,9 +70,15 @@ else
     exit 2
   fi
 
+  if _port_open "$PORT"; then
+    log "ERROR: localhost:${PORT} is already accepting connections; refusing to benchmark a server this round did not start"
+    exit 2
+  fi
+
   PIDFILE="${RESULT_DIR}/agentx_server.pid"
   rm -f "$PIDFILE"
   SERVER_PID=""
+  MLPERF_OWN_PORT=0
 
   cleanup() {
     [ "${AGENTX_KEEP_SERVER:-0}" = "1" ] && return 0
@@ -59,7 +96,9 @@ else
         kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null || true
       fi
     fi
-    command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
+    if [ "${MLPERF_OWN_PORT:-0}" = "1" ]; then
+      command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
+    fi
   }
   trap cleanup EXIT INT TERM
 
@@ -90,7 +129,89 @@ else
     exit 3
   fi
   log "server up (pid=${SERVER_PID}) on port ${PORT}"
+  python3 - "$PORT" "$SERVER_PID" <<'PY'
+import os
+import sys
+
+port = int(sys.argv[1])
+server = int(sys.argv[2])
+hexport = f"{port:04X}"
+inodes = set()
+for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        lines = open(name, encoding="utf-8").read().splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 10 or parts[3] != "0A":
+            continue
+        if parts[1].rsplit(":", 1)[-1].upper() != hexport:
+            continue
+        inodes.add(parts[9])
+if not inodes:
+    sys.stderr.write(f"ERROR: nothing is listening on port {port} after server start\n")
+    sys.exit(1)
+
+def ancestors(pid: int) -> set[int]:
+    seen: set[int] = set()
+    while pid and pid not in seen:
+        seen.add(pid)
+        try:
+            stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+        except OSError:
+            break
+        pid = int(stat.rsplit(")", 1)[1].split()[1])
+    return seen
+
+owned = False
+for pid_name in os.listdir("/proc"):
+    if not pid_name.isdigit():
+        continue
+    fd_dir = f"/proc/{pid_name}/fd"
+    try:
+        fds = os.listdir(fd_dir)
+    except OSError:
+        continue
+    for fd in fds:
+        try:
+            target = os.readlink(f"{fd_dir}/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target[8:-1] in inodes:
+            if server in ancestors(int(pid_name)):
+                owned = True
+                break
+    if owned:
+        break
+if not owned:
+    sys.stderr.write(
+        f"ERROR: listener on port {port} is not the server this round started (pid {server})\n"
+    )
+    sys.exit(1)
+PY
+  MLPERF_OWN_PORT=1
 fi
+
+python3 - "$PORT" "$MODEL_KEY" <<'PY'
+import json
+import sys
+import urllib.request
+
+port, want = sys.argv[1], sys.argv[2].lower()
+url = f"http://127.0.0.1:{port}/v1/models"
+try:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        payload = json.load(resp)
+except Exception as exc:
+    sys.stderr.write(f"ERROR: {url} did not answer after boot: {exc}\n")
+    sys.exit(1)
+ids = [str(item.get("id") or "") for item in (payload.get("data") or []) if isinstance(item, dict)]
+if want not in {item.lower() for item in ids}:
+    sys.stderr.write(f"ERROR: served models {ids} do not include {want}\n")
+    sys.exit(1)
+print(f"[mlperf_agentic_client] served model ok: {ids}")
+PY
 
 MLPERF_ROOT="${MLPERF_ENDPOINTS_DIR:-/opt/mlperf-endpoints}"
 if [ ! -f "${MLPERF_ROOT}/utility/run_agentic.sh" ]; then
@@ -107,9 +228,14 @@ if [ -z "${MLPERF_TOKENIZER_DIR:-}" ] || [ ! -d "${MLPERF_TOKENIZER_DIR}" ]; the
 fi
 
 FLOW="${MLPERF_AGENTIC_FLOW:-smoke_test}"
-MODEL_KEY="${MLPERF_AGENTIC_MODEL:-kimi-k3}"
 HARDWARE="${MLPERF_AGENTIC_HARDWARE:-mi355x}"
-export AGENTIC_CONCURRENCY="${AGENTIC_CONCURRENCY:-$CONC}"
+# CONC is the concurrency this round is recorded under. A stale
+# AGENTIC_CONCURRENCY from the baseline YAML must not outrank it.
+if [ -n "${CONC:-}" ]; then
+  export AGENTIC_CONCURRENCY="$CONC"
+else
+  export AGENTIC_CONCURRENCY="${AGENTIC_CONCURRENCY:-16}"
+fi
 export RESULTS_DIR="$ART"
 export AGENTIC_DATASET_PATH
 export MLPERF_TOKENIZER_DIR
@@ -126,7 +252,7 @@ export AGENTX_NONCANONICAL_REASONS=""
 if [ ${#NONCANON[@]} -gt 0 ]; then
   _reasons="$(IFS=,; echo "${NONCANON[*]}")"
   export AGENTX_NONCANONICAL_REASONS="$_reasons"
-  log "SMOKE: non-canonical MLPerf workload [${_reasons}] -- KEEP requires a full 613 validation"
+  log "SMOKE: non-canonical MLPerf workload [${_reasons}] -- measurable for search; canonical submission is the 613 confirmation"
 fi
 
 log "mlperf flow=${FLOW} model=${MODEL_KEY} hw=${HARDWARE} conc=${AGENTIC_CONCURRENCY} dataset=${AGENTIC_DATASET_PATH}"

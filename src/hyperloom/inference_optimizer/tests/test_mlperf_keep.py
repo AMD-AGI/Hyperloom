@@ -34,6 +34,7 @@ def _write_mapped(tmp_path, **over):
     payload = {
         "mlperf_complete": True,
         "submission_valid": True,
+        "canonical_submission": True,
         "request_error_rate": 0.0,
         "accuracy_score": 0.9,
         "output_throughput": 1000.0,
@@ -51,10 +52,18 @@ def test_full_keep_pass(tmp_path):
 
 def test_full_keep_incomplete(tmp_path):
     reason = mlperf_full_keep_block(
-        _write_mapped(tmp_path, mlperf_complete=False, submission_valid=False),
+        _write_mapped(tmp_path, mlperf_complete=False, submission_valid=False, canonical_submission=False),
         status="succeeded",
     )
-    assert reason.startswith("mlperf_full_incomplete")
+    assert reason.startswith("mlperf_submission_not_canonical")
+
+
+def test_smoke_measurement_is_not_a_submission(tmp_path):
+    reason = mlperf_full_keep_block(
+        _write_mapped(tmp_path, canonical_submission=False, noncanonical_reasons=["flow=smoke_test"]),
+        status="succeeded",
+    )
+    assert reason.startswith("mlperf_submission_not_canonical")
 
 
 def test_full_keep_error_rate(tmp_path):
@@ -62,7 +71,7 @@ def test_full_keep_error_rate(tmp_path):
         _write_mapped(tmp_path, request_error_rate=25.0),
         status="succeeded",
     )
-    assert reason == "mlperf_full_error_rate"
+    assert reason == "mlperf_submission_error_rate"
 
 
 def test_full_keep_accuracy_missing(tmp_path):
@@ -70,7 +79,7 @@ def test_full_keep_accuracy_missing(tmp_path):
         _write_mapped(tmp_path, accuracy_score=None),
         status="succeeded",
     )
-    assert reason == "mlperf_full_accuracy_unavailable"
+    assert reason == "mlperf_submission_accuracy_unavailable"
 
 
 def test_full_keep_failed_status(tmp_path):

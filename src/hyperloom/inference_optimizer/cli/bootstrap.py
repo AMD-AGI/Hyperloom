@@ -58,7 +58,9 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 2
+# The MLPerf client is a different workload, but it is opt-in: the epoch stays
+# so aiperf sessions remain resumable. The backend name is what resume compares.
+AGENTX_MEASUREMENT_EPOCH = 1
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -105,6 +107,17 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"session carries AgentX epoch {had_epoch}, this build measures "
                 f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
+            )
+        from hyperloom.inference_optimizer.agentx.deploy import agentic_backend
+
+        # Sessions recorded before the backend was persisted are aiperf.
+        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
+        want_backend = agentic_backend()
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
             )
     return ""
 
@@ -241,6 +254,12 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    if _agentx_enabled():
+        from hyperloom.inference_optimizer.agentx.deploy import agentic_backend
+
+        agentx_backend = agentic_backend()
+    else:
+        agentx_backend = ""
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -321,6 +340,7 @@ def _seed_shared_state(
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_backend=agentx_backend,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(

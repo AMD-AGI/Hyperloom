@@ -475,6 +475,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    from ._workload_envs import pin_mlperf_round_concurrency
+
+    pin_mlperf_round_concurrency(envs)
     # The recipe re-exports these unconditionally, so a value carried here is
     # one the run never used.
     for k in recipe_launch_contract(bench)[1] & envs.keys():

@@ -6366,6 +6366,52 @@ class WritebackCollaborator:
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 
+    async def _enqueue_mlperf_submission_confirmation(self) -> dict[str, Any]:
+        """Enqueue one canonical 613 run of the stack the session ended on.
+
+        Search already graded smoke against smoke. This run is recorded as a
+        submission confirmation and is not promoted as a KEEP.
+        """
+        from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend
+        from hyperloom.orchestrator.actions.executors._mlperf_keep import mlperf_full_env_overrides
+
+        if not is_mlperf_backend():
+            return {"skipped": True, "reason": "not_mlperf"}
+        launch = self._current_best_launch_config()
+        envs = mlperf_full_env_overrides(dict(launch.get("extra_envs") or {}))
+        benchmark_script = baseline_benchmark_script(self.shared_state)
+        recipe_generation = int(getattr(self.shared_state, "working_recipe_generation", 0) or 0)
+        params: dict[str, Any] = {
+            "source": "mlperf_submission_confirmation",
+            "mlperf_submission_confirmation": True,
+            "reason": "canonical 613 confirmation of the final stack",
+            "recipe_generation": recipe_generation,
+            "grid": [
+                {
+                    "name": "mlperf-submission",
+                    "extra_args": launch.get("extra_server_args") or "",
+                    "extra_envs": envs,
+                    "provenance": "mlperf_submission_confirmation",
+                    "note": "canonical 613; not graded against the smoke anchor",
+                }
+            ],
+            "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+        }
+        if self.shared_state.baseline_config_path:
+            params["config_path"] = self.shared_state.baseline_config_path
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
+        lanes, ttl = self._registry_lanes_ttl("explore")
+        self._inject_explore_runtime_params(params)
+        task, existing = await self.tasks.create_or_return_existing(
+            kind="explore",
+            params=params,
+            idempotency_key=f"mlperf-submission-g{recipe_generation}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        return {"task_id": task.task_id, "existing": bool(existing)}
+
     async def _validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
         """2a fallback - validate the geak win by REPLAYING it through
         GEAK's own ``bench_e2e.sh`` (the harness that produced the headline
