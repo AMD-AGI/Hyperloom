@@ -128,19 +128,19 @@ def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -
     assert b["critic"][1]["protocol"] == "anthropic"
 
 
-def test_build_backends_forced_anthropic_protocol_wins_over_dual_config(monkeypatch) -> None:
-    """With both sides configured, auto picks openai; the flag must override it."""
+def test_build_backends_forced_openai_protocol_wins_over_dual_config(monkeypatch) -> None:
+    """With both sides configured, auto follows the Claude orchestration; the flag must override it."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     auto = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert auto["critic"][1]["protocol"] == "openai"
+    assert auto["critic"][1]["protocol"] == "anthropic"
     forced = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="anthropic",
+        critic_protocol="openai",
     )
-    assert forced["critic"][1]["protocol"] == "anthropic"
+    assert forced["critic"][1]["protocol"] == "openai"
 
 
 def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) -> None:
@@ -234,11 +234,21 @@ def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeyp
         critic_agent_root=Path("/tmp/critic"),
     )
     assert b["critic"][0] == "critic_agent"
-    # Both sides configured means auto lands on openai; the point of the test is that the gateway takes that ordinary
-    # path, so the protocol is the assertion.
+    # Orchestration runs on Claude here, so auto reviews with the same model over the same protocol rather than with
+    # the other side's model.
+    assert b["critic"][1]["protocol"] == "anthropic"
+    assert b["critic"][1]["claude_model"] == "claude-x"
+    assert "codex_client_factory" not in b["critic"][1]
+
+
+def test_build_backends_critic_follows_an_orchestration_on_codex(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
+    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert b["orchestration"][0] == "codex"
     assert b["critic"][1]["protocol"] == "openai"
     assert b["critic"][1]["codex_model"] == "codex-y"
-    assert "codex_client_factory" not in b["critic"][1]
 
 
 def test_backends_have_no_provider_specific_branch() -> None:
