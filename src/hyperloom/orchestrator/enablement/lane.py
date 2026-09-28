@@ -109,7 +109,7 @@ class EnablementLane(CoordinatorCollaborator):
                 state.save(self.session_dir)
                 # The cap is the lane's own terminal, so the lane event closes
                 # here: no round follows it to close on the lane's behalf.
-                await self._close_enablement_lane(
+                await self.close_lane_event(
                     outcome=enablement_event.OUTCOME_STALLED,
                     reason="enablement_attempts_exhausted",
                 )
@@ -423,6 +423,34 @@ class EnablementLane(CoordinatorCollaborator):
             now_unix=time.time(),
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
             evidence={"reason": reason} if reason else {},
+        )
+
+    async def close_lane_event(self, *, outcome: str, reason: str) -> None:
+        """Close the enablement lane's event on the terminal it just reached.
+
+        Args:
+            outcome: One of the ``enablement_event.OUTCOME_*`` constants.
+            reason: Why the lane ended, recorded on the event.
+        """
+        state = self.shared_state
+        lane = state.enablement
+        enablement_event.finish(
+            outcome=outcome,
+            reason=reason,
+            recipe=recipe_for(
+                lane,
+                session_dir=str(self.session_dir or ""),
+                mode=str(getattr(state, "enablement_mode", "") or ""),
+            ),
+            kept_patches=lane.kept_patches,
+            kept_artifacts=lane.kept_artifacts,
+            setup_commands=lane.setup_commands,
+            accepted_config=lane.accepted_config,
+            accepted_config_path=str(lane.accepted_config_path or ""),
+            active_runtime=lane.active_runtime,
+            attempt_runtimes=lane.attempt_runtimes,
+            framework_root=str(lane.framework_root or ""),
+            stall_streak=await self.rounds.consecutive_stalled(),
         )
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
