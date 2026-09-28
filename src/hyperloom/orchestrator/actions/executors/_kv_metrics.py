@@ -666,8 +666,8 @@ def port_from_server_log(workspace: Any) -> int | None:
                 for line in head.splitlines():
                     # Matched on what the line is about rather than on its exact wording. The observed builds say
                     # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-                    # Enumerating the phrasings is how this collector got its original bug, so the test is the
-                    # combination -- a line announcing the server, carrying a URL with a port.
+                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
+                    # line announcing the server, carrying a URL with a port.
                     if not _SERVER_BIND_HINT.search(line):
                         continue
                     match = _SERVER_BIND_URL.search(line)

@@ -3145,8 +3145,8 @@ async def _run_forge_gemm_tuning(
     if resolved_model_dir is None:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
-        # Reporting it as failed spends a REVERT verdict on an experiment that
-        # never started, which is the misattribution this change set removes.
+        # Reporting it as failed would spend a REVERT verdict on an experiment
+        # that never started.
         return {
             "status": "skipped",
             "error_class": "model_path_unavailable",
@@ -3208,12 +3208,10 @@ async def _run_forge_gemm_tuning(
     #
     # This has to happen BEFORE the MoE untuned CSV is built, not just before
     # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
-    # afterwards and the dense lane got the full observed sweep while the MoE
-    # lane got a table with a single M=1 row -- which then missed on every
-    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
-    # That is precisely the failure this change set exists to remove, so leaving
-    # it in place on the MoE side would have fixed one lane and not the other.
+    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
+    # afterwards, the dense lane would get the full observed sweep while the MoE
+    # lane gets a table with a single M=1 row, which misses on every prefill and
+    # large-batch lookup and is reverted as no_shape_key_matched.
     if not tokens and kernel_sig_log:
         tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
         if tokens:

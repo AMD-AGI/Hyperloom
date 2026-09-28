@@ -1451,8 +1451,8 @@ _KERNEL_PROBE_LIMIT = 8
 #: Cumulative bytes of candidate traces the preflight will deserialise before
 #: giving up. Only the failing path spends this: with size ordering a healthy
 #: capture answers on the first probe. It exists because production rank traces
-#: reach hundreds of megabytes, and eight of those would turn a failure that
-#: used to take a second into one that takes minutes or exhausts memory.
+#: reach hundreds of megabytes, and eight of those would turn a one-second
+#: failure into one that takes minutes or exhausts memory.
 _KERNEL_PROBE_BYTE_BUDGET = 512 * 1024 * 1024
 
 #: Per-phase fragment names the splitter emits. Matched as well as the directory
