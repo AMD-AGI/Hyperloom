@@ -151,14 +151,14 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 ## Backend selection
 
-GEAK owns the KERNEL phase by default for SGLang/vLLM and decides kernel
-strategy internally. ATOM defaults to the per-kernel Forge backend at CLI launch:
+GEAK owns the KERNEL phase by default for every framework, ATOM included, and
+decides kernel strategy internally:
 
-- **Framework default**: with `--framework atom` and kernel optimization
-  enabled, the CLI fills an unset or blank `KERNEL_OPT_BACKEND_ORDER` with
-  `forge`. Other frameworks retain the handler's `geak` default
-  (`_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
-  `orchestrator/kernel/request_handlers.py`).
+- **Framework default**: an unset or blank `KERNEL_OPT_BACKEND_ORDER` resolves
+  through `_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
+  `orchestrator/kernel/request_handlers.py`, which is `geak`. No framework
+  overrides it at CLI launch; ATOM's former `forge` fill-in is gone, because
+  GEAK extracts candidates from ATOM's own `prefill`/`decode` annotation spans.
 - **Bare-metal setup**: preserves nonempty choices with process env > `.env`
   precedence, but does not fill or persist a backend default. Existing `.env`
   assignments, including `KERNEL_OPT_BACKEND_ORDER=geak`, are not automatically
