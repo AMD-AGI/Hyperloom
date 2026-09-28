@@ -79,8 +79,8 @@ automatically selects Hyperloom's AgentX session and grading mode. Do not export
 `HYPERLOOM_AGENTX` for this path. That environment variable remains only as a
 legacy mode switch for callers that do not supply a source YAML. This
 integration is pinned to Magpie
-[0.3.0 release candidate](https://github.com/AMD-AGI/Magpie/pull/105) commit
-`3642ce66ae46ca4dc125340b3d14a3f4640c369b` and InferenceX commit
+[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) commit
+`5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
 `3d5581562f643f9bdeb8410cd924e2c70906c966`.
 
 For the pinned GLM-5.2 TP4 recipe, create a source YAML. It carries the public

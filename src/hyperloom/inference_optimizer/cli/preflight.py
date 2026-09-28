@@ -1682,7 +1682,7 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
-_MAGPIE_REF_DEFAULT = "3642ce66ae46ca4dc125340b3d14a3f4640c369b"
+_MAGPIE_REF_DEFAULT = "5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0"
 _MAGPIE_GENERIC_HEALTH_CODE = "import Magpie\n"
 _MAGPIE_NATIVE_AGENTX_HEALTH_CODE = (
     _MAGPIE_SOURCE_IDENTITY_CODE

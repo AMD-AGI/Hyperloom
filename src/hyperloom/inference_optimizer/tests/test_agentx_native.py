@@ -234,9 +234,9 @@ def test_magpie_pinned_published_tree_hash_matches_independent_wheel_audit():
     namespace = _magpie_identity_namespace(None)
 
     assert namespace["_AUDITED_MAGPIE_EXECUTION_TREES"] == {
-        "3642ce66ae46ca4dc125340b3d14a3f4640c369b": {
-            "file_count": 77,
-            "tree_sha256": ("af54be3412932f6ac3556bf2eb498c860785b722ef5c0f2539d26f3a9f4ee204"),
+        "5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0": {
+            "file_count": 79,
+            "tree_sha256": ("afea9b95e992e0b715c955f5e72a7e92aca48d2c171ddff0e3d3e9082406e689"),
         }
     }
     assert namespace["_MAGPIE_UNPUBLISHED_PATHS"] == frozenset({"mcp/config.json"})

@@ -192,11 +192,11 @@ EOF
 }
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to the 0.3.0 release candidate commit. Operators can re-pin
+# Pin Magpie to the immutable commit behind v0.3.0. Operators can re-pin
 # with MAGPIE_REF=<tag|sha>, but the selected package must expose AgentXConfig
 # and the final recipe-fingerprint parity fix; an older importable AgentX build
 # is upgraded instead of being silently kept.
-MAGPIE_REF="${MAGPIE_REF:-3642ce66ae46ca4dc125340b3d14a3f4640c369b}"
+MAGPIE_REF="${MAGPIE_REF:-5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit

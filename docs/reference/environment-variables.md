@@ -971,8 +971,8 @@ throughput moves along the frontier rather than violating a rule.
 Normal AgentX measurements are materialized from that source YAML as Magpie
 `agentx: enable` runs.
 The canonical identity and launcher are intentionally separate from the local
-checkpoint path. The tested pair is Magpie 0.3.0 release-candidate commit
-`3642ce66ae46ca4dc125340b3d14a3f4640c369b` and InferenceX commit
+checkpoint path. The tested pair is Magpie v0.3.0 release commit
+`5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
 `3d5581562f643f9bdeb8410cd924e2c70906c966`:
 
 | Variable | Required | Default | Description |

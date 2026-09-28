@@ -21,11 +21,11 @@ into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
 - **Run AgentX measurements through native Magpie/InferenceX launchers.** The
-  tested pair is Magpie 0.3.0 release-candidate commit
-  `3642ce66ae46ca4dc125340b3d14a3f4640c369b` and InferenceX commit
-  `3d5581562f643f9bdeb8410cd924e2c70906c966`. Magpie 0.3.0 is pinned by
-  commit while its release PR awaits merge. Install preserves the audited
-  package and launcher trees; preflight repairs Magpie files changed by an
+  tested pair is Magpie v0.3.0 release commit
+  `5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
+  `3d5581562f643f9bdeb8410cd924e2c70906c966`. Both dependencies are pinned by
+  immutable commit for reproducible AgentX measurements. Install preserves the
+  audited package and launcher trees; preflight repairs Magpie files changed by an
   earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
   `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.
   A new

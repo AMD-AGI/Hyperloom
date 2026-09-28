@@ -281,8 +281,8 @@ pinned clone.
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
 | `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and native AgentX resolution. `install.sh` installs `MAGPIE_PACKAGE_SPEC` when Magpie is missing **or** the importable build lacks the pinned native AgentX capability. |
 
-Native AgentX is tested with `MAGPIE_REF=3642ce66ae46ca4dc125340b3d14a3f4640c369b`
-(Magpie 0.3.0 release candidate) and
+Native AgentX is tested with `MAGPIE_REF=5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0`
+(Magpie v0.3.0 release) and
 `INFERENCEX_REF=3d5581562f643f9bdeb8410cd924e2c70906c966`. Treat changing either
 pin as a coordinated compatibility change, not as an authentication override.
 That strict 40-character SHA, native capability, and audited Magpie execution-tree
