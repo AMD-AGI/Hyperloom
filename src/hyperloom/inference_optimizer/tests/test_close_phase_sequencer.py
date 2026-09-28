@@ -93,6 +93,8 @@ class _StubTaskRegistry:
         side_effects: list | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: dict | None = None,
     ):
         existing = self._by_key.get(idempotency_key)
         if existing is not None:

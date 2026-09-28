@@ -19,7 +19,6 @@ _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 _UNPACKAGED_ASSETS = (
     # Developer-only tooling, meaningless in an installed package.
     "**/.gitignore",
-    "**/.ci-deferred/*",
     # Container image build context: the Dockerfile clones the repo and the scripts hardcode /opt/Hyperloom, so they
     # are only used from a checkout.
     "hyperloom/inference_optimizer/assets/quick-start/*",

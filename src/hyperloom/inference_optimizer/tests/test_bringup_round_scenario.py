@@ -25,6 +25,7 @@ from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.rehearsal import (
     COMPLETED,
@@ -147,6 +148,9 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         enablement=EnablementRound(launch_log=launch_log),
         baseline_tput=0.0,
         baseline_failure_streak=1,
+        phase=PHASE_ENABLEMENT,
+        macro_cycle=0,
+        tick=0,
         stop_reason="",
         save=lambda *a, **k: None,
     )
