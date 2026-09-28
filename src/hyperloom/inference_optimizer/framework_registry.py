@@ -117,6 +117,17 @@ def python_package(framework: str | None) -> str:
     return spec.python_package or ""
 
 
+def repo_url(framework: str | None) -> str:
+    """Return ``framework``'s upstream repo URL, or ``""`` when it has none or is unregistered."""
+    spec = FRAMEWORKS.get(str(framework or "").strip().lower())
+    return (spec.repo_url or "") if spec is not None else ""
+
+
+def shipped_config_name(kind: str, framework: str | None) -> str:
+    """Return the shipped ``<kind>_<framework>.yaml`` asset name; an unregistered framework gets the default's."""
+    return f"{kind}_{_spec_or_default(framework).name}.yaml"
+
+
 def extra_args_env(framework: str | None) -> str:
     """Return the Magpie env var used to append backend args."""
     return _spec_or_default(framework).extra_args_env

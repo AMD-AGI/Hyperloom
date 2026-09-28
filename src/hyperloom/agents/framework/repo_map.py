@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical mapping from serving framework name to upstream git repo URL."""
+"""Upstream repos a framework-agent round scouts: the framework's own, and the bridging ones."""
 
 from __future__ import annotations
 
-_FRAMEWORK_TO_REPO_URL: dict[str, str] = {
-    "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm": "https://github.com/ROCm/vllm.git",
-    "atom": "https://github.com/ROCm/ATOM.git",
-    "xdit": "https://github.com/xdit-project/xDiT.git",
-}
-
+from hyperloom.inference_optimizer import framework_registry
 
 # Enablement bridging repos, keyed by ``bridge_layer``.
 _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
@@ -31,7 +25,7 @@ def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
 
 def repo_url_for_framework(framework: str) -> str:
     """Return the canonical GitHub repo URL for ``framework``."""
-    return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
+    return framework_registry.repo_url(framework)
 
 
 __all__ = ["bridge_repo_urls", "repo_url_for_framework"]

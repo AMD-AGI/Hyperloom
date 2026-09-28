@@ -27,6 +27,7 @@ from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -784,21 +785,9 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML from $FRAMEWORK (atom / vllm / sglang; unknown falls back to
-    ``profile_sglang.yaml``).
-    """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "profile_atom.yaml"
-    elif fw == "vllm":
-        name = "profile_vllm.yaml"
-    elif fw == "xdit":
-        name = "profile_xdit.yaml"
-    elif fw == "custom":
-        name = "profile_custom.yaml"
-    else:
-        name = "profile_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    """Resolve the shipped profile YAML for ``$FRAMEWORK``; an unknown framework gets ``profile_sglang.yaml``."""
+    fw = os.environ.get("FRAMEWORK", "sglang")
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("profile", fw)
 
 
 class ProfileExecutor(BenchmarkRunExecutor):

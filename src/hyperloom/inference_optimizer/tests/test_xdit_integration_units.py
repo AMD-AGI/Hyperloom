@@ -326,20 +326,26 @@ class TestExploreGrid:
             assert v.note == v.provenance == "default_grid"
 
 
-class TestRegistryRepoUrlConsistency:
-    """Guard against repo_url drift between framework_registry and repo_map."""
+class TestRegistryOwnsPerFrameworkAssets:
+    """What the registry derives for a framework must exist for every framework it registers."""
 
-    def test_registry_urls_match_repo_map(self):
-        try:
-            from hyperloom.agents.framework.repo_map import _FRAMEWORK_TO_REPO_URL
-        except ImportError:
-            pytest.skip("hyperloom.agents.framework not installed")
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    def test_every_registered_framework_ships_its_config(self, kind):
+        from hyperloom.inference_optimizer.session.paths import asset_root
+
+        configs = asset_root() / "assets" / "configs"
+        missing = [n for n in fr.FRAMEWORKS if not (configs / fr.shipped_config_name(kind, n)).is_file()]
+        assert missing == []
+
+    def test_an_unregistered_framework_gets_the_default_config(self):
+        assert fr.shipped_config_name("baseline", "no-such-fw") == f"baseline_{fr.DEFAULT_FRAMEWORK}.yaml"
+
+    def test_repo_urls_come_from_the_registry(self):
+        from hyperloom.agents.framework.repo_map import repo_url_for_framework
+
         for name, spec in fr.FRAMEWORKS.items():
-            if spec.repo_url is not None:
-                assert spec.repo_url == _FRAMEWORK_TO_REPO_URL.get(name, ""), (
-                    f"repo_url mismatch for {name}: "
-                    f"registry={spec.repo_url!r} vs repo_map={_FRAMEWORK_TO_REPO_URL.get(name)!r}"
-                )
+            assert repo_url_for_framework(name) == (spec.repo_url or "")
+        assert repo_url_for_framework("no-such-fw") == ""
 
 
 class TestLifecycleScriptableSkip:
