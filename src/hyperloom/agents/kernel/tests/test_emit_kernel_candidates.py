@@ -19,8 +19,8 @@ _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
-import emit_kernel_candidates as ekc  # noqa: E402
-import tracelens_analysis as tla  # noqa: E402
+import emit_kernel_candidates as ekc
+import tracelens_analysis as tla
 
 
 def _write(path: Path, text: str) -> Path:

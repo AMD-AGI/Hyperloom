@@ -28,8 +28,8 @@ from typing import Any
 # Sibling modules live next to this tool (invoked by absolute path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import tracelens_analysis as tla  # noqa: E402
-from _io_utils import read_json  # noqa: E402
+import tracelens_analysis as tla
+from _io_utils import read_json
 
 _INFERRED_PLACEHOLDERS = frozenset({"cannot be inferred", "unknown", "n/a", "-"})
 
