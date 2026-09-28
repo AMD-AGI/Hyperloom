@@ -848,12 +848,13 @@ Primary switch (default **off**) for live Langfuse trace push.
   incomplete, not that the session was short-lived. Across processes (a crash
   plus a `--resume`, or two shutdown paths racing), the durable unit is finer
   than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
-  drained so its rows are never re-pushed while later ones still are, and the
+  drained so its rows are never re-pushed while later ones still are;
+  `backfill_rows_sent` does the same for the audit backfills (recipe-KB,
+  specialist intel, forge steps, GEMM tuning, decision scores), counting a row
+  only once it was handed to the SDK and the final flush landed; and the
   one-shot `session_start` / `session_breakdown` pushes are claimed through an
   exclusive marker file (`reports/trace/.session_start.claim`) rather than
-  through the receipt read. The audit backfills (recipe-KB, specialist intel,
-  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
-  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
+  through the receipt read. The receipt also carries `payload_sha256` over its own body; a
   receipt whose hash does not match is ignored on read, so a torn file cannot
   suppress or replay the one-shot `session_start` / breakdown pushes.
 * **Package completeness**: `PACKAGE_MANIFEST` describes what was actually

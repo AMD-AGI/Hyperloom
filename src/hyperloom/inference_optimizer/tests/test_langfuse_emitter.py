@@ -769,6 +769,64 @@ def test_backfill_cursors_advance_only_once_the_client_flush_lands(tmp_path, mon
     assert second.span_named("forge:iter:1") is not None
 
 
+def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path, monkeypatch):
+    """A step left out of flush_steps_done must not have its rows marked delivered."""
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"), _kernel_decision("k2"))
+
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
+    real = em._open_decision_span
+    calls = {"n": 0}
+
+    def _second_row_fails(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("sdk hiccup")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(em, "_open_decision_span", _second_row_fails)
+    em.flush_session()
+    assert "decision_scores" not in em._flush_steps_done
+    em.flush_session()
+
+    steps = [
+        s.kwargs["metadata"]["task_id"] for s in client.spans if s.kwargs["name"] == "optimization_step:kernel_opt"
+    ]
+    assert steps == ["k1", "k2"]
+    assert lfe.read_receipt(sd)["backfill_rows_sent"]["decision_scores"] == 2
+
+
+def test_a_kb_row_whose_send_failed_is_left_for_the_next_leg(tmp_path, monkeypatch):
+    """A swallowed send is not a delivered row."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
+    _install_fake_sdk(monkeypatch, _FakeClient())
+    real_start = lfe._start_obs
+
+    def _forge_spans_fail(parent, **kwargs):
+        if str(kwargs.get("name", "")).startswith("forge:iter"):
+            raise RuntimeError("sdk hiccup")
+        return real_start(parent, **kwargs)
+
+    monkeypatch.setattr(lfe, "_start_obs", _forge_spans_fail)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert "forge_steps" not in lfe.read_receipt(sd).get("backfill_rows_sent", {})
+
+    monkeypatch.setattr(lfe, "_start_obs", real_start)
+    lfe._REGISTRY.clear()
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert second.span_named("forge:iter:1") is not None
+
+
 def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
     """Two processes reading the same empty receipt must not both emit."""
     _enable_env(monkeypatch)

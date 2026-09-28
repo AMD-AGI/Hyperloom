@@ -519,10 +519,10 @@ class LangfuseEmitter:
         phase: str = lfmap.UNPHASED,
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
-    ) -> None:
-        """Emit one non-LLM KB trace as a span nested under its agent span."""
+    ) -> bool:
+        """Emit one non-LLM KB trace as a span nested under its agent span; return whether it was handed over."""
         if not self._enabled:
-            return
+            return False
         try:
             start = lfmap.parse_ts(ts)
             parent = self._ensure_agent_span(phase, agent, start)
@@ -540,6 +540,8 @@ class LangfuseEmitter:
         except Exception:
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
+            return False
+        return True
 
     def _emit_generation(
         self,
@@ -617,6 +619,10 @@ class LangfuseEmitter:
         for name in _FLUSH_STEP_NAMES:
             if name in self._flush_steps_done:
                 continue
+            if name != "client_flush":
+                # Whatever this step hands the SDK sits in its buffer until the final flush, so a step retried after
+                # an earlier pass's flush owes that flush again.
+                self._flush_steps_done.discard("client_flush")
             try:
                 steps[name]()
             except Exception:
@@ -633,11 +639,17 @@ class LangfuseEmitter:
         self._backfill_rows_sent.update(self._backfill_rows_pending)
         self._backfill_rows_pending.clear()
 
-    def _unsent_backfill_rows(self, step: str, path: Path) -> list[dict[str, Any]]:
-        """Rows of one backfill log past what an earlier flush delivered; marks them pending for this one."""
+    def _backfill_rows(self, step: str, path: Path, send: Callable[[dict[str, Any]], bool]) -> None:
+        """Send one backfill log's rows past those already handed over, advancing its cursor one sent row at a time.
+
+        Raises on the first row that could not be sent, so the step stays owed and resumes at that row.
+        """
         rows = _load_jsonl(path)
-        self._backfill_rows_pending[step] = len(rows)
-        return rows[self._backfill_rows_sent.get(step, 0) :]
+        start = self._backfill_rows_pending.get(step, self._backfill_rows_sent.get(step, 0))
+        for index in range(start, len(rows)):
+            if not send(rows[index]):
+                raise RuntimeError(f"{step} row {index} could not be sent")
+            self._backfill_rows_pending[step] = index + 1
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins."""
@@ -861,10 +873,13 @@ class LangfuseEmitter:
         span_for: _SpanBuilder,
     ) -> None:
         """Backfill each not-yet-delivered row of one session audit log as a KB span under ``agent``."""
-        for row in self._unsent_backfill_rows(step, path_for(self.session_dir)):
+
+        def _send(row: dict[str, Any]) -> bool:
             self._counts[counter] += 1
             name, metadata = span_for(row)
-            self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
+            return self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
+
+        self._backfill_rows(step, path_for(self.session_dir), _send)
 
     def _recipe_audit_span(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Name + metadata for one recipe-KB read or write audit row."""
@@ -875,24 +890,22 @@ class LangfuseEmitter:
 
     def _flush_decision_scores(self) -> None:
         """Convert each not-yet-delivered decision_trace row into Langfuse Score(s)."""
-        for drow in self._unsent_backfill_rows("decision_scores", decision_trace_path(self.session_dir)):
+
+        def _send(drow: dict[str, Any]) -> bool:
             scores = lfmap.decision_to_scores(drow)
             if not scores:
-                continue
+                return True
             meta0 = scores[0].get("metadata") or {}
             phase = str(meta0.get("phase") or lfmap.UNPHASED)
             agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
             # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
             step_span = self._open_decision_span(drow, phase, agent)
-            for score in scores:
-                self._create_score(
-                    score,
-                    phase=phase,
-                    agent=agent,
-                    span=step_span,
-                )
+            sent = all(self._create_score(score, phase=phase, agent=agent, span=step_span) for score in scores)
             if step_span is not None:
                 self._safe_end(step_span)
+            return sent
+
+        self._backfill_rows("decision_scores", decision_trace_path(self.session_dir), _send)
 
     def _open_decision_span(
         self,
@@ -950,8 +963,8 @@ class LangfuseEmitter:
         phase: str,
         agent: str,
         span: Any = None,
-    ) -> None:
-        """Attach a Langfuse Score to a step span / agent span / the trace."""
+    ) -> bool:
+        """Attach a Langfuse Score to a step span / agent span / the trace; return whether it was handed over."""
         if span is None:
             span = self._agent_spans.get((phase, agent))
         try:
@@ -980,6 +993,8 @@ class LangfuseEmitter:
                 score.get("name"),
                 exc_info=True,
             )
+            return False
+        return True
 
     # -- receipt (session_breakdown ``langfuse`` section) ---------------
     def receipt(self) -> dict[str, Any]:
