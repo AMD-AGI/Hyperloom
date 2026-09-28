@@ -339,15 +339,13 @@ def check_mlperf_harness(env: Mapping[str, str]) -> None:
     framework = str(env.get("FRAMEWORK") or "").strip().lower()
     if framework and "sglang" not in framework:
         raise AgentXPreflightError(
-            "HYPERLOOM_AGENTIC_BACKEND=mlperf drives the Kimi-K3 SGLang recipe; "
-            f"refusing framework {framework!r}.",
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf drives the Kimi-K3 SGLang recipe; refusing framework {framework!r}.",
             repairable=False,
         )
     model = str(env.get("MODEL") or env.get("MODEL_PATH") or "").strip().lower()
     if model and "kimi" not in model:
         raise AgentXPreflightError(
-            "HYPERLOOM_AGENTIC_BACKEND=mlperf only measures Kimi-K3; "
-            f"refusing model {model!r}.",
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf only measures Kimi-K3; refusing model {model!r}.",
             repairable=False,
         )
     port = str(env.get("PORT") or "30000").strip()

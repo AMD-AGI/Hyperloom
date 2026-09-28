@@ -97,7 +97,9 @@ def mlperf_submission_block(
     if mapped.get("mlperf_complete") is False or mapped.get("submission_valid") is False:
         reasons = mapped.get("submission_invalid_reasons") or []
         return (
-            "mlperf_submission_incomplete:" + ",".join(str(r) for r in reasons) if reasons else "mlperf_submission_incomplete"
+            "mlperf_submission_incomplete:" + ",".join(str(r) for r in reasons)
+            if reasons
+            else "mlperf_submission_incomplete"
         )
     rate = mapped.get("request_error_rate")
     if not isinstance(rate, (int, float)) or rate > AGENTX_ERROR_RATE_THRESHOLD_PCT:

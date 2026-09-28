@@ -277,9 +277,7 @@ class ClosePhase(CoordinatorCollaborator):
         if not str(getattr(state, "baseline_config_path", "") or ""):
             await self._record_close_step(step, status="skipped", detail="no_baseline_config")
             return
-        needed = mlperf_benchmark_timeout_sec(
-            {"MLPERF_AGENTIC_FLOW": "full", "AGENTIC_NUM_TRAJECTORIES": "613"}
-        )
+        needed = mlperf_benchmark_timeout_sec({"MLPERF_AGENTIC_FLOW": "full", "AGENTIC_NUM_TRAJECTORIES": "613"})
         usable_sec = _phase_state.session_usable_seconds(state)
         if usable_sec is not None and usable_sec < needed:
             await self._record_close_step(

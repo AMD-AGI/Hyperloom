@@ -24,7 +24,6 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
-    VERDICT_KEEP,
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
