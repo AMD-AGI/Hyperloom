@@ -40,6 +40,20 @@ def _clear(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+def test_geak_timing_environment_crosses_the_ray_boundary(monkeypatch):
+    timing = {
+        "GEAK_E2E_TIMEOUT_S": "18000",
+        "GEAK_AGENT_TIMEOUT_MS": "14400000",
+        "GEAK_TIME_TAIL_CAP_S": "3600",
+        "GEAK_FINAL_RESERVE_S": "900",
+        "GEAK_REBENCH_RESERVE_S": "5400",
+    }
+    for name, value in timing.items():
+        monkeypatch.setenv(name, value)
+    env = ray_runtime.safe_runtime_env()["env_vars"]
+    assert {name: env[name] for name in timing} == timing
+
+
 def test_openai_only_fills_openai_aliases_and_leaves_anthropic_unset(monkeypatch):
     """OpenAI side only: its own aliases are filled, nothing on the Anthropic side."""
     _clear(monkeypatch)

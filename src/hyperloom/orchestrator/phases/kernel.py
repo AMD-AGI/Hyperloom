@@ -964,8 +964,9 @@ class KernelPhase(PhaseHandler):
         remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
-        # Reserve the closing window: kill the subprocess with at least ``grace`` left.
-        kill_budget = remaining - grace
+        rebench_reserve = max(0, int(os.environ.get("GEAK_REBENCH_RESERVE_S", "0")))
+        # The caller may reserve the canonical rebench in addition to closing.
+        kill_budget = remaining - grace - rebench_reserve
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
         phase_rem = _phase_state.phase_budget_remaining_seconds(
             self.shared_state,
