@@ -175,9 +175,16 @@ jobs:
         with:
           node-version: 22
       - name: Ensure jq and gh
+        env:
+          GH_CLI_VERSION: 2.101.0
         run: |
+          set -euo pipefail
           command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
-          command -v gh >/dev/null 2>&1 || { echo "::error::gh (GitHub CLI) is not installed on this runner"; exit 1; }
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \
+              | tar -xz -C "$RUNNER_TEMP"
+            echo "$RUNNER_TEMP/gh_${GH_CLI_VERSION}_linux_amd64/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Check configuration and LLM proxy
         run: |
