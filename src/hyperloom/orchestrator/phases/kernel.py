@@ -26,7 +26,7 @@ from . import machine_state as _phase_state
 from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )

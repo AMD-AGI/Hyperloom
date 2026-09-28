@@ -13,6 +13,7 @@ from hyperloom.orchestrator.actions.executors import (
     _multi_node_env as mne,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _FakeTasks:
@@ -34,7 +35,7 @@ def _fake_self(**state_overrides):
     for k, v in state_overrides.items():
         setattr(state, k, v)
     return SimpleNamespace(
-        _MN_AUTO_EXPLORE_GRID_CAP=Coordinator._MN_AUTO_EXPLORE_GRID_CAP,
+        _MN_AUTO_EXPLORE_GRID_CAP=FrameworkPhase._MN_AUTO_EXPLORE_GRID_CAP,
         shared_state=state,
         tasks=_FakeTasks(),
         # Stands in for the dispatcher's action-catalogue TTL lookup.
@@ -129,7 +130,7 @@ def test_grid_capped_at_grid_cap(monkeypatch):
     proposals = [{"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)]
     _run(s, domain="params", proposals=proposals)
     grid = s.tasks.calls[0]["params"]["grid"]
-    assert len(grid) == Coordinator._MN_AUTO_EXPLORE_GRID_CAP
+    assert len(grid) == FrameworkPhase._MN_AUTO_EXPLORE_GRID_CAP
 
 
 def test_string_extra_envs_ignored(monkeypatch):

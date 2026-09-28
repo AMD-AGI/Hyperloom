@@ -14,7 +14,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,
@@ -35,7 +36,6 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message, TOPIC_ALLOWLIST
 from ..policy.gate import (
-    patch_verdict_subject,
     PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
@@ -112,13 +112,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-def _is_upstream_pr_candidate(pending: Any) -> bool:
-    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate."""
-    if getattr(pending, "action_name", "") != "integrate_patch":
-        return False
-    return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
-
-
 def _record_config_proposal(router: Any, pending: Any) -> None:
     """Record one config-arm grid on the framework event, as it is proposed.
 
@@ -132,8 +125,7 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    recorder = router.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -200,22 +192,6 @@ def _variant_review_rows(
             }
         )
     return rows
-
-
-def _review_subject(pending: Any) -> str:
-    """Return the proposal row a ruling belongs on.
-
-    The two arms identify a proposal differently, so this is the candidate id
-    when the proposal carries one and the bus message id otherwise. Resolving it
-    here keeps a review on the proposal it judged instead of opening a second,
-    near-empty row beside it.
-    """
-    payload = getattr(pending, "payload", None) or {}
-    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    candidate = str(
-        payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
-    ).strip()
-    return candidate or str(getattr(pending, "proposal_msg_id", "") or "")
 
 
 def _phase_scope(router: Any) -> tuple[str, int]:
@@ -338,11 +314,10 @@ def _record_critic_review(
         variants=variants,
     )
 
-    proposal_id = _review_subject(pending)
+    proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    recorder = router.phase_framework.timeline()
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -407,11 +382,10 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     """Record what the loop did with a ruling, onto the ruling."""
     _record_phase_proposal_outcome(pending, **outcome)
 
-    proposal_id = _review_subject(pending)
+    proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
     if not proposal_id:
         return
-    getter = getattr(router, "_framework_timeline", None)
-    recorder = getter() if callable(getter) else None
+    recorder = router.phase_framework.timeline()
     if recorder is None:
         return
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
@@ -736,7 +710,7 @@ class IntentRouter:
         """
         pending.decided = True
         pending.verdict = verdict
-        if _is_upstream_pr_candidate(pending):
+        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -773,7 +747,7 @@ class IntentRouter:
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
             # A pre-screen carries its candidate id at the top level, not in params.
-            sid_candidate = patch_verdict_subject({**pa_params, **(pending.payload or {})})
+            sid_candidate = verdict_subject({**pa_params, **(pending.payload or {})})
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pa_params.get("task_id") or "").strip()
@@ -814,12 +788,8 @@ class IntentRouter:
                 pending,
                 approved_variant_names=approved_variant_names,
             )
-        elif verdict == "reject" and _is_upstream_pr_candidate(pending):
-            # Record the critic_denied row so the candidate pump advances.
-            await self._coord._record_framework_agent_critic_denied(
-                pending,
-                reasoning,
-            )
+        elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
+            await self._coord.phase_framework.record_critic_denial(pending, reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
@@ -833,10 +803,7 @@ class IntentRouter:
                     sid_candidate,
                 )
         elif verdict == "needs_review":
-            await self._coord._maybe_reauthor_from_critic_feedback(
-                pending,
-                advisory,
-            )
+            await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""

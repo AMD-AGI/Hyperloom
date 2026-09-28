@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Who owns a unit of work, decided the same way on both sides of the record."""
+"""Which lever a unit of work moved and which phase authored it, decided the same way on both sides of the record."""
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
+from hyperloom.common.framework_arm import is_local_explore_candidate
 
 #: What kind of lever a unit of work moved. This is the attribution key that
 #: survives the phase machine: a phase says *when* work ran, which stops being
@@ -51,7 +52,7 @@ def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
     # no upstream lead to attribute to.
     candidate_id = str(evidence.get("framework_agent_candidate_id") or "")
     if candidate_id:
-        if not candidate_id.startswith("local_explore:"):
+        if not is_local_explore_candidate(candidate_id):
             return LEVER_UPSTREAM_PR
         # That arm is told which gap to close, not which lever to move, so it returns server args about as often as a
         # diff.

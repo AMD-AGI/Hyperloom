@@ -626,7 +626,7 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
         mode="all",
         kind="accuracy_below_floor",
     )
-    coordinator = types.SimpleNamespace(_framework_timeline=lambda: None)
+    coordinator = types.SimpleNamespace(phase_framework=types.SimpleNamespace(timeline=lambda: None))
     Coordinator._fault_open_phase_event(
         coordinator,
         stage="reactor:optimizer",
