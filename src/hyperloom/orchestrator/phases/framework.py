@@ -927,6 +927,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             requires_lanes=lanes,
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         if _spec_existing and await self._settle_finished_authoring_specialist(
             spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
@@ -1202,6 +1203,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             requires_lanes=lanes,
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         new_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
@@ -1445,6 +1447,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             spec_task, _spec_existing = await self.tasks.create_or_return_existing(
                 idempotency_key=idem,
                 **create_kwargs,
+                dispatch_class="coordinator",
             )
             if not (_spec_existing and str(getattr(spec_task, "state", "") or "") == "failed"):
                 break
@@ -1621,6 +1624,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 idempotency_key=idem,
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",
@@ -2402,6 +2406,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
+            dispatch_class="coordinator",
         )
         _record_run(
             self,
@@ -2590,6 +2595,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             idempotency_key=f"mn-auto-explore-{task.task_id}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         log.info(
             "mn_auto_materialize: enqueued explore task_id=%s (variants=%d, from specialist=%s domain=%s, existing=%s)",

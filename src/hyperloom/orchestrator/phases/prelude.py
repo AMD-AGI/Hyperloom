@@ -1463,6 +1463,7 @@ class PreludePhase(CoordinatorCollaborator):
                 idempotency_key="warm-replay-prelude",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             )
         except Exception as exc:
             rollback = revert_warm_kernel_patches(
@@ -2617,6 +2618,7 @@ class PreludePhase(CoordinatorCollaborator):
             ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         if was_existing:
             log.info(
