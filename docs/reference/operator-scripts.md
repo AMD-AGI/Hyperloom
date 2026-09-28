@@ -177,6 +177,11 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 The same tools package also contains smaller utilities that are useful during
 incident response or launch validation:
 
+* `cold_start_check.py`: bounded gate for a fresh host/container. It runs the
+  installer check, launcher GPU/model preflight, framework and optional
+  Experience-KB bootstrap, trusted gateway TLS, and one real production
+  orchestration request:
+  `python src/hyperloom/inference_optimizer/tools/cold_start_check.py --model "$MODEL_PATH" --framework "$FRAMEWORK" --output /path/to/report.json`.
 * `backfill_langfuse.py`: replay one finished session's `reports/trace/` into
   Langfuse after the fact:
   `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.

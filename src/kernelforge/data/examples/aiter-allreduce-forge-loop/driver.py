@@ -22,6 +22,8 @@ import torch.distributed as dist
 # Constants
 
 SENTINEL = "__FORGE_DISTRIBUTED_RESULT__"
+
+
 def _default_tp() -> int:
     """Rank count to use when the caller did not name one."""
     for var in ("FORGE_NPROC_PER_NODE", "WORLD_SIZE"):
@@ -184,9 +186,7 @@ def _validate_suite_tp(name: str, tp: int) -> None:
     """Reject a named measured suite at a different tensor-parallel size."""
     expected = _SUITE_REQUIRED_TP.get(name)
     if expected is not None and tp != expected:
-        raise ValueError(
-            f"suite {name!r} requires tp={expected}, got tp={tp}"
-        )
+        raise ValueError(f"suite {name!r} requires tp={expected}, got tp={tp}")
 
 
 def parse_shape(spec: str) -> tuple[list[Case], dict]:
@@ -201,8 +201,7 @@ def parse_shape(spec: str) -> tuple[list[Case], dict]:
         builder = _SUITE_BUILDERS.get(name)
         if builder is None:
             raise ValueError(
-                f"unknown suite {name!r} in FORGE_COLLECTIVE_SUITE "
-                f"(known: {', '.join(sorted(_SUITE_BUILDERS))})"
+                f"unknown suite {name!r} in FORGE_COLLECTIVE_SUITE (known: {', '.join(sorted(_SUITE_BUILDERS))})"
             )
         _validate_suite_tp(name, DEFAULT_TP)
         return builder("bf16"), {"tp": str(DEFAULT_TP), "suite": name}
@@ -491,12 +490,8 @@ def _make_inputs(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke") -> 
     x = (torch.randn(shape, generator=gen, device=ctx.device, dtype=torch.float32) * scale).to(dtype)
     out = {"x": x}
     if case.target == "fused":
-        out["residual"] = torch.randn(
-            shape, generator=gen, device=ctx.device, dtype=torch.float32
-        ).to(dtype)
-        out["weight"] = torch.randn(
-            (case.hidden,), generator=gen, device=ctx.device, dtype=torch.float32
-        ).to(dtype)
+        out["residual"] = torch.randn(shape, generator=gen, device=ctx.device, dtype=torch.float32).to(dtype)
+        out["weight"] = torch.randn((case.hidden,), generator=gen, device=ctx.device, dtype=torch.float32).to(dtype)
         out["eps"] = 1e-6
     return out
 
@@ -510,9 +505,7 @@ def run_candidate(case: Case, ctx: WorkerCtx, inp: dict):
 
     if case.target == "raw":
         return tensor_model_parallel_all_reduce(inp["x"])
-    return tensor_model_parallel_fused_allreduce_rmsnorm(
-        inp["x"], inp["residual"], inp["weight"], inp["eps"]
-    )
+    return tensor_model_parallel_fused_allreduce_rmsnorm(inp["x"], inp["residual"], inp["weight"], inp["eps"])
 
 
 def run_reference(case: Case, ctx: WorkerCtx, inp: dict):
@@ -684,14 +677,10 @@ def worker_main(args: argparse.Namespace) -> int:
             for _ in range(max(1, args.repeat)):
                 this_round: dict[str, float] = {}
                 for case in cases:
-                    this_round[case.case_id] = bench_case(
-                        case, ctx, args.warmup, args.iters, args.seed
-                    )
+                    this_round[case.case_id] = bench_case(case, ctx, args.warmup, args.iters, args.seed)
                 rounds.append(this_round)
             for case in cases:
-                per_case[case.case_id] = statistics.median(
-                    r[case.case_id] for r in rounds
-                )
+                per_case[case.case_id] = statistics.median(r[case.case_id] for r in rounds)
             if rank0 and args.repeat > 1:
                 for case in cases:
                     vals = [r[case.case_id] for r in rounds]
@@ -710,11 +699,13 @@ def worker_main(args: argparse.Namespace) -> int:
                 g = groups.setdefault(case.group, {"cases": []})
                 # ``scored`` travels with the case so consumers do not have to re-derive which cases back the score
                 # from a second list that can drift out of step with this one.
-                g["cases"].append({
-                    "case_id": case.case_id,
-                    "median_ms": per_case[case.case_id],
-                    "scored": case.sensitive,
-                })
+                g["cases"].append(
+                    {
+                        "case_id": case.case_id,
+                        "median_ms": per_case[case.case_id],
+                        "scored": case.sensitive,
+                    }
+                )
 
             if rank0:
                 # Mark the cases outside the score.
@@ -785,11 +776,12 @@ def worker_main(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Forge TP8 all-reduce driver (Kimi-K3)")
     # The driver owns case selection, so the default must be the full scored suite rather than one probe case.
-    p.add_argument("--shape", default="", help="e.g. suite=tp8_k3,tp=8,dtype=bf16; empty derives the rank count from the launcher")
+    p.add_argument(
+        "--shape", default="", help="e.g. suite=tp8_k3,tp=8,dtype=bf16; empty derives the rank count from the launcher"
+    )
     # default=None distinguishes "caller chose smoke" from "caller said nothing", which decides whether the full
     # correctness matrix runs.
-    p.add_argument("--mode", default=None,
-                   choices=["smoke", "stability", "determinism"])
+    p.add_argument("--mode", default=None, choices=["smoke", "stability", "determinism"])
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--bench-mode", action="store_true")

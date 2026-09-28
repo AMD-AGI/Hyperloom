@@ -126,12 +126,17 @@ def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
     assert "disagrees" in warnings[0]
     assert gpu_types._resolve_gpu_type("mi300x", "") == ("mi300x", [])
 
+    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
     monkeypatch.delenv("GPU_TYPE", raising=False)
     assert gpu_types._resolve_amd_gpu_type("mi308x") == "mi308x"
     assert gpu_types._resolve_amd_gpu_type("nvidia") is None
 
     monkeypatch.setenv("GPU_TYPE", " MI325X ")
     assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.setenv("TARGET_GPU_TYPE", "MI325X")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.delenv("TARGET_GPU_TYPE")
     monkeypatch.setenv("GPU_TYPE", "unknown")
     assert gpu_types._resolve_amd_gpu_type() is None
 

@@ -167,3 +167,11 @@ def test_pip_still_receives_the_click_spec_when_the_ceiling_applies() -> None:
 
     assert "[click<8.3.0]" in out
     assert "[ray[default]==2.55.0]" in out
+
+
+def test_main_reasserts_ray_compatibility_after_geak_dependencies() -> None:
+    main = _extract_shell_function("main")
+    calls = [line.strip() for line in main.splitlines()]
+
+    assert calls.count("ensure_ray") == 2
+    assert len(calls) - 1 - calls[::-1].index("ensure_ray") > calls.index("ensure_geak")

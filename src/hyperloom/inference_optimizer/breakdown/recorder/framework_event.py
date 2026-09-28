@@ -395,6 +395,8 @@ class FrameworkEventRecorder:
             "source_ref",
             "repo",
             "title",
+            "reasoning",
+            "kb_read_id",
             "verdict",
             "route",
         ):
@@ -402,6 +404,21 @@ class FrameworkEventRecorder:
                 row[name] = str(fields.get(name) or "")
         if "changed_files" in fields:
             row["changed_files"] = [str(path) for path in (fields.get("changed_files") or []) if str(path or "")]
+        if "rendered_refs" in fields:
+            rendered_refs: list[dict[str, str]] = []
+            for item in fields.get("rendered_refs") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                experience_id = str(item.get("id") or "").strip()
+                if not experience_id:
+                    continue
+                rendered_refs.append(
+                    {
+                        "id": experience_id,
+                        "purpose": str(item.get("purpose") or "").strip(),
+                    }
+                )
+            row["rendered_refs"] = rendered_refs
         if "confidence" in fields:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
@@ -601,13 +618,20 @@ class FrameworkEventRecorder:
             "route",
             "patch_source",
             "patch_path",
+            "reasoning",
+            "reasoning_origin",
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
         for name in ("adopted", "attribution_eligible"):
             if name in fields:
                 row[name] = None if fields.get(name) is None else bool(fields.get(name))
-        for name in ("accepted_kernels", "target_files", "patches_applied"):
+        for name in (
+            "accepted_kernels",
+            "target_files",
+            "patches_applied",
+            "patches_reverted",
+        ):
             if name in fields:
                 row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
         if "ts" not in fields:
@@ -647,6 +671,7 @@ class FrameworkEventRecorder:
             row["failure"] = {
                 "error_class": str(failure.get("error_class") or ""),
                 "error_excerpt": str(failure.get("error_excerpt") or ""),
+                "attribution": str(failure.get("attribution") or ""),
             }
         if "artifacts" in fields:
             artifacts = _as_dict(fields.get("artifacts"))

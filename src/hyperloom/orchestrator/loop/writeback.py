@@ -61,6 +61,7 @@ from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state.attempt_ledger import record_config_attempt
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -472,6 +473,16 @@ def _record_config_attempts(
         # arms carry is projected from the gate that ruled. No gate row means
         # nothing gated the variant, which is not a gate that refused it.
         accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
+        error_class = str(row.get("error_class") or "")
+        error_excerpt = str(row.get("error_excerpt") or "")
+        failure_attribution = ""
+        if outcome in UNMEASURED_OUTCOMES:
+            failure_attribution = classify_failure_attribution(
+                error_class=error_class,
+                error_excerpt=error_excerpt,
+                reason=row.get("reason"),
+                explicit=row.get("failure_attribution"),
+            )
         recorder.record_attempt(
             attempt_id,
             arm=ARM_CONFIG,
@@ -481,6 +492,8 @@ def _record_config_attempts(
             provenance=str(row.get("provenance") or ""),
             outcome=outcome,
             reason=str(row.get("reason") or ""),
+            reasoning=str(variant.get("note") or ""),
+            reasoning_origin=str(variant.get("reasoning_origin") or ""),
             stage=str(row.get("stage") or ""),
             fingerprint=fingerprint,
             # The fingerprint is the join key; the name is what a reader
@@ -498,6 +511,9 @@ def _record_config_attempts(
             config_delta={
                 "extra_server_args": variant.get("extra_server_args"),
                 "extra_envs": variant.get("extra_envs"),
+                "remove_args": variant.get("remove_args"),
+                "unset_envs": variant.get("unset_envs"),
+                "args_mode": variant.get("args_mode"),
             },
             accuracy={
                 "required": True if accuracy_gate else None,
@@ -506,8 +522,9 @@ def _record_config_attempts(
                 "passed": accuracy_gate.get("passed"),
             },
             failure={
-                "error_class": str(row.get("error_class") or ""),
-                "error_excerpt": str(row.get("error_excerpt") or ""),
+                "error_class": error_class,
+                "error_excerpt": error_excerpt,
+                "attribution": failure_attribution,
             },
             artifacts={
                 "workspace": str(row.get("workspace") or ""),
