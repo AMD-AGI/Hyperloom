@@ -204,6 +204,14 @@ def _build(session: Path, state: dict, dest: Path) -> dict:
     if not state.get("framework_repo_path"):
         raise ValueError("Framework source root is unavailable")
     root = Path(state.get("framework_repo_path") or "")
+    from hyperloom.orchestrator.framework.optimization_scope import optimization_file
+
+    hook = optimization_file(str(state.get("bypass_scripts_dir") or ""))
+    if hook is not None:
+        from .single_file import build_single_file
+
+        _verify_accepted_source(state, root)
+        return build_single_file(state, root, hook, dest)
     contract = _read_contract(root)
     best = state.get("current_best") or {}
     if not best:
@@ -267,7 +275,9 @@ def export_custom_inference(session_dir: str | Path, state: dict[str, Any]) -> d
             shutil.rmtree(staged)
             staged.mkdir()
             result = {"schema_version": 1, "status": "incomplete", "reasons": [str(exc)], "validation": "not_run"}
-        atomic_write_json(staged / "deployment.json", result, indent=2)
+        single_file = result.get("kind") == "single_file"
+        metadata = session / "reports/deployment.json" if single_file else staged / "deployment.json"
+        atomic_write_json(metadata, result, indent=2, make_parents=True)
         if dest.exists():
             shutil.rmtree(dest)
         staged.rename(dest)
@@ -275,13 +285,15 @@ def export_custom_inference(session_dir: str | Path, state: dict[str, Any]) -> d
         from hyperloom.inference_optimizer.breakdown.session_package import deliverable
 
         expected = {(f"deployment/{rel}", digest) for rel, digest in result["files"].items()}
-        expected.add(("deployment/deployment.json", ""))
+        expected.add(("reports/deployment.json" if single_file else "deployment/deployment.json", ""))
         if deliverable(session, expected) != expected:
             result.update(
                 status="incomplete",
                 reasons=["artifact_not_self_contained: session package limits omit deployment files"],
             )
-            atomic_write_json(dest / "deployment.json", result, indent=2)
+            atomic_write_json(
+                session / "reports/deployment.json" if single_file else dest / "deployment.json", result, indent=2
+            )
     return result
 
 

@@ -271,6 +271,8 @@ SAFE_ENV_KEYS = (
     "HOME",
     "LD_LIBRARY_PATH",
     "HYPERLOOM_KERNEL_AGENT_ROOT",
+    "HYPERLOOM_BYPASS_SCRIPTS_DIR",
+    "CLAUDE_CONFIG_DIR",
     "KERNEL_AGENT_ROOT",
     # Single artefact root others default under.
     "USER_DATA_PATH",

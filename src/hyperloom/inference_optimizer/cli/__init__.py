@@ -213,6 +213,10 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
     """Fail at launch when ``--framework custom`` cannot resolve its script."""
     if str(framework or "").strip().lower() != "custom":
         return
+    from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope, optimization_file
+
+    if optimization_file() is not None:
+        check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
     from hyperloom.orchestrator.actions.executors._workload_envs import (
         apply_scriptable_runtime_defaults,
     )

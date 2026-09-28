@@ -2039,6 +2039,11 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: Markdown lines for the source-hint section.
     """
     rows = ["## 7. LOCAL SOURCE NAVIGATION HINT", ""]
+    from ..framework.optimization_scope import scope_instructions
+
+    scope = scope_instructions()
+    if scope:
+        rows.extend([scope, ""])
     session_tree = (inp.session_framework_tree or "").strip()
     others = tuple(r for r in inp.framework_source_roots if r.rstrip("/") != session_tree.rstrip("/"))
     if not session_tree and not others and not inp.source_hint_directories:

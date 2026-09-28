@@ -985,6 +985,26 @@ def _resolve_framework_root(
     patch_texts: list[str] | None = None,
     recorded_root: str | None = None,
 ) -> Path | None:
+    """Resolve the apply root and enforce an operator-declared file boundary."""
+    from ...framework.optimization_scope import check_patch_scope
+
+    root = _resolve_framework_root_unscoped(explicit, patch_paths, patch_texts, recorded_root)
+    if root is not None:
+        try:
+            texts = [*(patch_texts or []), *_read_patch_texts(patch_paths)]
+            check_patch_scope(root, texts)
+        except ValueError as exc:
+            log.warning("integrate_patch: %s", exc)
+            return None
+    return root
+
+
+def _resolve_framework_root_unscoped(
+    explicit: str | None,
+    patch_paths: list[Path] | None = None,
+    patch_texts: list[str] | None = None,
+    recorded_root: str | None = None,
+) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
     A ``recorded_root`` — carried from the authoring stage through

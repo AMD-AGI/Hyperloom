@@ -2246,6 +2246,14 @@ def apply_kernel_patch(
             cache-clear / rebuild / jit-build records, and an optional
             ``multinode`` block.
     """
+    from hyperloom.orchestrator.framework.optimization_scope import optimization_file
+
+    if optimization_file() is not None:
+        return {
+            "status": "failed",
+            "error_class": "single_file_scope",
+            "error": "Single-file workloads must integrate kernels through hyperloom_optimize.py using integrate_patch",
+        }
     if snapshot_dir is not None:
         return _apply_kernel_patch_snapshot(
             patch_path=patch_path,

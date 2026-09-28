@@ -257,6 +257,59 @@ shows it immediately, instead of after hours of search against the wrong
 denominator. For the full artifact schema, see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Optimize a single Python module
+
+A script-owned workload can keep model loading, inputs, validation and timing in
+its original Python script and expose only this optimization point:
+
+```python
+try:
+    from hyperloom_optimize import hyperloom_optimize
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+    def hyperloom_optimize(model):
+        return model
+
+# Load model and weights, construct inputs, and capture any reference first.
+model = hyperloom_optimize(model)
+outputs = model(**inputs)
+```
+
+Point `--framework-path` at a Git checkout tracking only
+`hyperloom_optimize.py`, initially an identity function. In the frozen benchmark
+directory, declare `optimization_scope.json`:
+
+```json
+{"schema_version": 1, "file": "/absolute/workspace/optimization/hyperloom_optimize.py"}
+```
+
+The normal custom entrypoint still emits the InferenceX report. A script runner
+can translate the user's final `{"latency_ms": 1.2, "validation_passed": true}`
+JSON line into latency, throughput and the required quality gate. Run each
+candidate with only its module on the import path and a fixed environment, so
+unshipped helper files or environment overrides cannot contribute to its score.
+
+The declaration narrows patch integration to that exact file and root, including
+patches carrying a recorded source root. Direct kernel-patch installation is
+refused: custom kernels must be defined in the optimization module and integrated
+through the normal patch path. Coordinator and specialist prompts carry the same
+boundary. Existing custom workloads without this declaration retain their
+current behavior.
+
+Use filesystem isolation as well as the integration policy: mount the benchmark,
+weights and installed libraries read-only, with a read-only container root and
+no Docker socket. Git metadata, sessions, private candidate worktrees and compiler
+caches need writable scratch space. The policy limits accepted model changes;
+it does not turn an agent's shell into a single-file filesystem sandbox.
+
+On CLOSE, export produces `deployment/hyperloom_optimize.py` and bookkeeping in
+`reports/deployment.json` (`kind: single_file`). Export requires a clean
+checkout containing only the tracked module and verifies accepted source
+snapshots. Copy just the Python module beside the original script to use it in
+the original runtime; no Hyperloom installation is needed. Runtime validation
+remains the responsibility of that script.
+
 ## Use the optimized model without Hyperloom
 
 Custom workloads can ship a standalone `deployment/` directory. On CLOSE,
@@ -265,7 +318,8 @@ runtime assets, accepted environment settings, and dependency versions observed
 under the declared interpreter. It includes the directory in the session package.
 Weights remain external. Export does not install packages or run GPU inference.
 
-Declare `hyperloom_inference.json` at the root of `--framework-path`:
+For the shared-adapter deployment contract, declare `hyperloom_inference.json`
+at the root of `--framework-path`:
 
 ```json
 {

@@ -152,6 +152,9 @@ def _section_session_context(
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
     roots = framework_source_roots or ()
+    from ..framework.optimization_scope import scope_instructions
+
+    scope = scope_instructions()
     roots_line = ", ".join(roots) if roots else "none discovered on this host"
     tree = str(session_framework_tree or "").strip()
     tree_lines = [f"- session_framework_tree: {tree}  (the tree under optimisation)"] if tree else []
@@ -165,6 +168,7 @@ def _section_session_context(
         f"- graded_axis      : {graded_metric_key(benchmark_mode=benchmark_mode)}",
         f"- max_minutes      : {max_minutes}",
         *tree_lines,
+        *([scope] if scope else []),
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(benchmark_mode):
