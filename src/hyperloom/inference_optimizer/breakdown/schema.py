@@ -117,6 +117,8 @@ class V6TaskConfig(TypedDict, total=False):
     framework_version: str
     gpu_type: str
     tp: int | None
+    ep: int | None
+    compute_partition: dict[str, Any]
     conc: int | None
     isl: int | None
     osl: int | None

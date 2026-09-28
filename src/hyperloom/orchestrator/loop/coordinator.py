@@ -31,6 +31,7 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 from ..phases import machine_state as _phase_state
+from hyperloom.inference_optimizer.breakdown.stop_reasons import PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -1316,10 +1317,25 @@ class Coordinator:
         agent_name: str,
         exc: BackendError,
     ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
+        """Track backend failures and stop an inert PRELUDE before it burns the run budget."""
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
         threshold = self._backend_error_streak_threshold
+        prelude_without_baseline = False
+        if (
+            new_value >= threshold
+            and agent_name == "orchestration"
+            and self.shared_state.phase == _phase_state.PHASE_PRELUDE
+            and self.shared_state.baseline_tput <= 0
+        ):
+            baseline_work_pending = any(
+                proposal.action_name == "baseline" and not proposal.decided
+                for proposal in self.state.pending_proposals.values()
+            )
+            if not baseline_work_pending:
+                active_tasks = [*await self.tasks.queued(), *await self.tasks.running()]
+                baseline_work_pending = any(task.kind == "baseline" for task in active_tasks)
+            prelude_without_baseline = not baseline_work_pending
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
             await self.writeback.record_observation(
@@ -1333,13 +1349,19 @@ class Coordinator:
                     "latest_error": repr(exc)[:500],
                     "severity": "high",
                     "hint": (
-                        "subprocess backend has failed >= threshold times "
-                        "consecutively; consider switching to a mock "
-                        "backend (e.g. --critic-mock) "
-                        "while the underlying transport is repaired"
+                        "orchestration cannot enqueue a baseline; run the cold-start check and repair the LLM transport"
+                        if prelude_without_baseline
+                        else (
+                            "subprocess backend has failed >= threshold times "
+                            "consecutively; consider switching to a mock "
+                            "backend (e.g. --critic-mock) "
+                            "while the underlying transport is repaired"
+                        )
                     ),
                 },
             )
+        if prelude_without_baseline:
+            self.shared_state.set_stop_reason(PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON)
 
 
 __all__ = [

@@ -109,10 +109,7 @@ def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device
     for t in result["times_ms"]:
         print(f"wall_ms: {t:.6f}")
     times = sorted(result["times_ms"])
-    print(
-        f"case_ms: {_case_id(rows, cols, dtype)} "
-        f"{times[len(times) // 2]:.6f}"
-    )
+    print(f"case_ms: {_case_id(rows, cols, dtype)} {times[len(times) // 2]:.6f}")
     return 0
 
 

@@ -48,6 +48,7 @@ from .model_gate import (
 from ..gpu_types import (
     _autodetect_gpu_type,
     _gpu_runner_type,
+    _resolve_amd_gpu_type,
     _resolve_gpu_type,
 )
 from ..model_config_utils import (
@@ -685,14 +686,9 @@ def _validate_and_resolve_claude_model(
         return None
 
     if catalog_ids is None:
-        # Auth/network/server/non-JSON/empty-catalog failure: genuinely unverifiable.
-        if allow_custom:
-            print(
-                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
-                f"model support enabled (trusting the operator id)."
-            )
-            return None
+        # Auth/network/server/non-JSON/empty-catalog failure says the transport is
+        # unusable, not merely that ``chosen`` is a custom id. Continuing here
+        # leaves PRELUDE unable to propose even the baseline.
         print(
             "ERROR: gateway catalog unreachable after retries; cannot "
             "verify Claude model availability. Refusing to start.",
@@ -1641,6 +1637,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
+    from ..experience_v1 import validate_experience_config
+
+    validate_experience_config()
     try:
         resolved_urls = _preflight(args)
     except Exception as exc:
@@ -2041,7 +2040,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 

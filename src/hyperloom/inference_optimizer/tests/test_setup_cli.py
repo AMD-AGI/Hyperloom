@@ -19,6 +19,21 @@ class _Completed:
     returncode = 7
 
 
+def test_env_template_does_not_activate_placeholder_credentials() -> None:
+    template = Path(__file__).resolve().parents[4] / ".env.template"
+    active = [
+        line.strip()
+        for line in template.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    credential_lines = [
+        line
+        for line in active
+        if line.startswith(("OPENAI_BASE_URL=", "OPENAI_API_KEY=", "ANTHROPIC_BASE_URL=", "ANTHROPIC_API_KEY="))
+    ]
+    assert credential_lines == []
+
+
 def test_setup_cli_forwards_flags_and_workspace_env(tmp_path: Path, monkeypatch):
     installer = tmp_path / "install_baremetal.sh"
     installer.write_text("#!/bin/sh\n", encoding="utf-8")

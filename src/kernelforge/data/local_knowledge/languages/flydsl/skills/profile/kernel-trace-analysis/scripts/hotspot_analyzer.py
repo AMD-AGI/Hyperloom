@@ -162,9 +162,9 @@ def stall_bar(pct):
 
 def fmt_cycles(n):
     if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}M"
+        return f"{n / 1_000_000:.2f}M"
     if n >= 1_000:
-        return f"{n/1_000:.1f}K"
+        return f"{n / 1_000:.1f}K"
     return str(n)
 
 
@@ -179,7 +179,7 @@ def print_stall_type_summary(instructions, total_stall):
         if inst.stall_cycles > 0:
             by_type[inst.stall_type] += inst.stall_cycles
     print(f"  {'Type':<14}  {'Stall':>8}  Bar")
-    print(f"  {'-'*14}  {'-'*8}  {'-'*38}")
+    print(f"  {'-' * 14}  {'-' * 8}  {'-' * 38}")
     for stype, cycles in sorted(by_type.items(), key=lambda x: x[1], reverse=True):
         pct = 100.0 * cycles / total_stall if total_stall else 0
         print(f"  {stype:<14}  {fmt_cycles(cycles):>8}  {stall_bar(pct)}")
@@ -188,7 +188,7 @@ def print_stall_type_summary(instructions, total_stall):
 def print_source_hotspots(hotspots, topk, total_stall):
     print_header(f"Top-{topk} Hotspot Source Lines  (stall cycles aggregated)")
     print(f"  {'#':>3}  {'Stall':>8}  {'%Total':>7}  {'StallBar':<38}  {'DomType':<12}  Source")
-    print(f"  {'-'*3}  {'-'*8}  {'-'*7}  {'-'*38}  {'-'*12}  {'-'*40}")
+    print(f"  {'-' * 3}  {'-' * 8}  {'-' * 7}  {'-' * 38}  {'-' * 12}  {'-' * 40}")
     for rank, hs in enumerate(hotspots[:topk], 1):
         if hs.total_stall_cycles == 0:
             break
@@ -203,7 +203,7 @@ def print_source_hotspots(hotspots, topk, total_stall):
 def print_asm_hotspots(instructions, topk, total_stall):
     print_header(f"Top-{topk} Hotspot Instructions  (by stall cycles)")
     print(f"  {'#':>3}  {'Stall':>8}  {'%Total':>7}  {'Type':<12}  {'ASM':<48}  Source")
-    print(f"  {'-'*3}  {'-'*8}  {'-'*7}  {'-'*12}  {'-'*48}  {'-'*30}")
+    print(f"  {'-' * 3}  {'-' * 8}  {'-' * 7}  {'-' * 12}  {'-' * 48}  {'-' * 30}")
     ranked = sorted([i for i in instructions if i.stall_cycles > 0], key=lambda x: x.stall_cycles, reverse=True)[:topk]
     for rank, inst in enumerate(ranked, 1):
         pct = 100.0 * inst.stall_cycles / total_stall if total_stall else 0
@@ -502,7 +502,7 @@ def main():
     print(f"\n  Kernel:        {os.path.basename(args.dispatch_dir)}")
     print(f"  Instructions:  {len(instructions):,}")
     print(f"  Total cycles:  {fmt_cycles(total_cycles)}")
-    print(f"  Total stalls:  {fmt_cycles(total_stall)}  ({100*total_stall/total_cycles:.1f}% of total cycles)")
+    print(f"  Total stalls:  {fmt_cycles(total_stall)}  ({100 * total_stall / total_cycles:.1f}% of total cycles)")
 
     meta = read_kernel_metadata(args.dispatch_dir, kernel_filter=args.kernel)
     reg_info = detect_arch_and_reg_pressure(instructions, meta)

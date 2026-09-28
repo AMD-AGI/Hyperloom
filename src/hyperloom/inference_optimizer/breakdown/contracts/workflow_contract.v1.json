@@ -60,6 +60,7 @@
       "patch_recovery_incomplete",
       "prelude_baseline_failed",
       "prelude_cold_anchor_low_budget",
+      "prelude_orchestration_unavailable",
       "robustness_escalated",
       "server_argv_invalid",
       "signal",
