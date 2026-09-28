@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -241,6 +242,23 @@ def session_start_payload(
     return payload
 
 
+_DECISION_IDENTITY_FIELDS: tuple[str, ...] = ("task_id", "dyn_id", "event", "kind", "change", "outcome", "variant_name")
+
+
+def decision_identity(decision_row: dict[str, Any]) -> str:
+    """Name one ``decision_trace.jsonl`` row independently of where the writer put it in the file.
+
+    Built from the facts its producer records once and never rewrites: the optimization journal's dedupe key
+    (``tick`` stands in for ``iter``, as every entry sets both from the same tick) plus the ``ts`` stamped at append,
+    or a dynamic action's ``dyn_id`` / ``event`` / ``ts``. What the writer derives or joins in on each export is left
+    out: ``tokens``, ``proposal_scores``, and ``phase``, which it infers from the phase history for a row that carries
+    none. Rows that agree on every field are one decision, so a row carrying none of them is scored once.
+    """
+    dec = decision_row.get("decision") or {}
+    facts = [decision_row.get("ts"), decision_row.get("tick"), *(dec.get(f) for f in _DECISION_IDENTITY_FIELDS)]
+    return hashlib.sha256(json.dumps(facts, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     """Project one ``decision_trace.jsonl`` row onto one or more Score dicts."""
     dec = decision_row.get("decision") or {}
@@ -377,6 +395,7 @@ __all__ = [
     "UNPHASED",
     "agent_of",
     "correlation_seed",
+    "decision_identity",
     "decision_to_scores",
     "derive_trace_id",
     "generation_metadata",

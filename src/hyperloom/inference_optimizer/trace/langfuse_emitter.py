@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     specialist_intel_path,
     trace_dir,
     trace_ext_dir,
+    trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
@@ -70,8 +71,7 @@ def _manifest_path(session_dir: Path) -> Path:
 
 #: Session-end reconcile steps, in run order. A retry in the same process skips
 #: the steps that already succeeded; across processes the durable unit is the
-#: row, through the ``ext_rows_sent`` / ``trajectory_rows_sent`` / ``backfill_rows_sent``
-#: receipt cursors.
+#: row, through the ``rows_sent`` and ``decisions_sent`` receipt entries.
 _FLUSH_STEP_NAMES: tuple[str, ...] = (
     "pending_halves",
     "ext_shards",
@@ -86,9 +86,15 @@ _FLUSH_STEP_NAMES: tuple[str, ...] = (
 )
 
 
-def _persisted_shard_cursors(session_dir: Path, key: str) -> dict[str, int]:
-    """Return how far each shard under receipt ``key`` was drained by a previous process."""
-    persisted = (read_receipt(session_dir) or {}).get(key)
+#: Per-shard cursors of receipts written before ``rows_sent``, with the directory their shard names live in.
+_LEGACY_SHARD_CURSORS: dict[str, Callable[[Path], Path]] = {
+    "ext_rows_sent": trace_ext_dir,
+    "trajectory_rows_sent": trajectory_dir,
+}
+
+
+def _cursor_entries(persisted: Any) -> dict[str, int]:
+    """Return the well-formed ``{name: rows}`` entries of one persisted cursor map."""
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -97,6 +103,16 @@ def _persisted_shard_cursors(session_dir: Path, key: str) -> dict[str, int]:
             cursors[str(name)] = max(0, int(count))
         except (TypeError, ValueError):
             continue
+    return cursors
+
+
+def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
+    """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``."""
+    cursors: dict[str, int] = {}
+    for key, directory in _LEGACY_SHARD_CURSORS.items():
+        prefix = directory(session_dir).relative_to(session_dir).as_posix()
+        cursors.update({f"{prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get(key)).items()})
+    cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
 
@@ -359,13 +375,12 @@ class LangfuseEmitter:
         # them nor loses the ones still owed.
         self._flush_steps_done: set[str] = set()
         self._flushed = False
-        # How many rows of each ext/ shard have been sent, restored from the receipt.
-        self._ext_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "ext_rows_sent")
-        self._trajectory_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "trajectory_rows_sent")
-        # Rows of each session-wide backfill log a flush delivered. A resumed leg reports into the same trace, so it
-        # starts after these; this flush's rows sit in ``_backfill_rows_pending`` until the client flush lands them.
-        self._backfill_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "backfill_rows_sent")
-        self._backfill_rows_pending: dict[str, int] = {}
+        # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
+        # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
+        persisted = read_receipt(self.session_dir) or {}
+        self._rows_sent: dict[str, int] = _persisted_rows_sent(self.session_dir, persisted)
+        decisions_sent = persisted.get("decisions_sent")
+        self._decisions_sent: set[str] = set(map(str, decisions_sent)) if isinstance(decisions_sent, list) else set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
         # after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -618,7 +633,7 @@ class LangfuseEmitter:
         steps: dict[str, Any] = {
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
-            **{name: functools.partial(self._backfill_kb_spans, name, *spec) for name, spec in kb_backfills.items()},
+            **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
             "trajectory": self._flush_trajectory,
             "decision_scores": self._flush_decision_scores,
             "close_spans": self._close_spans,
@@ -642,22 +657,24 @@ class LangfuseEmitter:
         self._write_receipt()
 
     def _flush_client(self) -> None:
-        """Hand the SDK's buffered observations to the network, then commit the backfill rows they carried."""
+        """Hand the SDK's buffered observations to the network."""
         self._client.flush()
-        self._backfill_rows_sent.update(self._backfill_rows_pending)
-        self._backfill_rows_pending.clear()
 
-    def _backfill_rows(self, step: str, path: Path, send: Callable[[dict[str, Any]], bool]) -> None:
-        """Send one backfill log's rows past those already handed over, advancing its cursor one sent row at a time.
+    def _rows_sent_key(self, source: Path) -> str:
+        """Return the ``rows_sent`` receipt key of an append-only source log."""
+        return source.relative_to(self.session_dir).as_posix()
 
-        Raises on the first row that could not be sent, so the step stays owed and resumes at that row.
+    def _drain(self, source: Path, rows: list[dict[str, Any]], send: Callable[[dict[str, Any]], bool]) -> None:
+        """Send the rows of ``source`` past its ``rows_sent`` cursor, advancing the cursor one sent row at a time.
+
+        Raises at the first row ``send`` could not hand to the SDK, so its step stays owed and every retry, in this
+        process or the next leg, resumes at that row.
         """
-        rows = _load_jsonl(path)
-        start = self._backfill_rows_pending.get(step, self._backfill_rows_sent.get(step, 0))
-        for index in range(start, len(rows)):
+        key = self._rows_sent_key(source)
+        for index in range(self._rows_sent.get(key, 0), len(rows)):
             if not send(rows[index]):
-                raise RuntimeError(f"{step} row {index} could not be sent")
-            self._backfill_rows_pending[step] = index + 1
+                raise RuntimeError(f"{key} row {index} could not be sent")
+            self._rows_sent[key] = index + 1
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins."""
@@ -858,36 +875,28 @@ class LangfuseEmitter:
         ext_dir = trace_ext_dir(self.session_dir)
         if not ext_dir.is_dir():
             return
-        unsent = 0
         for shard in sorted(ext_dir.glob("*.jsonl")):
-            sent = self._ext_rows_sent.get(shard.name, 0)
             rows = _load_jsonl(shard)
-            if sent == 0 and rows:
+            if rows and not self._rows_sent.get(self._rows_sent_key(shard)):
                 self._counts["ext_shards_read"] += 1
-            for index in range(sent, len(rows)):
-                if not self._emit_generation(token_row=rows[index], conv_row=None):
-                    unsent += 1
-                    break
-                self._ext_rows_sent[shard.name] = index + 1
-        if unsent:
-            raise RuntimeError(f"{unsent} ext-shard row(s) could not be sent")
+            self._drain(shard, rows, lambda row: self._emit_generation(token_row=row, conv_row=None))
 
     def _backfill_kb_spans(
         self,
-        step: str,
         path_for: Callable[[Path], Path],
         counter: str,
         agent: str,
         span_for: _SpanBuilder,
     ) -> None:
-        """Backfill each not-yet-delivered row of one session audit log as a KB span under ``agent``."""
+        """Backfill the rows of one session audit log earlier legs did not send as KB spans under ``agent``."""
 
         def _send(row: dict[str, Any]) -> bool:
             self._counts[counter] += 1
             name, metadata = span_for(row)
             return self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
 
-        self._backfill_rows(step, path_for(self.session_dir), _send)
+        path = path_for(self.session_dir)
+        self._drain(path, _load_jsonl(path), _send)
 
     def _recipe_audit_span(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Name + metadata for one recipe-KB read or write audit row."""
@@ -898,14 +907,17 @@ class LangfuseEmitter:
 
     def _flush_trajectory(self) -> None:
         """Backfill closed trajectory spans and point events, resuming each shard at its receipt cursor."""
-        shard_rows = {shard.name: load_trajectory_shard(shard) for shard in trajectory_shards(self.session_dir)}
+        shard_rows = {shard: load_trajectory_shard(shard) for shard in trajectory_shards(self.session_dir)}
         openings = trajmap.span_openings(row for rows in shard_rows.values() for row in rows)
-        for name, rows in shard_rows.items():
-            for index in range(self._trajectory_rows_sent.get(name, 0), len(rows)):
-                spec = trajmap.project_row(rows[index], openings)
-                if spec is not None:
-                    self._emit_trajectory_span(spec)
-                self._trajectory_rows_sent[name] = index + 1
+
+        def _send(row: dict[str, Any]) -> bool:
+            spec = trajmap.project_row(row, openings)
+            if spec is not None:
+                self._emit_trajectory_span(spec)
+            return True
+
+        for shard, rows in shard_rows.items():
+            self._drain(shard, rows, _send)
 
     def _flush_trajectory_tail(self) -> None:
         """Ship the trajectory rows recorded after the full flush, ending any span opened to parent them.
@@ -947,23 +959,34 @@ class LangfuseEmitter:
         self._counts["trajectory_spans_sent"] += 1
 
     def _flush_decision_scores(self) -> None:
-        """Convert each not-yet-delivered decision_trace row into Langfuse Score(s)."""
+        """Convert each decision_trace row earlier legs did not score into Langfuse Score(s).
 
-        def _send(drow: dict[str, Any]) -> bool:
-            scores = lfmap.decision_to_scores(drow)
-            if not scores:
-                return True
-            meta0 = scores[0].get("metadata") or {}
-            phase = str(meta0.get("phase") or lfmap.UNPHASED)
-            agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
-            # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
-            step_span = self._open_decision_span(drow, phase, agent)
-            sent = all(self._create_score(score, phase=phase, agent=agent, span=step_span) for score in scores)
-            if step_span is not None:
-                self._safe_end(step_span)
-            return sent
+        The writer rewrites the file as a ts-sorted join on every export, so a new decision can land ahead of ones
+        already sent; rows are matched by :func:`lfmap.decision_identity`, not by position. Raises at the first row
+        that could not be sent, leaving it and the rows after it owed.
+        """
+        for drow in _load_jsonl(decision_trace_path(self.session_dir)):
+            identity = lfmap.decision_identity(drow)
+            if identity in self._decisions_sent:
+                continue
+            if not self._send_decision(drow):
+                raise RuntimeError(f"decision {identity} could not be sent")
+            self._decisions_sent.add(identity)
 
-        self._backfill_rows("decision_scores", decision_trace_path(self.session_dir), _send)
+    def _send_decision(self, drow: dict[str, Any]) -> bool:
+        """Hand one decision's step span and Scores to the SDK; return whether every Score was handed over."""
+        scores = lfmap.decision_to_scores(drow)
+        if not scores:
+            return True
+        meta0 = scores[0].get("metadata") or {}
+        phase = str(meta0.get("phase") or lfmap.UNPHASED)
+        agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
+        # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
+        step_span = self._open_decision_span(drow, phase, agent)
+        sent = all(self._create_score(score, phase=phase, agent=agent, span=step_span) for score in scores)
+        if step_span is not None:
+            self._safe_end(step_span)
+        return sent
 
     def _open_decision_span(
         self,
@@ -1079,9 +1102,8 @@ class LangfuseEmitter:
             # Which reconcile steps have completed, so a receipt written after a partial flush says what is still owed
             # instead of reading as final.
             "flush_steps_done": sorted(self._flush_steps_done),
-            "ext_rows_sent": dict(self._ext_rows_sent),
-            "backfill_rows_sent": dict(self._backfill_rows_sent),
-            "trajectory_rows_sent": dict(self._trajectory_rows_sent),
+            "rows_sent": dict(self._rows_sent),
+            "decisions_sent": sorted(self._decisions_sent),
         }
 
     def _claim_one_shot(self, marker: str) -> bool:

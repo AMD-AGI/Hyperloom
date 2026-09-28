@@ -843,12 +843,21 @@ Primary switch (default **off**) for live Langfuse trace push.
   succeeded, for this process) and `counts_final`, which is `true` only once
   *every* step has completed — a `false` there means the push is still
   incomplete, not that the session was short-lived. Across processes (a crash
-  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
-  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
-  drained so its rows are never re-pushed while later ones still are;
-  `backfill_rows_sent` does the same for the audit backfills (recipe-KB,
-  specialist intel, forge steps, GEMM tuning, decision scores), counting a row
-  only once it was handed to the SDK and the final flush landed; and the
+  plus a `--resume`, or two shutdown paths racing), every leg reports into the
+  same trace and the durable unit is finer than a step. `rows_sent` maps each
+  append-only log, by its path under the session directory, to how many of its
+  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A leg
+  sends only the rows past that count, advancing it one row at a time and
+  stopping at the first row it could not send, so that row is retried by the
+  next call or the next leg. `decision_trace.jsonl` is rewritten ts-sorted on
+  every export, so decision scores are tracked by decision identity instead
+  (`decisions_sent`, a hash of the decision's timestamp, tick, ids, change and
+  outcome). Both record what was handed to the Langfuse SDK: its flush does not
+  report a failed export, so a row lost in export is not re-pushed. Receipts
+  written before `rows_sent` existed carry `ext_rows_sent` /
+  `trajectory_rows_sent`; those are still read. The `*_read` counters count only
+  what the current leg read past those cursors. The
   one-shot `session_start` / `session_breakdown` pushes are claimed through an
   exclusive marker file (`reports/trace/.session_start.claim`) rather than
   through the receipt read. The receipt also carries `payload_sha256` over its own body; a

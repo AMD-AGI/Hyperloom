@@ -671,7 +671,7 @@ def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, first)
     lfe.LangfuseEmitter(sd).flush_session()
     assert len(first.generations) == 1
-    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 1}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 1}
 
     # The resumed process appends one more row to the same shard.
     with shard.open("a", encoding="utf-8") as fh:
@@ -680,14 +680,36 @@ def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
     second = _FakeClient()
     _install_fake_sdk(monkeypatch, second)
     lfe._REGISTRY.clear()
-    em2 = lfe.LangfuseEmitter(sd)
-    assert em2._ext_rows_sent == {"forge-1.jsonl": 1}
-    em2.flush_session()
+    lfe.LangfuseEmitter(sd).flush_session()
 
     # Only the new row was pushed; the first was not duplicated.
     assert len(second.generations) == 1
     assert second.generations[0].kwargs["usage_details"]["output"] == 777
-    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 2}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 2}
+
+
+def test_a_receipt_from_before_rows_sent_still_resumes_ext_and_trajectory_shards(tmp_path, monkeypatch):
+    """A persisted receipt outlives the code that wrote it: its per-shard cursors must still hold."""
+    from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    ext_shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
+    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="old"))
+    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="new", output_tokens=777))
+    trajectory_shard = trajectory_dir(sd) / "1-a.jsonl"
+    _append_jsonl(trajectory_shard, {"kind": "session", "status": "started"})
+    legacy = {"ext_rows_sent": {"forge-1.jsonl": 1}, "trajectory_rows_sent": {"1-a.jsonl": 1}}
+    (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    assert [g.kwargs["usage_details"]["output"] for g in client.generations] == [777]
+    receipt = lfe.read_receipt(sd)
+    assert receipt["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 2, "reports/trace/trajectory/1-a.jsonl": 1}
+    assert "ext_rows_sent" not in receipt and "trajectory_rows_sent" not in receipt
 
 
 def _append_jsonl(path: Path, *rows: dict) -> None:
@@ -701,7 +723,7 @@ def _forge_iteration(iteration: int) -> dict:
     return {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1", "iteration": iteration}
 
 
-def _kernel_decision(task_id: str) -> dict:
+def _kernel_decision(task_id: str, ts: str = "2026-06-09T16:00:00Z") -> dict:
     return {
         "decision": {
             "component": "kernel_agent",
@@ -710,8 +732,44 @@ def _kernel_decision(task_id: str) -> dict:
             "task_id": task_id,
         },
         "phase": "KERNEL",
-        "ts": "2026-06-09T16:00:00Z",
+        "ts": ts,
     }
+
+
+def _rewrite_decision_trace(sd: Path, *rows: dict) -> None:
+    """Mirror the decision_trace writer: every export rewrites the whole file as a ts-sorted join."""
+    path = sd / "reports" / "trace" / "decision_trace.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(rows, key=lambda row: row.get("ts") or "")
+    path.write_text("".join(json.dumps(row) + "\n" for row in ordered), encoding="utf-8")
+
+
+def _decision_task_ids(client: _FakeClient) -> list[str]:
+    scores = client.scores + client.observation_scores
+    return [s["metadata"]["task_id"] for s in scores if s["name"] == "decision_outcome"]
+
+
+def test_a_decision_the_writer_sorts_before_sent_ones_is_pushed_once(tmp_path, monkeypatch):
+    """decision_trace.jsonl is rewritten ts-sorted, so a new decision can land ahead of rows already sent."""
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    late = _kernel_decision("late", ts="2026-06-09T17:00:00Z")
+    _rewrite_decision_trace(sd, late)
+
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert _decision_task_ids(first) == ["late"]
+
+    _rewrite_decision_trace(
+        sd, late, _kernel_decision("early", ts="2026-06-09T15:00:00Z"), _kernel_decision("no-ts", ts="")
+    )
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert _decision_task_ids(second) == ["no-ts", "early"]
 
 
 def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeypatch):
@@ -745,30 +803,6 @@ def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeyp
     assert [s.kwargs["metadata"]["task_id"] for s in decision_spans] == ["k2"]
 
 
-def test_backfill_cursors_advance_only_once_the_client_flush_lands(tmp_path, monkeypatch):
-    """Rows handed to the SDK buffer have not reached Langfuse until the final flush does."""
-    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
-
-    _enable_env(monkeypatch)
-    sd = _seed_trace_dir(tmp_path)
-    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
-
-    failing = _FakeClient()
-
-    def _down():
-        raise RuntimeError("langfuse unreachable")
-
-    failing.flush = _down  # type: ignore[method-assign]
-    _install_fake_sdk(monkeypatch, failing)
-    lfe.LangfuseEmitter(sd).flush_session()
-
-    second = _FakeClient()
-    _install_fake_sdk(monkeypatch, second)
-    lfe._REGISTRY.clear()
-    lfe.LangfuseEmitter(sd).flush_session()
-    assert second.span_named("forge:iter:1") is not None
-
-
 def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path, monkeypatch):
     """A step left out of flush_steps_done must not have its rows marked delivered."""
     _enable_env(monkeypatch)
@@ -797,7 +831,7 @@ def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path
         s.kwargs["metadata"]["task_id"] for s in client.spans if s.kwargs["name"] == "optimization_step:kernel_opt"
     ]
     assert steps == ["k1", "k2"]
-    assert lfe.read_receipt(sd)["backfill_rows_sent"]["decision_scores"] == 2
+    assert len(lfe.read_receipt(sd)["decisions_sent"]) == 2
 
 
 def test_a_kb_row_whose_send_failed_is_left_for_the_next_leg(tmp_path, monkeypatch):
@@ -817,7 +851,7 @@ def test_a_kb_row_whose_send_failed_is_left_for_the_next_leg(tmp_path, monkeypat
 
     monkeypatch.setattr(lfe, "_start_obs", _forge_spans_fail)
     lfe.LangfuseEmitter(sd).flush_session()
-    assert "forge_steps" not in lfe.read_receipt(sd).get("backfill_rows_sent", {})
+    assert forge_steps_path(sd).relative_to(sd).as_posix() not in lfe.read_receipt(sd)["rows_sent"]
 
     monkeypatch.setattr(lfe, "_start_obs", real_start)
     lfe._REGISTRY.clear()

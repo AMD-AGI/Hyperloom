@@ -185,7 +185,7 @@ def test_flush_projects_spans_only_and_resumes_the_shard_cursor(tmp_path, monkey
     assert [s.kwargs["name"] for s in first.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"] == [
         "session"
     ]
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 2}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 2}
 
     _write_shard(sd, "1-a.jsonl", [_row(span_id="s2", attributes={"name": "later"})])
     second = _FakeClient()
@@ -194,7 +194,7 @@ def test_flush_projects_spans_only_and_resumes_the_shard_cursor(tmp_path, monkey
     lfe.LangfuseEmitter(sd).flush_session()
     projected = [s.kwargs["name"] for s in second.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]
     assert projected == ["session:later"]
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 3}
 
 
 def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_path, monkeypatch):
@@ -223,7 +223,7 @@ def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_p
     assert [s.kwargs["name"] for s in projected] == ["session:tail", "session"]
     assert client.flushed == flushed + 1
     assert all(s.ended for s in client.spans)
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 3}
 
     emitter.flush_session()
     assert len([s for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]) == 2
