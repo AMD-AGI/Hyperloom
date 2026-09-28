@@ -145,7 +145,7 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
     task = queued[0]
     assert tuple(task.requires_lanes) == _KERNEL_AGENT_LANES
     assert task.params["from_phase"] == ps.PHASE_FRAMEWORK_AGENT
-    remaining = ps.phase_budget_remaining_seconds(st, budget_pct=c._phase_budget_pct)
+    remaining = ps.phase_budget_remaining_seconds(st)
     assert task.lease_ttl_sec == pytest.approx(remaining, abs=5.0)
 
 

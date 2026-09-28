@@ -651,11 +651,10 @@ def phase_cumulative_seconds(
 def _phase_budget_total_seconds(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
     phase = (getattr(state, "phase", "") or "").strip().upper()
     if phase not in budget:
         return None
@@ -695,11 +694,10 @@ def _phase_budget_total_seconds(
 def phase_budget_remaining_seconds(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
     """Return seconds left in the current phase ENTRY's budget (``None`` when budget window 0 = unlimited)."""
-    total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    total = _phase_budget_total_seconds(state, now_unix=now_unix)
     if total is None:
         return None
     return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
@@ -711,13 +709,9 @@ def effective_max_minutes(state: Any) -> float:
     return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
 
 
-def phase_cap_seconds(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-) -> float | None:
+def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
     phase = (getattr(state, "phase", "") or "").upper()
     if phase not in budget:
         return None
@@ -733,11 +727,10 @@ def phase_cap_seconds(
 def phase_cap_exceeded(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> bool:
     """True when time spent in the current phase has reached its absolute cap."""
-    cap = phase_cap_seconds(state, budget_pct=budget_pct)
+    cap = phase_cap_seconds(state)
     if cap is None:
         return False
     return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
@@ -789,7 +782,6 @@ def session_remaining_seconds(
 def phase_status_summary(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> str:
     """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
@@ -797,13 +789,8 @@ def phase_status_summary(
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
-    budget = normalize_budget_pct(budget_pct or state.phase_budget_pct)
-    budget_pct_for_phase = budget.get(phase, 0.0)
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget,
-        now_unix=now_unix,
-    )
+    budget_pct_for_phase = normalize_budget_pct(state.phase_budget_pct).get(phase, 0.0)
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget_line: str
     if remaining is None:
         budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
@@ -1360,7 +1347,6 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 def exit_normal_kernel(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     kernel_work_in_flight: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1368,7 +1354,6 @@ def exit_normal_kernel(
 
     Args:
         state: The session state the exit rules read.
-        budget_pct: Per-phase budget shares.
         now_unix: Clock override for the wall-clock rules.
         kernel_work_in_flight: Whether the ``kernel_agent`` task is queued or
             running. It owns the phase until it returns, so only the budget
@@ -1380,18 +1365,14 @@ def exit_normal_kernel(
             return leverage_exit
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     if remaining is not None and remaining <= 0:
         return "kernel_phase_budget_exhausted", {
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
             "rejected_kernel_count": rejected_count,
         }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+    if phase_cap_exceeded(state, now_unix=now_unix):
         return "kernel_budget_cap", {
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
@@ -1449,7 +1430,6 @@ _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
 def exit_normal_sweep(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """SWEEP normal exit: the concurrency ladder's terminal state, or budget exhausted."""
@@ -1476,17 +1456,13 @@ def exit_normal_sweep(
                 if exhausted_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
                     return "sweep_failed", evidence
             return "sweep_done", evidence
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     if remaining is not None and remaining <= 0:
         return "sweep_budget_exhausted", {
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+    if phase_cap_exceeded(state, now_unix=now_unix):
         return "sweep_budget_cap", {
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
@@ -1619,7 +1595,6 @@ def _optimize_did_work_this_cycle(state: Any) -> bool:
 def exit_normal_optimize(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """OPTIMIZE normal exit."""
@@ -1637,14 +1612,14 @@ def exit_normal_optimize(
     if all_dry:
         return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
 
-    remaining = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     if remaining is not None and remaining <= 0:
         return "optimize_phase_budget_exhausted", {
             **arms,
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
         }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+    if phase_cap_exceeded(state, now_unix=now_unix):
         return "optimize_budget_cap", {
             **arms,
             "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
@@ -1677,13 +1652,12 @@ def _positive_number(value: Any) -> float | None:
 def _budget_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
     return {
-        "remaining_sec": phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix),
-        "cap_sec": phase_cap_seconds(state, budget_pct=budget_pct),
+        "remaining_sec": phase_budget_remaining_seconds(state, now_unix=now_unix),
+        "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
     }
@@ -1698,7 +1672,6 @@ def _base_workflow_predicate_inputs(
     optimize_enabled: bool,
     enablement_enabled: bool,
     enablement_in_flight: bool,
-    budget_pct: dict[str, float] | None,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
     last_conc = getattr(state, "last_conc_sweep", None) or {}
@@ -1731,7 +1704,7 @@ def _base_workflow_predicate_inputs(
             "enablement_enabled": bool(enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None)),
+        "phase_budget_pct": normalize_budget_pct(getattr(state, "phase_budget_pct", None)),
     }
 
 
@@ -1755,7 +1728,6 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
 def _framework_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _all_dry, evidence = per_lever_dryness(state)
@@ -1768,13 +1740,12 @@ def _framework_predicate_inputs(
     plateau["specialist_round_count"] = len(
         _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
     )
-    return plateau, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+    return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def _kernel_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
     kernel_work_in_flight: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1800,13 +1771,12 @@ def _kernel_predicate_inputs(
         "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
         "rejected_kernel_count": len(getattr(state, "rejected_kernel_ids", None) or []),
     }
-    return pending, plateau, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+    return pending, plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def _sweep_predicate_inputs(
     state: Any,
     *,
-    budget_pct: dict[str, float] | None,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     last_conc = getattr(state, "last_conc_sweep", None) or {}
@@ -1839,14 +1809,13 @@ def _sweep_predicate_inputs(
             "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
         },
     }
-    return result, _budget_predicate_inputs(state, budget_pct=budget_pct, now_unix=now_unix)
+    return result, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def workflow_predicate_inputs(
     state: Any,
     *,
     kernel_enabled: bool = True,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
@@ -1864,7 +1833,6 @@ def workflow_predicate_inputs(
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,
         enablement_in_flight=enablement_in_flight,
-        budget_pct=budget_pct,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
@@ -1876,24 +1844,15 @@ def workflow_predicate_inputs(
             "enablement_in_flight": bool(enablement_in_flight),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
-        inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(
-            state,
-            budget_pct=budget_pct,
-            now_unix=frozen_now,
-        )
+        inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
-            budget_pct=budget_pct,
             now_unix=frozen_now,
             kernel_work_in_flight=kernel_work_in_flight,
         )
     elif current == PHASE_SWEEP:
-        inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(
-            state,
-            budget_pct=budget_pct,
-            now_unix=frozen_now,
-        )
+        inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
     return inputs
 
 
@@ -1901,7 +1860,6 @@ def initial_workflow_predicate_inputs(
     state: Any,
     *,
     current_phase: str,
-    budget_pct: dict[str, float] | None,
     kernel_enabled: bool,
     optimize_enabled: bool,
     enablement_enabled: bool,
@@ -1915,7 +1873,6 @@ def initial_workflow_predicate_inputs(
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,
         enablement_in_flight=False,
-        budget_pct=budget_pct,
     )
 
 
@@ -2124,7 +2081,6 @@ def compute_next_phase(
     state: Any,
     *,
     kernel_enabled: bool = True,
-    budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
@@ -2135,7 +2091,6 @@ def compute_next_phase(
     inputs = workflow_predicate_inputs(
         state,
         kernel_enabled=kernel_enabled,
-        budget_pct=budget_pct,
         now_unix=now_unix,
         optimize_enabled=optimize_enabled,
         enablement_enabled=enablement_enabled,

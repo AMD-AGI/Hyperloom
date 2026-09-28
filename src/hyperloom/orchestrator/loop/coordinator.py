@@ -166,8 +166,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.knowledge_plane: Any = knowledge_plane
         # ProposalScorer facade (advisory only).
         self._proposal_scorer: Any = proposal_scorer
-        # Phase budget percentages, normalised once at construction.
-        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -320,7 +318,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self._ensure_phase_initialised()
+        self._ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self._ensure_recipe_kb_t0_anchored()
 

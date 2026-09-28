@@ -282,7 +282,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 0.0,
+        lambda _s: 0.0,
     )
     assert coord._dispatch_paused_for_phase_budget() is True
 
@@ -292,7 +292,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 123.0,
+        lambda _s: 123.0,
     )
     assert coord._dispatch_paused_for_phase_budget() is False
 

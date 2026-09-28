@@ -42,7 +42,6 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
             baseline_tput=100.0,
             warm_replay_outcome={},
         ),
-        budget_pct=None,
         kernel_enabled=True,
         optimize_enabled=True,
         enablement_enabled=True,

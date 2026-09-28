@@ -11,7 +11,6 @@ import json
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
@@ -1413,33 +1412,11 @@ class IntentRouter:
                 payload,
             )
         )
-        from ..phases.machine_state import (
-            PHASE_FRAMEWORK_AGENT,
-            PHASE_KERNEL_AGENT,
-            apply_escalate_budget_bump,
-        )
-
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
             return
-        # extend_*_budget mutates phase_budget_pct directly.
-        now_ts = datetime.now(timezone.utc).isoformat()
-        if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
-            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct,
-                phase=PHASE_FRAMEWORK_AGENT,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
-            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct,
-                phase=PHASE_KERNEL_AGENT,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+        if hint in (ESCALATE_HINT_EXTEND_EXPLORE_BUDGET, ESCALATE_HINT_EXTEND_KERNEL_BUDGET):
+            self.shared_state.bump_phase_budget(hint)
             self.shared_state.save(self.session_dir)
             return
         # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.

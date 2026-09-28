@@ -22,18 +22,20 @@ log = _logging.getLogger(__name__)
 class MachinePhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
-    def _ensure_phase_initialised(self) -> None:
-        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
+    def _ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
+
+        Args:
+            budget_pct: The CLI per-phase share overrides; seeded into state only
+                when state has no budget yet, so a resumed session keeps its own.
+        """
         state = self.shared_state
-        # Redistribute disabled phases' budget shares to the enabled work phases.
-        self._phase_budget_pct = _phase_state.redistribute_budget_pct(
-            self._phase_budget_pct,
-            optimize_enabled=self._optimize_enabled(),
-            kernel_enabled=self._kernel_enabled(),
-        )
-        # Persist the phase budget so CLI flags land in state.json for resume parity.
         if not state.phase_budget_pct:
-            state.phase_budget_pct = dict(self._phase_budget_pct)
+            state.phase_budget_pct = _phase_state.redistribute_budget_pct(
+                _phase_state.normalize_budget_pct(budget_pct),
+                optimize_enabled=self._optimize_enabled(),
+                kernel_enabled=self._kernel_enabled(),
+            )
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
         # baseline and KEPT stack.
@@ -45,32 +47,23 @@ class MachinePhase(CoordinatorCollaborator):
             )
         if current == _phase_state.PHASE_CLOSE:
             self._reopen_a_session_that_was_left_closed()
-            current = _phase_state.PHASE_PRELUDE
-        if current in _phase_state.PHASE_NAMES:
-            # Already initialised; keep the CLI-side budget override authoritative.
-            state.phase_budget_pct = dict(self._phase_budget_pct)
-            try:
-                state.save(self.session_dir)
-            except Exception:
-                log.exception("Coordinator: save after phase budget refresh failed")
-            return
-        # Fresh start; pre-phase-machine resume state is treated as fresh.
-        _phase_state.record_phase_transition(
-            state,
-            to_phase=_phase_state.PHASE_PRELUDE,
-            reason="phase_entered",
-            evidence={
-                "trigger": "fresh_session",
-                "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
-                    state,
-                    current_phase="",
-                    budget_pct=dict(self._phase_budget_pct),
-                    kernel_enabled=self._kernel_enabled(),
-                    optimize_enabled=self._optimize_enabled(),
-                    enablement_enabled=self._enablement_admitted(),
-                ),
-            },
-        )
+        elif not current:
+            # Fresh start; pre-phase-machine resume state is treated as fresh.
+            _phase_state.record_phase_transition(
+                state,
+                to_phase=_phase_state.PHASE_PRELUDE,
+                reason="phase_entered",
+                evidence={
+                    "trigger": "fresh_session",
+                    "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
+                        state,
+                        current_phase="",
+                        kernel_enabled=self._kernel_enabled(),
+                        optimize_enabled=self._optimize_enabled(),
+                        enablement_enabled=self._enablement_admitted(),
+                    ),
+                },
+            )
         try:
             state.save(self.session_dir)
         except Exception:
@@ -93,7 +86,6 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    budget_pct=dict(self._phase_budget_pct),
                     kernel_enabled=self._kernel_enabled(),
                     optimize_enabled=self._optimize_enabled(),
                     enablement_enabled=self._enablement_admitted(),
@@ -205,7 +197,6 @@ class MachinePhase(CoordinatorCollaborator):
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
-            budget_pct=self._phase_budget_pct,
             optimize_enabled=optimize_enabled,
             enablement_enabled=self._enablement_admitted(),
             enablement_in_flight=enablement_in_flight,

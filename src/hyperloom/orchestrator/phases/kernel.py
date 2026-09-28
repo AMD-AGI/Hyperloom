@@ -669,7 +669,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
         lanes, catalogue_ttl = self._registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
-        remaining = _phase_state.phase_budget_remaining_seconds(state, budget_pct=self._phase_budget_pct)
+        remaining = _phase_state.phase_budget_remaining_seconds(state)
         ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
         # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
         base_key = f"kernel_agent_c{int(getattr(state, 'macro_cycle', 0) or 0)}"
@@ -991,10 +991,7 @@ class KernelPhase(CoordinatorCollaborator):
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
-        phase_rem = _phase_state.phase_budget_remaining_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_rem = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
@@ -1013,16 +1010,10 @@ class KernelPhase(CoordinatorCollaborator):
                     float(session_remaining) - self.shared_state.closing_reserve_sec(),
                 )
             )
-        phase_remaining = _phase_state.phase_budget_remaining_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
-        phase_cap = _phase_state.phase_cap_seconds(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
         if phase_cap is not None:
             candidates.append(
                 max(
