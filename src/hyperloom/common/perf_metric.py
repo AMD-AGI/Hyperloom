@@ -40,7 +40,8 @@ GRADED_DURATION = "duration_seconds"
 GRADED_ERROR_RATE = "request_error_rate"
 
 # The work a fixed-work run issues (MLPerf agentic: trajectories). Present only on such runs; its presence is what
-# makes a pair fixed-work for ``rounds_are_comparable``.
+# makes a pair fixed-work for ``rounds_are_comparable``. Not in ``GRADED_AXIS_KEYS``: a fixed-window record would
+# publish it as a null on every aiperf session.
 GRADED_FIXED_WORK = "issued_trajectories"
 
 # A trace replay slices a different part of the corpus when the window moves, so the two rounds stop measuring the
@@ -68,7 +69,6 @@ GRADED_AXIS_KEYS = (
     "tpot_p90_ms",
     GRADED_DURATION,
     GRADED_ERROR_RATE,
-    GRADED_FIXED_WORK,
 )
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
@@ -235,7 +235,6 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "tpot_p90_ms",
         GRADED_INTVTY_P50,
         GRADED_OUTPUT_PER_GPU,
-        GRADED_FIXED_WORK,
     ):
         value = _positive(source.get(key))
         if value is not None:
@@ -243,6 +242,9 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
     if duration is not None:
         axes[GRADED_DURATION] = duration
+    fixed_work = _positive(source.get(GRADED_FIXED_WORK))
+    if fixed_work is not None:
+        axes[GRADED_FIXED_WORK] = fixed_work
     error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     if error_rate is not None:
         axes[GRADED_ERROR_RATE] = error_rate

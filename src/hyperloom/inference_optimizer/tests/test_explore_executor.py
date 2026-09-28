@@ -2562,7 +2562,9 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
 
 
-def _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, name: str) -> tuple[dict, SharedState]:
+async def _mlperf_round(
+    sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, name: str
+) -> tuple[dict, SharedState]:
     """Run one explore variant on the MLPerf backend against a smoke baseline."""
     _force_cold_decision(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -2581,25 +2583,22 @@ def _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, n
         _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    async def _run():
-        task = await tr.create(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / f"explore-{name}"),
-                "base_tput": 200.0,
-                "grid": [{"name": name, "extra_args": f"--{name}"}],
-            },
-            idempotency_key=f"ex-{name}",
-        )
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_fake_run,
-        ):
-            return await sub.run_task(task)
-
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / f"explore-{name}"),
+            "base_tput": 200.0,
+            "grid": [{"name": name, "extra_args": f"--{name}"}],
+        },
+        idempotency_key=f"ex-{name}",
+    )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    out = __import__("asyncio").run(_run()).result
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
     return out["explore_search_update"]["tested"][canonical_fingerprint(f"--{name}", {})], state
 
 
@@ -2617,20 +2616,22 @@ def _mlperf_smoke(**over) -> dict:
     }
 
 
-def test_explore_mlperf_keeps_a_fixed_work_speedup(sub_agent_runner, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_explore_mlperf_keeps_a_fixed_work_speedup(sub_agent_runner, tmp_path, monkeypatch):
     """+10% output throughput finishes the same 150 trajectories ~10% sooner, and is a KEEP.
 
     The fixed-window duration rule would call that pair incomparable.
     """
-    tested, _ = _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
+    tested, _ = await _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
     assert tested["outcome"] == "KEEP"
     assert tested["graded_objective"] == "output_throughput"
     assert tested["gain_pct"] == pytest.approx(10.0)
 
 
-def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_path, monkeypatch):
     """The throughput gain is real; the inline accuracy drop against the smoke baseline decides."""
-    tested, _ = _mlperf_round(
+    tested, _ = await _mlperf_round(
         sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_score=0.60), name="lossy"
     )
     assert tested["outcome"] == "REVERT"
@@ -2640,8 +2641,9 @@ def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_pat
     assert gates["accuracy"]["threshold"] == pytest.approx(0.72)
 
 
-def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner, tmp_path, monkeypatch):
-    tested, _ = _mlperf_round(
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner, tmp_path, monkeypatch):
+    tested, _ = await _mlperf_round(
         sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_missing_turns=3), name="unscored"
     )
     assert tested["outcome"] == "REVERT"
