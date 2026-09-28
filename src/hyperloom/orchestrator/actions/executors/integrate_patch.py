@@ -3540,10 +3540,9 @@ class IntegratePatchExecutor:
                 # An ADVANCED round stacks its patch and never reaches the
                 # KEEP capture, so without this the tree its patch applied
                 # to is never recorded and a later KEEP binds it to that
-                # round's framework root instead. Since the capture now
-                # PROVES a patch against the tree it is bound to, a
-                # mis-binding no longer certifies anything -- it refuses the
-                # whole recipe, which for a legitimate multi-root stack is a
+                # round's framework root instead. The capture proves a patch
+                # against the tree it is bound to, so a mis-binding refuses
+                # the whole recipe -- for a legitimate multi-root stack a
                 # false refusal rather than a false pass.
                 "enablement_patch_roots": _accepted_patch_roots(
                     getattr(attempt.shared_state, "enablement", None),
@@ -3718,9 +3717,8 @@ class IntegratePatchExecutor:
             applied=applied,
             framework_root=root,
         )
-        # The durable stack, not a dispatch parameter: the base set used to
-        # arrive beside the round and be re-installed before its boot, and the
-        # round lifecycle no longer sends or replays it.
+        # Read from the durable stack: the round lifecycle does not dispatch
+        # the base set with the round.
         inherited_artifacts = [a for a in (getattr(enablement, "kept_artifacts", None) or []) if isinstance(a, Mapping)]
         stack_artifacts = accepted_stack_artifacts(
             inherited=inherited_artifacts,
