@@ -1566,16 +1566,16 @@ def test_atom_source_install_fetches_the_pinned_commit_under_rocm_torch_constrai
     assert " -e " in f" {atom_install[0]} "
 
 
-def test_atom_install_records_framework_atom_over_an_existing_sglang(tmp_path: Path):
+def test_atom_install_records_framework_atom_when_frameworks_omits_it(tmp_path: Path):
     """The engine the operator asked setup to install is the one downstream skills must use."""
     dotenv = tmp_path / ".env"
 
     res = _drive_installer(
         tmp_path,
-        importable={"sglang", "atom"},
+        importable={"atom"},
         dotenv=dotenv,
         install_framework="atom",
-        body="write_runtime_dotenv",
+        body="FRAMEWORKS=sglang,vllm\nwrite_runtime_dotenv",
     )
 
     assert res.returncode == 0, res.stderr
