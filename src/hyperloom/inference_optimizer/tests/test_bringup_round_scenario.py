@@ -24,7 +24,6 @@ from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.rehearsal import (
@@ -191,9 +190,9 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementLane, "_open_authoring_round"),
         (EnablementLane, "_renew_enablement_round"),
         (EnablementLane, "_settle_enablement_round"),
+        (EnablementLane, "close_lane_event"),
         (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
         (EnablementBuild, "_maybe_escalate_to_targeted_build"),
-        (WritebackCollaborator, "_close_enablement_lane"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
     return shim

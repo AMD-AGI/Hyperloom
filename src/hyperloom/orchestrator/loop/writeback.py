@@ -22,7 +22,6 @@ from hyperloom.common.launch_log_evidence import (
     observed_sglang_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
-from ..enablement.recipe.section import recipe_for
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -1371,31 +1370,6 @@ class WritebackCollaborator:
             observed_metric=state.enablement.observed_metric,
             eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
             probe_config_path=state.enablement.probe_config_path,
-        )
-
-    async def _close_enablement_lane(self, *, outcome: str, reason: str) -> None:
-        """Close the enablement lane's event on the terminal it just reached.
-
-        ``outcome`` is one of the ``OUTCOME_*`` constants.
-        """
-        lane = self.shared_state.enablement
-        enablement_event.finish(
-            outcome=outcome,
-            reason=reason,
-            recipe=recipe_for(
-                lane,
-                session_dir=str(self.session_dir or ""),
-                mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
-            ),
-            kept_patches=lane.kept_patches,
-            kept_artifacts=lane.kept_artifacts,
-            setup_commands=lane.setup_commands,
-            accepted_config=lane.accepted_config,
-            accepted_config_path=str(lane.accepted_config_path or ""),
-            active_runtime=lane.active_runtime,
-            attempt_runtimes=lane.attempt_runtimes,
-            framework_root=str(lane.framework_root or ""),
-            stall_streak=await self.rounds.consecutive_stalled(),
         )
 
     async def _reopen_revalidation_window(self) -> None:
@@ -3705,7 +3679,7 @@ class WritebackCollaborator:
                             accuracy=acc,
                             accuracy_floor=floor,
                         )
-                        await self._close_enablement_lane(
+                        await self._coord.enablement_lane.close_lane_event(
                             outcome=enablement_event.OUTCOME_SUCCEEDED,
                             reason="revalidation promoted",
                         )

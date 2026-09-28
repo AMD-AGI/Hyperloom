@@ -208,9 +208,9 @@ def _lane(session_dir: Path, **overrides: Any):
         "_open_authoring_round",
         "_renew_enablement_round",
         "_settle_enablement_round",
+        "close_lane_event",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
-    fake._close_enablement_lane = types.MethodType(WritebackCollaborator._close_enablement_lane, fake)
     return fake
 
 
@@ -233,7 +233,7 @@ def _writeback(session_dir: Path, **overrides: Any):
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
     )
-    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
+    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
     return fake
 
@@ -347,6 +347,30 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
     assert events[0]["ext"]["attempts"]["count"] == ENABLEMENT_MAX_ATTEMPTS
     assert events[0]["ext"]["attempts"]["landed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_session):
+    """The cap's close resolves on the lane the Coordinator builds, not on a surface a test lends it."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = _bound_session
+    coord.rounds = _rounds(_bound_session)
+    coord.shared_state = SharedState(framework="sglang", enablement_mode="all", phase=PHASE_ENABLEMENT)
+    coord.shared_state.enablement.launch_log = _MISSING_ARCH_LOG
+    await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
+    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    lane = coord.enablement_lane
+    lane._environment_verdict = lambda: None
+
+    assert await lane._maybe_enqueue_enablement_specialist() == ""
+
+    assert coord.shared_state.stop_reason == "enablement_attempts_exhausted"
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["status"] == "failed"
+    assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
 
 
 @pytest.mark.asyncio
@@ -697,7 +721,7 @@ async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
     verdict recorded here would describe a stack no measurement had confirmed.
 
     The guard that the close still computes a verdict lives on the terminal that
-    remains: :func:`test_the_writeback_close_also_carries_a_replay_verdict`.
+    remains: :func:`test_the_lane_close_carries_a_replay_verdict`.
     """
     lane = _lane(tmp_path)
 
@@ -716,11 +740,11 @@ async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_writeback_close_also_carries_a_replay_verdict(tmp_path):
-    """The second terminal. A guard on one path is a guard on one path."""
-    writeback = _writeback(tmp_path)
+async def test_the_lane_close_carries_a_replay_verdict(tmp_path):
+    """Every terminal that closes the lane publishes the replay verdict."""
+    lane = _lane(tmp_path)
 
-    await writeback._close_enablement_lane(
+    await lane.close_lane_event(
         outcome=enablement_event.OUTCOME_STALLED,
         reason="cap reached",
     )
