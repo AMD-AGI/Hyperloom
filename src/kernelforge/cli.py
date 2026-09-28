@@ -528,10 +528,10 @@ _LANE_PROVIDER_REQUIREMENTS = (
 
 # Guarantees a lane is better off with and can still run without.
 #
-# ``stop_hooks`` used to be a refusal alongside the requirement above. What it
-# buys a lane is in-session denial: the PreToolUse callbacks refuse an edit to
-# the driver, harness or oracle, and refuse a driver run that skips the shared
-# device lock. A provider that ignores ``AgentRunSpec.hooks`` gets neither.
+# What ``stop_hooks`` buys a lane is in-session denial: the PreToolUse
+# callbacks refuse an edit to the driver, harness or oracle, and refuse a driver
+# run that skips the shared device lock. A provider that ignores
+# ``AgentRunSpec.hooks`` gets neither.
 #
 # It is an advisory rather than a refusal because a campaign's published
 # numbers do not rest on it. A lane candidate that touches the measurement
@@ -1635,9 +1635,7 @@ def forge_loop(
             "search_start_ms": best_ms,
             "mean_case_speedup": mean_case_speedup,
             "search_start_mean_case_speedup": mean_case_speedup,
-            # The published manifest already withholds the badge when the wall times contradict the score; this result
-            # JSON used to assert the improvement outright, so the same run answered differently depending on which
-            # artifact a reader picked.
+            # Like the published manifest's badge, ``improved`` is withheld when the wall times contradict the score.
             **warm_start_improvement_flags(
                 pristine_ms=pristine_ms,
                 best_ms=best_ms,
