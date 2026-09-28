@@ -10,7 +10,7 @@ from pathlib import Path
 
 from hyperloom.common.git_safety import safe_directory_args
 
-__all__ = ["_run_git", "_run_git_cp"]
+__all__ = ["_git_head_sha", "_run_git", "_run_git_cp"]
 
 
 def _run_git(args: list[str], *, timeout: float = 120.0) -> tuple[bool, str, str]:
@@ -50,3 +50,13 @@ def _run_git_cp(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
+
+
+def _git_head_sha(root: str | Path | None) -> str:
+    """Return ``root``'s HEAD commit, or ``""`` when it is not a git tree."""
+    if not root:
+        return ""
+    cp = _run_git_cp(["-C", str(root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        return ""
+    return (cp.stdout or "").strip()

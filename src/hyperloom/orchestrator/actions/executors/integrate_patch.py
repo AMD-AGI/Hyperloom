@@ -71,7 +71,7 @@ from ._accuracy_gate import (
     read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
-from ._git import _run_git_cp
+from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
@@ -650,22 +650,6 @@ def _run_setup_commands(
                 failed.append(cmd)
                 _record(cmd, cmd_index, "failed")
     return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
-
-
-def _git_head_sha(framework_root: Path | None) -> str:
-    """Return ``framework_root``'s HEAD, or ``""`` when it is not a git tree.
-
-    Read BEFORE any candidate mutation: ``base_sha`` names the tree the patches
-    apply to, so a read taken after the KEEP commit would name a tree that
-    already contains them and every recorded patch would replay onto its own
-    result.
-    """
-    if framework_root is None:
-        return ""
-    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-    if cp is None or getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
 
 
 def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
