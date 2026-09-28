@@ -2109,7 +2109,7 @@ def _stamp_framework_kb_provenance(
     """Ensure a FRAMEWORK-dispatched deliverable carries KB-writeback provenance.
 
     Stamps the ``specialist:serving:framework...`` provenance prefix (that
-    :meth:`IntegratePatchExecutor._find_frameworkoposal` requires) from the
+    :meth:`IntegratePatchExecutor._find_framework_proposal` requires) from the
     dispatch context, so same-framework deliverables reach ``lessons.jsonl``.
 
     Mutates ``done_payload["proposal_set"][0]`` in place; no-ops when this
@@ -4958,7 +4958,7 @@ class IntegratePatchExecutor:
 
     # Helpers
     @staticmethod
-    def _find_frameworkoposal(
+    def _find_framework_proposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Return the first proposal whose provenance starts with
@@ -5055,7 +5055,7 @@ class IntegratePatchExecutor:
             config_fingerprint: Content fingerprint of the applied server
                 args / envs, recorded so a retried config can be recognised.
         """
-        proposal = self._find_frameworkoposal(done_payload)
+        proposal = self._find_framework_proposal(done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
             # rather than in a specialist's ``fa_*`` markers. Discovery dedups
