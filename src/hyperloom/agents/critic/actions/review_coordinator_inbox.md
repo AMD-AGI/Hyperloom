@@ -55,8 +55,8 @@ Default behavior summary:
 - `patch_landing` proposal without comparable benchmark + accuracy
   gate → `needs_review` (or `reject` if the packet itself shows a
   regression).
-- `enablement_landing` proposal (enablement / framework-agent
-  `integrate_patch`) → **approve** on the structural bar; do NOT block on
+- `enablement_landing` proposal (enablement `integrate_patch`) →
+  **approve** on the structural bar; do NOT block on
   a missing throughput before/after or a restated rollback plan (rollback is
   automatic). Boot-origin has no baseline yet; eval-origin booted but missed the
   accuracy floor. Either way the downstream runnable-decision gate REVERTs any

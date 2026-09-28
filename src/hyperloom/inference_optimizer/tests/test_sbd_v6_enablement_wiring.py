@@ -153,6 +153,8 @@ def _lane(session_dir: Path, **overrides: Any):
         baseline_failure_streak=1,
         baseline_arg_error_streak=0,
         baseline_total_failures=0,
+        phase=PHASE_ENABLEMENT,
+        macro_cycle=0,
         tick=0,
         stop_reason="",
         save=lambda *a, **k: None,
@@ -626,7 +628,7 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
         mode="all",
         kind="accuracy_below_floor",
     )
-    coordinator = types.SimpleNamespace(_framework_timeline=lambda: None)
+    coordinator = types.SimpleNamespace(phase_framework=types.SimpleNamespace(timeline=lambda: None))
     Coordinator._fault_open_phase_event(
         coordinator,
         stage="reactor:optimizer",

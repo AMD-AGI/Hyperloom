@@ -5643,7 +5643,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "9fc0dc6487bde554c6ed314a15b61022e5ec62ea"
+_TRACELENS_REF_DEFAULT = "e34b29496936dc8af27c1269138878f1d4b414b3"
 
 
 def _default_tracelens_root() -> Path:
@@ -6890,8 +6890,7 @@ def main() -> int:
         default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
         help=(
             "Number of steady-state iterations for the splitter to extract "
-            "(#127). Maps to --num-steps on TraceLens.TraceUtils."
-            "split_inference_trace_annotation."
+            "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
         ),
     )
     parser.add_argument(
@@ -6909,7 +6908,7 @@ def main() -> int:
         default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
         help=(
             "OSL window ratio R for the splitter (#194 §3). Maps to "
-            "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
+            "--R on TraceLens.TraceUtils.split_trace.main. "
             "Pairs with --CONC / --OSL so mixed-window selection uses the "
             "benchmark-contract PD ratio instead of an empirical default. "
             "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
@@ -7273,7 +7272,7 @@ def main() -> int:
                 [
                     sys.executable,
                     "-c",
-                    "import TraceLens; import TraceLens.TraceUtils.split_inference_trace_annotation",
+                    "import TraceLens; import TraceLens.TraceUtils.split_trace.main",
                 ],
                 cwd=tl_root,
                 log_path=log_path,
@@ -7424,7 +7423,7 @@ def main() -> int:
                 split_cmd = [
                     sys.executable,
                     "-m",
-                    "TraceLens.TraceUtils.split_inference_trace_annotation",
+                    "TraceLens.TraceUtils.split_trace.main",
                     str(split_input_path),
                     "-o",
                     str(split_dir),

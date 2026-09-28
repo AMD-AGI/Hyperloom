@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from hyperloom.common.perf_metric import AGENTX_KEEP_THRESHOLD_FLOOR_PCT
+from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
 
 # Percentiles rendered per axis, in order.
 _RENDERED = ("p50", "p90", "p99")
@@ -50,11 +50,10 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
 def grading_lines() -> list[str]:
     """Describe what an AgentX KEEP is decided on."""
     return [
-        "**Graded on E2E normalised interactivity P90** — the SLOW tail,",
-        "`1 / P90(E2EL_i / OSL_i)` in tok/s/user. This is the axis InferenceX ranks a",
-        "submission on, so a change that only speeds up the fastest users scores zero.",
-        f"KEEP needs >={AGENTX_KEEP_THRESHOLD_FLOOR_PCT:.0f}% on it with per-chip token throughput held",
-        "inside the noise band; both axes worse is REVERT; neither dominating is",
-        "RECORDED, which is measured and kept in the ledger but not promoted.",
-        "Output throughput is still measured, and is not the objective.",
+        "**Graded on E2E normalised interactivity P50** — the median of",
+        "`OSL_i / E2EL_i` in tok/s/user. InferenceX ranks submissions on the P90 of the",
+        "same family; the median is what Hyperloom decides KEEP on, and P90 is held as a guard.",
+        f"KEEP needs >=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}% on it while the slow tail (P90) and output",
+        "throughput each hold inside the noise band. Anything short of all three is REVERT.",
+        "Total token throughput is still measured, and is not the objective.",
     ]

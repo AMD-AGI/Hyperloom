@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.sources.github. Hermetic - monkeypatches urlopen; verifies best-effort policy (returns [] on failure) and keyword-driven query composition."""
+"""Tests for hyperloom.agents.framework.sources.github. Hermetic - monkeypatches urlopen; verifies best-effort policy (returns [] on failure) and query composition."""
 
 from __future__ import annotations
 
@@ -43,33 +43,24 @@ def _install_urlopen(monkeypatch, handler) -> None:
 # _build_query -----------------------------------------------------------
 
 
-def test_build_query_uses_extracted_keywords() -> None:
-    """gap_description keywords feed the OR clause; PERF_TERMS not used."""
-    q = gh._build_query("sgl-project/sglang", "improve fp8 MoE attention")
+def test_build_query_scopes_repo_and_perf_terms() -> None:
+    """The query is scoped to the repo's PRs and ORs every perf term."""
+    q = gh._build_query("sgl-project/sglang")
     assert "repo:sgl-project/sglang" in q
     assert "is:pr" in q
-    assert "is:open" in q
-    assert "fp8" in q
-    assert "moe" in q
-    assert "attention" in q
-
-
-def test_build_query_falls_back_to_perf_terms_when_empty() -> None:
-    """Empty gap_description triggers the PERF_TERMS fallback."""
-    q = gh._build_query("sgl-project/sglang", "")
     for t in gh.PERF_TERMS:
         assert t in q
 
 
 def test_build_query_open_only_keeps_is_open() -> None:
     """Default open-only keeps the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", "fp8", states=("open",))
+    q = gh._build_query("sgl-project/sglang", states=("open",))
     assert "is:open" in q
 
 
 def test_build_query_all_drops_is_open() -> None:
     """Explicit all-state search omits the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", "fp8", states=("all",))
+    q = gh._build_query("sgl-project/sglang", states=("all",))
     assert "is:open" not in q
     assert "is:pr" in q
 

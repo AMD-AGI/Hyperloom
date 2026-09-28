@@ -16,10 +16,9 @@ unset, silently leaves GEAK owning the kernel phase. There is no CLI flag for it
 
 Two ways this silently degrades into a duplicate of the plain 12h leg — avoid both:
 
-- The demo skill's pre-launch install block sources `.env`, which sets
-  `KERNEL_OPT_BACKEND_ORDER` to whatever that file carries, and then replays the
-  caller's pre-existing exports on top via `eval "$_dotenv_prev"`. Export `forge`
-  **after** that whole block, not before.
+- The demo skill's shared environment loader fills missing values from `.env`
+  without overriding non-empty caller exports. Export `forge` in the execution
+  shell and verify it remains selected after environment preparation.
 - In docker mode the variable must be set **inside the same `docker exec`** that runs
   `optimize`. Exporting it on the host does not reach the optimizer.
 

@@ -14,7 +14,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
@@ -55,6 +55,9 @@ _DEFAULT_MAX_FUSIONS = 4
 
 # Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
+
+# Heavy kernels a fusible chain runs between; everything else is launch-bound tail.
+COMPUTE_CATEGORIES: frozenset[str] = frozenset({"gemm", "attention", "conv", "moe"})
 
 
 def _resolve_max_fusions(value: Optional[int] = None) -> int:
@@ -102,10 +105,9 @@ def hot_kernels_from_trace(
         return []
 
     rows: list[dict[str, Any]] = []
-    compute = {"gemm", "attention", "conv", "moe"}
     for name, (dur, count) in agg.items():
         cat = categorize_kernel_name(name)
-        if launch_bound_only and cat in compute:
+        if launch_bound_only and cat in COMPUTE_CATEGORIES:
             continue
         rows.append(
             {
@@ -153,14 +155,14 @@ def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[
     return [name for name, _ in ranked[:top_n]]
 
 
-def ordered_fusion_boundaries_from_trace(
+def stream_ordered_kernels(
     trace_path: str | Path,
-    *,
-    top_n: int = 16,
-    max_chain_len: int = 8,
-    min_repeats: int = 2,
-) -> list[dict[str, Any]]:
-    """Recover repeated compute-to-compute fusion boundaries from stream order."""
+) -> tuple[dict[tuple[Any, Any], list[dict[str, Any]]], float]:
+    """Kernel events bucketed by GPU stream, each bucket ordered by timestamp.
+
+    Returns the buckets and the summed kernel duration. Execution order only holds
+    within one stream, so every adjacency question has to be asked per bucket.
+    """
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
     for event in _load_trace_events(trace_path):
@@ -188,8 +190,20 @@ def ordered_fusion_boundaries_from_trace(
             }
         )
         total_kernel_us += duration
+    for bucket in streams.values():
+        bucket.sort(key=lambda item: item["ts"])
+    return streams, total_kernel_us
 
-    compute_categories = {"gemm", "attention", "conv", "moe"}
+
+def ordered_fusion_boundaries_from_trace(
+    trace_path: str | Path,
+    *,
+    top_n: int = 16,
+    max_chain_len: int = 8,
+    min_repeats: int = 2,
+) -> list[dict[str, Any]]:
+    """Recover repeated compute-to-compute fusion boundaries from stream order."""
+    streams, total_kernel_us = stream_ordered_kernels(trace_path)
 
     def normalized_name(name: str) -> str:
         value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
@@ -208,12 +222,12 @@ def ordered_fusion_boundaries_from_trace(
         interior_count = max(0, len(segment) - 2)
         if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
             boundary_kind = "epilogue"
-        elif categories[0] in compute_categories:
+        elif categories[0] in COMPUTE_CATEGORIES:
             boundary_kind = "compute_boundary"
         else:
             boundary_kind = "vertical"
         # The trailing kernel is the NEXT compute anchor.
-        terminal_compute = categories[-1] if categories[-1] in compute_categories else ""
+        terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
         fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
         row = aggregated.setdefault(
             key,
@@ -232,11 +246,10 @@ def ordered_fusion_boundaries_from_trace(
         row["count"] += 1
         row["total_us"] += sum(float(item["dur"]) for item in segment)
 
-    for stream_events in streams.values():
-        ordered = sorted(stream_events, key=lambda item: item["ts"])
+    for ordered in streams.values():
         start_index: Optional[int] = None
         for index, event in enumerate(ordered):
-            if event["category"] not in compute_categories:
+            if event["category"] not in COMPUTE_CATEGORIES:
                 continue
             if start_index is not None:
                 record(ordered[start_index : index + 1])
@@ -505,6 +518,170 @@ def declared_traits(item: Any) -> list[str]:
     return _declared_terms(item, "traits", FUSION_TRAIT_VOCAB)
 
 
+_SCOPE_SINGLE = """- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+  it is broken. The fusion is delivered by REPLACING one call site in the source
+  file printed below, so the entire chain must live inside THAT file, and every
+  tensor your kernel takes as input must already be a local name at that call
+  site. Do not fuse across a boundary: not into a method defined in another
+  module (an imported `XMLP`, an imported norm class), and not into work the
+  framework performs below the call (in vLLM the KV-cache write happens inside
+  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
+  reachable from a model `forward` and a fusion folding them in cannot be wired).
+  Before proposing, name the exact call site you would replace and check that
+  every input is in scope there. A chain that fails this test is worth zero
+  end-to-end even when its microbenchmark is 30x.
+- One patch, one file. If two different modules each hold a fusible chain,
+  propose them as two SEPARATE entries, each self-contained in its own file --
+  never one entry spanning both."""
+
+_SCOPE_REPO = """- SCOPE — the WHOLE repository is in scope and editable, and a fusion may span as
+  many files as it needs. Name the file holding the call site you would replace in
+  "source_file", and every OTHER existing file that has to change in
+  "additional_files". There is no single-file rule here: do not shrink a chain to
+  fit one file.
+- FIND THE CODE, do not guess it. Nothing is embedded in this prompt; you have read
+  and search tools and a repository. The entry point named below is where to START,
+  not the answer: a model file routinely reaches the anchored work through one
+  opaque call (`attn_backend.forward_xxx(...)`, `self.indexer(...)`, a dispatch
+  through an env gate) whose operands are not local names there. Grep for the ops
+  in the anchor evidence, follow the imports and calls until you reach the code that
+  actually issues those kernels, and propose the fusion THERE.
+- Every path you return must be a file that EXISTS in this repository, spelled as it
+  is on disk (repo-relative or absolute). A proposal whose "source_file" does not
+  resolve is discarded rather than retargeted, so open each file before naming it.
+- Name the exact call site you would replace, and account for every tensor your
+  kernel takes as input: each one must be a local name at that call site, or be
+  produced in one of the files you listed in "additional_files". Work the framework
+  performs below your call is reachable ONLY if you list the file performing it.
+- One entry is ONE fusion, delivered as one patch, however many files it touches.
+  Two genuinely independent chains are two entries."""
+
+_FUSION_CONSTRAINTS_TAIL = """- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
+  framework CUDA-only fused op.
+- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
+  their semantics, dtype, shape, and cache layout match.
+- Do NOT change what a library GEMM dispatches to. A tuned GEMM (flydsl / aiter /
+  hipBLASLt / CK) selects its kernel from the (dtype, layout, shape) of the call,
+  so asking that same call for a different output dtype (`out_dtype=`, `otype=`),
+  a transposed operand, or an `out=` buffer of another type drops it off the tuned
+  table onto a different, UNTUNED solution. The displaced kernel is typically
+  several times the size of the elementwise op being fused, so the substitution
+  costs far more than the fusion saves even though the fused call site alone
+  benchmarks faster. When the op you are fusing sits between a library GEMM and
+  its consumer, leave the GEMM call byte-identical and fuse into the PROLOGUE of
+  the CONSUMER instead -- consumers are frequently templated on their input dtype
+  already and upcast on load, which removes the same launch for free. A GEMM
+  epilogue is in scope only when the GEMM is one YOU author.
+- The correctness reference must be the REAL eager op imported from this source
+  (say which symbol to import), never a re-derivation."""
+
+
+def fusion_constraints(repo_scope: bool = False) -> str:
+    """The rules that decide whether a proposal can be wired at all.
+
+    Scope is the only rule that changes with how much source the run offered: with
+    one file the model must stay inside it, and with the whole repository it must
+    go looking for the file that owns the chain.
+    """
+    scope = _SCOPE_REPO if repo_scope else _SCOPE_SINGLE
+    chain_rule = (
+        "- Must be a real contiguous chain in the repository (name the exact files, functions/methods)."
+        if repo_scope
+        else "- Must be a real contiguous chain in this source (name the exact functions/methods)."
+    )
+    return f"""Constraints for each proposed fusion:
+{chain_rule}
+{scope}
+{_FUSION_CONSTRAINTS_TAIL}"""
+
+
+def render_source_files(source_files: Sequence[str], *, model_type: str, framework: str) -> str:
+    """Embed each in-scope file under its own path heading.
+
+    The path is the label the model answers with in ``source_file``, so it is
+    printed exactly as it will have to be matched back.
+    """
+    blocks = [f"### {path}\n```python\n{text}\n```" for path in source_files if (text := _read_source(path))]
+    if not blocks:
+        return ""
+    return f"## Model source (`{model_type}` in {framework})\n" + "\n\n".join(blocks)
+
+
+def render_repo_scope_brief(
+    repo_root: str,
+    entry_files: Sequence[str],
+    *,
+    model_type: str,
+    framework: str,
+) -> str:
+    """Hand discovery the repository instead of one file's embedded text.
+
+    Repo scope exists because the file that owns the fusible chain cannot be
+    derived from the model config: it is reached through a call, not through a
+    naming convention. Embedding a guessed shortlist would only move that guess
+    earlier in the pipeline, so the agent is given the tree and its own read and
+    search tools and is expected to locate the code itself.
+    """
+    lines = [
+        f"## The framework repository (`{model_type}` in {framework})",
+        f"Repository root: {repo_root or '(the working directory of this session)'}",
+        "",
+        "No source is embedded in this prompt. Open whatever you need with your read",
+        "and search tools; every file in this repository is in scope and editable.",
+    ]
+    known = [str(path) for path in entry_files if path]
+    if known:
+        lines += [
+            "",
+            "Entry point(s) resolved for this model -- where to START, not the answer:",
+            *(f"  {path}" for path in known),
+        ]
+    return "\n".join(lines)
+
+
+def _output_schema_block(model_type: str, *, repo_scope: bool = False) -> str:
+    """The JSON contract every discovery prompt asks the model to answer in."""
+    source_field = (
+        (
+            '  "source_file": "<exact on-disk path of the file holding the call site '
+            'you would replace>",\n'
+            '  "additional_files": [<exact on-disk path of every OTHER existing file '
+            "this fusion must also edit; [] when the call-site file is enough. Do NOT "
+            "list the new fused-kernel module here -- it does not exist yet>],\n"
+        )
+        if repo_scope
+        else ""
+    )
+    return f"""## Output — a single JSON array (and nothing after it). Be TERSE to fit the
+## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
+## sentence. Each element:
+{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
+  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
+  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
+          {_OP_VOCAB_FOR_PROMPT}.
+          This list IS the fusion's identity: two runs proposing the same fusion
+          must produce the same list, so decide by one test rather than by
+          impression. For each candidate ask: does my kernel carry out that
+          computation? If the op runs in the surrounding module, or you only
+          read its result, or you only hand your result to it, then it is NOT
+          yours -- leave it out. Where the kernel sits is irrelevant; only what
+          it computes counts. List every op that passes the test, and nothing
+          else.>],
+  "traits": [<how the kernel is built, chosen ONLY from:
+          {_TRAIT_VOCAB_FOR_PROMPT}.
+          Precision, architecture variant, and which part of the model this sits
+          in. These describe the kernel rather than name an operation it
+          performs, so they do NOT belong in "ops". Omit the field when none
+          apply.>],
+  "source_anchors": ["<symbol/line to grep>", "..."],
+{source_field}  "fusion_math": "<what the fused kernel computes, precisely>",
+  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
+  "candidate_kind": "<integration|new_fusion|replacement>",
+  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
+  "priority": <0.0-1.0 by expected launch-bound time saved>,
+  "rationale": "<why this chain, tied to the hot kernels above>"}}"""
+
+
 def build_discovery_prompt(
     *,
     model_type: str,
@@ -516,8 +693,29 @@ def build_discovery_prompt(
     max_fusions: int = _DEFAULT_MAX_FUSIONS,
     ordered_boundaries: Optional[list[dict[str, Any]]] = None,
     existing_operator_hints: Optional[list[dict[str, str]]] = None,
+    source_files: Sequence[str] = (),
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> str:
-    """Assemble the discovery prompt from runtime, source, and operator evidence."""
+    """Assemble the discovery prompt from runtime, source, and operator evidence.
+
+    ``repo_scope`` embeds no source at all and points the agent at the repository
+    instead, naming ``source_files`` as the entry points to start from.
+    """
+    if repo_scope:
+        source_block = render_repo_scope_brief(
+            repo_root,
+            source_files,
+            model_type=model_type,
+            framework=framework,
+        )
+    else:
+        source_block = f"## Model source (`{model_type}` in {framework})\n```python\n{source_text}\n```"
+    read_verb = (
+        "Explore the repository described below and identify"
+        if repo_scope
+        else "Read the model source below and identify"
+    )
     lb = ", ".join(sorted(LAUNCH_BOUND_CATEGORIES))
     hot_lines = "\n".join(
         f"  - {k['category']:11s} {k['share'] * 100:5.1f}%  (n={k['count']}, avg={k['avg_us']:.1f}us)  {k['name'][:90]}"
@@ -587,70 +785,18 @@ the card that shape, dtype, and cache layout actually match.
 {operator_lines or "  - none found"}
 
 ## Your task
-Read the model source below and identify up to {max_fusions} CONTIGUOUS op chains in
+{read_verb} up to {max_fusions} CONTIGUOUS op chains in
 the DECODE forward that are worth fusing. Include GEMM/attention prologue or epilogue
 boundaries when the ordered trace proves adjacency. Treat an existing ROCm operator
 that covers a larger boundary as an `integration` candidate and benchmark/wire it
 before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
 runs back-to-back on the decode path.
 
-Constraints for each proposed fusion:
-- Must be a real contiguous chain in this source (name the exact functions/methods).
-- SCOPE — the single hardest constraint, and the one that wastes a whole run when
-  it is broken. The fusion is delivered by REPLACING one call site in the source
-  file printed below, so the entire chain must live inside THAT file, and every
-  tensor your kernel takes as input must already be a local name at that call
-  site. Do not fuse across a boundary: not into a method defined in another
-  module (an imported `XMLP`, an imported norm class), and not into work the
-  framework performs below the call (in vLLM the KV-cache write happens inside
-  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
-  reachable from a model `forward` and a fusion folding them in cannot be wired).
-  Before proposing, name the exact call site you would replace and check that
-  every input is in scope there. A chain that fails this test is worth zero
-  end-to-end even when its microbenchmark is 30x.
-- One patch, one file. If two different modules each hold a fusible chain,
-  propose them as two SEPARATE entries, each self-contained in its own file --
-  never one entry spanning both.
-- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
-  framework CUDA-only fused op.
-- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
-  their semantics, dtype, shape, and cache layout match.
-- The correctness reference must be the REAL eager op imported from this source
-  (say which symbol to import), never a re-derivation.
+{fusion_constraints(repo_scope=repo_scope)}
 
-## Output — a single JSON array (and nothing after it). Be TERSE to fit the
-## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
-## sentence. Each element:
-{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
-  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
-  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
-          {_OP_VOCAB_FOR_PROMPT}.
-          This list IS the fusion's identity: two runs proposing the same fusion
-          must produce the same list, so decide by one test rather than by
-          impression. For each candidate ask: does my kernel carry out that
-          computation? If the op runs in the surrounding module, or you only
-          read its result, or you only hand your result to it, then it is NOT
-          yours -- leave it out. Where the kernel sits is irrelevant; only what
-          it computes counts. List every op that passes the test, and nothing
-          else.>],
-  "traits": [<how the kernel is built, chosen ONLY from:
-          {_TRAIT_VOCAB_FOR_PROMPT}.
-          Precision, architecture variant, and which part of the model this sits
-          in. These describe the kernel rather than name an operation it
-          performs, so they do NOT belong in "ops". Omit the field when none
-          apply.>],
-  "source_anchors": ["<symbol/line to grep>", "..."],
-  "fusion_math": "<what the fused kernel computes, precisely>",
-  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
-  "candidate_kind": "<integration|new_fusion|replacement>",
-  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
-  "priority": <0.0-1.0 by expected launch-bound time saved>,
-  "rationale": "<why this chain, tied to the hot kernels above>"}}
+{_output_schema_block(model_type, repo_scope=repo_scope)}
 
-## Model source (`{model_type}` in {framework})
-```python
-{source_text}
-```
+{source_block}
 """
 
 
@@ -790,6 +936,79 @@ def _norm_env_flag(flag: str, model_type: str) -> str:
     return f
 
 
+def _as_sequence(value: Any) -> list[Any]:
+    """A proposal field that may arrive as one string or a list of them."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def resolve_repo_file(value: Any, repo_root: str) -> str:
+    """Resolve a repo-scope proposal's claimed path to a real file, or ``""``.
+
+    Repo scope removes the offered-file list that
+    :func:`resolve_proposed_source_file` matches against, so existing on disk and
+    living inside the repository is the whole check -- and it is a HARD one.
+    Falling back to the model file the way single-file discovery does would
+    reintroduce the silent retarget that repo scope exists to remove: the caller
+    would get a recipe pointing at a file the model never proposed.
+    """
+    claimed = str(value or "").strip()
+    if not claimed:
+        return ""
+    root: Optional[Path] = None
+    if repo_root:
+        with contextlib.suppress(OSError):
+            root = Path(repo_root).expanduser().resolve()
+    candidates = [Path(claimed).expanduser()]
+    if root is not None and not candidates[0].is_absolute():
+        candidates.insert(0, root / candidates[0])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        if root is not None and not resolved.is_relative_to(root):
+            log.warning("discovery: ignoring %s, which is outside the framework repo %s", resolved, root)
+            continue
+        return str(resolved)
+    return ""
+
+
+def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], default: str) -> str:
+    """Map a proposal's claimed call-site file onto one the run actually offered.
+
+    The model is asked to copy a path back verbatim, and mostly does; a trailing
+    component still identifies the file unambiguously when it does not. Anything
+    that matches nothing falls back to the primary file rather than inventing a
+    target the loop cannot track.
+    """
+    claimed = str(value or "").strip()
+    if not claimed or not in_scope_files:
+        return default
+    for path in in_scope_files:
+        if claimed == path:
+            return path
+    claimed_parts = Path(claimed).parts
+    for path in in_scope_files:
+        parts = Path(path).parts
+        if claimed_parts and parts[-len(claimed_parts) :] == claimed_parts:
+            return path
+    for path in in_scope_files:
+        if Path(path).name == Path(claimed).name:
+            return path
+    log.warning(
+        "discovery: proposed source_file %r matches no in-scope file; using %s",
+        claimed[:120],
+        Path(default).name or default,
+    )
+    return default
+
+
 def parse_discovered_recipes(
     text: str,
     *,
@@ -800,12 +1019,32 @@ def parse_discovered_recipes(
     category_shares: dict[str, float] | None = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    explicit_target: bool = False,
+    in_scope_files: Sequence[str] = (),
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> list[Recipe]:
-    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects."""
+    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
+
+    ``explicit_target`` marks a run whose target an operator named. The scope gate
+    then warns instead of dropping: it recognizes nine coarse terms, so it can reject
+    a wireable chain, and discarding what was explicitly asked for hides that.
+
+    ``in_scope_files`` lists every file the prompt embedded. A proposal may name
+    any of them as its call site, and the scope gate judges against all of them --
+    it must see the same source the model did, or it drops chains for being
+    "outside" a file they were never claimed to be in.
+
+    ``repo_scope`` replaces that offered list with the repository: the prompt
+    embedded nothing, so each proposal names its own files and is judged against
+    the files IT named. A proposal whose call site does not resolve is dropped
+    rather than retargeted onto ``source_file``.
+    """
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    # The same file the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
-    # the model was shown.
-    source_text = _read_source(source_file)
+    scope_files = [p for p in (in_scope_files or [source_file]) if p]
+    # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
+    # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.
+    source_text = "" if repo_scope else "\n".join(_read_source(path) for path in scope_files)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
         name = str(item.get("name") or f"discovered_{i + 1}").strip()
@@ -841,18 +1080,51 @@ def parse_discovered_recipes(
                     ",".join(matched_categories),
                 )
                 continue
-        # SCOPE gate: a fusion is wired by replacing ONE call site in the file the model was shown, so a proposal
-        # claiming ops that file never performs is unwireable no matter how good the kernel is.
-        outside = out_of_scope_terms(source_text, [*declared, *traits])
+        # Which file(s) this proposal wires itself into. Resolved BEFORE the scope gate: under repo scope the gate has
+        # no run-wide source text and must read exactly the files this proposal named.
+        extra_files: list[str] = []
+        if repo_scope:
+            proposed_file = resolve_repo_file(item.get("source_file"), repo_root)
+            if not proposed_file:
+                log.warning(
+                    "discovery: dropping %s -- its source_file %r is not a file in %s",
+                    name,
+                    str(item.get("source_file") or "")[:200],
+                    repo_root or "the framework repo",
+                )
+                continue
+            for value in _as_sequence(item.get("additional_files")):
+                resolved = resolve_repo_file(value, repo_root)
+                if not resolved:
+                    log.warning(
+                        "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
+                        name,
+                        str(value)[:200],
+                    )
+                    continue
+                if resolved != proposed_file and resolved not in extra_files:
+                    extra_files.append(resolved)
+            gate_files = [proposed_file, *extra_files]
+            scope_text = "\n".join(_read_source(path) for path in gate_files)
+        else:
+            proposed_file = resolve_proposed_source_file(item.get("source_file"), scope_files, source_file)
+            gate_files = scope_files
+            scope_text = source_text
+        # SCOPE gate: a fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops
+        # that none of those files perform is unwireable no matter how good the kernel is.
+        outside = out_of_scope_terms(scope_text, [*declared, *traits])
         if outside:
-            log.info(
-                "discovery: dropping %s (%s not performed in %s -- the fusion crosses "
+            log.log(
+                logging.WARNING if explicit_target else logging.INFO,
+                "discovery: %s %s (%s not performed in %s -- the fusion crosses "
                 "a module boundary and has no wireable call site there)",
+                "keeping operator-named" if explicit_target else "dropping",
                 name,
                 ",".join(outside),
-                Path(source_file).name or source_file,
+                ", ".join(Path(p).name or p for p in gate_files),
             )
-            continue
+            if not explicit_target:
+                continue
         # Compile-pass gate: never author a chain vLLM fuses at compile time.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],
@@ -909,12 +1181,19 @@ def parse_discovered_recipes(
         # the kind while silently skipping the constraint.
         if candidate_kind == "integration" and not existing_operator:
             candidate_kind = "new_fusion"
+        if proposed_file != source_file or extra_files:
+            log.info(
+                "discovery: %s wires into %s",
+                name,
+                ", ".join(Path(p).name or p for p in [proposed_file, *extra_files]),
+            )
         out.append(
             Recipe(
                 pattern_id=f"llm:{name}",
                 description=str(item.get("rationale") or op_chain or name)[:300],
                 env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), model_type),
-                source_file=source_file,
+                source_file=proposed_file,
+                extra_files=extra_files,
                 source_hints=[str(a) for a in anchors],
                 fusion_math=fusion_math,
                 eager_reference_hint=str(item.get("eager_reference") or ""),
@@ -1215,6 +1494,8 @@ def discover_recipes(
     knowledge_root: str | Path | None = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    repo_scope: bool = False,
+    repo_root: str = "",
 ) -> list[Recipe]:
     """LLM-autonomous discovery: propose fusible chains from the trace + source."""
     if not diagnosis.is_candidate:
@@ -1223,7 +1504,7 @@ def discover_recipes(
         source_text = Path(source_file).read_text(encoding="utf-8") if source_file else ""
     except OSError:
         source_text = ""
-    if not source_text:
+    if not source_text and not repo_scope:
         log.warning("discovery: model source unreadable (%s); cannot self-discover", source_file)
         return []
     hot = hot_kernels_from_trace(trace_path, top_n=top_kernels)
@@ -1246,6 +1527,9 @@ def discover_recipes(
         max_fusions=_resolve_max_fusions(max_fusions),
         ordered_boundaries=ordered_boundaries,
         existing_operator_hints=existing_operator_hints,
+        source_files=[source_file] if (repo_scope and source_file) else (),
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
     raw = llm_fn(prompt)
     recipes = parse_discovered_recipes(
@@ -1257,6 +1541,8 @@ def discover_recipes(
         category_shares=diagnosis.category_shares,
         pass_probe=pass_probe,
         framework_root=framework_root,
+        repo_scope=repo_scope,
+        repo_root=repo_root,
     )
     log.info(
         "discovery proposed %d fusion(s): %s",

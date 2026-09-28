@@ -605,6 +605,9 @@ class TestN24KernelAgentEnvHardFail:
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
+        import os
+
+        snapshot = dict(os.environ)
         for var in (
             "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
@@ -613,6 +616,11 @@ class TestTracelensRootEnvCorrection:
             "MAGPIE_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(snapshot)
 
     def _write_env_file(self, tmp_path, tracelens_dir):
         runtime = tmp_path / "runtime"
@@ -631,11 +639,12 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(good)
+        assert outcome["detail"]["corrected_keys"] == ["TRACELENS_ROOT"]
         assert "TRACELENS_ROOT" in capsys.readouterr().err
 
     def test_keeps_valid_inherited_root(self, tmp_path, monkeypatch):
@@ -649,30 +658,78 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(inherited)
+        assert outcome["detail"]["corrected_keys"] == []
 
-    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the env file must NOT be promoted to an explicit MAGPIE_PATH override."""
+    @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
+    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
+        """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
-        magpie_dir = tmp_path / "not-a-magpie-checkout"
-        magpie_dir.mkdir()
+        magpie_dir = tmp_path / "installed-magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
+        override = tmp_path / "not-a-magpie-checkout"
+        if override_kind == "non-checkout":
+            override.mkdir()
+        selected = "" if override_kind == "empty" else str(override)
         (runtime / "kernel-agent.env.sh").write_text(
             f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("MAGPIE_PATH", selected)
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
-        assert _os.environ.get("MAGPIE_PATH") is None
+        assert _os.environ["MAGPIE_PATH"] == selected
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+
+    @pytest.mark.parametrize("root_already_set", [False, True])
+    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch, root_already_set):
+        """A reused kernel-agent root must not suppress the runtime's missing Magpie import root."""
+        import os
+        import subprocess
+        import sys
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        magpie_dir = tmp_path / "runtime Magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
+        (runtime / "kernel-agent.env.sh").write_text(
+            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\nexport MAGPIE_PATH='{magpie_dir}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("PYTHONPATH", "")
+        if root_already_set:
+            monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/operator/kernel")
+
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight._derive_runtime_paths()
+
+        assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
+        assert os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == (
+            "/operator/kernel" if root_already_set else "/installed/kernel"
+        )
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+        child = subprocess.run(
+            [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert child.returncode == 0, child.stderr
+        assert child.stdout.strip() == "installer-checkout"
 
     def test_placeholder_path_to_your_is_unset(self):
         assert cli_preflight._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
