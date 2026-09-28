@@ -967,7 +967,7 @@ class KernelPhase(CoordinatorCollaborator):
         confirmed on disk, leaving current behaviour untouched. Never raises.
         """
         try:
-            from hyperloom.inference_optimizer.agentx.deploy import is_agentx_client_script
+            from hyperloom.common.agentx_workload import is_agentx_client_script
 
             # Only the AgentX client misleads the inference; anything else in
             # this field is the launcher GEAK should keep deriving for itself.

@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Mapping
+
+from hyperloom.common.agentx_workload import is_agentx_client_script
 
 from ._workload_envs import (
     apply_agentx_switch,
@@ -27,10 +28,7 @@ def apply_runtime_benchmark_overrides(
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and Path(str(bench.get("benchmark_script") or "")).name in {
-        "aiperf_client.sh",
-        "mlperf_agentic_client.sh",
-    }:
+    if agentx_mode is None and is_agentx_client_script(str(bench.get("benchmark_script") or "")):
         agentx_mode = True
 
     if model_path:

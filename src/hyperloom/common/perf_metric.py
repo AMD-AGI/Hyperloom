@@ -39,6 +39,10 @@ GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
 GRADED_DURATION = "duration_seconds"
 GRADED_ERROR_RATE = "request_error_rate"
 
+# The work a fixed-work run issues (MLPerf agentic: trajectories). Present only on such runs; its presence is what
+# makes a pair fixed-work for ``rounds_are_comparable``.
+GRADED_FIXED_WORK = "issued_trajectories"
+
 # A trace replay slices a different part of the corpus when the window moves, so the two rounds stop measuring the
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
@@ -64,6 +68,7 @@ GRADED_AXIS_KEYS = (
     "tpot_p90_ms",
     GRADED_DURATION,
     GRADED_ERROR_RATE,
+    GRADED_FIXED_WORK,
 )
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
@@ -96,6 +101,12 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
+    # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
+    # asking for interactivity there would only degrade every round.
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if is_mlperf_backend():
+        return False
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
@@ -172,6 +183,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
+        (GRADED_FIXED_WORK, _positive(source.get(GRADED_FIXED_WORK))),
     ):
         if value is not None:
             snap[key] = value
@@ -223,6 +235,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "tpot_p90_ms",
         GRADED_INTVTY_P50,
         GRADED_OUTPUT_PER_GPU,
+        GRADED_FIXED_WORK,
     ):
         value = _positive(source.get(key))
         if value is not None:
@@ -277,11 +290,22 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
 
 
 def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
-    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+    """Whether the pair measured the same work and the candidate dropped no extra requests.
+
+    A fixed-window replay measured the same work when both windows are the same length. A fixed-work run (either
+    side carries ``GRADED_FIXED_WORK``) finishes a set amount of work, so its duration is the thing a speedup
+    shortens; the same work is the same issued count.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
     """
+    if GRADED_FIXED_WORK in candidate or GRADED_FIXED_WORK in anchor:
+        for side in (candidate, anchor):
+            if not all(key in side for key in (GRADED_FIXED_WORK, GRADED_ERROR_RATE)):
+                return False
+        if axis_of(candidate, GRADED_FIXED_WORK) != axis_of(anchor, GRADED_FIXED_WORK):
+            return False
+        return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
             return False
@@ -344,6 +368,7 @@ __all__ = [
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
     "GRADED_ERROR_RATE",
+    "GRADED_FIXED_WORK",
     "GRADED_INTVTY",
     "GRADED_INTVTY_P50",
     "GRADED_OUTPUT",

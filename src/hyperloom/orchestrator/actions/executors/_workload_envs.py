@@ -359,11 +359,12 @@ def build_agentx_workload_spec(
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
-    from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend
-    from hyperloom.inference_optimizer.agentx.mapping import (
-        CANONICAL_MLPERF_CORPUS_LOADER,
-        CANONICAL_MLPERF_CORPUS_ENTRIES,
-        CANONICAL_MLPERF_SMOKE_ENTRIES,
+    from hyperloom.common.agentx_workload import (
+        MLPERF_CORPUS,
+        MLPERF_PORT,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
     )
 
     proc_env: Mapping[str, str] = os.environ if env is None else env
@@ -402,27 +403,21 @@ def build_agentx_workload_spec(
         "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
     }
     if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
-        flow = client_knob("MLPERF_AGENTIC_FLOW", "smoke_test").strip() or "smoke_test"
-        num_entries = (
-            CANONICAL_MLPERF_SMOKE_ENTRIES
-            if flow == "smoke_test"
-            else int(client_knob("AGENTIC_NUM_TRAJECTORIES", CANONICAL_MLPERF_CORPUS_ENTRIES))
-        )
         return {
             "kind": "agentx_mlperf_agentic",
             "client": "mlperf",
             "scenario": "mlperf-agentic-v6",
-            "corpus": CANONICAL_MLPERF_CORPUS_LOADER,
-            "canonical_corpus": CANONICAL_MLPERF_CORPUS_LOADER,
-            "num_entries": num_entries,
+            "corpus": MLPERF_CORPUS,
+            "canonical_corpus": MLPERF_CORPUS,
+            "num_entries": mlperf_trajectories(envs),
             "duration_s": 0,
             "geak_loop_duration_s": 0,
             "concurrency": conc,
             "metric_basis": metric_basis,
             "intvty_p90_veto_pct": intvty_p90_veto_pct,
             "metric_window_s": 0.0,
-            "flow": flow,
-            "port": int(client_knob("PORT", 30000) or 30000),
+            "flow": mlperf_flow(envs),
+            "port": int(envs.get("PORT") or MLPERF_PORT),
             "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
             "isl_osl_placeholder": isl_osl_placeholder,
         }
@@ -478,7 +473,9 @@ def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
     carries it. A conc-sweep rung that only changes ``CONC`` would then be
     recorded at one concurrency and measured at another.
     """
-    if str(envs.get("HYPERLOOM_AGENTIC_BACKEND") or "").strip().lower() != "mlperf":
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if not is_mlperf_backend(envs):
         return
     conc = envs.get("CONC")
     if conc not in (None, ""):
@@ -514,7 +511,16 @@ def apply_agentx_switch(
     if not framework or framework_registry.is_scriptable(framework):
         return
     envs = bench.setdefault("envs", {})
-    from hyperloom.inference_optimizer.agentx.deploy import agentx_client_script, is_mlperf_backend
+    from hyperloom.common.agentx_workload import (
+        BACKEND_ENV,
+        MLPERF_PORT,
+        MLPERF_SERVED_MODEL,
+        agentx_client_script,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
@@ -530,33 +536,30 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
-        if is_mlperf_backend(_agentx_env) and (
-            key.startswith(("MLPERF_", "AGENTIC_")) or key == "HYPERLOOM_AGENTIC_BACKEND"
-        ):
+        if is_mlperf_backend(_agentx_env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV):
             envs[key] = value
     if is_mlperf_backend(_agentx_env):
-        envs["HYPERLOOM_AGENTIC_BACKEND"] = "mlperf"
-        # The harness dials localhost:30000. Pin it here so a recipe PORT cannot
-        # leave the server and the client on different sockets.
-        envs["PORT"] = "30000"
-        envs.setdefault("MLPERF_AGENTIC_FLOW", os.environ.get("MLPERF_AGENTIC_FLOW") or "smoke_test")
-        envs.setdefault(
-            "MLPERF_ENDPOINTS_DIR",
-            os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints",
-        )
+        envs[BACKEND_ENV] = "mlperf"
+        # The harness dials a fixed port and model name. Pinning both here is the
+        # one place they are enforced, so a recipe PORT cannot leave the server
+        # and the client on different sockets.
+        envs["PORT"] = str(MLPERF_PORT)
+        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+        # Settled once here; the client and the published spec read these back.
+        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
         # The round's CONC is what the measurement is recorded under. A baseline
         # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
-        if conc not in (None, "", 0):
-            envs["CONC"] = str(conc)
-        envs["AGENTIC_CONCURRENCY"] = str(envs.get("CONC") or os.environ.get("CONC") or "16")
-        envs["MLPERF_AGENTIC_MODEL"] = "kimi-k3"
-        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+        pin_mlperf_round_concurrency(envs)
         from ._server_argv import add_server_arg_unless_pinned
 
         add_server_arg_unless_pinned(
             envs,
             framework,
-            "--served-model-name kimi-k3",
+            f"--served-model-name {MLPERF_SERVED_MODEL}",
             pinned_by=("served-model-name", "served_model_name"),
         )
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
@@ -603,10 +606,11 @@ def prepare_agentx_runtime(
             try:
                 materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
                 benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = isinstance(benchmark, dict) and Path(str(benchmark.get("benchmark_script") or "")).name in {
-                    "aiperf_client.sh",
-                    "mlperf_agentic_client.sh",
-                }
+                from hyperloom.common.agentx_workload import is_agentx_client_script
+
+                active = isinstance(benchmark, dict) and is_agentx_client_script(
+                    str(benchmark.get("benchmark_script") or "")
+                )
             except (OSError, ValueError, TypeError):
                 active = False
     if not active:

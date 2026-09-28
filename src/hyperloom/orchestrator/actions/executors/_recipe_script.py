@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.agentx_workload import is_agentx_client_script
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
@@ -23,10 +24,6 @@ _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(
 # ``"$@"`` / ``${@}``: forwarding its own positional arguments is the other way
 # a script accepts extra server args, alongside the framework's args variable.
 _POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
-
-# Spelled out rather than imported from ``agentx.deploy``: this module is on the
-# default benchmark path, which is pinned not to import the agentx package.
-_AGENTX_CLIENT_SCRIPTS = frozenset({"aiperf_client.sh", "mlperf_agentic_client.sh"})
 
 
 class RecipeLeverUnavailableError(ValueError):
@@ -54,7 +51,7 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     if not script:
         return ""
 
-    if script in _AGENTX_CLIENT_SCRIPTS:
+    if is_agentx_client_script(script):
         script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
         if not script:
             framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()

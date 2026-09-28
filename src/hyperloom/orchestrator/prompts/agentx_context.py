@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
+from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT, intvty_grading_enabled
 
 # Percentiles rendered per axis, in order.
 _RENDERED = ("p50", "p90", "p99")
@@ -49,6 +49,12 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
 
 def grading_lines() -> list[str]:
     """Describe what an AgentX KEEP is decided on."""
+    if not intvty_grading_enabled(benchmark_mode="agentx"):
+        return [
+            "**Graded on output token throughput** — the MLPerf agentic harness replays a",
+            "fixed trajectory set and publishes no per-request interactivity, so a KEEP is",
+            "an output-throughput gain that holds the smoke accuracy of the baseline.",
+        ]
     return [
         "**Graded on E2E normalised interactivity P50** — the median of",
         "`OSL_i / E2EL_i` in tok/s/user. InferenceX ranks submissions on the P90 of the",

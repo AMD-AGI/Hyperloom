@@ -30,6 +30,7 @@ _AGENTX_ENV_KEYS = (
     "MODEL_PATH",
     "PORT",
     "MLPERF_AGENTIC_FLOW",
+    "AGENTIC_NUM_TRAJECTORIES",
     "AGENTIC_DATASET_PATH",
     "MLPERF_TOKENIZER_DIR",
 )
@@ -316,6 +317,10 @@ def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
     assert bench["envs"]["PORT"] == "30000"
     assert bench["envs"]["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
     assert bench["envs"]["AGENTIC_CONCURRENCY"] == "16"
+    assert bench["envs"]["MLPERF_AGENTIC_MODEL"] == "kimi-k3"
+    # Settled here once; the client requires them rather than defaulting its own.
+    assert bench["envs"]["MLPERF_AGENTIC_FLOW"] == "smoke_test"
+    assert bench["envs"]["AGENTIC_NUM_TRAJECTORIES"] == "150"
     assert "--served-model-name kimi-k3" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 

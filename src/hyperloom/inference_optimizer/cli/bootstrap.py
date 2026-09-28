@@ -108,7 +108,7 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
-        from hyperloom.inference_optimizer.agentx.deploy import agentic_backend
+        from hyperloom.common.agentx_workload import agentic_backend
 
         # Sessions recorded before the backend was persisted are aiperf.
         had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
@@ -124,7 +124,7 @@ def agentx_state_is_stale(state: Any) -> str:
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
-    from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend
+    from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -132,25 +132,13 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_ISL,
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
-        CANONICAL_MLPERF_CORPUS_DURATION_S,
-        CANONICAL_MLPERF_CORPUS_ENTRIES,
-        CANONICAL_MLPERF_CORPUS_LOADER,
-        CANONICAL_MLPERF_ISL,
-        CANONICAL_MLPERF_OSL,
-        CANONICAL_MLPERF_PREFIX_CACHE_HIT,
-        CANONICAL_MLPERF_SMOKE_ENTRIES,
     )
 
     if is_mlperf_backend():
-        flow = str(os.environ.get("MLPERF_AGENTIC_FLOW") or "smoke_test").strip()
-        entries = CANONICAL_MLPERF_SMOKE_ENTRIES if flow == "smoke_test" else CANONICAL_MLPERF_CORPUS_ENTRIES
+        # The MLPerf corpus has no published shape; the first measurement supplies it.
         return {
-            "corpus_loader": CANONICAL_MLPERF_CORPUS_LOADER,
-            "corpus_entries": entries,
-            "duration_s": float(CANONICAL_MLPERF_CORPUS_DURATION_S),
-            "isl": dict(CANONICAL_MLPERF_ISL),
-            "osl": dict(CANONICAL_MLPERF_OSL),
-            "prefix_cache_hit": CANONICAL_MLPERF_PREFIX_CACHE_HIT,
+            "corpus_loader": MLPERF_CORPUS,
+            "corpus_entries": mlperf_trajectories(),
             "source": "canonical_mlperf",
         }
 
@@ -255,7 +243,7 @@ def _seed_shared_state(
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
     if _agentx_enabled():
-        from hyperloom.inference_optimizer.agentx.deploy import agentic_backend
+        from hyperloom.common.agentx_workload import agentic_backend
 
         agentx_backend = agentic_backend()
     else:

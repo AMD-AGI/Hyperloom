@@ -2562,202 +2562,87 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
 
 
-def _agentx_anchor() -> dict[str, float]:
+def _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, name: str) -> tuple[dict, SharedState]:
+    """Run one explore variant on the MLPerf backend against a smoke baseline."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
+    state.baseline_tput = 200.0
+    state.baseline_accuracy = 0.72
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    async def _run():
+        task = await tr.create(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / f"explore-{name}"),
+                "base_tput": 200.0,
+                "grid": [{"name": name, "extra_args": f"--{name}"}],
+            },
+            idempotency_key=f"ex-{name}",
+        )
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_fake_run,
+        ):
+            return await sub.run_task(task)
+
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    out = __import__("asyncio").run(_run()).result
+    return out["explore_search_update"]["tested"][canonical_fingerprint(f"--{name}", {})], state
+
+
+def _mlperf_smoke(**over) -> dict:
+    """A mapped smoke round: 150 trajectories, baseline-level accuracy, no failures."""
     return {
-        "output_throughput": 200.0,
-        "input_throughput": 200.0,
-        "total_token_throughput": 400.0,
-        "e2e_norm_intvty_p90": 80.0,
-        "e2e_norm_intvty_p50": 100.0,
-        "duration_seconds": 25.0,
-        "request_error_rate": 0.0,
-    }
-
-
-def test_explore_mlperf_smoke_keeps_on_median_interactivity(sub_agent_runner, tmp_path, monkeypatch):
-    """A complete smoke measurement is gradable. The objective is p50, not system tps."""
-    _force_cold_decision(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
-    sub, tr, _ = sub_agent_runner
-    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
-    state.baseline_tput = 200.0
-    state.baseline_perf = _agentx_anchor()
-    sub.shared_state = state
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    candidate = {
-        "input_throughput": 200.0,
-        "total_token_throughput": 400.0,
-        "e2e_norm_intvty_p90": 80.0,
-        "e2e_norm_intvty_p50": 110.0,
-        "duration_seconds": 25.0,
+        "output_throughput": 220.0,
+        "duration": 3500.0,
+        "issued_trajectories": 150,
         "request_error_rate": 0.0,
         "submission_valid": True,
-        "canonical_submission": False,
-        "completed": 150,
+        "accuracy_score": 0.72,
+        "accuracy_missing_turns": 0,
+        **over,
     }
 
-    def _fake_run(cmd, *args, **kwargs):
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=200.0, perf_axes=candidate)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+def test_explore_mlperf_keeps_a_fixed_work_speedup(sub_agent_runner, tmp_path, monkeypatch):
+    """+10% output throughput finishes the same 150 trajectories ~10% sooner, and is a KEEP.
 
-    async def _run():
-        task = await tr.create(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / "explore-mlperf-keep"),
-                "base_tput": 200.0,
-                "grid": [{"name": "v_smoke", "extra_args": "--mlperf-smoke"}],
-            },
-            idempotency_key="ex-mlperf-keep",
-        )
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_fake_run,
-        ):
-            return await sub.run_task(task)
-
-    res = __import__("asyncio").run(_run())
-
-    out = res.result
-    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--mlperf-smoke", {})]
+    The fixed-window duration rule would call that pair incomparable.
+    """
+    tested, _ = _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
     assert tested["outcome"] == "KEEP"
-    assert tested["graded_objective"] == "e2e_norm_intvty_p50"
-    assert not any(gate.get("gate") == "mlperf_full_613" for gate in tested["gates"])
-    assert out["winners"]
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["gain_pct"] == pytest.approx(10.0)
 
 
-def test_explore_mlperf_reverts_when_the_tail_regresses(sub_agent_runner, tmp_path, monkeypatch):
-    """A higher output throughput with a worse slow tail is not a KEEP."""
-    _force_cold_decision(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
-    sub, tr, _ = sub_agent_runner
-    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
-    state.baseline_tput = 200.0
-    state.baseline_perf = _agentx_anchor()
-    sub.shared_state = state
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    candidate = {
-        "input_throughput": 400.0,
-        "total_token_throughput": 800.0,
-        "e2e_norm_intvty_p90": 40.0,
-        "e2e_norm_intvty_p50": 110.0,
-        "duration_seconds": 25.0,
-        "request_error_rate": 0.0,
-        "submission_valid": True,
-        "canonical_submission": False,
-        "completed": 150,
-    }
-
-    def _fake_run(cmd, *args, **kwargs):
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=400.0, perf_axes=candidate)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-
-    async def _run():
-        task = await tr.create(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / "explore-mlperf-tail"),
-                "base_tput": 200.0,
-                "grid": [{"name": "v_tail", "extra_args": "--mlperf-tail"}],
-            },
-            idempotency_key="ex-mlperf-tail",
-        )
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_fake_run,
-        ):
-            return await sub.run_task(task)
-
-    res = __import__("asyncio").run(_run())
-
-    out = res.result
-    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--mlperf-tail", {})]
+def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_path, monkeypatch):
+    """The throughput gain is real; the inline accuracy drop against the smoke baseline decides."""
+    tested, _ = _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_score=0.60), name="lossy"
+    )
     assert tested["outcome"] == "REVERT"
-    assert out["winners"] == []
+    gates = {gate["gate"]: gate for gate in tested["gates"]}
+    assert gates["accuracy"]["passed"] is False
+    assert gates["accuracy"]["observed"] == pytest.approx(0.60)
+    assert gates["accuracy"]["threshold"] == pytest.approx(0.72)
 
 
-def test_mlperf_submission_confirmation_is_not_graded_against_smoke(sub_agent_runner, tmp_path, monkeypatch):
-    """The 613 run confirms the final stack. It does not KEEP or compare durations."""
-    from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
-
-    _force_cold_decision(monkeypatch)
-    sub, tr, _ = sub_agent_runner
-    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
-    state.baseline_tput = 200.0
-    state.baseline_perf = _agentx_anchor()
-    sub.shared_state = state
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    seen: dict[str, object] = {}
-
-    async def _fake_grid(**kwargs):
-        seen["envs"] = dict(kwargs["grid"][0].extra_envs)
-        workspace = Path(kwargs["output_root"]) / "benchmark"
-        workspace.mkdir(parents=True)
-        (workspace / "inferencex_result.json").write_text(
-            json.dumps(
-                {
-                    "output_throughput": 100.0,
-                    "canonical_submission": True,
-                    "submission_valid": True,
-                    "mlperf_complete": True,
-                    "request_error_rate": 0.0,
-                    "accuracy_score": 0.9,
-                    "completed": 613,
-                    "duration": 15000.0,
-                }
-            ),
-            encoding="utf-8",
-        )
-        return [
-            VariantResult(
-                name="mlperf-submission",
-                extra_server_args="",
-                extra_envs={},
-                status="succeeded",
-                workspace=str(workspace),
-                output_throughput=100.0,
-            )
-        ]
-
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-
-    async def _run():
-        task = await tr.create(
-            kind="explore",
-            params={
-                "config_path": str(base),
-                "output_dir": str(tmp_path / "explore-mlperf-confirm"),
-                "base_tput": 200.0,
-                "mlperf_submission_confirmation": True,
-                "grid": [{"name": "final", "extra_args": ""}],
-            },
-            idempotency_key="ex-mlperf-confirm",
-        )
-        with (
-            patch("hyperloom.orchestrator.actions.executors.explore.run_grid", side_effect=_fake_grid),
-            patch("hyperloom.orchestrator.actions.executors.explore.resolve_graded_comparison") as graded,
-        ):
-            result = await sub.run_task(task)
-        return result, graded
-
-    res, graded = __import__("asyncio").run(_run())
-
-    graded.assert_not_called()
-    assert seen["envs"]["MLPERF_AGENTIC_FLOW"] == "full"
-    assert seen["envs"]["AGENTIC_NUM_TRAJECTORIES"] == "613"
-    assert res.result["winners"] == []
-    assert res.result["mlperf_submission"]["passed"] is True
-    assert state.mlperf_submission["passed"] is True
+def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner, tmp_path, monkeypatch):
+    tested, _ = _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_missing_turns=3), name="unscored"
+    )
+    assert tested["outcome"] == "REVERT"
+    assert {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]["reason"] == "accuracy_unavailable"

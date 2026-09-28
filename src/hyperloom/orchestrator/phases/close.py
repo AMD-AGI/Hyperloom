@@ -256,72 +256,6 @@ class ClosePhase(CoordinatorCollaborator):
             detail=f"task_state={getattr(result, 'state', '')} validated={validated}",
         )
 
-    async def _confirm_mlperf_submission(self) -> None:
-        """Run the canonical 613 trajectory set once on the stack the session ended on.
-
-        Search KEEPs stay on smoke-versus-smoke. This confirmation is not graded
-        against that anchor. A session that cannot fit the run records a skip
-        instead of a false confirmation.
-        """
-        from hyperloom.inference_optimizer.agentx.deploy import is_mlperf_backend, mlperf_benchmark_timeout_sec
-
-        step = "mlperf_submission"
-        if not is_mlperf_backend():
-            return
-        state = self.shared_state
-        generation = int(getattr(state, "working_recipe_generation", 0) or 0)
-        previous = getattr(state, "mlperf_submission", None) or {}
-        if isinstance(previous, dict) and previous.get("passed") and previous.get("recipe_generation") == generation:
-            await self._record_close_step(step, status="skipped", detail="already_confirmed")
-            return
-        if not str(getattr(state, "baseline_config_path", "") or ""):
-            await self._record_close_step(step, status="skipped", detail="no_baseline_config")
-            return
-        needed = mlperf_benchmark_timeout_sec({"MLPERF_AGENTIC_FLOW": "full", "AGENTIC_NUM_TRAJECTORIES": "613"})
-        usable_sec = _phase_state.session_usable_seconds(state)
-        if usable_sec is not None and usable_sec < needed:
-            await self._record_close_step(
-                step,
-                status="skipped",
-                detail=f"session_budget usable={usable_sec:.0f}s needed={needed:.0f}s",
-            )
-            return
-        summary = await self._enqueue_mlperf_submission_confirmation()
-        task_id = str(summary.get("task_id") or "")
-        if not task_id:
-            await self._record_close_step(step, status="skipped", detail=str(summary.get("reason") or "not_enqueued"))
-            return
-        task = await self.tasks.get(task_id)
-        if task.state != "queued":
-            await self._record_close_step(step, status="skipped", task_id=task_id, detail=f"task_state={task.state}")
-            return
-        timeout_sec = needed + 600.0
-        log.info("CLOSE: MLPerf 613 submission confirmation task=%s (timeout=%.0fs)", task_id, timeout_sec)
-        try:
-            result = await asyncio.wait_for(
-                self.run_task_registered(
-                    task,
-                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=None),
-                ),
-                timeout=timeout_sec,
-            )
-        except asyncio.TimeoutError:
-            await self._abandon_close_task(task, reason="mlperf_submission_timeout")
-            await self._record_close_step(step, status="failed", task_id=task_id, detail="timeout")
-            return
-        if result is None:
-            await self._abandon_close_task(task, reason="mlperf_submission_lanes_busy")
-            await self._record_close_step(step, status="skipped", task_id=task_id, detail="lanes_busy")
-            return
-        record = getattr(state, "mlperf_submission", None) or {}
-        passed = isinstance(record, dict) and record.get("passed") is True
-        await self._record_close_step(
-            step,
-            status="done" if passed else "failed",
-            task_id=task_id,
-            detail=str(record.get("block") or "") if isinstance(record, dict) else "",
-        )
-
     def _record_close_roofline_progress(self) -> None:
         """Snapshot the session's roofline progress into the close section."""
         try:
@@ -429,12 +363,6 @@ class ClosePhase(CoordinatorCollaborator):
         except Exception as exc:
             log.exception("CLOSE: stack revalidation failed")
             await self._record_close_step("stack_revalidation", status="failed", detail=repr(exc)[:240])
-
-        try:
-            await self._confirm_mlperf_submission()
-        except Exception as exc:
-            log.exception("CLOSE: MLPerf submission confirmation failed")
-            await self._record_close_step("mlperf_submission", status="failed", detail=repr(exc)[:240])
 
         # Post-optimization roofline (best-effort): profile the final optimized service once so the before/after
         # kernel roofline chart has its "after" column.

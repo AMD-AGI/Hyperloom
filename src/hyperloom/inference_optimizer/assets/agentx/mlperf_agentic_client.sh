@@ -7,9 +7,10 @@
 # mlperf_agentic_client.sh — AgentX client that keeps Magpie server lifecycle
 # and drives MLPerf ``utility/run_agentic.sh`` against localhost:30000.
 #
-# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. Search measures
-# smoke.yaml (150 trajectories) against a smoke baseline. The canonical 613
-# confirmation sets MLPERF_AGENTIC_FLOW=full once, on the final stack.
+# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. The AgentX switch
+# settles PORT, the served model, the flow, the trajectory count and the
+# concurrency; preflight checks the harness, dataset and tokenizer. This script
+# checks only what it alone can see: who owns the port, and what is served.
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,23 +18,16 @@ log() { echo "[mlperf_agentic_client] $*"; }
 
 : "${MODEL:?MODEL required}"
 : "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
-# The harness always dials localhost:30000. A different PORT would benchmark
-# whatever already answers there, then have the exit trap kill it.
-if [ -n "${PORT:-}" ] && [ "$PORT" != "30000" ]; then
-  log "ERROR: MLPerf harness targets localhost:30000; refusing PORT=${PORT}"
-  exit 2
-fi
-PORT=30000
+: "${PORT:?PORT required}"
+: "${MLPERF_AGENTIC_MODEL:?MLPERF_AGENTIC_MODEL required}"
+: "${MLPERF_AGENTIC_FLOW:?MLPERF_AGENTIC_FLOW required}"
+: "${AGENTIC_NUM_TRAJECTORIES:?AGENTIC_NUM_TRAJECTORIES required}"
+: "${AGENTIC_CONCURRENCY:?AGENTIC_CONCURRENCY required}"
+: "${AGENTIC_DATASET_PATH:?AGENTIC_DATASET_PATH required}"
+: "${MLPERF_TOKENIZER_DIR:?MLPERF_TOKENIZER_DIR required}"
+: "${MLPERF_ENDPOINTS_DIR:?MLPERF_ENDPOINTS_DIR required}"
 export PORT
-
-MODEL_KEY="${MLPERF_AGENTIC_MODEL:-kimi-k3}"
-case "$MODEL_KEY" in
-  kimi-k3|kimi_k3) ;;
-  *)
-    log "ERROR: MLPerf agentic client only measures kimi-k3 (got ${MODEL_KEY})"
-    exit 2
-    ;;
-esac
+MODEL_KEY="$MLPERF_AGENTIC_MODEL"
 
 _port_open() {
   python3 - "$1" <<'PY'
@@ -213,53 +207,15 @@ if want not in {item.lower() for item in ids}:
 print(f"[mlperf_agentic_client] served model ok: {ids}")
 PY
 
-MLPERF_ROOT="${MLPERF_ENDPOINTS_DIR:-/opt/mlperf-endpoints}"
-if [ ! -f "${MLPERF_ROOT}/utility/run_agentic.sh" ]; then
-  log "ERROR: MLPerf harness missing at ${MLPERF_ROOT}/utility/run_agentic.sh"
-  exit 2
-fi
-if [ -z "${AGENTIC_DATASET_PATH:-}" ] || [ ! -e "${AGENTIC_DATASET_PATH}" ]; then
-  log "ERROR: AGENTIC_DATASET_PATH is missing or unreadable: ${AGENTIC_DATASET_PATH:-unset}"
-  exit 2
-fi
-if [ -z "${MLPERF_TOKENIZER_DIR:-}" ] || [ ! -d "${MLPERF_TOKENIZER_DIR}" ]; then
-  log "ERROR: MLPERF_TOKENIZER_DIR is missing: ${MLPERF_TOKENIZER_DIR:-unset}"
-  exit 2
-fi
-
-FLOW="${MLPERF_AGENTIC_FLOW:-smoke_test}"
 HARDWARE="${MLPERF_AGENTIC_HARDWARE:-mi355x}"
-# CONC is the concurrency this round is recorded under. A stale
-# AGENTIC_CONCURRENCY from the baseline YAML must not outrank it.
-if [ -n "${CONC:-}" ]; then
-  export AGENTIC_CONCURRENCY="$CONC"
-else
-  export AGENTIC_CONCURRENCY="${AGENTIC_CONCURRENCY:-16}"
-fi
 export RESULTS_DIR="$ART"
-export AGENTIC_DATASET_PATH
-export MLPERF_TOKENIZER_DIR
-if [ "$FLOW" = "smoke_test" ]; then
-  export AGENTIC_NUM_TRAJECTORIES="${AGENTIC_NUM_TRAJECTORIES:-150}"
-else
-  export AGENTIC_NUM_TRAJECTORIES="${AGENTIC_NUM_TRAJECTORIES:-613}"
-fi
+export AGENTIC_DATASET_PATH MLPERF_TOKENIZER_DIR AGENTIC_NUM_TRAJECTORIES AGENTIC_CONCURRENCY
 
-NONCANON=()
-[ "$FLOW" = "smoke_test" ] && NONCANON+=("flow=smoke_test(canonical full/613)")
-[ "${AGENTIC_NUM_TRAJECTORIES}" != "613" ] && NONCANON+=("entries=${AGENTIC_NUM_TRAJECTORIES}(canonical 613)")
-export AGENTX_NONCANONICAL_REASONS=""
-if [ ${#NONCANON[@]} -gt 0 ]; then
-  _reasons="$(IFS=,; echo "${NONCANON[*]}")"
-  export AGENTX_NONCANONICAL_REASONS="$_reasons"
-  log "SMOKE: non-canonical MLPerf workload [${_reasons}] -- measurable for search; canonical submission is the 613 confirmation"
-fi
-
-log "mlperf flow=${FLOW} model=${MODEL_KEY} hw=${HARDWARE} conc=${AGENTIC_CONCURRENCY} dataset=${AGENTIC_DATASET_PATH}"
+log "mlperf flow=${MLPERF_AGENTIC_FLOW} trajectories=${AGENTIC_NUM_TRAJECTORIES} model=${MODEL_KEY} hw=${HARDWARE} conc=${AGENTIC_CONCURRENCY} dataset=${AGENTIC_DATASET_PATH}"
 set +e
 (
-  cd "$MLPERF_ROOT"
-  bash utility/run_agentic.sh "$FLOW" "$MODEL_KEY" "$HARDWARE" perf
+  cd "$MLPERF_ENDPOINTS_DIR"
+  bash utility/run_agentic.sh "$MLPERF_AGENTIC_FLOW" "$MODEL_KEY" "$HARDWARE" perf
 )
 HARNESS_RC=$?
 set -e
@@ -273,16 +229,12 @@ if [ -z "$SUMMARY" ]; then
   log "ERROR: no result_summary.json produced under ${ART}"
   exit 1
 fi
-# Inline accuracy lands in scores.json beside the summary; the accuracy/ path is
-# what a separate acc-only pass would write, and K3 has no such dataset. Both are
-# checked so neither layout silently maps to "no accuracy" and blocks every KEEP.
-ACCURACY="$(find "$ART" -name 'scores.json' -print -quit 2>/dev/null || true)"
-if [ -z "$ACCURACY" ]; then
-  ACCURACY="$(find "$ART" -path '*/accuracy/accuracy_results.json' -print -quit 2>/dev/null || true)"
-fi
+# Inline accuracy lands in scores.json beside the summary. Without it the
+# mapped result carries no accuracy and the accuracy gate refuses the KEEP.
+SCORES="$(find "$ART" -name 'scores.json' -print -quit 2>/dev/null || true)"
 MAP_ARGS=("$SUMMARY" "${RESULT_DIR}/${RESULT_FILENAME}.json")
-if [ -n "$ACCURACY" ]; then
-  MAP_ARGS+=("$ACCURACY")
+if [ -n "$SCORES" ]; then
+  MAP_ARGS+=("$SCORES")
 fi
 python3 "${BENCH_DIR}/map_mlperf.py" "${MAP_ARGS[@]}"
 log "mapped ${SUMMARY} -> ${RESULT_DIR}/${RESULT_FILENAME}.json"

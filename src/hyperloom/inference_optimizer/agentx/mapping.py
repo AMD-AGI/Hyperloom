@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Map aiperf ``profile_export_aiperf.json`` metrics to the InferenceX result schema (``inferencex_result.json``)."""
+"""Map an AgentX client's export to the InferenceX result schema (``inferencex_result.json``).
+
+Two clients, two readers: :func:`map_aiperf` for aiperf's ``profile_export_aiperf.json``
+and :func:`map_mlperf` for the MLCommons ``inference-endpoint`` ``result_summary.json``
+plus its inline ``scores.json``.
+"""
 
 from __future__ import annotations
 
@@ -17,18 +22,6 @@ CANONICAL_CORPUS_DURATION_S = 3600
 CANONICAL_ISL = {"avg": 113814, "p50": 94821, "p75": 119126, "p90": 163328, "p99": 506158}
 CANONICAL_OSL = {"avg": 806, "p50": 333, "p75": 801, "p90": 1874, "p99": 6386}
 CANONICAL_PREFIX_CACHE_HIT = 0.975
-
-# MLPerf agentic v6 corpus (HYPERLOOM_AGENTIC_BACKEND=mlperf). Search grades the
-# 150-trajectory smoke set against a smoke baseline. The canonical 613-trajectory
-# online run is a submission confirmation of the final stack, not a graded
-# comparison against that smoke anchor.
-CANONICAL_MLPERF_CORPUS_LOADER = "agentic_combined_v6"
-CANONICAL_MLPERF_CORPUS_ENTRIES = 613
-CANONICAL_MLPERF_SMOKE_ENTRIES = 150
-CANONICAL_MLPERF_CORPUS_DURATION_S = 0
-CANONICAL_MLPERF_ISL: dict[str, int] = {}
-CANONICAL_MLPERF_OSL: dict[str, int] = {}
-CANONICAL_MLPERF_PREFIX_CACHE_HIT = 0.0
 
 # Percentiles carried forward from the aiperf sequence-length distributions.
 _SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
@@ -195,268 +188,138 @@ def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ns_to_ms(value: Any) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
-        return 0.0
-    if value >= 1_000_000:
-        return float(value) / 1_000_000.0
+class MlperfReportError(ValueError):
+    """An MLPerf harness file does not have the upstream shape :func:`map_mlperf` reads."""
+
+
+# ``inference_endpoint.metrics.report.Report`` fields :func:`map_mlperf` reads.
+_REPORT_FIELDS = (
+    "n_samples_issued",
+    "n_samples_completed",
+    "n_samples_failed",
+    "duration_ns",
+    "state",
+    "complete",
+    "qps",
+    "tps",
+    "ttft",
+    "tpot",
+    "latency",
+    "output_sequence_lengths",
+)
+
+# One series as ``_series_to_metric_dict`` writes it. A series that recorded no
+# samples is written as ``{}``.
+_SERIES_FIELDS = ("avg", "std_dev", "percentiles")
+
+# The registry keys percentiles by ``str(float)``.
+_PERCENTILE_KEYS = {"p50": "50.0", "p75": "75.0", "p90": "90.0", "p99": "99.0"}
+
+# TTFT, TPOT and sample latency are recorded in nanoseconds.
+_NS_PER_MS = 1e6
+
+# Result key prefix -> ``Report`` series, all in nanoseconds.
+_LATENCY_SERIES = (("ttft", "ttft"), ("tpot", "tpot"), ("e2el", "latency"))
+
+
+def _finite(value: Any, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise MlperfReportError(f"{where}: expected a finite number, got {value!r}")
     return float(value)
 
 
-def _series_ms(block: Any, percentile: int | None = None, *, avg: bool = False) -> float:
+def _series(report: Mapping[str, Any], name: str) -> dict[str, float] | None:
+    """``avg``, ``std_dev`` and the :data:`_PERCENTILE_KEYS` of one series; ``None`` when it has no samples."""
+    block = report[name]
     if not isinstance(block, dict):
-        if avg and isinstance(block, (int, float)) and not isinstance(block, bool):
-            return _ns_to_ms(block)
-        return 0.0
-    if avg:
-        for key in ("avg", "mean", "average"):
-            if block.get(key) is not None:
-                return _ns_to_ms(block.get(key))
-    perc = block.get("percentiles") if isinstance(block.get("percentiles"), dict) else block
-    if percentile is not None and isinstance(perc, dict):
-        for key in (str(percentile), percentile, f"p{percentile}"):
-            if perc.get(key) is not None:
-                return _ns_to_ms(perc.get(key))
-    return 0.0
-
-
-def _seq_total(block: Any) -> int:
-    if isinstance(block, dict):
-        total = block.get("total")
-        if isinstance(total, (int, float)) and not isinstance(total, bool):
-            return int(total)
-    if isinstance(block, (int, float)) and not isinstance(block, bool):
-        return int(block)
-    return 0
-
-
-def _seq_distribution(block: Any) -> dict[str, int]:
-    if not isinstance(block, dict):
-        return {}
-    out: dict[str, int] = {}
-    avg = block.get("avg") or block.get("mean")
-    if isinstance(avg, (int, float)) and not isinstance(avg, bool):
-        out["avg"] = int(avg)
-    perc = block.get("percentiles") if isinstance(block.get("percentiles"), dict) else block
-    if isinstance(perc, dict):
-        for name, key in (("p50", 50), ("p75", 75), ("p90", 90), ("p99", 99)):
-            raw = perc.get(str(key), perc.get(key, perc.get(name)))
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                out[name] = int(raw)
+        raise MlperfReportError(f"{name}: expected a series object, got {type(block).__name__}")
+    if not block:
+        return None
+    missing = [key for key in _SERIES_FIELDS if key not in block]
+    if missing:
+        raise MlperfReportError(f"{name}: series is missing {missing}")
+    percentiles = block["percentiles"]
+    if not isinstance(percentiles, dict):
+        raise MlperfReportError(f"{name}.percentiles: expected an object")
+    out = {"avg": _finite(block["avg"], f"{name}.avg"), "std_dev": _finite(block["std_dev"], f"{name}.std_dev")}
+    for label, key in _PERCENTILE_KEYS.items():
+        if key not in percentiles:
+            raise MlperfReportError(f"{name}.percentiles has no {key!r} (has {sorted(percentiles)})")
+        out[label] = _finite(percentiles[key], f"{name}.percentiles[{key!r}]")
     return out
 
 
-def _accuracy_score(accuracy: Mapping[str, Any] | None) -> float | None:
-    if not isinstance(accuracy, dict) or not accuracy:
-        return None
-    for key in ("score", "accuracy", "overall_score", "pass_rate", "inline_accuracy"):
-        value = accuracy.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            return float(value)
-    metrics = accuracy.get("metrics")
-    if isinstance(metrics, dict):
-        for key in ("score", "accuracy", "pass_rate"):
-            value = metrics.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-                return float(value)
-    return None
-
-
-def _positive_float(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value) or value <= 0:
-        return None
-    return float(value)
-
-
-def _series_percentile_ms(block: Any, percentile: int) -> float | None:
-    """One harness percentile in milliseconds, or ``None`` when it was not published.
-
-    Does not fall back to the average. A missing tail is not the median.
-    """
-    if not isinstance(block, dict):
-        return None
-    perc = block.get("percentiles")
-    if not isinstance(perc, dict):
-        return None
-    wanted = float(percentile)
-    for key, value in perc.items():
-        try:
-            if float(key) != wanted:
-                continue
-        except (TypeError, ValueError):
-            continue
-        number = _positive_float(value)
-        if number is not None:
-            return _ns_to_ms(number)
-    return None
-
-
-def _percentile_of(values: list[float], quantile: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    index = (len(ordered) - 1) * quantile
-    low = int(math.floor(index))
-    high = int(math.ceil(index))
-    if low == high:
-        return ordered[low]
-    weight = index - low
-    return ordered[low] * (1.0 - weight) + ordered[high] * weight
-
-
-def _intvty_from_records(records: Any) -> tuple[float | None, float | None]:
-    """Median and slow-tail of per-request output tokens per second.
-
-    The slow tail is the 10th percentile of the rate, the same inversion
-    ``map_aiperf`` applies to ``e2e_output_token_throughput``.
-    """
-    if not isinstance(records, list):
-        return None, None
-    rates: list[float] = []
-    for row in records:
-        if not isinstance(row, dict):
-            continue
-        tokens = _positive_float(row.get("output_tokens"))
-        if tokens is None:
-            tokens = _positive_float(row.get("osl"))
-        latency_s = _positive_float(row.get("latency_s"))
-        if latency_s is None:
-            latency_ns = _positive_float(row.get("latency_ns"))
-            latency_s = (latency_ns / 1e9) if latency_ns else None
-        if tokens and latency_s:
-            rates.append(tokens / latency_s)
-    if not rates:
-        return None, None
-    return _percentile_of(rates, 0.50), _percentile_of(rates, 0.10)
-
-
-def _intvty_from_rate_block(block: Any) -> tuple[float | None, float | None]:
-    """Explicit per-request rate percentiles, when the harness published them."""
-    if not isinstance(block, dict):
-        return None, None
-    return _positive_float(block.get("p50")), _positive_float(block.get("p10"))
-
-
-def _mlperf_interactivity(summary: Mapping[str, Any]) -> tuple[float | None, float | None]:
-    """Median and slow-tail interactivity, or ``(None, None)`` when unknown.
-
-    Preference order:
-
-    1. An explicit per-request ``e2e_output_token_throughput`` block (p50 and
-       p10), the same axis ``map_aiperf`` grades.
-    2. Per-request records (``output_tokens`` and latency) on the summary.
-    3. The harness TPOT percentiles inverted to tokens/s. Those percentiles are
-       computed from per-request samples; ``1/TPOT`` is decode interactivity
-       and moves independently of system ``tps``.
-
-    System throughput divided by concurrency is not a percentile. It is never
-    written into these keys. A missing percentile stays missing so grading
-    fails closed instead of treating an aggregate as a tail.
-    """
-    median, slow = _intvty_from_rate_block(summary.get("e2e_output_token_throughput"))
-    if median is not None or slow is not None:
-        return median, slow
-    median, slow = _intvty_from_records(summary.get("request_records"))
-    if median is not None or slow is not None:
-        return median, slow
-    tpot = summary.get("tpot") if isinstance(summary.get("tpot"), dict) else None
-    if tpot is None and isinstance(summary.get("itl"), dict):
-        tpot = summary["itl"]
-    median_ms = _series_percentile_ms(tpot, 50)
-    slow_ms = _series_percentile_ms(tpot, 90)
-    median = (1000.0 / median_ms) if median_ms else None
-    slow = (1000.0 / slow_ms) if slow_ms else None
-    return median, slow
+def _inline_accuracy(scores: Mapping[str, Any]) -> tuple[float, int]:
+    """The harness's inline accuracy score and the turns it could not score."""
+    if not isinstance(scores, Mapping) or "score" not in scores:
+        raise MlperfReportError("scores.json: no 'score'")
+    turns = scores.get("turns")
+    if not isinstance(turns, Mapping) or "missing" not in turns:
+        raise MlperfReportError("scores.json: no 'turns.missing'")
+    return _finite(scores["score"], "scores.score"), int(_finite(turns["missing"], "scores.turns.missing"))
 
 
 def map_mlperf(
-    summary: Mapping[str, Any],
+    report: Mapping[str, Any],
     *,
-    accuracy: Mapping[str, Any] | None = None,
-    noncanonical_reasons: "Sequence[str] | None" = None,
+    issued_trajectories: int,
+    corpus: str,
+    scores: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Convert an MLPerf harness ``result_summary.json`` into the InferenceX result schema."""
-    extra = [str(r) for r in (noncanonical_reasons or []) if str(r).strip()]
-    completed = int(summary.get("n_samples_completed") or summary.get("completed") or 0)
-    failed = int(summary.get("n_samples_failed") or summary.get("failed") or 0)
-    issued = int(summary.get("n_samples_issued") or summary.get("issued") or (completed + failed))
-    duration_ns = summary.get("duration_ns")
-    if isinstance(duration_ns, (int, float)) and duration_ns > 0:
-        duration_s = float(duration_ns) / 1e9
-    else:
-        duration_s = float(summary.get("duration") or 0.0)
-    osl_total = _seq_total(summary.get("output_sequence_lengths"))
-    isl_total = _seq_total(summary.get("input_sequence_lengths"))
-    tps = summary.get("tps")
-    out_tput = (
-        float(tps)
-        if isinstance(tps, (int, float)) and tps
-        else ((osl_total / duration_s) if duration_s > 0 and osl_total else 0.0)
-    )
-    in_tput = (isl_total / duration_s) if duration_s > 0 and isl_total else 0.0
-    req_tput = (completed / duration_s) if duration_s > 0 and completed else 0.0
-    denom = issued if issued > 0 else (completed + failed)
-    error_rate = (100.0 * failed / denom) if denom > 0 else (None if failed else 0.0)
-    complete = bool(summary.get("complete"))
-    interrupted = bool(summary.get("interrupted") or summary.get("error"))
-    intvty_p50, intvty_p90 = _mlperf_interactivity(summary)
-    ttft = summary.get("ttft") or {}
-    tpot = summary.get("tpot") or summary.get("itl") or {}
-    latency = summary.get("latency") or summary.get("e2e") or {}
-    acc_score = _accuracy_score(accuracy)
-    # Non-canonical (smoke, or anything short of 613) is still a measurement.
-    # ``submission_valid`` is what AgentX will grade. ``canonical_submission``
-    # is the leaderboard bar, and a smoke KEEP must not be read as one.
-    reasons: list[str] = []
-    if not complete:
-        reasons.append("incomplete_run")
-    if interrupted:
+    """Convert an ``inference-endpoint`` ``result_summary.json`` into the InferenceX result schema.
+
+    The harness publishes no per-request OSL/E2EL series, so no ``e2e_norm_intvty_*``
+    key is written. A field the upstream ``Report`` does not carry is absent, never
+    0.0; a file that does not match that schema raises :class:`MlperfReportError`.
+
+    Args:
+        report: The parsed ``result_summary.json``.
+        issued_trajectories: Trajectories the run was configured to replay. The
+            harness does not record it, and it is what two fixed-work rounds must
+            share to be comparable.
+        corpus: The dataset the trajectories came from.
+        scores: The parsed inline ``scores.json``, when the run produced one.
+    """
+    if not isinstance(report, Mapping):
+        raise MlperfReportError("result_summary.json: expected an object")
+    missing = [key for key in _REPORT_FIELDS if key not in report]
+    if missing:
+        raise MlperfReportError(f"result_summary.json is missing {missing}")
+    issued = int(_finite(report["n_samples_issued"], "n_samples_issued"))
+    completed = int(_finite(report["n_samples_completed"], "n_samples_completed"))
+    failed = int(_finite(report["n_samples_failed"], "n_samples_failed"))
+    reasons = []
+    if report["state"] == "interrupted":
         reasons.append("interrupted")
-    verdict = not reasons
-    mapped = {
-        "request_throughput": req_tput,
-        "output_throughput": float(out_tput or 0.0),
-        "input_throughput": float(in_tput or 0.0),
-        "total_token_throughput": float(out_tput or 0.0) + float(in_tput or 0.0),
+    if report["complete"] is not True:
+        reasons.append("incomplete_run")
+    mapped: dict[str, Any] = {
         "completed": completed,
-        "total_input_tokens": isl_total,
-        "total_output_tokens": osl_total,
-        "duration": duration_s,
-        "mean_ttft_ms": _series_ms(ttft, avg=True),
-        "median_ttft_ms": _series_ms(ttft, 50),
-        "p99_ttft_ms": _series_ms(ttft, 99),
-        "std_ttft_ms": _ns_to_ms((ttft or {}).get("std") if isinstance(ttft, dict) else 0.0),
-        "mean_tpot_ms": _series_ms(tpot, avg=True),
-        "median_tpot_ms": _series_ms(tpot, 50),
-        "p90_tpot_ms": _series_ms(tpot, 90),
-        "p99_tpot_ms": _series_ms(tpot, 99),
-        "std_tpot_ms": _ns_to_ms((tpot or {}).get("std") if isinstance(tpot, dict) else 0.0),
-        "mean_itl_ms": _series_ms(tpot, avg=True),
-        "median_itl_ms": _series_ms(tpot, 50),
-        "p99_itl_ms": _series_ms(tpot, 99),
-        "std_itl_ms": _ns_to_ms((tpot or {}).get("std") if isinstance(tpot, dict) else 0.0),
-        "mean_e2el_ms": _series_ms(latency, avg=True),
-        "median_e2el_ms": _series_ms(latency, 50),
-        "p99_e2el_ms": _series_ms(latency, 99),
-        "std_e2el_ms": _ns_to_ms((latency or {}).get("std") if isinstance(latency, dict) else 0.0),
-        "theoretical_prefix_cache_hit": float(summary.get("prefix_cache_hit") or 0.0),
-        "submission_valid": verdict,
+        "request_error_rate": 100.0 * failed / issued if issued > 0 else None,
+        "submission_valid": not reasons,
         "submission_invalid_reasons": reasons,
-        "canonical_submission": verdict and not extra,
-        "noncanonical_reasons": list(extra),
-        "request_error_rate": error_rate,
-        "corpus_loader": str(summary.get("corpus_loader") or CANONICAL_MLPERF_CORPUS_LOADER),
-        "isl_distribution": _seq_distribution(summary.get("input_sequence_lengths")),
-        "osl_distribution": _seq_distribution(summary.get("output_sequence_lengths")),
-        "accuracy_score": acc_score,
-        "mlperf_complete": complete,
+        "issued_trajectories": int(issued_trajectories),
+        "corpus_loader": str(corpus),
     }
-    if intvty_p50 is not None:
-        mapped["e2e_norm_intvty_p50"] = intvty_p50
-    if intvty_p90 is not None:
-        mapped["e2e_norm_intvty_p90"] = intvty_p90
+    if report["duration_ns"] is not None:
+        mapped["duration"] = _finite(report["duration_ns"], "duration_ns") / 1e9
+    if report["qps"] is not None:
+        mapped["request_throughput"] = _finite(report["qps"], "qps")
+    if report["tps"] is not None:
+        mapped["output_throughput"] = _finite(report["tps"], "tps")
+    for prefix, name in _LATENCY_SERIES:
+        series = _series(report, name)
+        if series is None:
+            continue
+        mapped[f"mean_{prefix}_ms"] = series["avg"] / _NS_PER_MS
+        mapped[f"std_{prefix}_ms"] = series["std_dev"] / _NS_PER_MS
+        mapped[f"median_{prefix}_ms"] = series["p50"] / _NS_PER_MS
+        mapped[f"p90_{prefix}_ms"] = series["p90"] / _NS_PER_MS
+        mapped[f"p99_{prefix}_ms"] = series["p99"] / _NS_PER_MS
+    osl = _series(report, "output_sequence_lengths")
+    if osl is not None:
+        mapped["total_output_tokens"] = int(_finite(report["output_sequence_lengths"].get("total"), "osl.total"))
+        mapped["osl_distribution"] = {key: int(osl[key]) for key in ("avg", "p50", "p75", "p90", "p99")}
+    if scores is not None:
+        mapped["accuracy_score"], mapped["accuracy_missing_turns"] = _inline_accuracy(scores)
     return mapped

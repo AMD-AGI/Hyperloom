@@ -10,7 +10,7 @@ from typing import Mapping
 
 import yaml
 
-from .deploy import MLPERF_CLIENT_SCRIPT, is_agentx_client_script
+from hyperloom.common.agentx_workload import MLPERF_CLIENT_SCRIPT, is_agentx_client_script
 
 # aiperf capability preflight is memoized per resolved binary: the probe shells out with a timeout and its result
 # cannot change within a run, so a multi-point grid must not re-probe every round.
