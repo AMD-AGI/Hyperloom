@@ -472,11 +472,6 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert "Session layout under" in out
     assert "manifest.json" in out
 
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
-    assert cb._session_dir_from_env() == tmp_path
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
-    assert cb._session_dir_from_env() is None
-
 
 def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget() -> None:
     """A new leg drops the last leg's ending; what the session spent is untouched."""
@@ -653,10 +648,10 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
     assert patched["other"] is True
 
 
-def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_final_summary_prints_the_kernel_opt_line_for_its_session(tmp_path: Path, monkeypatch, capsys) -> None:
     from hyperloom.orchestrator.kernel import attempt_summary as kernel_attempt_summary
 
-    monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
+    monkeypatch.delenv("HYPERLOOM_SESSION_DIR", raising=False)
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "kernel_optimization_summary.json").write_text("{}", encoding="utf-8")
@@ -669,7 +664,7 @@ def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, caps
 
     monkeypatch.setattr(kernel_attempt_summary, "build_kernel_optimization_summary", _summary)
 
-    cb._print_kernel_opt_summary_line(SharedState(session_id="s"))
+    cb._print_final_summary(SharedState(session_id="s"), "time_budget_exhausted", tmp_path)
 
     out = capsys.readouterr().out
     assert "3 attempted" in out

@@ -374,7 +374,7 @@ def _print_final_summary(
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state)
+    _print_kernel_opt_summary_line(state, session_dir)
     print("===============================================")
 
 
@@ -470,16 +470,15 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _print_kernel_opt_summary_line(state: SharedState) -> None:
+def _print_kernel_opt_summary_line(state: SharedState, session_dir: Path | None) -> None:
     """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
+    if session_dir is None:
+        return
     try:
         from hyperloom.orchestrator.kernel.attempt_summary import (
             build_kernel_optimization_summary,
         )
 
-        session_dir = _session_dir_from_env()
-        if session_dir is None:
-            return
         summary = build_kernel_optimization_summary(state, session_dir)
         totals = summary.get("totals") or {}
         attempted = int(totals.get("attempted") or 0)
@@ -581,13 +580,3 @@ def _resolve_reference_recipe(
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
     return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
-
-
-def _session_dir_from_env() -> Path | None:
-    """``$HYPERLOOM_SESSION_DIR`` when it names an existing directory, else ``None``."""
-    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
-    if env_sd:
-        p = Path(env_sd).expanduser()
-        if p.is_dir():
-            return p
-    return None
