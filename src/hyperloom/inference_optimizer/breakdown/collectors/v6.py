@@ -405,12 +405,21 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             # no chronology of its own.
             anchors.append((str(action.get("end_time") or action.get("start_time") or ""), action))
     if not anchors:
-        return {**dict.fromkeys(_BASELINE_OUTCOME_FIELDS), "perf": _graded_axes(None)}
+        return {
+            **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
+            "perf": _graded_axes(None),
+            "submission_valid": None,
+        }
     anchors.sort(key=lambda row: row[0])
     measurement = _mapping(anchors[-1][1].get("measurement"))
+    submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
         "perf": _graded_axes(measurement.get("perf")),
+        # Published beside the axes because it qualifies them: upstream rejecting the round makes every figure in
+        # ``perf`` a measurement of something it would not accept as a submission. Tri-state, so a session recorded
+        # before the recorder wrote it stays ``None`` rather than reading as rejected.
+        "submission_valid": None if submission_valid is None else bool(submission_valid),
     }
 
 

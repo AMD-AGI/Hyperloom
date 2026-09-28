@@ -622,3 +622,57 @@ def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
     )
 
     assert "+10.99% validated gain" in r.global_facts.headline
+
+
+#: One AgentX round's axes, as the recorder stamps them onto ``perf``.
+_AGENTX_PERF = {
+    "e2e_norm_intvty_p50": 41.8,
+    "e2e_norm_intvty_p90": 22.4,
+    "output_tput_per_gpu": 275.6,
+    "total_throughput": 26500.0,
+    "input_throughput": 24296.0,
+    "ttft_p50_ms": 110.0,
+    "ttft_p90_ms": 240.0,
+    "tpot_p50_ms": 18.0,
+    "tpot_p90_ms": 34.0,
+    "duration_seconds": 3600.0,
+    "request_error_rate": 0.0,
+}
+
+
+def _agentx_breakdown() -> dict[str, Any]:
+    """A breakdown whose baseline and validation rounds both carry graded axes."""
+    b = _fixture_breakdown()
+    b["outcome"]["baseline"]["perf"] = dict(_AGENTX_PERF)
+    b["outcome"]["baseline"]["submission_valid"] = True
+    b["outcome"]["validation"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["submission_valid"] = True
+    return b
+
+
+def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
+    """The ``perf`` block reached the artifact from the first V6 recorder and no renderer read it.
+
+    An AgentX session is ranked on median interactivity with the tail and per-GPU output as guards, so a report
+    that shows only ``throughput_tok_s_per_gpu`` states a figure the verdict was not taken on.
+    """
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    for key in ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "output_tput_per_gpu"):
+        assert key in md, f"{key} is graded but never rendered"
+    for key in ("ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
+        assert key in md, f"{key} was asked for in the detail view"
+    # The inputs a pair is refused on. Without them a REVERT on the objective and one on a drifted window read the
+    # same in the report.
+    for key in ("duration_seconds", "request_error_rate"):
+        assert key in md, f"{key} decides comparability and must be auditable"
+    assert "submission_valid" in md
+
+
+def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
+    """A synthetic session measures none of them, and eleven nulls would claim it was graded on them."""
+    md = render_session_report(_fixture_breakdown()).markdown
+
+    assert "AgentX graded axes" not in md
+    assert "e2e_norm_intvty_p50" not in md

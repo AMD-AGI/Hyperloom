@@ -142,9 +142,14 @@ class V6MetadataLangfuse(TypedDict, total=False):
 class V6GradedAxes(TypedDict, total=False):
     """The axes an AgentX measurement is ranked and reported on.
 
-    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``, which is not a
-    member here -- the verdict reads it off the measurement, not off this block. ``output_tput_per_gpu`` is the
-    frontier's y axis and the latency percentiles are the detail view: reported, never graded.
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
+    member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
+    axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
+    never graded. ``total_throughput`` is reported for continuity and no longer enters any verdict.
+
+    ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
+    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
+    published without them cannot be re-derived from this record.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
@@ -161,6 +166,8 @@ class V6GradedAxes(TypedDict, total=False):
     ttft_p90_ms: float | None
     tpot_p50_ms: float | None
     tpot_p90_ms: float | None
+    duration_seconds: float | None
+    request_error_rate: float | None
 
 
 class V6GradingTputGuard(TypedDict, total=False):
