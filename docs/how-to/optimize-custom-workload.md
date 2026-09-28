@@ -141,6 +141,36 @@ The CLI persists these pins in `state.json` and serializes them into
 silently. On `--resume` the persisted pins are re-exported, so they only need
 re-passing when you want to change them.
 
+## Declaring the levers to explore
+
+"Leave the rest for exploration" needs somewhere for the search to start. An LLM
+framework has source the model can read to infer its knobs; a `custom` workload
+does not, so its seed grid is empty and EXPLORE has nothing to sweep until the
+model guesses.
+
+Declare the knob space instead, in `levers.json` beside your benchmark script
+(inside `--benchmark-scripts-dir`):
+
+```json
+[
+  {"name": "workers_1", "extra_envs": {"GPU_CHAIN_WORKERS": "1"}},
+  {"name": "workers_2", "extra_envs": {"GPU_CHAIN_WORKERS": "2"}},
+  {"name": "threads_4",  "extra_envs": {"OMP_NUM_THREADS": "4"}}
+]
+```
+
+Each entry is an explore variant: a `name` plus at least one thing a restart can
+apply (`extra_envs`, `extra_args`, `remove_args`, `unset_envs`, or
+`args_mode: "replace"`). The declarations are seeded ahead of the model's own
+proposals, so the sweep runs even when the model proposes nothing; a variant the
+model proposes under the same name wins, and a declaration the ledger has
+already benchmarked is not re-seeded on later rounds.
+
+The file is optional — but if it exists and is malformed, the launch fails with
+exit code 2 rather than starting a run whose grid silently comes back empty. It
+lives in the scripts dir because that directory is already persisted and
+re-exported on `--resume`.
+
 ## The FRAMEWORK_AGENT phase
 
 `custom` runs the FRAMEWORK_AGENT phase by default, and it is the only phase

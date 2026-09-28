@@ -213,6 +213,30 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
             os.environ[BENCHMARK_BACKEND_ENV] = archived
 
 
+def _require_valid_declared_levers(framework: str) -> None:
+    """Fail at launch when ``--framework custom`` declares an unusable lever grid.
+
+    The declaration is optional, but a malformed one must not be discovered
+    mid-run: every silent path surfaces later as ``empty_grid``, so an
+    operator's typo reads as "the model proposed nothing".
+    """
+    if str(framework or "").strip().lower() != "custom":
+        return
+    from hyperloom.orchestrator.actions.executors.explore import (
+        DeclaredLeversError,
+        declared_levers_path,
+        load_declared_levers,
+    )
+
+    try:
+        levers = load_declared_levers()
+    except DeclaredLeversError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if levers:
+        print(f"Declared levers : {len(levers)} variant(s) from {declared_levers_path()}")
+
+
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
     """Fail at launch when ``--framework custom`` cannot resolve its script."""
     if str(framework or "").strip().lower() != "custom":
@@ -1809,6 +1833,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             state.framework,
             gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
         )
+        _require_valid_declared_levers(state.framework)
         _persist_operator_supplied_paths(state)
         # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
         # path as the paths above.
@@ -2039,6 +2064,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
         _require_custom_entrypoint(framework, gpu_type=runner_gpu_type or gpu_type)
+        _require_valid_declared_levers(framework)
 
         # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
         # unanswerable until args.gpu_type is final.
