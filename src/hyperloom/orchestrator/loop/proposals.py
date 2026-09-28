@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.stack_replay import config_stack_fingerprint
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -319,6 +320,8 @@ class ProposalsCollaborator:
 
         # Build put_recipe kwargs, preserving live fields the caller didn't override.
         overrides = dict(recipe_overrides or {})
+        if "best_config" in overrides and "stack_fingerprint" not in overrides:
+            overrides["stack_fingerprint"] = config_stack_fingerprint(live, getattr(ss, "stack_fingerprint_meta", None))
         _reserved = {
             "canonical_id",
             "version",

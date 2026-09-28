@@ -3021,3 +3021,46 @@ def test_a_skip_that_resolved_no_recipe_states_an_empty_request_not_an_invented_
     assert ext["skip"]["code"] == "no_warm_start_recipe"
     assert ext["request"]["tier"] == ""
     assert ext["request"]["donor"] is None
+
+
+_STACK_MISMATCH = {"conflicts": ["aiter commit abc1234 recorded, pod runs def5678"], "notes": []}
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_refuses_a_recipe_tuned_on_another_stack(tmp_path):
+    """With no compatible donor, what is left is the mismatched recipe's own best_config; it must not replay."""
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(),
+        warm_start_context={"status": "hit", "match": {"tier": "exact"}, "stack_mismatch": _STACK_MISMATCH},
+    )
+    assert await coord._maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "skipped"
+    assert outcome["reason"].startswith("stack_mismatch: aiter commit abc1234")
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["warm_replay_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_uses_a_compatible_donor_despite_a_mismatched_match(tmp_path):
+    """T0 already put a compatible donor's config in recommended_replay; the mismatch is about the match itself."""
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(extra_server_args="--from-recipe-row"),
+        warm_start_context={
+            "status": "hit",
+            "match": {"tier": "exact", "confidence": 0.85},
+            "stack_mismatch": _STACK_MISMATCH,
+            "recommended_replay": {
+                "extra_server_args": "--from-compatible-donor",
+                "extra_envs": {},
+                "expected_gain_pct": 25.0,
+                "config_tier": "same_arch_class",
+                "config_confidence": 0.95,
+            },
+        },
+    )
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None
+    assert coord.tasks.calls[0]["params"]["extra_server_args"] == "--from-compatible-donor"

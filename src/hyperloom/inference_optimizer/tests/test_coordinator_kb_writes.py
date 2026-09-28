@@ -866,3 +866,43 @@ def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
         session_dir=tmp_path,
         save_state=False,
     )
+
+
+def test_a_new_best_config_records_the_stack_it_was_measured_on(tmp_path: Path) -> None:
+    """Warm replay compares against this; the prior row's ROCm/AITER named an older config's build."""
+    coord = _make_coordinator(tmp_path)
+    coord.recipe_kb.put_recipe(
+        canonical_id=_expected_cid(),
+        model=_MODEL,
+        hardware=_HW,
+        framework_name=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"extra_server_args": "--old"},
+        stack_fingerprint={"rocm_version": "6.3.0", "aiter_commit": "old1234"},
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    coord.shared_state.stack_fingerprint_meta = {"rocm": "6.4.1", "aiter": "new5678"}
+    coord._kb_amend_recipe(recipe_overrides={"best_config": {"extra_server_args": "--new"}})
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["stack_fingerprint"]["rocm_version"] == "6.4.1"
+    assert row["stack_fingerprint"]["aiter_commit"] == "new5678"
+
+
+def test_an_amend_without_a_new_config_keeps_the_recorded_stack(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    coord.recipe_kb.put_recipe(
+        canonical_id=_expected_cid(),
+        model=_MODEL,
+        hardware=_HW,
+        framework_name=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"extra_server_args": "--old"},
+        stack_fingerprint={"rocm_version": "6.3.0", "aiter_commit": "old1234"},
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    coord.shared_state.stack_fingerprint_meta = {"rocm": "6.4.1", "aiter": "new5678"}
+    coord._kb_amend_recipe(append_lesson={"statement": "noted", "measured_impact": ""})
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["stack_fingerprint"]["rocm_version"] == "6.3.0"

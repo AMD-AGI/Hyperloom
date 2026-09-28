@@ -257,7 +257,15 @@ class _RenderMixin:
             donor_conf = _as_float(replay.get("config_confidence"))
             suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
             out.append(f"  · borrowed from {donor} (config_tier={config_tier}{suffix})")
-        if not replay:
+        stack = ctx.get("stack_mismatch")
+        stack = stack if isinstance(stack, dict) else {}
+        conflicts = [str(c) for c in stack.get("conflicts") or []]
+        if conflicts:
+            out.append(f"  · config not replayed from this match, stack differs: {'; '.join(conflicts)[:240]}")
+        notes = [str(n) for n in stack.get("notes") or []]
+        if notes:
+            out.append(f"  · stack not verified: {'; '.join(notes)[:240]}")
+        if not replay and not conflicts:
             # Remote Recipe hits replay through the section SDKs, so the context
             # carries no config; the priors below are still real.
             out.append("  · (no replayable config on this match)")

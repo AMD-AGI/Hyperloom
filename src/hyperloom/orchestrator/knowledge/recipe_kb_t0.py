@@ -22,6 +22,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
+from hyperloom.orchestrator.knowledge.stack_replay import StackComparison, compare_stacks, row_stack_fingerprint
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -362,8 +363,13 @@ def _find_config_donor(
     target_conc: Any = None,
     target_isl: Any = None,
     target_osl: Any = None,
+    live_stack: Mapping[str, Any] | None = None,
 ) -> tuple[Mapping[str, Any] | None, str, float]:
-    """Borrow a replayable config through the standard degradation tiers."""
+    """Borrow a replayable config through the standard degradation tiers.
+
+    A candidate recorded on a ROCm/AITER build that provably differs from ``live_stack`` is skipped, so a compatible
+    sibling can still donate.
+    """
     if not (model_type or arch_slug):
         return None, "", 0.0
     common = {
@@ -412,6 +418,8 @@ def _find_config_donor(
                 _candidate_dimension(candidate, "framework_version"),
             ):
                 continue
+            if live_stack and compare_stacks(row_stack_fingerprint(candidate), live_stack).blocks_replay:
+                continue
             if _donor_is_trustworthy(
                 candidate,
                 target_arch_slug=arch_slug,
@@ -447,8 +455,13 @@ def _build_warm_start_context(
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
     config_donor_confidence: float | None = None,
+    stack: StackComparison | None = None,
 ) -> dict[str, Any]:
-    """Build the model-facing WarmStartContext from a KB recipe row."""
+    """Build the model-facing WarmStartContext from a KB recipe row.
+
+    ``stack`` compares ``recipe``'s ROCm/AITER with the pod's. A proven mismatch keeps the recipe's priors but stops
+    it standing in as its own config source, and is recorded as ``stack_mismatch`` for PRELUDE and the prompt.
+    """
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
     current_remote = bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
@@ -473,9 +486,18 @@ def _build_warm_start_context(
         ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
         ctx["lessons"] = list(prior_source.get("lessons") or [])
         ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
+    stack_blocked = bool(stack is not None and stack.blocks_replay)
+    if stack is not None and (stack.conflicts or stack.notes):
+        ctx["stack_mismatch"] = stack.to_dict()
     # Replay config comes from the donor, or the identity recipe as self-donor.
     donor = config_donor if not current_remote and isinstance(config_donor, Mapping) else None
-    if not current_remote and donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
+    if (
+        not current_remote
+        and donor is None
+        and not stack_blocked
+        and isinstance(recipe, Mapping)
+        and _has_replayable_config(recipe)
+    ):
         donor = recipe
         config_donor_tier = config_donor_tier or "self"
         if config_donor_confidence is None:
@@ -1111,10 +1133,15 @@ def run_t0_anchor(
         merged_extras.update(prior_extras)
         merged_extras.update(_extras)
 
-        # Stack fingerprint — preserve prior values not stamped this round.
+        # Stack fingerprint — preserve prior values not stamped this round. ROCm/AITER on a row that already carries a
+        # config describe the build that config was measured on, which warm replay compares against; stamping this
+        # pod over them here, before the lookup, would make every row match whatever pod reads it.
         sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
+        config_owns_stack = _has_replayable_config(live)
         if isinstance(fp, Mapping):
             for fp_key in ("vllm_version", "aiter_commit", "rocm_version"):
+                if config_owns_stack and fp_key in ("aiter_commit", "rocm_version"):
+                    continue
                 new = str(fp.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
@@ -1195,11 +1222,19 @@ def run_t0_anchor(
     current_remote_point = bool(
         isinstance(warm_point, Mapping) and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
     )
+    warm_stack = compare_stacks(row_stack_fingerprint(warm_point), fp) if warm_point else None
+    if warm_stack is not None and warm_stack.blocks_replay:
+        log.info(
+            "warm-start recipe %s not used as a config source: %s",
+            cid,
+            "; ".join(warm_stack.conflicts),
+        )
     # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
     # gate before it becomes the donor.
     if (
         not current_remote_point
         and warm_point
+        and not (warm_stack is not None and warm_stack.blocks_replay)
         and _has_replayable_config(warm_point)
         and (
             warm_tier == "exact"
@@ -1229,6 +1264,7 @@ def run_t0_anchor(
             target_conc=_tgt_conc,
             target_isl=_tgt_isl,
             target_osl=_tgt_osl,
+            live_stack=fp,
         )
         if donor is not None:
             config_donor = donor
@@ -1261,6 +1297,7 @@ def run_t0_anchor(
         canonical_id=cid,
         source=warm_source,
         recipe=warm_point or None,
+        stack=warm_stack,
     )
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.

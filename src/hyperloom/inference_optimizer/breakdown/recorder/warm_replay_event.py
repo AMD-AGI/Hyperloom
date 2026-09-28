@@ -86,6 +86,8 @@ SKIP_DISABLED_BY_FLAG = "disabled_by_flag"
 SKIP_NO_WARM_START_RECIPE = "no_warm_start_recipe"
 SKIP_RECIPE_NOT_REPLAYABLE = "recipe_not_replayable"
 SKIP_RECIPE_READ_FAILED = "recipe_read_failed"
+# The matched recipe was recorded on a ROCm/AITER build that provably differs from the pod's.
+SKIP_STACK_MISMATCH = "stack_mismatch"
 SKIP_CONFIDENCE_BELOW_THRESHOLD = "confidence_below_threshold"
 SKIP_BEST_CONFIG_EMPTY = "best_config_empty"
 SKIP_WORKLOAD_CONFIG_INCOMPATIBLE = "workload_config_incompatible"
@@ -143,6 +145,7 @@ __all__ = [
     "SKIP_NO_WARM_START_RECIPE",
     "SKIP_RECIPE_NOT_REPLAYABLE",
     "SKIP_RECIPE_READ_FAILED",
+    "SKIP_STACK_MISMATCH",
     "SKIP_WORKLOAD_CONFIG_INCOMPATIBLE",
     "STATUS_BY_OUTCOME",
     "WarmReplayEventRecorder",

@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_NO_WARM_START_RECIPE,
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
+    SKIP_STACK_MISMATCH,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
 )
 
@@ -1242,9 +1243,37 @@ class PreludePhase(CoordinatorCollaborator):
             if replay.get(field) not in (None, "", [])
         }
         recipe_suppressed = False
+        # T0 records a proven ROCm/AITER mismatch between the matched recipe and this pod. A compatible donor's
+        # config is already in ``recommended_replay``; what is left here would come from the mismatched recipe
+        # itself (the best_config fallback, or the remote SDK material), so it does not replay.
+        stack_mismatch = wsc.get("stack_mismatch") if isinstance(wsc, dict) else None
+        stack_conflicts = (
+            list((stack_mismatch or {}).get("conflicts") or []) if isinstance(stack_mismatch, dict) else []
+        )
+        if stack_conflicts and (current_remote or not (rep_args or rep_envs)):
+            if kernel_pending:
+                recipe_suppressed = True
+                bc_args = ""
+                bc_envs = {}
+                config_source = ""
+                config_tier = "suppressed_stack_mismatch"
+                donor_expected_gain = 0.0
+            else:
+                self._skip_warm_replay(
+                    code=SKIP_STACK_MISMATCH,
+                    outcome={
+                        "status": "skipped",
+                        "reason": ("stack_mismatch: " + "; ".join(stack_conflicts))[:500],
+                        "warm_recipe_tier": tier,
+                        "warm_recipe_conf": conf,
+                        "config_source": config_source,
+                    },
+                    details={"conflicts": stack_conflicts},
+                )
+                return None
         # Low-confidence config/patch content is suppressed, but the kernel section from the same Recipe can still
         # receive a combined check.
-        if replay_conf < min_conf:
+        if not recipe_suppressed and replay_conf < min_conf:
             if kernel_pending:
                 recipe_suppressed = True
                 bc_args = ""

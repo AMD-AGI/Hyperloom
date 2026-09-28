@@ -46,6 +46,25 @@ it.
   `auto`, so campaigns died after discovery. The resolved provider is now
   forwarded.
 
+- **Warm replay no longer replays a config tuned on a different ROCm or AITER
+  build (#1507).** A KB row's `best_config` can carry build-specific knobs
+  (`--attention-backend aiter`, `SGLANG_USE_AITER`, tuned `AITER_CONFIG_*`
+  CSVs), and the recorded `rocm_version` / `aiter_commit` were compared nowhere.
+  A proven mismatch now keeps the row's lessons and pitfalls but stops it being
+  a config source, in the T0 self match, the borrowed-donor search, and
+  PRELUDE's fallback to the matched recipe (`warm_replay` skip reason
+  `stack_mismatch`). A compatible donor can still supply the config. ROCm follows
+  the framework-version rule: same major.minor line, recorded not newer than the
+  pod. AITER matches on equal commits (prefix) or equal versions; a commit
+  against a version is not comparable and is disclosed, not refused. `unknown`
+  on either side is no claim, and remote rows, which carry no fingerprint, are
+  unaffected. The mismatch is shown in the `=== Warm start ===` prompt block.
+
+  The recorded build now stays with the config: T0 no longer stamps the current
+  pod's ROCm/AITER onto a row that already carries a `best_config` (it did so
+  before its own lookup, so every row matched whatever pod read it), and writing
+  a new `best_config` records the stack of the session that measured it.
+
 ## Hyperloom 1.1.2 release
 
 The [1.1.2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.2)
