@@ -34,6 +34,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
 )
+from hyperloom.inference_optimizer.framework_registry import python_package
 
 
 # ---------------------------------------------------------------------------
@@ -225,9 +226,8 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     if roots:
         hints: list[str] = list(roots)
         hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
-        pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
-        pkg_name = pkg_map.get(framework, framework)
-        ver = _resolve_package_version(pkg_name)
+        pkg_name = python_package(framework)
+        ver = _resolve_package_version(pkg_name) if pkg_name else ""
         if ver:
             hints.append(f"({pkg_name} installed version: {ver})")
         # Always include the ROCm/HIP root hint (authoring sub-agent always

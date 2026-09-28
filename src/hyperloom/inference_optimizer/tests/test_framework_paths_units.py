@@ -829,6 +829,23 @@ class TestResolveFrameworkTree:
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_parent if name == "myfw" else None)
         assert fp.resolve_framework_tree("myfw") == f"{pkg_parent}/"
 
+    def test_xdit_is_found_under_its_xfuser_package(self, monkeypatch, tmp_path):
+        """xDiT installs as ``xfuser``; there is no importable ``xdit`` package."""
+        pkg_dir = tmp_path / "xfuser"
+        pkg_dir.mkdir()
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_dir if name == "xfuser" else None)
+        assert fp.resolve_framework_tree("xdit") == f"{pkg_dir}/"
+
+    def test_xdit_default_checkout_is_named_after_its_repo(self, monkeypatch, tmp_path):
+        """The shipped default is ``/app/xDiT/``, the repo's directory name, not ``/xdit``."""
+        checkout = tmp_path / "xDiT"
+        checkout.mkdir()
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", (f"{checkout}/",))
+        assert fp.resolve_framework_tree("xdit") == f"{checkout}/"
+
     def test_unknown_framework_resolves_to_nothing(self, monkeypatch):
         monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)

@@ -27,6 +27,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from hyperloom.inference_optimizer import framework_registry as _reg
+
 log = logging.getLogger(__name__)
 
 #: Framework-agnostic way to name the source tree a session may patch. Accepted in
@@ -291,21 +293,8 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
 
 
 def _scriptable_frameworks() -> tuple[str, ...]:
-    """Return the registered scriptable framework names (empty on import error).
-
-    Imported lazily: ``framework_registry`` lives in ``inference_optimizer`` and
-    importing it at module scope would close a cycle back through this package.
-
-    Returns:
-        tuple[str, ...]: Scriptable framework names, or ``()`` when the registry
-            cannot be imported.
-    """
-    try:
-        from hyperloom.inference_optimizer import framework_registry as _reg
-
-        return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
-    except Exception:  # noqa: BLE001 - discovery must never break path resolution
-        return ()
+    """Return the registered scriptable framework names."""
+    return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
 
 
 def _framework_repo_dirname(framework: str) -> str:
@@ -320,13 +309,8 @@ def _framework_repo_dirname(framework: str) -> str:
     Returns:
         str: The bare repo directory name, or ``""`` when unknown.
     """
-    try:
-        from hyperloom.inference_optimizer import framework_registry as _reg
-
-        spec = _reg.FRAMEWORKS.get(framework)
-        url = str(getattr(spec, "repo_url", "") or "").strip()
-    except Exception:  # noqa: BLE001
-        return ""
+    spec = _reg.FRAMEWORKS.get(framework)
+    url = str(getattr(spec, "repo_url", "") or "").strip()
     if not url:
         return ""
     name = url.rstrip("/").rsplit("/", 1)[-1]
@@ -478,18 +462,20 @@ def resolve_framework_tree(framework: str) -> str:
     Returns:
         str: The normalised tree root, or ``""`` when the framework has none.
     """
-    pkg = str(framework or "").strip().lower()
-    if not pkg:
+    name = str(framework or "").strip().lower()
+    if not name:
         return ""
-    for key in (f"{pkg.upper()}_REPO_PATH", f"{pkg.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+    for key in (f"{name.upper()}_REPO_PATH", f"{name.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
         candidate = os.environ.get(key, "").strip()
         if candidate and Path(candidate).is_dir():
             return _normalize_root(candidate)
-    origin = _find_spec_origin(pkg)
+    package = _reg.python_package(name)
+    origin = _find_spec_origin(package) if package else None
     if origin is not None:
         return _normalize_root(str(origin))
+    dirnames = {d for d in (name, package, _framework_repo_dirname(name)) if d}
     for default in _DEFAULT_SOURCE_ROOTS:
-        if default.rstrip("/").endswith(f"/{pkg}") and Path(default).is_dir():
+        if Path(default).name in dirnames and Path(default).is_dir():
             return _normalize_root(default)
     return ""
 

@@ -16,6 +16,8 @@ class FrameworkSpec:
     kind: str
     extra_args_env: str
     repo_url: str | None
+    # The importable package the framework installs as; ``None`` when it ships none.
+    python_package: str | None
     supports_server_reuse: bool
     throughput_unit: str
     has_denoiser_config: bool = False
@@ -32,6 +34,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_SGLANG_ARGS",
         repo_url="https://github.com/sgl-project/sglang.git",
+        python_package="sglang",
         supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
@@ -40,6 +43,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_VLLM_ARGS",
         repo_url="https://github.com/ROCm/vllm.git",
+        python_package="vllm",
         supports_server_reuse=True,
         throughput_unit="tok/s",
     ),
@@ -48,6 +52,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_ATOM_ARGS",
         repo_url="https://github.com/ROCm/ATOM.git",
+        python_package="atom",
         supports_server_reuse=False,
         throughput_unit="tok/s",
     ),
@@ -56,6 +61,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_XDIT_ARGS",
         repo_url="https://github.com/xdit-project/xDiT.git",
+        python_package="xfuser",
         supports_server_reuse=False,
         throughput_unit="img/s",
         # A diffusers pipeline: transformer/ + vae/ configs are on disk.
@@ -67,6 +73,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_CUSTOM_ARGS",
         repo_url=None,
+        python_package=None,
         supports_server_reuse=False,
         throughput_unit="unit/s",
     ),
@@ -99,6 +106,15 @@ def is_scriptable(framework: str | None) -> bool:
 def has_denoiser_config(framework: str | None) -> bool:
     """Return whether ``framework``'s model can be read as a diffusers denoiser."""
     return _spec_or_default(framework).has_denoiser_config
+
+
+def python_package(framework: str | None) -> str:
+    """Return the package ``framework`` imports as; an unregistered name is taken as its own package."""
+    key = str(framework or "").strip().lower()
+    spec = FRAMEWORKS.get(key)
+    if spec is None:
+        return key
+    return spec.python_package or ""
 
 
 def extra_args_env(framework: str | None) -> str:
