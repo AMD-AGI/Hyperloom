@@ -227,6 +227,9 @@ def test_contract_vocabularies_match_runtime_surfaces():
     contract = workflow_contract()
     assert contract["vocabularies"]["event_types"] == list(_EVENT_TYPES)
     assert set(contract["vocabularies"]["stop_reasons"]) == set(STOP_REASON_VOCAB)
+    assert set(workflow_schema()["properties"]["outcome"]["properties"]["stop_reason"]["enum"]) == set(
+        STOP_REASON_VOCAB
+    ) | {""}
     assert {phase: set(actions) for phase, actions in contract["phase_actions"].items()} == {
         phase: set(actions) for phase, actions in PHASE_ALLOWED_ACTIONS.items()
     }
