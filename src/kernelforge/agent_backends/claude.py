@@ -384,7 +384,20 @@ class ClaudeBackend:
         except Exception as error:
             raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {error}") from error
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()[-1200:]
+            # Report both streams rather than `stderr or stdout`. The CLI writes an
+            # `unrecognized_model` warning to stderr for any model it does not know
+            # by name -- including models that then serve the request perfectly
+            # well, because the warning comes from an internal session-title query
+            # rather than from the run. Preferring stderr let that ever-present line
+            # displace the actual failure, which the CLI reports as JSON on stdout,
+            # so every failure on such a model read as "the model is unrecognized"
+            # whatever its true cause. stdout comes first: that is where the cause is.
+            streams = [
+                f"{name}: {text.strip()}"
+                for name, text in (("stdout", completed.stdout), ("stderr", completed.stderr))
+                if text and text.strip()
+            ]
+            detail = " | ".join(streams)[-1200:] or f"exited {completed.returncode} with no output"
             raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {detail}")
         try:
             payload = json.loads(completed.stdout)
