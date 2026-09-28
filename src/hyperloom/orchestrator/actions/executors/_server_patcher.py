@@ -456,25 +456,33 @@ def _probe_isolated_vllm() -> tuple[str, Path] | None:
         if match.is_dir():
             site = match.parent
             break
-    if site is None:
-        return None
 
     version = ""
-    vllm_python = os.environ.get("VLLM_PYTHON", "").strip()
-    if vllm_python and Path(vllm_python).exists():
+    imported_root: Path | None = None
+    vllm_python = os.environ.get("VLLM_PYTHON", "").strip() or str(Path(venv_root) / "bin" / "python")
+    if Path(vllm_python).exists():
         try:
             proc = subprocess.run(
-                [vllm_python, "-c", "import vllm; print(vllm.__version__)"],
+                [vllm_python, "-c", "import vllm; print(vllm.__version__); print(vllm.__file__)"],
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=30,
             )
-            if proc.returncode == 0:
-                version = proc.stdout.strip()
+            lines = proc.stdout.strip().splitlines()
+            if proc.returncode == 0 and len(lines) >= 2:
+                version = lines[-2].strip()
+                imported_root = Path(lines[-1].strip()).resolve().parent.parent
         except (OSError, subprocess.SubprocessError) as e:
             log.info("_server_patcher: VLLM_PYTHON version probe failed (%s)", e)
+
+    # A source build installs vLLM editable, so site-packages holds only an egg-link or .pth and the package lives
+    # in the checkout; only the venv's own interpreter can say where that is.
+    if site is None:
+        site = imported_root
+    if site is None:
+        return None
 
     if not version:
         for dist in sorted(site.glob("vllm-*.dist-info")):
