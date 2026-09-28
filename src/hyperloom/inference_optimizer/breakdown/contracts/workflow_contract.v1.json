@@ -56,6 +56,7 @@
       "model_config_incompatible",
       "model_context_window_too_small",
       "no_kernel_skipped",
+      "patch_recovery_incomplete",
       "prelude_baseline_failed",
       "prelude_cold_anchor_low_budget",
       "robustness_escalated",
