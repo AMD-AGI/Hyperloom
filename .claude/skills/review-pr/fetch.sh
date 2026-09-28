@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 1 of the review-pr skill: collect the PR evidence every later step reads.
 #
-# usage: fetch.sh <PR-NUMBER> [WORK_DIR]
+# usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]
 # Writes the artifacts listed in SKILL.md into WORK_DIR and prints WORK_DIR last.
 # Anything that cannot be collected exits non-zero with the reason: reviewing on
 # partial evidence produces a confident review of a diff nobody read.
@@ -13,11 +13,16 @@ die() {
   exit 1
 }
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]"
-case "$1" in '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]" ;; esac
+[ "$#" -ge 1 ] && [ "$#" -le 4 ] \
+  || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]"
+case "$1" in
+  '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]" ;;
+esac
 
 PR="$1"
 WORK="${2:-/tmp/hl-review-$PR}"
+EXPECTED_HEAD="${3:-}"
+EXPECTED_BASE_TIP="${4:-}"
 command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
 
 REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
@@ -46,6 +51,10 @@ sed -n 's/^title: //p' "$WORK/meta.txt" > "$WORK/title.txt"
 HEAD_SHA=$(sed -n 's/^head: //p' "$WORK/meta.txt")
 BASE_TIP=$(sed -n 's/^base_tip: //p' "$WORK/meta.txt")
 [ -n "$HEAD_SHA" ] && [ -n "$BASE_TIP" ] || die "PR metadata carries no head sha or base sha"
+[ -z "$EXPECTED_HEAD" ] || [ "$HEAD_SHA" = "$EXPECTED_HEAD" ] \
+  || die "head mismatch: expected $EXPECTED_HEAD, got $HEAD_SHA"
+[ -z "$EXPECTED_BASE_TIP" ] || [ "$BASE_TIP" = "$EXPECTED_BASE_TIP" ] \
+  || die "base tip mismatch: expected $EXPECTED_BASE_TIP, got $BASE_TIP"
 
 gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$WORK/body.txt"
 
