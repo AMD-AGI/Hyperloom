@@ -47,8 +47,8 @@ VLLM_METRICS = """\
 # TYPE vllm:num_preemptions_total counter
 vllm:num_preemptions_total{engine="0",model_name="qwen"} 458.0
 vllm:kv_cache_usage_perc 0.969
-vllm:prefix_cache_queries 1000.0
-vllm:prefix_cache_hits 529.0
+vllm:prefix_cache_queries_total 1000.0
+vllm:prefix_cache_hits_total 529.0
 """
 
 
@@ -277,6 +277,25 @@ def test_prefix_cache_counters_are_read():
 
     sg = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
     assert aggregate_series(sg.cached_tokens_total) == 4600439.0
+
+
+def test_prefix_cache_only_sample_is_not_discarded():
+    text = (
+        'vllm:prefix_cache_queries_total{engine="0"} 1000.0\n'
+        'vllm:prefix_cache_hits_total{engine="0"} 529.0\n'
+    )
+    sample = sample_from_families(parse_prometheus_text(text))
+
+    assert sample.has_readings()
+    assert aggregate_series(sample.prefix_cache_queries) == 1000.0
+    assert aggregate_series(sample.prefix_cache_hits) == 529.0
+
+
+def test_token_capacity_only_sample_is_not_discarded():
+    sample = sample_from_families(parse_prometheus_text("sglang:max_total_num_tokens 32768\n"))
+
+    assert sample.has_readings()
+    assert sample.capacity_tokens == 32768.0
 
 
 def test_canonical_label_key_is_order_independent():

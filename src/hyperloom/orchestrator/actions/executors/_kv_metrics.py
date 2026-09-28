@@ -148,8 +148,8 @@ _VLLM_USAGE = ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
 # The only workable preemption count: vLLM's log line for it is dead code (``log()`` resets the counter before reading
 # it), so this has no log fallback.
 _VLLM_PREEMPT_TOTAL = "vllm:num_preemptions_total"
-_VLLM_PREFIX_QUERIES = "vllm:prefix_cache_queries"
-_VLLM_PREFIX_HITS = "vllm:prefix_cache_hits"
+_VLLM_PREFIX_QUERIES = "vllm:prefix_cache_queries_total"
+_VLLM_PREFIX_HITS = "vllm:prefix_cache_hits_total"
 
 # Deliberately not read: ``sglang:cache_hit_rate``. Observed reading 0.0 on a server whose ``cached_tokens_total`` had
 # already reached 4.6M, so it is not a cumulative rate -- whether it is instantaneous or windowed is unresolved, and a
@@ -577,9 +577,18 @@ class KvSample:
                 self.active_pool_usage,
                 self.physical_pool_usage,
                 self.used_tokens,
+                self.evictable_tokens,
+                self.available_tokens,
+                self.capacity_tokens,
                 self.capacity_gb,
             )
-        ) or bool(self.retract_total or self.preempt_total)
+        ) or bool(
+            self.retract_total
+            or self.preempt_total
+            or self.prefix_cache_queries
+            or self.prefix_cache_hits
+            or self.cached_tokens_total
+        )
 
 
 def _detect_engine(families: ParsedFamilies) -> str:
