@@ -978,6 +978,7 @@ PY
 _pip_install_editable() {
   local root="$1"
   local label="$2"
+  local extras="${3:-}"
   if [ ! -d "$root" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
       warn "${label} checkout not found: ${root}"
@@ -995,8 +996,10 @@ _pip_install_editable() {
   fi
   log "ensuring ${label} editable install from ${root}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
+    local spec="."
+    [ -n "$extras" ] && spec=".[${extras}]"
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
-    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e '$spec'"
   fi
   return 0
 }
@@ -1125,7 +1128,7 @@ ensure_tracelens() {
       die "TraceLens root not found: $TRACELENS_ROOT"
     fi
   fi
-  _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" || {
+  _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" "kernel_source" || {
     [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ] || die "install AMD-AGI/TraceLens at TRACELENS_ROOT=${TRACELENS_ROOT}"
   }
 
