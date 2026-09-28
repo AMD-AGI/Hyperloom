@@ -1155,12 +1155,9 @@ def test_a_recorded_root_for_a_patch_outside_the_stack_is_ignored(repo: Path, tm
     and a declared-target set for a tree no round wrote, and the capture is then
     judged against files that were never part of the stack.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _accepted_patch_roots
-
     unrelated = tmp_path / "aiter"
     applied = tmp_path / "2.patch"
-    roots = _accepted_patch_roots(
-        EnablementRound(),
+    roots = EnablementRound().accepted_patch_roots(
         done_payload={
             "patch_roots": {
                 str(applied): str(repo),

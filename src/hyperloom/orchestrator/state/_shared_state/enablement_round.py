@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -134,6 +135,97 @@ class EnablementRound:
     levers_without_readers: list = field(default_factory=list)
     # {interpreter_tag, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
+
+    def recorded_base_shas(self) -> dict[str, str]:
+        """The per-root base shas earlier rounds of this stack already recorded."""
+        raw = self.base_sha_by_root
+        return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)} if isinstance(raw, Mapping) else {}
+
+    def record_base_sha(self, root: str, sha: str) -> bool:
+        """Record ``root``'s pre-mutation head, first writer wins; return whether this call recorded it."""
+        current = dict(self.base_sha_by_root or {})
+        if current.get(root):
+            return False
+        current[root] = sha
+        self.base_sha_by_root = current
+        return True
+
+    def inherited_base_shas(self) -> dict[str, str]:
+        """Return the base sha an earlier accepted round already named, per root.
+
+        Each KEEP is committed, so this round's pre-mutation HEAD already contains
+        its predecessors: recording it would name a tree the recipe's own earlier
+        patch steps have already been applied to, and a replay would apply them
+        again on top of their own result. The first accepted round's reading is the
+        one that names the tree the whole stack applies to.
+        """
+        # The roots records only exist from the first KEEP onward; the durable map
+        # is written by every round that mutates a tree, advanced ones included, so
+        # it is the one that survives an ADVANCED -> KEEP sequence.
+        inherited = self.recorded_base_shas()
+        for record in self.roots or []:
+            if not isinstance(record, Mapping):
+                continue
+            path, sha = str(record.get("path") or ""), str(record.get("base_sha") or "")
+            if path and sha:
+                inherited.setdefault(path, sha)
+        return inherited
+
+    def accepted_patch_roots(
+        self,
+        *,
+        done_payload: Mapping[str, Any] | None,
+        applied: Iterable[Any],
+        framework_root: str,
+    ) -> dict[str, str]:
+        """Map every patch in the accepted stack, plus this round's ``applied``, to the tree it applies against.
+
+        The stack is cumulative and the recipe emits one patch step per entry in
+        ``kept_patches``, so an entry an earlier round bound has to keep its root
+        here: a step whose root resolves to no record is refused as
+        ``root_unidentified``, and one silently re-pointed at this round's root
+        would be captured against a tree that never held it.
+
+        The ``done_payload`` contribution is admitted only for patches that ARE in
+        the accepted stack, on the same rule ``_sole_patch_root`` applies to the
+        selected set: a recorded entry for a patch this integration did not take
+        cannot attest anything about the stack. Admitting it would add a root record
+        and a set of declared targets for a tree nothing in the stack touched, and
+        the capture would then be judged against files no round wrote.
+        """
+        accepted = [str(p) for p in (*(self.kept_patches or []), *applied) if str(p)]
+        in_stack = set(accepted)
+        roots: dict[str, str] = {}
+        if isinstance(self.patch_roots, Mapping):
+            # Keyed by the stack's own paths by construction: it is this method's own output from an earlier round.
+            roots.update({str(k): str(v) for k, v in self.patch_roots.items() if str(k) and str(v)})
+        roots.update(
+            {
+                str(k): str(v)
+                for k, v in ((done_payload or {}).get("patch_roots") or {}).items()
+                if str(k) and str(v) and str(k) in in_stack
+            }
+        )
+        # The same fallback the projection uses, so the captured set and the
+        # replayed set cannot disagree about which tree a patch belongs to.
+        for key in accepted:
+            if not roots.get(key) and framework_root:
+                roots[key] = framework_root
+        return roots
+
+    def last_execution_seq(self) -> int:
+        """Return the highest ``seq`` already in the durable setup ledger."""
+        return max(
+            (int(row.get("seq") or 0) for row in self.setup_executions or [] if isinstance(row, dict)), default=0
+        )
+
+    def append_setup_executions(self, rows: Iterable[Any]) -> bool:
+        """Append execution rows to the append-only ledger; return whether any were appended."""
+        new = [row for row in rows if isinstance(row, dict)]
+        if not new:
+            return False
+        self.setup_executions = [*(self.setup_executions or []), *new]
+        return True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
