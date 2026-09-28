@@ -179,6 +179,7 @@ jobs:
           # The per-tool-result <total_tokens> system message is hoisted to the front by the sglang
           # backend, so every turn missed the prefix cache and re-prefilled the whole history.
           export CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off
+          export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
           if [ "$INSECURE" = 1 ]; then
             export NODE_TLS_REJECT_UNAUTHORIZED=0
           fi
