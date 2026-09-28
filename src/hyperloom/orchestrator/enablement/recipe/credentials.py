@@ -19,6 +19,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 
+from .setup_allowlist import TRUSTED_BIN_PREFIX_RE
+
 #: Installer families the setup allowlist admits, keyed by the token that
 #: introduces the command. Only the ``pip`` family is covered by the KEEP-time
 #: distribution closure; every other family mutates state that map cannot see.
@@ -46,7 +48,6 @@ _CREDENTIALED_URL_RE = re.compile(
 #: The ambient spelling of ``--index-url``; an inline assignment of one is the
 #: same flag by another name, and the allowlist admits it as readily.
 _PIP_INDEX_ENV_NAMES: tuple[str, ...] = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_INDEX_URL")
-_TRUSTED_BIN_PREFIX_RE = re.compile(r"^(?:/opt/[^/]+|/usr(?:/local)?|/bin|/sbin)(?:/[^/]+)*/")
 
 #: Ambient channels proved by a variable name.
 _ENV_CHANNELS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -109,7 +110,7 @@ def installer_class(cmd: str) -> str:
     _, tokens = split_env_assignments(cmd)
     if not tokens:
         return ""
-    head = Path(_TRUSTED_BIN_PREFIX_RE.sub("", tokens[0], count=1)).name
+    head = Path(TRUSTED_BIN_PREFIX_RE.sub("", tokens[0], count=1)).name
     for family, heads in _INSTALLER_FAMILIES:
         if head in heads:
             return family

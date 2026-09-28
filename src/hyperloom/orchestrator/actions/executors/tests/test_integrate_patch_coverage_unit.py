@@ -188,7 +188,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
         called["setup"] = True
         return {"applied": [], "skipped": [], "failed": []}
 
-    monkeypatch.setattr(ip, "_run_setup_commands", _spy_setup)
+    monkeypatch.setattr(ip, "run_setup_commands", _spy_setup)
 
     class _SS:
         def get_specialist_patch_verdict(self, tid):

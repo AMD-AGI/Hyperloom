@@ -16,18 +16,24 @@ import pytest
 from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors._nogit_patch import _revert_patches_no_git
+from hyperloom.orchestrator.actions.executors import _setup_replay
+from hyperloom.orchestrator.actions.executors._setup_replay import (
+    resolve_setup_commands as _resolve_setup_commands,
+    run_setup_commands as _run_setup_commands,
+    with_skipped_setup_reason as _with_skipped_setup_reason,
+)
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
     _git_apply,
     _git_apply_reverse,
-    _is_allowlisted_setup_command,
     _is_git_tree,
     _resolve_framework_root,
     _resolve_patch_paths,
-    _resolve_setup_commands,
-    _run_setup_commands,
-    _with_skipped_setup_reason,
+)
+from hyperloom.orchestrator.enablement.recipe.setup_allowlist import (
+    is_allowlisted_setup_command as _is_allowlisted_setup_command,
+    sanitize_setup_command as _sanitize_setup_command,
 )
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -517,7 +523,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     )
     monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
     monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(ip, "_run_setup_commands", forbidden)
+    monkeypatch.setattr(ip, "run_setup_commands", forbidden)
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
@@ -1604,7 +1610,6 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     down verbatim -- redacting where the list is built would hand pip a masked
     URL. It is redacted at the artifact writer instead.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
 
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
     monkeypatch.setattr(
@@ -1682,7 +1687,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
         replayed["commands"] = list(commands)
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
 
     async def _fake_bench(**_kwargs):
         return {
@@ -1773,7 +1778,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
             on_execution(row)
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": [row]}
 
-    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installed)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _installed)
     arrange(ip_mod, monkeypatch)
 
     shared_state = SimpleNamespace(
@@ -1894,7 +1899,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         git_commit_all(repo, "install")
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installing_commits)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
@@ -1954,7 +1959,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         git_commit_all(explicit_root, "install")
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installing_commits)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
@@ -2029,8 +2034,6 @@ async def test_a_completed_setup_row_is_durable_even_when_the_await_is_cancelled
     import asyncio
     import threading
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-
     reached_second = threading.Event()
     release = threading.Event()
     durable: list[dict] = []
@@ -2041,11 +2044,11 @@ async def test_a_completed_setup_row_is_durable_even_when_the_await_is_cancelled
             release.wait(timeout=30)
         return True
 
-    monkeypatch.setattr(ip_mod, "_execute_setup_command", _executor)
+    monkeypatch.setattr(_setup_replay, "execute_setup_command", _executor)
 
     pending = asyncio.ensure_future(
         asyncio.to_thread(
-            ip_mod._run_setup_commands,
+            _setup_replay.run_setup_commands,
             ["pip install one", "pip install two"],
             cwd=tmp_path,
             log_dir=tmp_path / "logs",
@@ -2087,7 +2090,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
         seen["ident"] = threading.get_ident()
         return {"applied": [], "skipped": [], "failed": []}
 
-    monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
