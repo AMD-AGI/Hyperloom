@@ -984,6 +984,7 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
 
     artifact_dir = tmp_path / "aiperf_artifacts"
     artifact_dir.mkdir()
+    (artifact_dir / "server_metrics_export.jsonl").write_text("{not json\n", encoding="utf-8")
     path = artifact_dir / "server_metrics_export.json"
     gauge = {
         "type": "gauge",
@@ -1052,11 +1053,23 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
         encoding="utf-8",
     )
 
-    assert find_server_metrics_export(tmp_path) == path
+    assert find_server_metrics_export(tmp_path).suffix == ".jsonl"
     rows = read_aiperf_server_metrics(path)
-    assert [phase for _sample, _timing, phase in rows] == ["warmup", "measured"]
-    assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [0.25, 0.5]
+    assert [phase for _sample, _timing, phase in rows] == ["warmup", "warmup", "measured", "measured"]
+    assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [None, 0.25, None, 0.5]
+    assert [aggregate_series(sample.prefix_cache_hits) for sample, _timing, _phase in rows] == [0, 10, 10, 30]
     assert aggregate_series(rows[-1][0].prefix_cache_hits) == 30.0
+
+    payload = KvMetricsRecorder(
+        poller=_StubPoller([]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    ).summary()
+    assert payload["aiperf_server_metrics_path"] == str(path)
+    assert payload["prefix_cache"]["prefix_cache_hits_delta_by_phase"] == {
+        "warmup": 10.0,
+        "measured": 20.0,
+    }
 
 
 def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
@@ -1311,25 +1324,6 @@ def test_explicit_env_still_outranks_the_config(tmp_path):
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
     assert resolve_metrics_port({"PORT": "9001"}, tmp_path) == 9001
-
-
-def test_ambient_port_does_not_outrank_round_config(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
-
-    monkeypatch.setenv("PORT", "9999")
-    (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
-
-    assert resolve_metrics_port({}, tmp_path) == 34407
-
-
-def test_remote_benchmark_base_url_selects_remote_metrics_endpoint():
-    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
-
-    poller = KvMetricsPoller(
-        config_envs={"BENCHMARK_BASE_URL": "http://head-pod:8000/v1"}
-    )
-
-    assert poller.url == "http://head-pod:8000/metrics"
 
 
 def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):

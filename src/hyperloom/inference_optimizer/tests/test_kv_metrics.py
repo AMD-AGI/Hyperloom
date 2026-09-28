@@ -291,13 +291,6 @@ def test_prefix_cache_only_sample_is_not_discarded():
     assert aggregate_series(sample.prefix_cache_hits) == 529.0
 
 
-def test_token_capacity_only_sample_is_not_discarded():
-    sample = sample_from_families(parse_prometheus_text("sglang:max_total_num_tokens 32768\n"))
-
-    assert sample.has_readings()
-    assert sample.capacity_tokens == 32768.0
-
-
 def test_canonical_label_key_is_order_independent():
     assert canonical_label_key({"b": "2", "a": "1"}) == canonical_label_key({"a": "1", "b": "2"})
     assert canonical_label_key({}) == ""

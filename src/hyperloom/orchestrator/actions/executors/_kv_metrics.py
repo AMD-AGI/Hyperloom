@@ -253,17 +253,24 @@ def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
     return families
 
 
-def find_server_metrics_export(workspace: Any) -> Path | None:
-    """Locate aiperf's server-metrics export under a round's directory."""
+def _server_metrics_exports(workspace: Any) -> list[Path]:
+    """Locate aiperf server-metrics exports in preference order."""
+    found: list[Path] = []
     try:
         root = Path(workspace)
         for pattern in _SERVER_METRICS_RELPATHS:
             for candidate in sorted(root.glob(pattern)):
-                if candidate.is_file():
-                    return candidate
+                if candidate.is_file() and candidate not in found:
+                    found.append(candidate)
     except OSError:
-        return None
-    return None
+        return []
+    return found
+
+
+def find_server_metrics_export(workspace: Any) -> Path | None:
+    """Locate the preferred aiperf server-metrics export."""
+    exports = _server_metrics_exports(workspace)
+    return exports[0] if exports else None
 
 
 def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
@@ -299,9 +306,15 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
                 label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
                 series_key = (str(name), canonical_label_key(label_map))
                 running = cumulative.get(series_key, 0.0)
-                for timeslice in series.get("timeslices") or []:
-                    if not isinstance(timeslice, dict):
-                        continue
+                timeslices = [item for item in (series.get("timeslices") or []) if isinstance(item, dict)]
+                if metric_type == "counter" and timeslices:
+                    start = int(_number(timeslices[0].get("start_ns")) or 0)
+                    if start > 0:
+                        # AIPerf stores per-timeslice increments. Emit the
+                        # opening cumulative snapshot so phase deltas include
+                        # the first interval instead of starting after it.
+                        rows.append((start, start, phase, str(name), label_map, running))
+                for timeslice in timeslices:
                     start = int(_number(timeslice.get("start_ns")) or 0)
                     end = int(_number(timeslice.get("end_ns")) or 0)
                     if end <= 0:
@@ -812,7 +825,7 @@ def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: A
     if port is not None:
         return port
     if workspace is not None:
-        for probe in (port_from_workspace, port_from_server_command, port_from_server_log):
+        for probe in (port_from_workspace, port_from_server_log, port_from_server_command):
             port = probe(workspace)
             if port is not None:
                 return port
@@ -1387,11 +1400,14 @@ class KvMetricsRecorder:
         if self._workspace is None:
             return None
         try:
-            export = find_server_metrics_export(self._workspace)
+            export = None
+            records = []
+            for candidate in _server_metrics_exports(self._workspace):
+                records = read_aiperf_server_metrics(candidate)
+                if records:
+                    export = candidate
+                    break
             if export is None:
-                return None
-            records = read_aiperf_server_metrics(export)
-            if not records:
                 return None
             # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
             # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
