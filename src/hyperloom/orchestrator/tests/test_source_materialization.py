@@ -44,6 +44,18 @@ def _repository(root: Path, package: str = "accepted_pkg", prefix: str = "python
     return root
 
 
+def _nonregular_entry(root: Path, relative: str, kind: str) -> None:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink":
+        target.symlink_to("missing-target")
+    else:
+        target.mkdir()
+        _git(target, "init", "-q")
+        (target / "README").write_text("Gitlink fixture\n")
+        _commit(target)
+
+
 def _keep(root: Path, snapshot: Path, writes: dict[str, str | None], *, prefix: str = "python") -> dict:
     for relative, content in writes.items():
         target = root / relative
@@ -281,6 +293,74 @@ def test_repo_root_imports_allow_ancillary_source_and_ignore_archive_attributes(
     result = _imports(descriptor, tmp_path / "missing", tmp_path)
     assert result["alpha"]["value"] == "first"
     assert (Path(descriptor["bundle_root"]) / "trees/000/setup.py").is_file()
+
+
+@pytest.mark.parametrize("prefix", ["python", ""])
+def test_nonregular_entries_outside_import_scope_do_not_block_source(tmp_path: Path, prefix: str) -> None:
+    root = _repository(tmp_path / "repo", prefix=prefix)
+    omitted = {
+        ".dockerignore": "symlink",
+        ".claude/skills/shared": "symlink",
+        "sgl-model-gateway/LICENSE": "symlink",
+        "3rdparty/composable_kernel": "gitlink",
+        "python-extra/vendor": "gitlink",
+    }
+    for relative, kind in omitted.items():
+        _nonregular_entry(root, relative, kind)
+    module = (Path(prefix) / "accepted_pkg/alpha.py").as_posix()
+    layer = _keep(root, tmp_path / "first", {module: "VALUE = 'accepted'\n"}, prefix=prefix)
+    assert _git(root, "ls-tree", layer["base_sha"], "3rdparty/composable_kernel").startswith("160000 commit ")
+
+    descriptor = materialize_source_stack({"optimization_stack": [layer]}, tmp_path / "materialized")
+
+    result = _imports(descriptor, tmp_path / "missing", tmp_path)
+    assert result["alpha"]["value"] == "accepted"
+    bundle = Path(descriptor["bundle_root"])
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    exported = {row["path"] for row in manifest["files"]}
+    assert all(f"trees/000/{path}" not in exported for path in omitted)
+    assert all(not (bundle / "trees/000" / path).exists() for path in omitted)
+    assert (bundle / "trees/000" / prefix / "accepted_pkg/beta.py").is_file()
+
+
+@pytest.mark.parametrize("prefix", ["python", ""])
+@pytest.mark.parametrize("kind", ["symlink", "gitlink"])
+def test_nonregular_entries_inside_import_scope_are_refused(tmp_path: Path, prefix: str, kind: str) -> None:
+    root = _repository(tmp_path / "repo", prefix=prefix)
+    relative = (Path(prefix) / "accepted_pkg/linked").as_posix()
+    _nonregular_entry(root, relative, kind)
+    module = (Path(prefix) / "accepted_pkg/alpha.py").as_posix()
+    layer = _keep(root, tmp_path / "first", {module: "VALUE = 'accepted'\n"}, prefix=prefix)
+    output = tmp_path / "materialized"
+
+    with pytest.raises(SourceMaterializationError, match="unsupported_tree_entry"):
+        materialize_source_stack({"optimization_stack": [layer]}, output)
+    assert not output.exists() or not list(output.iterdir())
+
+
+@pytest.mark.parametrize("relative", ["support", "helper.py", "extension.so", "sourceless.pyc"])
+def test_repo_root_import_scope_rejects_unpatched_nonregular_dependencies(tmp_path: Path, relative: str) -> None:
+    root = _repository(tmp_path / "repo", prefix="")
+    _nonregular_entry(root, relative, "symlink")
+    layer = _keep(root, tmp_path / "first", {"accepted_pkg/alpha.py": "VALUE = 'accepted'\n"}, prefix="")
+
+    with pytest.raises(SourceMaterializationError, match="unsupported_tree_entry"):
+        materialize_source_stack({"optimization_stack": [layer]}, tmp_path / "materialized")
+
+
+def test_later_layer_cannot_hide_nonregular_entries_under_an_earlier_import_root(tmp_path: Path) -> None:
+    root = _repository(tmp_path / "repo")
+    first = _keep(root, tmp_path / "first", {"python/accepted_pkg/alpha.py": "VALUE = 'first'\n"})
+    _nonregular_entry(root, "python/accepted_pkg/linked", "symlink")
+    second = _keep(
+        root,
+        tmp_path / "second",
+        {"lib/other_pkg/__init__.py": "", "lib/other_pkg/alpha.py": "VALUE = 'second'\n"},
+        prefix="lib",
+    )
+
+    with pytest.raises(SourceMaterializationError, match="unsupported_tree_entry"):
+        materialize_source_stack({"optimization_stack": [first, second]}, tmp_path / "materialized")
 
 
 @pytest.mark.parametrize("damage", ["directory", "symlink", "mode"])

@@ -72,8 +72,9 @@ def _git(root: Path, *args: str, input_data: bytes | None = None) -> bytes:
     return result.stdout
 
 
-def _tree(root: Path, commit: str) -> dict[str, tuple[str, str]]:
+def _tree(root: Path, commit: str) -> tuple[dict[str, tuple[str, str]], list[str]]:
     entries = {}
+    unsupported = []
     for record in _git(root, "ls-tree", "-rz", "--full-tree", commit).split(b"\0"):
         if not record:
             continue
@@ -81,9 +82,10 @@ def _tree(root: Path, commit: str) -> dict[str, tuple[str, str]]:
         mode, kind, object_id = header.decode().split()
         path = _relative(raw_path.decode())
         if kind != "blob" or mode not in ("100644", "100755"):
-            raise SourceMaterializationError("unsupported_tree_entry", path)
-        entries[path] = (mode, object_id)
-    return entries
+            unsupported.append(path)
+        else:
+            entries[path] = (mode, object_id)
+    return entries, unsupported
 
 
 def _module(path: str, prefix: str, tree: Mapping[str, Any], *, deleted: bool = False) -> str:
@@ -157,7 +159,7 @@ def _read_layer(entry: Mapping[str, Any]) -> dict[str, Any]:
         raise SourceMaterializationError("unsupported_non_git_tree", root_text)
     if _git(root, "rev-parse", f"{commit}^{{commit}}").decode().strip() != commit:
         raise SourceMaterializationError("commit_identity_mismatch", layer_id)
-    tree = _tree(root, commit)
+    tree, unsupported = _tree(root, commit)
     rows = manifest.get("files")
     if not isinstance(rows, list) or not rows:
         raise SourceMaterializationError("empty_snapshot", layer_id)
@@ -183,7 +185,15 @@ def _read_layer(entry: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(targets, list) or len(targets) != len(operations) or set(targets) != set(operations)
     ):
         raise SourceMaterializationError("layer_coverage_mismatch", layer_id)
-    return {"id": layer_id, "root": root, "commit": commit, "prefix": prefix, "tree": tree, "ops": operations}
+    return {
+        "id": layer_id,
+        "root": root,
+        "commit": commit,
+        "prefix": prefix,
+        "tree": tree,
+        "unsupported": unsupported,
+        "ops": operations,
+    }
 
 
 def _export(root: Path, tree: Mapping[str, tuple[str, str]], destination: Path) -> None:
@@ -206,6 +216,14 @@ def _export(root: Path, tree: Mapping[str, tuple[str, str]], destination: Path) 
 
 def _native(path: str) -> bool:
     return bool({suffix.lower() for suffix in PurePosixPath(path).suffixes} & _NATIVE_SUFFIXES)
+
+
+def _in_import_scope(path: str, prefix: str) -> bool:
+    if prefix:
+        return path == prefix or path.startswith(prefix + "/") or prefix.startswith(path + "/")
+    # A repo-root PYTHONPATH exposes modules/packages, not ancillary dot/tool directories.
+    owner = PurePosixPath(path).parts[0]
+    return owner.isidentifier() or _native(owner) or PurePosixPath(owner).suffix in {".py", ".pyc", ".pyo"}
 
 
 def _check_untracked_runtime(root: Path, group: list[dict[str, Any]]) -> None:
@@ -234,6 +252,11 @@ def _assemble(layers: list[dict[str, Any]], staging: Path) -> dict[str, Any]:
     }
     for index, (root, group) in enumerate(groups.items()):
         latest = group[-1]
+        prefixes = list(dict.fromkeys(layer["prefix"] for layer in group))
+        for layer in group:
+            for path in layer["unsupported"]:
+                if any(_in_import_scope(path, prefix) for prefix in prefixes):
+                    raise SourceMaterializationError("unsupported_tree_entry", path)
         for earlier, later in zip(group, group[1:]):
             _git(root, "merge-base", "--is-ancestor", earlier["commit"], later["commit"])
             changed = {
@@ -254,7 +277,6 @@ def _assemble(layers: list[dict[str, Any]], staging: Path) -> dict[str, Any]:
                 "layer_ids": [layer["id"] for layer in group],
             }
         )
-        prefixes = list(dict.fromkeys(layer["prefix"] for layer in group))
         for prefix in prefixes:
             output_prefix = str(PurePosixPath(root_rel, prefix))
             if not (staging / output_prefix).is_dir():
@@ -327,11 +349,13 @@ def _validate_import_ownership(manifest: Mapping[str, Any]) -> None:
 
 
 def materialize_source_stack(current_best: Mapping[str, Any], output_dir: Path) -> dict[str, Any] | None:
-    """Export the complete accepted git trees, or refuse unresolved source layers.
+    """Export complete accepted Python import scopes, or refuse unresolved source layers.
 
     Version 1 accepts regular Python changes with explicit artifact coverage.
     It verifies snapshot bytes against each post-KEEP commit and exports the
-    final accepted commit, independent of the live worktree's current HEAD.
+    regular files of the final accepted commit, independent of the live
+    worktree's current HEAD. Nonregular ancillary entries outside the Python
+    import scopes are omitted; those within an import scope are refused.
     Unversioned files under any import prefix, except ordinary Python caches,
     leave runtime closure unresolved, including incidental repo-root output.
     """
