@@ -119,9 +119,9 @@ _SHA256_FORGE_LOOP: dict[str, str] = {
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
     "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
-# The group-axis rule moved fusion alone: harness contract step 4 now forbids
-# substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
-# paths, and reminds authors that H and G are often unequal.
+    # The group-axis rule moved fusion alone: harness contract step 4 now forbids
+    # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
+    # paths, and reminds authors that H and G are often unequal.
     "fusion": "5e0e61ccc6c483411dbb10e6381187ca16373bf9d1156873f9f1abc099f7bf5f",
     "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
     "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",

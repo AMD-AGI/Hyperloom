@@ -211,9 +211,7 @@ def test_harness_group_dim_mismatch_catches_gqa_as_g(tmp_path):
     why = harness_group_dim_mismatch(bad, shapes)
     assert why and "n_local_groups=16" in why
     assert harness_group_dim_mismatch("G = 16  # n_local_groups\n", shapes) == ""
-    assert "gqa_groups" in harness_group_dim_mismatch(
-        "G = shapes['gqa_groups']\n", shapes
-    )
+    assert "gqa_groups" in harness_group_dim_mismatch("G = shapes['gqa_groups']\n", shapes)
 
 
 def test_shapes_missing_config_returns_minimal(tmp_path):

@@ -869,9 +869,7 @@ def run(
         )
         for text in anchor_report.warnings:
             log.warning("anchor: %s", text)
-        shapes = resolve_decode_shapes(
-            model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size
-        )
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )
@@ -918,9 +916,7 @@ def run(
     elif discover_mode == "llm":
         # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
         # chains itself (not capped to templates).
-        shapes = resolve_decode_shapes(
-            model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size
-        )
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )
