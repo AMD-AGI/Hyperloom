@@ -305,6 +305,27 @@ class TestSessionCarriesTheOnlyCopy:
         assert SharedState().latency_budget_ms == 0.0
 
 
+class TestResumeDoesNotSilentlyKeepTheOldBudget:
+    """A resume-time ``--max-latency-ms`` must not fail open."""
+
+    @pytest.mark.parametrize(
+        ("archived", "requested"),
+        [(0.0, 250.0), (500.0, 250.0), (250.0, 500.0)],
+    )
+    def test_a_different_value_is_refused(self, archived, requested):
+        from hyperloom.inference_optimizer.cli.bootstrap import latency_budget_resume_conflict
+
+        reason = latency_budget_resume_conflict(SharedState(latency_budget_ms=archived), requested)
+        assert "--max-latency-ms" in reason
+        assert f"{requested:g}" in reason
+
+    @pytest.mark.parametrize(("archived", "requested"), [(250.0, None), (0.0, None), (250.0, 250.0)])
+    def test_omitting_or_repeating_the_value_resumes(self, archived, requested):
+        from hyperloom.inference_optimizer.cli.bootstrap import latency_budget_resume_conflict
+
+        assert latency_budget_resume_conflict(SharedState(latency_budget_ms=archived), requested) == ""
+
+
 class TestPromptBlock:
     """What the router sees. Rendered, not asserted against source text."""
 
