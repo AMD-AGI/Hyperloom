@@ -107,7 +107,7 @@ def _stub_external_integrate_operations(monkeypatch):
             source_import_root=lambda root: root,
         ),
     )
-    monkeypatch.setattr(ip.IntegratePatchExecutor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(ip, "probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
 
 
 def _write_specialist_workspace(
