@@ -695,5 +695,27 @@ def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
     """A synthetic session measures none of them, and eleven nulls would claim it was graded on them."""
     md = render_session_report(_fixture_breakdown()).markdown
 
+    # Anchored on a positive assertion first: both checks below would also pass on an empty report, and
+    # reporters/base.py substitutes a warning section for a renderer that raises.
+    assert "throughput_tok_s_per_gpu" in md
     assert "AgentX graded axes" not in md
     assert "e2e_norm_intvty_p50" not in md
+
+
+def test_an_axis_no_verdict_reads_does_not_make_a_round_agentx_graded() -> None:
+    """``total_throughput`` is filled for any benchmark, so counting it would head the block over a
+    session that was never graded on an AgentX axis."""
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import has_graded_axes
+
+    assert not has_graded_axes({"total_throughput": 26500.0, "input_throughput": 24296.0})
+    assert has_graded_axes({"e2e_norm_intvty_p50": 41.8})
+    assert has_graded_axes({"request_error_rate": 0.0}), "a comparability input is one the verdict reads"
+
+
+def test_a_non_finite_axis_reads_the_same_in_the_facts_as_in_the_table() -> None:
+    """``_md_cell`` renders NaN as an em dash; a key fact saying "nan" would be a second answer."""
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import graded_axes_facts
+
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("nan")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("inf")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": 41.8}, label="X") == ["X e2e_norm_intvty_p50: 41.8."]

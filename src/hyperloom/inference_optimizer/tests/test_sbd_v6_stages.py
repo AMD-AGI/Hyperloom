@@ -256,6 +256,9 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
         "perf": _UNMEASURED_AXES,
         # Tri-state: this round's recorder never answered, which is not the same as upstream rejecting it.
         "submission_valid": None,
+        # Empty rather than absent: the reasons travel with the flag, so a consumer reading this block never has to
+        # walk the timeline to find out why a round was refused.
+        "submission_invalid_reasons": [],
     }
     assert outcome["anchoring_eval"] == {
         "task_id": "b-1",
@@ -310,6 +313,7 @@ def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
         "e2el_mean_ms": None,
         "perf": _UNMEASURED_AXES,
         "submission_valid": None,
+        "submission_invalid_reasons": [],
     }
 
 

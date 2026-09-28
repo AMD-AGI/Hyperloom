@@ -11,6 +11,7 @@ output-throughput figure it was no longer ranked on.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ..base import as_dict, md_kv_list
@@ -39,15 +40,20 @@ _GRADED_ROWS: tuple[tuple[str, str], ...] = (
 #: open the table to learn where the round sits.
 _HEADLINE = ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "output_tput_per_gpu")
 
+#: What makes a round AgentX-graded, which is not every row in the table. ``total_throughput`` and
+#: ``input_throughput`` are filled for any benchmark, so counting them would head a block "AgentX graded axes" over a
+#: session that was never graded on one -- the section's own emptiness is what says it was not an AgentX round.
+_DECIDING_AXES = tuple(key for key, _ in _GRADED_ROWS if key not in ("total_throughput", "input_throughput"))
+
 
 def has_graded_axes(perf: Any) -> bool:
-    """Whether *perf* measured any graded axis at all.
+    """Whether *perf* measured any axis the AgentX verdict is taken on.
 
     A synthetic round carries the whole block as nulls, and rendering eleven nulls would claim the session was
     graded on axes it never had; emptiness is how a non-AgentX round says so.
     """
     axes = as_dict(perf)
-    return any(axes.get(key) is not None for key, _ in _GRADED_ROWS)
+    return any(axes.get(key) is not None for key in _DECIDING_AXES)
 
 
 def graded_axes_facts(perf: Any, *, label: str) -> list[str]:
@@ -56,7 +62,9 @@ def graded_axes_facts(perf: Any, *, label: str) -> list[str]:
     facts: list[str] = []
     for key in _HEADLINE:
         value = axes.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # ``isfinite`` for the same reason ``_md_cell`` guards it: a hand-edited artifact can carry NaN, and a fact
+        # line reading "nan" beside a table cell reading "—" would be two answers to one question.
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             facts.append(f"{label} {key}: {float(value):.4g}.")
     return facts
 

@@ -409,6 +409,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
             "perf": _graded_axes(None),
             "submission_valid": None,
+            "submission_invalid_reasons": [],
         }
     anchors.sort(key=lambda row: row[0])
     measurement = _mapping(anchors[-1][1].get("measurement"))
@@ -420,6 +421,9 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         # ``perf`` a measurement of something it would not accept as a submission. Tri-state, so a session recorded
         # before the recorder wrote it stays ``None`` rather than reading as rejected.
         "submission_valid": None if submission_valid is None else bool(submission_valid),
+        # The reasons travel with the flag rather than only onto the report. A consumer reading this block out of
+        # the JSON would otherwise find a bare ``false`` here and have to walk the timeline to learn why.
+        "submission_invalid_reasons": [str(r) for r in (measurement.get("submission_invalid_reasons") or [])],
     }
 
 
