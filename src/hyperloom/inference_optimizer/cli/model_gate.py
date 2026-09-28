@@ -1461,6 +1461,11 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3.
         state.set_stop_reason(stop_reason)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "model_gate")
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)

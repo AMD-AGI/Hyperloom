@@ -2173,11 +2173,7 @@ def assemble_kernel_ext(
     acceptances = group_rows(acceptance_rows, "acceptance_kind")
     geak_ref, conflicting = _geak_settlement(geak_ledger)
 
-    # The gate rules on a queued integration. A rewrite and the patch gated for
-    # it share a kernel id, which is the only thing the two sides have in
-    # common; a fusion or a GEMM table produces no kernel of its own and is
-    # findable only by the integration id its lane recorded.
-    integrate_by_kernel = group_rows(integrate_rows, "kernel_id")
+    # Only an authored integration reference can link a lane to an E2E gate.
     integrate_by_id = group_rows(integrate_rows, "integration_id")
     attempts = [_lane_attempt(row) for row in lane_rows]
     attempts.extend(_geak_attempt(row) for row in geak_kernel_rows)
@@ -2186,8 +2182,6 @@ def assemble_kernel_ext(
             continue
         if row["integrate_ref"]:
             row["e2e"] = _integrate_e2e(integrate_by_id.get(row["integrate_ref"], []))
-        elif row["kernel_id"]:
-            row["e2e"] = _integrate_e2e(integrate_by_kernel.get(row["kernel_id"], []))
     attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=geak_ref))
     # A row whose producer stated no start time sorts after the ones that did,
     # rather than ahead of them where an empty string would put it.

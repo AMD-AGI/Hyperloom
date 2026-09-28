@@ -1384,6 +1384,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     """
     if stop_reason == SUPERVISOR_RESTART_REASON:
         return
+    if not state.close_sequence_done:
+        from ..breakdown.recorder.close_out import record_close_safety_net
+
+        record_close_safety_net(session_dir)
     try:
         from ..breakdown import write_minimal_final_json
 
@@ -1490,6 +1494,11 @@ def _persist_preflight_failure_artifacts(
                 record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "install")
         try:
             from ..breakdown import write_breakdown_json
 

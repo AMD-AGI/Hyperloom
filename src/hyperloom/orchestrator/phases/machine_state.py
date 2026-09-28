@@ -1681,8 +1681,10 @@ def _budget_predicate_inputs(
     now_unix: float,
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
+    remaining_sec = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     return {
-        "remaining_sec": phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix),
+        "remaining_sec": remaining_sec,
+        "current_balance": remaining_sec,
         "cap_sec": phase_cap_seconds(state, budget_pct=budget_pct),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
@@ -2485,7 +2487,9 @@ def record_phase_transition(
         },
     )
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
+        from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
         # the exit that ended it, and open the one being entered. Recorded here
@@ -2512,6 +2516,9 @@ def record_phase_transition(
             entered_at=str(row.get("ts") or ""),
             entered_unix=now_unix,
         )
+        stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
+        if stage:
+            record_stage_reached(bound_session(), stage)
     except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
         pass
     return row

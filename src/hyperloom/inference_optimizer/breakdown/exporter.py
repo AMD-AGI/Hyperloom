@@ -165,6 +165,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             state=state,
             timeline=timeline,
             warnings=warnings,
+            recorded=assembled.get("outcome"),
         ),
         warnings,
         default={},
@@ -399,12 +400,17 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
         # Re-assembled rather than reused from the export: this pass runs after
         # the sequencer's last act, so the fragments now carry the verdict and
         # the artifact paths that did not exist when the breakdown was written.
-        fresh = collectors.collect_v6_close(
-            fresh_warnings,
-            recorded=_load_assembled(sd, fresh_warnings).get("close"),
-        )
+        assembled = _load_assembled(sd, fresh_warnings)
+        fresh = collectors.collect_v6_close(fresh_warnings, recorded=assembled.get("close"))
         changed = breakdown.get("close") != fresh
         breakdown["close"] = fresh
+        recorded_stage = (assembled.get("outcome") or {}).get("stage_reached_recorded")
+        outcome = breakdown.get("outcome")
+        if recorded_stage and isinstance(outcome, dict):
+            if outcome.get("stage_reached_recorded") != recorded_stage:
+                outcome["stage_reached_recorded"] = recorded_stage
+                outcome["stage_reached"] = recorded_stage
+                changed = True
 
         # This pass is the only one that ever sees the steps recorded *after* the breakdown was written —
         # ``artifact_package``, ``ndjson_drain``, ``done`` — so drift among them is reported here or nowhere.
