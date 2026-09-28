@@ -4,8 +4,7 @@
 name: PR Review
 
 # Runs the review-pr skill (.claude/skills/review-pr) when the PR author or a repository member
-# comments `/review`, or a maintainer adds `ai-review`, on a same-repository PR. Publishing is done
-# by .github/scripts/pr-review-publish.sh:
+# comments `/review` on a same-repository PR. Publishing is done by .github/scripts/pr-review-publish.sh:
 # blocking issues become a request-changes review; a clean card dismisses the bot's earlier
 # request-changes reviews and is posted as an LGTM comment. The bot never approves or merges.
 #
@@ -19,8 +18,6 @@ name: PR Review
 on:
   issue_comment:
     types: [created]
-  pull_request:
-    types: [labeled]
 
 permissions: {}
 
@@ -31,20 +28,14 @@ concurrency:
       ((github.event_name == 'issue_comment' && github.event.comment.body == '/review'
         && (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
                      github.event.comment.author_association)
-            || github.event.comment.user.login == github.event.issue.user.login))
-       || (github.event_name == 'pull_request' && github.event.label.name == 'ai-review'))
-      && format('pr-{0}', github.event.issue.number || github.event.pull_request.number)
+            || github.event.comment.user.login == github.event.issue.user.login)))
+      && format('pr-{0}', github.event.issue.number)
       || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   gate:
-    if: >-
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request
-       && github.event.comment.body == '/review')
-      || (github.event_name == 'pull_request' && github.event.action == 'labeled'
-          && github.event.label.name == 'ai-review'
-          && github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event.issue.pull_request && github.event.comment.body == '/review'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -53,13 +44,13 @@ jobs:
       proceed: ${{ steps.check.outputs.proceed }}
       pr: ${{ steps.check.outputs.pr }}
       head: ${{ steps.check.outputs.head }}
+      base: ${{ steps.check.outputs.base }}
     steps:
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          PR: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
           ASSOCIATION: ${{ github.event.comment.author_association }}
@@ -70,44 +61,27 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          if [ "$EVENT" = issue_comment ]; then
-            gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
-          fi
-          meta=$(gh pr view "$PR" --repo "$REPO" --json state,isCrossRepository,headRefOid,author \
-            --jq '[.state, .isCrossRepository, .headRefOid, .author.login] | @tsv')
-          IFS=$'\t' read -r state cross head author <<< "$meta"
-          if [ "$EVENT" = issue_comment ]; then
-            case "$ASSOCIATION" in
-              OWNER | MEMBER | COLLABORATOR) ;;
-              *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
-            esac
-            echo "authorized=true" >> "$GITHUB_OUTPUT"
-          fi
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
+          meta=$(gh pr view "$PR" --repo "$REPO" --json state,isCrossRepository,headRefOid,baseRefOid,author \
+            --jq '[.state, .isCrossRepository, .headRefOid, .baseRefOid, .author.login] | @tsv')
+          IFS=$'\t' read -r state cross head base author <<< "$meta"
+          case "$ASSOCIATION" in
+            OWNER | MEMBER | COLLABORATOR) ;;
+            *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
+          esac
           [ "$state" = OPEN ] || refuse "the PR is ${state}."
           [ "$cross" = false ] || refuse "pull requests from forks are not supported."
           {
             echo "proceed=true"
             echo "pr=$PR"
             echo "head=$head"
+            echo "base=$base"
           } >> "$GITHUB_OUTPUT"
-      - name: Consume ai-review label
-        if: >-
-          always()
-          && (github.event_name == 'pull_request' || steps.check.outputs.authorized == 'true')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
-        run: |
-          present=$(gh api "repos/$REPO/issues/$PR/labels" --jq 'any(.[]; .name == "ai-review")')
-          if [ "$present" = true ]; then
-            gh api -X DELETE "repos/$REPO/issues/$PR/labels/ai-review" >/dev/null
-          fi
       - if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          PR: ${{ github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh pr comment "$PR" --repo "$REPO" --body "Automated review failed to start. Run: ${RUN_URL}"
@@ -137,6 +111,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+          path: base-tree
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
@@ -198,11 +177,13 @@ jobs:
           Review pull request #${PR} of ${HL_REPO} with the review-pr skill: read
           .claude/skills/review-pr/SKILL.md and follow it top to bottom, with these overrides for this CI run.
 
-          - Step 1: run \`bash .claude/skills/review-pr/fetch.sh ${PR} ${WORK}\`. \$WORK is ${WORK}.
-          - The repository root is the base branch. The PR head tree (commit ${HEAD_SHA}) is checked out
-            at pr-head/; every head-tree read or grep the skill asks for targets pr-head/.
-          - Do not run any code from either tree other than fetch.sh: no python, pytest, pip, make or
-            scripts. Where a step asks you to reproduce by running code, apply the SKIPPED protocol.
+          - Step 1: run \`bash .claude/skills/review-pr/fetch.sh ${PR} ${WORK} ${HEAD_SHA} ${{ needs.gate.outputs.base }}\`.
+            \$WORK is ${WORK}. The command rejects evidence from any other head or base tip.
+          - The repository root contains trusted automation from the default branch. The exact PR base
+            is at base-tree/ and head ${HEAD_SHA} is at pr-head/. Read the PR's authoring contract from
+            base-tree/; every head-tree read or grep targets pr-head/.
+          - Do not run code from base-tree/ or pr-head/: no python, pytest, pip, make or scripts. Where
+            a step asks you to reproduce by running code, apply the SKIPPED protocol.
           - Step 7's independent reader is a Task sub-agent given only card.md, diff.txt and base.txt.
           - Do not publish. Your last action is writing the final card to ${WORK}/card.md; the workflow
             publishes it.
