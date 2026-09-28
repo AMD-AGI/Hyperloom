@@ -1141,6 +1141,38 @@ raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 15) else 1)
 PY
 }
 
+# vLLM >= 0.30.0 lists mooncake-transfer-engine-rocm in requirements/rocm.txt, and
+# that package publishes wheels for only part of the Python range the source build
+# accepts (no cp314 at 0.3.13). Resolve it before any venv or pip mutation so an
+# unsupported interpreter fails with guidance instead of midway through setup.
+vllm_mooncake_requirement() {
+  sed -e 's/#.*//' -e 's/[[:space:]]//g' "$1" |
+    { grep -E '^mooncake-transfer-engine-rocm([^A-Za-z0-9_.-]|$)' || true; } | head -1
+}
+
+check_vllm_mooncake_installable() {
+  local py="$1" req_file="$2" req pyver out
+  req="$(vllm_mooncake_requirement "$req_file")"
+  [ -n "$req" ] || return 0
+  out="$("$py" -m pip install --dry-run --no-deps --quiet \
+    --extra-index-url "$ROCM_SDK_INDEX_URL" "$req" 2>&1)" && return 0
+  pyver="$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
+  die "vLLM ${VLLM_VERSION} source build requires ${req}, which pip cannot install for Python ${pyver}" \
+    "($(printf '%s\n' "$out" | grep -m1 'ERROR' || printf '%s\n' "$out" | tail -n1))." \
+    "Use a Python version that package publishes wheels for, docker mode, or an earlier vLLM" \
+    "(for example VLLM_VERSION=0.29.0 VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206)."
+}
+
+check_vllm_mooncake_if_checked_out() {
+  local req_file="${VLLM_ROOT}/requirements/rocm.txt"
+  if [ -f "$req_file" ] &&
+     [ "$(git -C "$VLLM_ROOT" rev-parse HEAD 2>/dev/null || true)" = "$VLLM_SOURCE_REF" ]; then
+    check_vllm_mooncake_installable "$1" "$req_file"
+    return $?
+  fi
+  warn "vLLM source ${VLLM_SOURCE_REF} is not checked out at ${VLLM_ROOT}; mooncake-transfer-engine-rocm availability not checked"
+}
+
 check_vllm_source_prereqs() {
   local tool current required arch
   for tool in git gcc g++ cmake ninja hipcc; do
@@ -1245,10 +1277,12 @@ install_vllm_from_source() {
       verify_vllm_source "$base_py" "$py" || die "installed vLLM source overlay failed runtime verification"
     else
       warn "vLLM source overlay is not installed (check-only)"
+      check_vllm_mooncake_if_checked_out "$base_py" || return $?
     fi
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
+    check_vllm_mooncake_if_checked_out "$base_py" || return $?
     rocm_devel_headers_present "$base_py" ||
       log "would ensure ROCm devel headers before the vLLM source build"
     log "would prepare ${VLLM_ROOT} at ${VLLM_SOURCE_REF} and build into ${VLLM_VENV_ROOT}"
@@ -1270,6 +1304,7 @@ install_vllm_from_source() {
     log "reusing verified vLLM source overlay"
     return 0
   fi
+  check_vllm_mooncake_installable "$base_py" "$VLLM_ROOT/requirements/rocm.txt" || return $?
   [ "$state" != exact ] || check_vllm_source_prereqs
   ensure_rocm_devel_headers "$base_py"
   rocm_devel_headers_present "$base_py" || die "ROCm devel headers are required for vLLM source install"

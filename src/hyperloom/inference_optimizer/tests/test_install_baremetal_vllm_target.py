@@ -89,7 +89,7 @@ DRY_RUN={dry}; CHECK_ONLY={check}; VLLM_SOURCE_REF={_REF}
 VLLM_ROOT="{tmp_path}/src"; VLLM_VENV_ROOT="{tmp_path}/venv"
 install_vllm_from_source /usr/bin/python3
 """
-    result = _bash(("install_vllm_from_source",), body)
+    result = _bash(("install_vllm_from_source", *_MOONCAKE_FUNCS), body)
     assert result.returncode == 0, result.stderr
     assert "MUTATION" not in result.stdout
     assert ("would ensure ROCm devel headers" if mode == "dry" else "not installed") in (result.stdout + result.stderr)
@@ -139,6 +139,7 @@ vllm_overlay_is_valid() {{ return 0; }}
 verify_vllm_source() {{ return 0; }}
 check_vllm_source_prereqs() {{ echo PREREQS >> "$CALLS"; }}
 check_vllm_source_python() {{ :; }}
+check_vllm_mooncake_installable() {{ echo MOONCAKE >> "$CALLS"; }}
 rocm_devel_headers_present() {{ return 0; }}
 ensure_rocm_devel_headers() {{ echo HEADERS >> "$CALLS"; }}
 detect_rocm_gfx_arch() {{ echo gfx950; }}
@@ -173,6 +174,7 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls").read_text()
+    assert calls.index("MOONCAKE") < calls.index("HEADERS") < calls.index("pip install")
     assert calls.index("BASE_SITE") < calls.index("pip install")
     assert "pip install --no-build-isolation --constraint" in calls
     assert "--extra-index-url https://stable.repo.amd.com/rocm/whl-next" in calls
@@ -184,6 +186,150 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     assert "SCM=0.29.0" in calls
     assert "SCMGEN=0.29.0" in calls
     assert f"AITER:{tmp_path}/deps/aiter" in calls
+
+
+_MOONCAKE_FUNCS = ("vllm_mooncake_requirement", "check_vllm_mooncake_installable", "check_vllm_mooncake_if_checked_out")
+
+
+def _pip_python(tmp_path: Path, pip_ok: bool) -> Path:
+    py = tmp_path / "pip-python"
+    pip_branch = "exit 0" if pip_ok else 'echo "ERROR: No matching distribution found for $last" >&2; exit 1'
+    py.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\n'
+        f'echo "PIP:$*" >> "$CALLS"\n'
+        'for a in "$@"; do last="$a"; done\n'
+        f"{pip_branch}\n"
+    )
+    py.chmod(0o755)
+    return py
+
+
+def _requirements(tmp_path: Path, lines: str) -> Path:
+    req = tmp_path / "rocm.txt"
+    req.write_text(lines)
+    return req
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("mooncake-transfer-engine-rocm >= 0.3.13\n", "mooncake-transfer-engine-rocm>=0.3.13"),
+        (
+            "# Mooncake for KV transfer\nmooncake-transfer-engine-rocm>=0.3.13  # rocm\n",
+            "mooncake-transfer-engine-rocm>=0.3.13",
+        ),
+        ("numba==0.65.0\n", ""),
+    ],
+)
+def test_mooncake_requirement_is_read_from_vllm_requirements(tmp_path: Path, line: str, expected: str) -> None:
+    result = _bash(_MOONCAKE_FUNCS, f'vllm_mooncake_requirement "{_requirements(tmp_path, line)}"')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+def test_mooncake_unavailable_fails_with_guidance(tmp_path: Path) -> None:
+    py = _pip_python(tmp_path, pip_ok=False)
+    req = _requirements(tmp_path, "mooncake-transfer-engine-rocm >= 0.3.13\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode != 0
+    assert "mooncake-transfer-engine-rocm>=0.3.13" in result.stderr
+    assert "Python 3.14" in result.stderr
+    assert "docker" in result.stderr and "VLLM_SOURCE_REF" in result.stderr
+    assert "install --dry-run --no-deps" in (tmp_path / "calls").read_text()
+
+
+def test_mooncake_available_passes(tmp_path: Path) -> None:
+    py = _pip_python(tmp_path, pip_ok=True)
+    req = _requirements(tmp_path, "mooncake-transfer-engine-rocm >= 0.3.13\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode == 0, result.stderr
+
+
+def test_requirements_without_mooncake_skip_pip(tmp_path: Path) -> None:
+    py = _pip_python(tmp_path, pip_ok=False)
+    req = _requirements(tmp_path, "numba==0.65.0\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.29.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "calls").exists()
+
+
+def test_source_build_rejects_unavailable_mooncake_before_mutation(tmp_path: Path) -> None:
+    body = _source_stubs(tmp_path, "updated") + (
+        'printf "mooncake-transfer-engine-rocm >= 0.3.13\\n" > "$VLLM_ROOT/requirements/rocm.txt"\n'
+        f'check_vllm_mooncake_installable() {{ die "mooncake unavailable"; }}\n'
+        f'install_vllm_from_source "{tmp_path}/venv/bin/python"\n'
+    )
+    result = _bash(("install_vllm_from_source",), body, env={**os.environ})
+    assert result.returncode != 0
+    assert "mooncake unavailable" in result.stderr
+    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    assert "HEADERS" not in calls
+    assert "pip install" not in calls
+    assert "setup.py" not in calls
+
+
+@pytest.mark.parametrize("mode", ["dry", "check"])
+def test_non_mutating_modes_check_mooncake_on_pinned_checkout(tmp_path: Path, mode: str) -> None:
+    dry, check = (1, 0) if mode == "dry" else (0, 1)
+    root = tmp_path / "src"
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    (root / "requirements").mkdir()
+    (root / "requirements" / "rocm.txt").write_text("mooncake-transfer-engine-rocm >= 0.3.13\n")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    py = _pip_python(tmp_path, pip_ok=False)
+    body = f"""
+log() {{ echo "$*"; }}; warn() {{ echo "$*" >&2; }}; die() {{ echo "$*" >&2; return 1; }}
+rocm_devel_headers_present() {{ return 0; }}
+verify_vllm_source() {{ return 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+DRY_RUN={dry}; CHECK_ONLY={check}; VLLM_SOURCE_REF={head}
+VLLM_ROOT="{root}"; VLLM_VENV_ROOT="{tmp_path}/venv"
+install_vllm_from_source "{py}"
+"""
+    result = _bash(("install_vllm_from_source", *_MOONCAKE_FUNCS), body)
+    assert result.returncode != 0
+    assert "mooncake-transfer-engine-rocm>=0.3.13" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["dry", "check"])
+def test_non_mutating_modes_warn_when_source_not_checked_out(tmp_path: Path, mode: str) -> None:
+    dry, check = (1, 0) if mode == "dry" else (0, 1)
+    py = _pip_python(tmp_path, pip_ok=False)
+    body = f"""
+log() {{ echo "$*"; }}; warn() {{ echo "$*" >&2; }}; die() {{ echo "$*" >&2; return 1; }}
+rocm_devel_headers_present() {{ return 0; }}
+verify_vllm_source() {{ return 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+DRY_RUN={dry}; CHECK_ONLY={check}; VLLM_SOURCE_REF={_REF}
+VLLM_ROOT="{tmp_path}/missing"; VLLM_VENV_ROOT="{tmp_path}/venv"
+install_vllm_from_source "{py}"
+"""
+    result = _bash(("install_vllm_from_source", *_MOONCAKE_FUNCS), body)
+    assert result.returncode == 0, result.stderr
+    assert "mooncake-transfer-engine-rocm availability not checked" in result.stderr
+    assert not (tmp_path / "calls").exists()
 
 
 def test_source_route_requires_isolated_framework_env(tmp_path: Path) -> None:
