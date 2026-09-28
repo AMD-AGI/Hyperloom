@@ -59,7 +59,7 @@ def _pending(payload: dict) -> PendingProposal:
 # -- submit -----------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
-    await coord._submit_framework_agent_candidate_for_review(
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
         dict(_CANDIDATE),
         audit={"recommended_next_step": "direct_framework"},
         audit_step="direct_framework",
@@ -75,8 +75,12 @@ async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_submit_is_idempotent_per_candidate(coord: Coordinator) -> None:
-    await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
-    await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
+        dict(_CANDIDATE), audit_step="direct_framework"
+    )
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
+        dict(_CANDIDATE), audit_step="direct_framework"
+    )
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 
@@ -86,12 +90,12 @@ async def test_submit_is_idempotent_per_candidate(coord: Coordinator) -> None:
 async def test_materialize_direct_route_enqueues_raw_only(coord: Coordinator, monkeypatch) -> None:
     raw: list = []
     author: list = []
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
     monkeypatch.setattr(
-        coord, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
+        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
     coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "direct_framework", "batch_id": "b"})
     )
     assert len(raw) == 1
@@ -102,12 +106,12 @@ async def test_materialize_direct_route_enqueues_raw_only(coord: Coordinator, mo
 async def test_materialize_author_route_enqueues_specialist_only(coord: Coordinator, monkeypatch) -> None:
     raw: list = []
     author: list = []
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
     monkeypatch.setattr(
-        coord, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
+        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
     coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
     )
     assert raw == []
@@ -120,12 +124,12 @@ async def test_materialize_author_route_falls_back_to_raw_when_authoring_disable
 ) -> None:
     raw: list = []
     author: list = []
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
     monkeypatch.setattr(
-        coord, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
+        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
     coord.shared_state.framework_agent_authoring_enabled = False
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
     )
     assert len(raw) == 1
@@ -136,12 +140,12 @@ async def test_materialize_author_route_falls_back_to_raw_when_authoring_disable
 async def test_materialize_unknown_route_runs_both_tracks(coord: Coordinator, monkeypatch) -> None:
     raw: list = []
     author: list = []
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
     monkeypatch.setattr(
-        coord, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
+        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
     coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "", "batch_id": "b"})
     )
     assert len(raw) == 1
@@ -154,7 +158,7 @@ async def test_enqueued_task_rides_the_decaying_keep_curve(coord: Coordinator) -
     from hyperloom.orchestrator.phases.machine_state import decaying_keep_threshold_pct
 
     coord.shared_state.macro_cycle = 2
-    await coord._enqueue_framework_agent_task(dict(_CANDIDATE))
+    await coord.phase_framework._enqueue_framework_agent_task(dict(_CANDIDATE))
 
     queued = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
     assert len(queued) == 1
@@ -165,7 +169,7 @@ async def test_enqueued_task_rides_the_decaying_keep_curve(coord: Coordinator) -
 @pytest.mark.asyncio
 async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> None:
     raw: list = []
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
     pending = _pending(
         {
             "candidate": dict(_CANDIDATE),

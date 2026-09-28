@@ -13,8 +13,8 @@ from typing import Any
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import framework as _phase_framework
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 _ACTION_REGISTRY = ACTION_CATALOGUE
@@ -66,12 +66,12 @@ def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list
 
 
 class _CoordinatorStub:
-    """Minimal stub to bind the Coordinator's discover methods to."""
+    """Minimal stub to bind the FrameworkPhase discover methods to."""
 
-    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
-    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
-    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
-    _stamp_framework_progress = Coordinator._stamp_framework_progress
+    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
+    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
+    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
+    _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
     # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
     # (same-framework path).
     _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
@@ -82,14 +82,8 @@ class _CoordinatorStub:
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
 
-    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        return ["https://github.com/sgl-project/sglang.git"]
-
     def _framework_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
-
-    def _framework_tried_refs(self) -> list[str]:
-        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
+        return FrameworkPhase._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
 
 class _TasksStub:
@@ -107,7 +101,7 @@ class _TasksStub:
 
 
 async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
-    await Coordinator._enqueue_framework_agent_task(stub, cand)  # type: ignore[arg-type]
+    await FrameworkPhase._enqueue_framework_agent_task(stub, cand)  # type: ignore[arg-type]
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
@@ -145,7 +139,7 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand_bad))
 
-    nxt = Coordinator._select_next_framework_agent_candidate(stub)  # type: ignore[arg-type]
+    nxt = FrameworkPhase._select_next_framework_agent_candidate(stub)  # type: ignore[arg-type]
     assert nxt is not None
     assert nxt["candidate_id"] == "pr-good"
 
@@ -186,7 +180,7 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
         {"batch_id": "b2", "candidates": []},
     ]
 
-    Coordinator._record_framework_agent_phase_done(  # type: ignore[arg-type]
+    FrameworkPhase._record_framework_agent_phase_done(  # type: ignore[arg-type]
         stub,
         reason="discover_retries_exhausted",
         failure_count=3,

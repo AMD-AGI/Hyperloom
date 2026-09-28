@@ -26,7 +26,7 @@ from . import machine_state as _phase_state
 from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
@@ -681,6 +681,7 @@ class KernelPhase(CoordinatorCollaborator):
                 idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 break
@@ -1881,6 +1882,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Build the ``geak_e2e`` stack entry, carrying only kernels proven to have run."""
         proven = overlay_loaded is True
         return {
+            "backend": "geak",
             "accepted_kernels": (result.get("accepted_kernels") or []) if proven else [],
             "accepted_heads": (result.get("accepted_heads") or []) if proven else [],
             "report_path": result.get("report_path"),

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG, patch_lever_kind
+from hyperloom.orchestrator.lever import LEVER_CONFIG, patch_lever_kind
 
 from ..actions.executors._grid_base import is_kept
 

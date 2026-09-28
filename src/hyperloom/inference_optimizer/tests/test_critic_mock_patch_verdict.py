@@ -38,7 +38,7 @@ async def _specialist_wrote_a_patch(coord: Coordinator, *, spec_params: dict) ->
     worktree = runs_dir(coord.session_dir, "specialist", SPECIALIST_ID) / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     (worktree / "kernel.py").write_text("# patched\n", encoding="utf-8")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=Task(
             task_id=SPECIALIST_ID,
             kind="specialist",

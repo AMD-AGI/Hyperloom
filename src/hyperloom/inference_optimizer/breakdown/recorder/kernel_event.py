@@ -2285,6 +2285,7 @@ def assemble_kernel_ext(
         "macro_cycle": _int_or_none(header.get("macro_cycle")) or 0,
         "in_flight_stage": _text(header.get("in_flight_stage")),
         "entry": _as_dict(header.get("entry")),
+        "failure": failure or None,
         # Every candidate either route produced, in one shape. The two routes
         # run different machinery and state their results under different
         # names; normalizing here is what lets one reader replay the visit

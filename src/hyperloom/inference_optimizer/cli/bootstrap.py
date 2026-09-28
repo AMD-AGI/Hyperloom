@@ -462,19 +462,10 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     except Exception:
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
-    # reports/final.json: patch the single field in place if present.
     try:
-        from ..session.session_paths import reports_dir
+        from hyperloom.orchestrator.actions.executors.report import reconcile_final_crash_count
 
-        final_json = reports_dir(session_dir) / "final.json"
-        if final_json.exists():
-            data = json.loads(final_json.read_text(encoding="utf-8"))
-            if int(data.get("crash_count") or 0) < live:
-                data["crash_count"] = live
-                final_json.write_text(
-                    json.dumps(data, indent=2, sort_keys=True),
-                    encoding="utf-8",
-                )
+        reconcile_final_crash_count(session_dir, live)
     except Exception:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 

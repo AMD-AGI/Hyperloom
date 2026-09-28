@@ -40,7 +40,7 @@ def optimize_state(
     **overrides: Any,
 ) -> SharedState:
     """A real ``SharedState`` positioned in the optimisation phase."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG, LEVER_SOURCE_PATCH
+    from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_SOURCE_PATCH
     from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 
     state = SharedState()
@@ -79,12 +79,17 @@ class FakeCoordinator:
 
     def __getattr__(self, name: str) -> Any:
         from hyperloom.orchestrator.loop.coordinator import Coordinator
+        from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
         attr = inspect.getattr_static(Coordinator, name, _MISSING)
-        if attr is _MISSING:
-            raise AttributeError(
-                f"{name!r} is neither state this fake was given nor an attribute of the Coordinator -- the test is "
-                f"reaching for something that no longer exists."
-            )
-        get = getattr(attr, "__get__", None)
-        return get(self, type(self)) if get is not None else attr
+        if attr is not _MISSING:
+            get = getattr(attr, "__get__", None)
+            return get(self, type(self)) if get is not None else attr
+        if name in vars(FrameworkPhase):
+            # Fetched from ``phase_framework`` so a helper reached by name and one reached through
+            # ``phase_framework`` share one instance.
+            return getattr(self.phase_framework, name)
+        raise AttributeError(
+            f"{name!r} is neither state this fake was given nor an attribute of the Coordinator or FrameworkPhase -- "
+            f"the test is reaching for something that no longer exists."
+        )

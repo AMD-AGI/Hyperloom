@@ -16,7 +16,6 @@ from typing import Callable
 from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     NOT_IMPLEMENTED,
-    RESOURCE_CONSTRAINT,
     SERVE_FLAG,
     TOKENIZER_ERROR,
     UNSUPPORTED_DTYPE,
@@ -202,7 +201,7 @@ class BaseAdapter:
         self._run = run
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap`` via a runtime."""
+        """Whether this adapter can attempt to repair ``gap``."""
         return False
 
     def build_stack_action(
@@ -232,13 +231,29 @@ class BaseAdapter:
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
-        """Build a code-localization action, or None (unsupported)."""
-        return None
+        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted), or None."""
+        if not self.supports(gap):
+            return None
+        pr_number = _pr_number_from_ref(candidate_ref)
+        if pr_number <= 0:
+            return None
+        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
+        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
+            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
+            return None
+        return EnablementStackAction(
+            kind="pr_backport",
+            framework=self.framework,
+            gap_id=f"gap.enablement.{gap.kind}",
+            capability=gap.kind,
+            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
+            acquisition_method="none",
+            repo_url=repo_url,
+            pr_number=pr_number,
+        )
 
     def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
         """Return the argv that re-installs an editable checkout, or None."""
@@ -274,6 +289,10 @@ class NullAdapter(BaseAdapter):
 class _VenvProvisionMixin(BaseAdapter):
     """Shared attempt-venv creation + pip-install plumbing for real adapters."""
 
+    def supports(self, gap: CapabilityGap) -> bool:
+        """True for the gaps a runtime candidate might repair."""
+        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
+
     def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
         """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python)."""
         venv_root = attempt_dir / "venv"
@@ -301,36 +320,6 @@ class _VenvProvisionMixin(BaseAdapter):
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
 
-    def build_localization_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        framework: str,
-        model: str,
-        candidate_ref: str,
-        repo_url: str,
-    ) -> EnablementStackAction | None:
-        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted)."""
-        if not self.supports(gap):
-            return None
-        pr_number = _pr_number_from_ref(candidate_ref)
-        if not repo_url or pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
-            return None
-        return EnablementStackAction(
-            kind="pr_backport",
-            framework=self.framework,
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
-            acquisition_method="none",
-            repo_url=repo_url,
-            pr_number=pr_number,
-        )
-
     def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
         """Re-install the editable checkout so localized Python changes take effect."""
         if not venv_python or not checkout:
@@ -342,12 +331,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
     """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
 
     framework = "vllm"
-
-    def supports(self, gap: CapabilityGap) -> bool:
-        """True for code-acquirable gaps (never for resource constraints)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return False
-        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
 
     def build_stack_action(
         self,
@@ -454,12 +437,6 @@ class SglangAdapter(_VenvProvisionMixin):
             return ""
         root = Path(framework_root)
         return "python" if (root / "python" / "sglang").is_dir() else ""
-
-    def supports(self, gap: CapabilityGap) -> bool:
-        """True for code-acquirable gaps (never for resource constraints)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return False
-        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
 
     def build_stack_action(
         self,
@@ -574,33 +551,9 @@ class AtomAdapter(BaseAdapter):
 
     framework = "atom"
 
-    def build_localization_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        framework: str,
-        model: str,
-        candidate_ref: str,
-        repo_url: str,
-    ) -> EnablementStackAction | None:
-        """Build a pr_backport localization (applied via no-git; no refresh)."""
-        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
-            return None
-        pr_number = _pr_number_from_ref(candidate_ref)
-        if not repo_url or pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            return None
-        return EnablementStackAction(
-            kind="pr_backport",
-            framework="atom",
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"atom PR backport #{pr_number} for {gap.kind}",
-            repo_url=repo_url,
-            pr_number=pr_number,
-        )
+    def supports(self, gap: CapabilityGap) -> bool:
+        """Localize any code gap; the backport is applied via no-git, with no editable refresh."""
+        return True
 
 
 class XditAdapter(BaseAdapter):
