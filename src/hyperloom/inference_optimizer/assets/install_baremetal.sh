@@ -1150,17 +1150,28 @@ vllm_mooncake_requirement() {
     { grep -E '^mooncake-transfer-engine-rocm([^A-Za-z0-9_.-]|$)' || true; } | head -1
 }
 
+# `pip download` rather than `pip install --dry-run`: the base interpreter may be a
+# PEP 668 externally-managed system Python (install refused before resolving) or
+# carry a pip older than 22.2 (no --dry-run), while the overlay venv built from it
+# installs the same wheel fine.
 check_vllm_mooncake_installable() {
-  local py="$1" req_file="$2" req pyver out
+  local py="$1" req_file="$2" req pyver out dl_dir rc=0
   req="$(vllm_mooncake_requirement "$req_file")"
   [ -n "$req" ] || return 0
-  out="$("$py" -m pip install --dry-run --no-deps --quiet \
-    --extra-index-url "$ROCM_SDK_INDEX_URL" "$req" 2>&1)" && return 0
-  pyver="$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
-  die "vLLM ${VLLM_VERSION} source build requires ${req}, which pip cannot install for Python ${pyver}" \
-    "($(printf '%s\n' "$out" | grep -m1 'ERROR' || printf '%s\n' "$out" | tail -n1))." \
-    "Use a Python version that package publishes wheels for, docker mode, or an earlier vLLM" \
-    "(for example VLLM_VERSION=0.29.0 VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206)."
+  dl_dir="$(mktemp -d)"
+  out="$("$py" -m pip download --no-deps --quiet --dest "$dl_dir" \
+    --extra-index-url "$ROCM_SDK_INDEX_URL" "$req" 2>&1)" || rc=$?
+  rm -rf "$dl_dir"
+  [ "$rc" -eq 0 ] && return 0
+  if printf '%s\n' "$out" | grep -q 'No matching distribution found' &&
+     ! printf '%s\n' "$out" | grep -Eqi 'retrying|connection|timed out|proxy'; then
+    pyver="$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
+    die "vLLM ${VLLM_VERSION} source build requires ${req}, which publishes no wheel for Python ${pyver}." \
+      "Use a Python version that package publishes wheels for, docker mode, or an earlier vLLM" \
+      "(for example VLLM_VERSION=0.29.0 VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206)."
+  fi
+  die "cannot check ${req} required by the vLLM ${VLLM_VERSION} source build:" \
+    "$(printf '%s\n' "$out" | grep -m1 -i 'error' || printf '%s\n' "$out" | tail -n1)"
 }
 
 check_vllm_mooncake_if_checked_out() {

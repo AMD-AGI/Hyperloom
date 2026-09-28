@@ -241,7 +241,7 @@ check_vllm_mooncake_installable "{py}" "{req}"
     assert "mooncake-transfer-engine-rocm>=0.3.13" in result.stderr
     assert "Python 3.14" in result.stderr
     assert "docker" in result.stderr and "VLLM_SOURCE_REF" in result.stderr
-    assert "install --dry-run --no-deps" in (tmp_path / "calls").read_text()
+    assert "download --no-deps" in (tmp_path / "calls").read_text()
 
 
 def test_mooncake_available_passes(tmp_path: Path) -> None:
@@ -254,6 +254,60 @@ check_vllm_mooncake_installable "{py}" "{req}"
 """
     result = _bash(_MOONCAKE_FUNCS, body)
     assert result.returncode == 0, result.stderr
+
+
+def _script_python(tmp_path: Path, pip_body: str, version: str = "3.12") -> Path:
+    py = tmp_path / "script-python"
+    py.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "-c" ]; then echo {version}; exit 0; fi\n'
+        f'echo "PIP:$*" >> "$CALLS"\n'
+        'for a in "$@"; do last="$a"; done\n'
+        f"{pip_body}\n"
+    )
+    py.chmod(0o755)
+    return py
+
+
+def test_mooncake_check_passes_on_externally_managed_python(tmp_path: Path) -> None:
+    py = _script_python(
+        tmp_path,
+        'case " $* " in\n'
+        '  *" download "*|*" --break-system-packages "*) exit 0 ;;\n'
+        "esac\n"
+        'echo "error: externally-managed-environment" >&2\n'
+        'echo "hint: See PEP 668 for the detailed specification." >&2\n'
+        "exit 1",
+    )
+    req = _requirements(tmp_path, "mooncake-transfer-engine-rocm >= 0.3.13\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mooncake_check_network_failure_does_not_blame_python(tmp_path: Path) -> None:
+    py = _script_python(
+        tmp_path,
+        "echo \"WARNING: Retrying (Retry(total=4)) after connection broken by 'NewConnectionError'\" >&2\n"
+        'echo "ERROR: Could not find a version that satisfies the requirement $last (from versions: none)" >&2\n'
+        'echo "ERROR: No matching distribution found for $last" >&2\n'
+        "exit 1",
+    )
+    req = _requirements(tmp_path, "mooncake-transfer-engine-rocm >= 0.3.13\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode != 0
+    assert "NewConnectionError" in result.stderr
+    assert "VLLM_SOURCE_REF" not in result.stderr
+    assert "publishes wheels" not in result.stderr
 
 
 def test_requirements_without_mooncake_skip_pip(tmp_path: Path) -> None:
