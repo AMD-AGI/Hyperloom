@@ -171,6 +171,13 @@ jobs:
           ref: ${{ needs.gate.outputs.head }}
           path: pr-head
           persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Ensure jq and gh
+        run: |
+          command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+          command -v gh >/dev/null 2>&1 || { echo "::error::gh (GitHub CLI) is not installed on this runner"; exit 1; }
 
       - name: Check configuration and LLM proxy
         run: |
