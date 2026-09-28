@@ -18,6 +18,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -220,6 +221,7 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    conc_sweep_flag = getattr(args, "enable_conc_sweep", None)
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -297,9 +299,7 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=(
-            not _agentx_enabled() if getattr(args, "enable_conc_sweep", None) is None else bool(args.enable_conc_sweep)
-        ),
+        conc_sweep_enabled=not is_agentx_mode(benchmark_mode) if conc_sweep_flag is None else bool(conc_sweep_flag),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
