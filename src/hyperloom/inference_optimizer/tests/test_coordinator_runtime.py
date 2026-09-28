@@ -371,6 +371,36 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
+    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        c.shared_state.closing_phase = True
+        await c.tick(1)
+        assert [b.calls for b in backends.values()] == [0, 0]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+
+    async def _raise() -> None:
+        raise RuntimeError("advance broke")
+
+    monkeypatch.setattr(c, "_advance_phase_if_needed", _raise)
+    try:
+        # A resumed session carries its tick forward; the record uses that clock, not a per-run count.
+        c.shared_state.tick = 41
+        await c.tick(1)
+        recorded = c.shared_state.last_tick_exception
+        assert (recorded["stage"], recorded["tick"], recorded["message"]) == ("advance_phase", 42, "advance broke")
+    finally:
+        await c.stop()
+
+
 # Backend-error streak (critic subprocess health)
 class _AlwaysFailingBackend(Backend):
     """Backend that always raises BackendError."""

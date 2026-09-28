@@ -969,15 +969,21 @@ class Coordinator(metaclass=_CoordinatorMeta):
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1."""
+        """Run ``n`` loop-body ticks of :meth:`run` without its stop checks or teardown; replays a resume first."""
         await self._replay_resume_if_needed()
         for _ in range(n):
-            # The tick's first act; see
-            # :mod:`hyperloom.orchestrator.bringup.reconcile`.
-            await self.reconciler.run(time.time())
-            self.shared_state.increment_tick()
-            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK returning
-            # no_gain -> skip_to_sweep).
+            await self._tick_once()
+
+    async def _tick_once(self) -> bool:
+        """Run one tick of the loop body; returns whether the session is in its closing phase."""
+        # Repair before anything is admitted: a round nobody will settle, a task row with no process, a review nobody
+        # answered. Ungated, because a stuck round closes every gate this could sit behind.
+        await self.reconciler.run(time.time())
+        # Bump the persistent tick counter — drives phase/plateau math.
+        self.shared_state.increment_tick()
+        try:
+            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK
+            # returning no_gain -> skip_to_sweep).
             await self._await_within_session_bound(
                 self._advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
@@ -987,35 +993,54 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     self._advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
+        except Exception as exc:
+            log.exception("phase advance before reactors failed")
+            self._record_coordinator_exception(stage="advance_phase_pre_reactor", exc=exc)
+        in_closing = bool(self.shared_state.closing_phase)
+        # One reactor + dispatcher pass; during closing skip LLM passes.
+        if not in_closing:
             for name in self._tick_roles:
+                if self._stop_requested():
+                    break
                 await self._await_within_session_bound(
                     lambda n=name: self._reactor_pass(n),
                     stage=f"reactor:{name}",
                 )
+        if not self._stop_requested():
             await self._pump_dispatcher_once()
-            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self.phase_framework.pump(caller="tick")
+        if not in_closing:
+            # FRAMEWORK_AGENT phase pump: enqueue the next candidate / fetch the next batch.
+            await self.phase_framework.pump(caller="run")
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self._pump_enablement_safely(caller="tick")
-            # phase machine advance at tick boundary.
+            await self._pump_enablement_safely(caller="run")
+        # phase machine advance; runs even in_closing so CLOSE is recorded.
+        try:
             await self._await_within_session_bound(
                 self._advance_phase_if_needed,
                 stage="advance_phase",
             )
+        except Exception as exc:
+            log.exception("phase advance failed")
+            self._record_coordinator_exception(stage="advance_phase", exc=exc)
+        # Periodic reaper + DB retention; time-gated.
+        now = time.monotonic()
+        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+            await self._run_maintenance(tick=self.shared_state.tick)
+            self._last_maintenance_ts = now
+        return in_closing
 
     def _record_coordinator_exception(
         self,
         *,
         stage: str,
         exc: BaseException,
-        tick: int | None = None,
         agent: str = "",
     ) -> None:
         """Record a Coordinator-side exception without killing the session."""
         self._fault_open_phase_event(stage=stage, exc=exc)
         try:
             self.shared_state.record_tick_exception(
-                tick=int(tick if tick is not None else self.shared_state.tick or 0),
+                tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
                 exc_type=type(exc).__name__,
@@ -1178,75 +1203,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tick_n += 1
                 in_closing = bool(self.shared_state.closing_phase)
                 try:
-                    # Repair before anything is admitted: a round nobody will
-                    # settle, a task row with no process, a review nobody
-                    # answered. Ungated, because a stuck round closes every gate
-                    # this could sit behind.
-                    await self.reconciler.run(time.time())
-                    # Bump the persistent tick counter — drives phase/plateau math.
-                    self.shared_state.increment_tick()
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase_pre_reactor",
-                        )
-                        if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                            await self._await_within_session_bound(
-                                self._advance_phase_if_needed,
-                                stage="advance_phase_hint",
-                            )
-                    except Exception as exc:
-                        log.exception("phase advance before reactors (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase_pre_reactor",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    in_closing = self.shared_state.closing_phase
-                    # One reactor + dispatcher pass; during closing skip LLM passes.
-                    if not in_closing:
-                        for name in self._tick_roles:
-                            if self._stop_requested():
-                                break
-                            await self._await_within_session_bound(
-                                lambda n=name: self._reactor_pass(n),
-                                stage=f"reactor:{name}",
-                            )
-                    if not self._stop_requested():
-                        await self._pump_dispatcher_once()
-                    # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
-                    if not in_closing:
-                        await self.phase_framework.pump(caller="run")
-                        # Phase-independent enablement pump.
-                        await self._pump_enablement_safely(caller="run")
-                    # phase machine advance; runs even in_closing so CLOSE is recorded.
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase",
-                        )
-                    except Exception as exc:
-                        log.exception("phase advance (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    # Periodic reaper + DB retention; time-gated.
-                    now = time.monotonic()
-                    if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                        await self._run_maintenance(tick=tick_n)
-                        self._last_maintenance_ts = now
+                    in_closing = await self._tick_once()
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:
                     last_tick_exc = exc
-                    log.exception("Coordinator.run: tick %d body raised", tick_n)
-                    self._record_coordinator_exception(
-                        stage="tick_body",
-                        exc=exc,
-                        tick=tick_n,
-                    )
+                    log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
+                    self._record_coordinator_exception(stage="tick_body", exc=exc)
 
                 # check stop conditions
                 if self._stop_requested():
