@@ -175,21 +175,16 @@ run:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run on the
-  KernelForge kernel backend.
-- [`12h atom`](hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md) — the same run on ATOM,
-  using the user's selected `docker` or `baremetal` mode from setup; if no mode is
-  selected, ask before continuing. `baremetal` uses the development machine's
-  existing ATOM/ROCm Python environment, even if that platform is a container
-  (no additional Docker). Setup uses `--install-framework none
-  --frameworks atom --require-frameworks`, first with `--check-only` and then
-  with approval if setup is needed. The KERNEL_AGENT phase runs GEAK, the same
-  backend the other frameworks get when none is named.
-- [`12h atom forge`](hyperloom-qwen3-14b-fp8-12h-atom-forge/SKILL.md) — the ATOM
-  run with `KERNEL_OPT_BACKEND_ORDER=forge`, so the KERNEL_AGENT phase is the
-  per-kernel KernelForge backend. Same workload, budget and phase split as
-  `12h atom`, so the two are directly comparable.
+- [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8
+  run on SGLang, vLLM or ATOM. For ATOM it follows its ATOM section, using the
+  user's selected `docker` or `baremetal` mode from setup; if no mode is selected,
+  ask before continuing. `baremetal` uses the development machine's ATOM/ROCm
+  Python environment, even if that platform is a container (no additional
+  Docker); setup verifies an existing ATOM with `--install-framework none
+  --frameworks atom --require-frameworks` or, with approval, installs it with
+  `--install-framework atom`.
+- [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run, on any
+  of the three frameworks, with the KernelForge kernel backend.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.

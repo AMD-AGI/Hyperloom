@@ -407,8 +407,9 @@ mode, ask the user whether they want to run a demo optimization now, and if so
 which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
-- `12h` — medium-length Qwen3-14B-FP8 run; use the ATOM variant when ATOM is
-  detected or explicitly selected (including a Docker run awaiting detection).
+- `12h` — medium-length Qwen3-14B-FP8 run on SGLang, vLLM or ATOM; the demo
+  follows its ATOM section when ATOM is detected or explicitly selected
+  (including a Docker run awaiting detection).
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
@@ -419,9 +420,9 @@ structured UI: which kernel optimization backend the KERNEL_AGENT phase should
 use. Do not ask this for `3h` (it runs `--no-kernel`, so there is no kernel
 phase to route) or for `custom advanced` (that skill collects its own flags).
 
-When `FRAMEWORK=atom`, or the user selected the ATOM demo in Docker mode before
-container-side detection, ask the same backend question and route to the ATOM
-pair instead of the SGLang/vLLM one. If no backend was selected, write nothing
+When `FRAMEWORK=atom`, or the user selected ATOM in Docker mode before
+container-side detection, ask the same backend question; the same two demo
+skills cover ATOM. If no backend was selected, write nothing
 to `.env`. Preserve an explicit shell or `.env` value; if it is non-empty and
 does not opt in, report the original value and ask whether to keep it or
 explicitly switch before launch. Never silently unset or delete it.
@@ -437,12 +438,10 @@ kernel backend differs, so the two runs stay directly comparable.
 The choice selects which demo skill to load and sets
 `KERNEL_OPT_BACKEND_ORDER`:
 
-- `geak` → load `hyperloom-qwen3-14b-fp8-12h`, or
-  `hyperloom-qwen3-14b-fp8-12h-atom` when `FRAMEWORK=atom`. Leave
+- `geak` → load `hyperloom-qwen3-14b-fp8-12h`. Leave
   `KERNEL_OPT_BACKEND_ORDER` unset, or write `geak`; anything that does not opt
   in means GEAK.
-- `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge`, or
-  `hyperloom-qwen3-14b-fp8-12h-atom-forge` when `FRAMEWORK=atom`, and write
+- `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge`, and write
   `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
   the same backend.
 
@@ -478,10 +477,8 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h`
-- `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge`
-- `12h` + `FRAMEWORK=atom` + `geak` → `hyperloom-qwen3-14b-fp8-12h-atom`
-- `12h` + `FRAMEWORK=atom` + `forge` → `hyperloom-qwen3-14b-fp8-12h-atom-forge`
+- `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h` (SGLang, vLLM or ATOM)
+- `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge` (SGLang, vLLM or ATOM)
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
