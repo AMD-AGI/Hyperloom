@@ -1053,8 +1053,29 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return inst
 
     @classmethod
+    def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
+        """Reject damaged crash evidence and agent text before migrating a persisted state."""
+        for name, expected in cls.AGENT_UPDATE_FIELDS.items():
+            if name in raw and not isinstance(raw[name], expected):
+                raise ValueError(f"state.json.{name} must be {expected.__name__}, got {type(raw[name]).__name__}")
+        if "crash_count" in raw:
+            count = raw["crash_count"]
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError(f"state.json.crash_count must be int, got {type(count).__name__}")
+        if "crash_timestamps" in raw:
+            timestamps = raw["crash_timestamps"]
+            if not isinstance(timestamps, list):
+                raise ValueError(f"state.json.crash_timestamps must be list, got {type(timestamps).__name__}")
+            for index, timestamp in enumerate(timestamps):
+                if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+                    raise ValueError(
+                        f"state.json.crash_timestamps[{index}] must be a number, got {type(timestamp).__name__}"
+                    )
+
+    @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping."""
+        """Construct state from a mapping, refusing invalid crash evidence or agent text with ``ValueError``."""
+        cls._validate_resume_fields(raw)
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
@@ -1554,27 +1575,55 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
+    AGENT_UPDATE_FIELDS: ClassVar[dict[str, type]] = {
+        "current_action": str,
+        "target_summary": str,
+    }
+
+    @classmethod
+    def agent_update_errors(cls, changes: Mapping[str, Any]) -> dict[str, str]:
+        """Describe forbidden fields and invalid types; unknown keys remain soft rejections.
+
+        The untrusted path serves one caller -- an agent's UPDATE_STATE intent --
+        and the prompt advertises exactly the fields in
+        :data:`AGENT_UPDATE_FIELDS`. Everything else on the state is the
+        Coordinator's to write through its own actions, so a field outside that
+        set is refused by name rather than landing and surfacing later as a
+        confusing failure in the loop; an advertised field is refused when its
+        type is wrong.
+        """
+        known = {f.name for f in fields(cls)}
+        errors: dict[str, str] = {}
+        for key, value in changes.items():
+            if key not in known:
+                continue
+            expected = cls.AGENT_UPDATE_FIELDS.get(key)
+            if expected is None:
+                errors[key] = "Coordinator-owned field"
+            elif not isinstance(value, expected):
+                errors[key] = f"must be {expected.__name__}, got {type(value).__name__}"
+        return errors
+
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written."""
+        """Apply known fields, dropping each write an untrusted caller may not make.
+
+        A core field never reaches here: PolicyGate refuses that whole intent
+        upstream. Everything this method refuses -- a non-core field outside
+        :data:`AGENT_UPDATE_FIELDS`, a wrong value type -- is dropped per key
+        while the rest of the same call is applied, and the caller reports the
+        difference as ``rejected``.
+        """
         if not changes:
             return {}
-        core_fields: frozenset[str] = frozenset()
-        if not allow_core:
-            # Lazy import to avoid a shared_state <-> policy import cycle.
-            from ..policy.gate import CORE_STATE_FIELDS
-
-            core_fields = CORE_STATE_FIELDS
+        errors = {} if allow_core else self.agent_update_errors(changes)
         applied: dict[str, Any] = {}
         # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is not writable here.
         writable = {f.name for f in fields(self)}
         for key, value in changes.items():
             if key not in writable:
                 continue
-            if key in core_fields:
-                log.warning(
-                    "apply_changes: dropping core state field %r (allow_core=False)",
-                    key,
-                )
+            if key in errors:
+                log.warning("apply_changes: dropping state field %r (allow_core=False): %s", key, errors[key])
                 continue
             setattr(self, key, value)
             applied[key] = value

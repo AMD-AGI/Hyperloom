@@ -226,7 +226,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         payload={"params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert len(calls) == 1
     assert calls[0]["candidate"]["candidate_id"] == _CANDIDATE["candidate_id"]
@@ -291,7 +291,7 @@ async def test_non_framework_agent_proposal_does_not_reauthor(coord: Coordinator
         payload={"params": {"specialist_task_id": "s-1"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert calls == []
     assert coord.shared_state.specialist_reauthor_attempts == {}

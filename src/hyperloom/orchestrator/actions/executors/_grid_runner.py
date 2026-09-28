@@ -81,7 +81,6 @@ from ._grid_base import (
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
-    variant_fingerprint as variant_fingerprint,
 )
 from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
@@ -132,7 +131,6 @@ from ._grid_variant_filter import (
     _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
     _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
     xdit_blacklist_reason as xdit_blacklist_reason,
-    _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
     _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
     _probe_server_help_text as _probe_server_help_text,
     _detect_model_class as _detect_model_class,
@@ -2133,13 +2131,28 @@ def _write_variant_abort_marker(
     extra_args: str = "",
 ) -> None:
     """Write ``abort_reason.json`` into the variant slot directory."""
-    _write_variant_abort_marker_impl(
-        slot,
-        variant_name=variant_name,
-        error_class=error_class,
-        error_summary=error_summary,
-        extra_args=extra_args,
-    )
+    try:
+        slot.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "variant": variant_name,
+            "error_class": error_class,
+            "error": (error_summary or "")[:2000],
+            "extra_args": extra_args,
+            "aborted_at_utc": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
+            ),
+        }
+        (slot / "abort_reason.json").write_text(
+            json.dumps(marker, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning(
+            "_grid_runner: failed to write abort_reason.json at %s: %s",
+            slot,
+            exc,
+        )
 
 
 def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> str:
@@ -2169,39 +2182,6 @@ def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
             except OSError:
                 continue
     return ""
-
-
-def _write_variant_abort_marker_impl(
-    slot: Path,
-    *,
-    variant_name: str,
-    error_class: str,
-    error_summary: str,
-    extra_args: str,
-) -> None:
-    """Implementation body for :func:`_write_variant_abort_marker`."""
-    try:
-        slot.mkdir(parents=True, exist_ok=True)
-        marker = {
-            "variant": variant_name,
-            "error_class": error_class,
-            "error": (error_summary or "")[:2000],
-            "extra_args": extra_args,
-            "aborted_at_utc": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ",
-                time.gmtime(),
-            ),
-        }
-        (slot / "abort_reason.json").write_text(
-            json.dumps(marker, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning(
-            "_grid_runner: failed to write abort_reason.json at %s: %s",
-            slot,
-            exc,
-        )
 
 
 __all__ = [
@@ -2264,7 +2244,6 @@ __all__ = [
     "_XDIT_ENV_BLACKLIST",
     "_XDIT_ENV_COMBO_BLACKLIST",
     "xdit_blacklist_reason",
-    "_HELP_TEXT_CACHE",
     "_HELP_PROBE_COMMANDS",
     "_probe_server_help_text",
     "_detect_model_class",

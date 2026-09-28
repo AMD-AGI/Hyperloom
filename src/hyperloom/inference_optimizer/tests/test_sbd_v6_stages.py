@@ -225,7 +225,9 @@ def _baseline_event(*actions: dict) -> dict:
     return {"type": "baseline", "ext": {"actions": list(actions)}}
 
 
-#: What ``outcome.baseline.perf`` reads on a round that measured no graded axis.
+#: What ``outcome.baseline.perf`` reads on a round that measured no graded axis. The comparability inputs are
+#: members because the verdict reads them: a pair is refused on a drifted window or a worse error rate, so a
+#: published block that omitted them could not be checked against the verdict taken on it.
 _UNMEASURED_AXES = {
     "e2e_norm_intvty_p90": None,
     "e2e_norm_intvty_p50": None,
@@ -236,6 +238,8 @@ _UNMEASURED_AXES = {
     "ttft_p90_ms": None,
     "tpot_p50_ms": None,
     "tpot_p90_ms": None,
+    "duration_seconds": None,
+    "request_error_rate": None,
 }
 
 
@@ -247,9 +251,14 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
         "accuracy": 0.81,
         "ttft_mean_ms": 120.0,
         "e2el_mean_ms": 900.0,
-        # A synthetic anchor measures none of the graded axes, and all four are still published; see
+        # A synthetic anchor measures none of the graded axes, and every one is still published; see
         # test_sbd_v6_grading.py for the axes themselves.
         "perf": _UNMEASURED_AXES,
+        # Tri-state: this round's recorder never answered, which is not the same as upstream rejecting it.
+        "submission_valid": None,
+        # Empty rather than absent: the reasons travel with the flag, so a consumer reading this block never has to
+        # walk the timeline to find out why a round was refused.
+        "submission_invalid_reasons": [],
     }
     assert outcome["anchoring_eval"] == {
         "task_id": "b-1",
@@ -303,6 +312,8 @@ def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
         "ttft_mean_ms": None,
         "e2el_mean_ms": None,
         "perf": _UNMEASURED_AXES,
+        "submission_valid": None,
+        "submission_invalid_reasons": [],
     }
 
 

@@ -93,7 +93,7 @@ the "baremetal" option as the run mode during setup.
 
 ## Setup scenarios
 
-Hyperloom supports two local setup scenarios. Pick the one that matches where your 
+Hyperloom supports two local setup scenarios. Pick the one that matches where your
 serving framework will run.
 
 ### Scenario A: Bare metal

@@ -22,7 +22,10 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    AGENTX_PREFLIGHT_STOP_REASON,
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+)
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...state.shared_state import SharedState
 
@@ -311,6 +314,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "than spending its budget in the enablement lane. Fix: run "
         "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
         "the real cause), or point AIPERF_BIN at an existing pinned build."
+    ),
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON: (
+        "A patch lifecycle owed the framework tree a revert and could not finish it, so the tree still "
+        "holds patches nothing measured against. The run stopped instead of attributing later results to "
+        "a baseline that is not on disk. The recovery keeps its checkpoint and retries the teardown on the "
+        "next resume; if that retry also fails, reconcile the tree by hand against the recorded backup "
+        "manifests before resuming."
     ),
     # Host-level terminals: something outside the model ended the run.
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
@@ -1195,6 +1205,46 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     return {"topic": topic, "from_agent": from_agent, "summary": summary, "payload": payload}
 
 
+def _write_final_json(json_path: Path, summary: dict[str, Any]) -> None:
+    """Write ``summary`` to ``json_path`` atomically."""
+    # A kill mid-flush must never leave a non-empty but invalid final.json on disk (issue #464 —
+    # downstream keys off it, and the crash-safe fallback would otherwise see garbled JSON).
+    _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
+
+
+def _write_final_report(output_dir: Path, summary: dict[str, Any]) -> tuple[Path, Path]:
+    """Write ``summary`` as ``final.json`` and ``final.md`` under ``output_dir``."""
+    json_path = output_dir / "final.json"
+    md_path = output_dir / "final.md"
+    _write_final_json(json_path, summary)
+    md_path.write_text(_format_md(summary), encoding="utf-8")
+    return json_path, md_path
+
+
+def write_stop_report(session_dir: Path, state: SharedState, *, stop_detail: str) -> None:
+    """Write the final report of a session a gate stopped before its ``report`` action ran."""
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir
+
+    summary = _build_summary_dict(state, {}, [], external_baseline=None)
+    summary["stop_detail"] = stop_detail
+    output_dir = reports_dir(session_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_final_report(output_dir, summary)
+
+
+def reconcile_final_crash_count(session_dir: Path, crash_count: int) -> None:
+    """Raise ``final.json``'s ``crash_count`` to ``crash_count`` when the report exists and records fewer."""
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir
+
+    json_path = reports_dir(session_dir) / "final.json"
+    if not json_path.exists():
+        return
+    summary = json.loads(json_path.read_text(encoding="utf-8"))
+    if int(summary.get("crash_count") or 0) < crash_count:
+        summary["crash_count"] = crash_count
+        _write_final_json(json_path, summary)
+
+
 # ---------------------------------------------------------------------------
 class ReportExecutor:
     """ActionRunner for the ``report`` action."""
@@ -1294,12 +1344,7 @@ class ReportExecutor:
             except ValueError:
                 summary["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
 
-        json_path = output_dir / "final.json"
-        md_path = output_dir / "final.md"
-        # Atomic write: a kill mid-flush must never leave a non-empty but invalid final.json on disk (issue #464 —
-        # downstream keys off it, and the crash-safe fallback would otherwise see garbled JSON).
-        _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
-        md_path.write_text(_format_md(summary), encoding="utf-8")
+        json_path, md_path = _write_final_report(output_dir, summary)
 
         log.info(
             "report_executor: wrote %s and %s (cumulative_gain_validated=%.2f%%)",
@@ -1380,4 +1425,4 @@ class ReportExecutor:
 report_executor = ReportExecutor()
 
 
-__all__ = ["ReportExecutor", "report_executor"]
+__all__ = ["ReportExecutor", "reconcile_final_crash_count", "report_executor", "write_stop_report"]

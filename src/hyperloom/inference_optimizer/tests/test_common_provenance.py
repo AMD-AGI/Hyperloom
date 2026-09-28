@@ -530,7 +530,7 @@ def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
 
 def test_the_lever_is_what_came_back_not_what_was_asked_for():
     """A config deliverable is a config lever, whoever dispatched it."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    from hyperloom.orchestrator.lever import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
         patch_lever_kind,
@@ -557,7 +557,7 @@ def test_the_lever_is_what_came_back_not_what_was_asked_for():
 
 def test_an_explicit_stamp_still_outranks_the_derivation():
     """Callers that do know the lever keep saying so."""
-    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    from hyperloom.orchestrator.lever import (
         LEVER_UPSTREAM_PR,
         patch_lever_kind,
     )

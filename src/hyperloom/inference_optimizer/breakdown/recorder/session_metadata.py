@@ -103,7 +103,13 @@ def record_metadata_identity(
     signature = workload_signature(task_config)
     if signature:
         task_config["workload_signature"] = signature
-    _write(session_dir, {"session": session, "task_config": task_config}, producer=producer)
+    payload: dict[str, Any] = {"session": session, "task_config": task_config}
+    workflow_flags = manifest.get("workflow_flags")
+    if isinstance(workflow_flags, Mapping):
+        from ..workflow_contract import workflow_metadata
+
+        payload["workflow"] = workflow_metadata(workflow_flags)
+    _write(session_dir, payload, producer=producer)
 
 
 def record_metadata_langfuse(

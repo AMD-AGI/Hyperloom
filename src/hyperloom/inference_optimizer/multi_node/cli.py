@@ -909,21 +909,44 @@ def _extract_pod_json(logs: str) -> dict | None:
     return None
 
 
-def _forward_runtime_env() -> dict[str, Any] | None:
-    """Build the Ray runtime_env carrying per-round env overrides to every rank."""
-    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
-        return None
-    if not isinstance(parsed, dict):
-        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
-        return None
+def per_round_forward_overrides() -> dict[str, Any]:
+    """Parse the per-round env control vars into ``{"set": {...}, "unset": [...]}``.
 
-    env_vars = filter_forward_env({str(k): str(v) for k, v in parsed.items()}, warn_on_drop=True)
+    Both multi-node backends launch from these, so they are parsed once here rather than
+    once per backend. What each backend then does with them differs: the RayJob path
+    filters the set through :func:`filter_forward_env`, while the Infera SSH path forwards
+    it verbatim.
+    """
+    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    overrides: dict[str, str] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+            parsed = None
+        if isinstance(parsed, dict):
+            overrides = {str(k): str(v) for k, v in parsed.items()}
+        elif parsed is not None:
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
+
+    raw_unset = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    unset: list[str] = []
+    if raw_unset:
+        try:
+            parsed_unset = json.loads(raw_unset)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+            parsed_unset = None
+        if isinstance(parsed_unset, list):
+            unset = sorted({str(k).strip() for k in parsed_unset if str(k).strip()})
+
+    return {"set": overrides, "unset": unset}
+
+
+def _forward_runtime_env(overrides: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the Ray runtime_env carrying per-round env overrides to every rank."""
+    env_vars = filter_forward_env(dict(overrides.get("set") or {}), warn_on_drop=True)
     if not env_vars:
         return None
     info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")
@@ -1209,8 +1232,17 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
-def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[str, Any]:
-    """Every field that changes what the RayJob launcher spawns, as one record."""
+def _rayjob_topology_fingerprint(
+    args: argparse.Namespace,
+    nnodes: int,
+    forward_env: dict[str, str],
+) -> dict[str, Any]:
+    """Every field that changes what the RayJob launcher spawns, as one record.
+
+    ``forward_env`` is the runtime_env the launch submission carries, so the servers run
+    with it: a round that changes only these would otherwise resume the prior cluster and
+    benchmark the previous environment while reporting the new one.
+    """
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     fingerprint: dict[str, Any] = {
         "framework": str(args.framework),
@@ -1220,6 +1252,7 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
         "nnodes": int(nnodes),
         "pd_mode": pd_mode,
         "extra_args": _normalize_extra_args(getattr(args, "extra_args", "")),
+        "forward_env": dict(sorted(forward_env.items())),
     }
     if pd_mode == "disaggregated":
         # Only meaningful under PD; leaving them out when aggregated keeps a stale value from an earlier PD run out of
@@ -1279,7 +1312,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
         # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
         # miss the fast path, and it is part of the record because it carries every variant flag.
-        topology = _rayjob_topology_fingerprint(args, nnodes)
+        # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
+        # launch below actually sends.
+        runtime_env = _forward_runtime_env(per_round_forward_overrides())
+        topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
         prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -1329,7 +1365,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         with _ray_dashboard_client(state) as ray:
             # Launch new servers (skipped when resuming a RUNNING launch).
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
+                launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a

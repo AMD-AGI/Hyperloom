@@ -837,6 +837,8 @@ def test_a_crash_after_a_measured_win_still_closes_failed(tmp_path):
 
     event = _kernel_events(tmp_path)[0]
     assert event["status"] == "failed"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
+    assert event["ext"]["failure"]["stage"] == "forge_fusion"
     outcome = event["ext"]["outcome"]
     assert outcome["verdict"] == "improved"
     assert outcome["failed_stage"] == "forge_fusion"

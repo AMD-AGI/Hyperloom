@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import fnmatch as _fnmatch
+import hashlib
 import json
 import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -232,13 +234,16 @@ def xdit_blacklist_reason(
     return None
 
 
-_HELP_TEXT_CACHE: dict[str, str] = {}
+# Framework -> (parser identity, help text). Keyed on identity rather than kept
+# for the life of the process: a reinstalled framework must not be judged by the
+# parser its predecessor printed.
+_HELP_TEXT_CACHE: dict[str, tuple[str, str]] = {}
 
-# Framework -> monotonic deadline before which a failed probe is not retried.
-_HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
+# Framework -> (parser identity, failed-probe retry deadline).
+_HELP_PROBE_FAILURES: dict[str, tuple[str, float]] = {}
 _HELP_PROBE_RETRY_SEC: float = 300.0
 # Importing a serving framework to read its parser costs seconds (sglang: ~4s warm,
-# more on a cold pod). The result is cached per framework, so this is paid once.
+# more on a cold pod), and the probe is a blocking call inside an async executor.
 _HELP_PROBE_TIMEOUT_SEC: float = 30.0
 
 # Per-framework ``--help`` argv tails; resolve the interpreter at call time.
@@ -267,49 +272,97 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _framework_package_stamp(interpreter: str, fw: str) -> list[str | int] | None:
+    """Stat the framework package the probe would import, or None if not locatable.
+
+    Read off the filesystem, never imported: the parser lives in the probe
+    interpreter's environment, not this process's, and importing a serving
+    framework here is exactly the cost the cache exists to avoid.
+    """
+    try:
+        root = Path(interpreter).resolve().parent.parent
+        for init in sorted(root.glob(f"lib/python*/site-packages/{fw}/__init__.py")):
+            stat = init.stat()
+            return [str(init), stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        return None
+    return None
+
+
+def _help_probe_launch_identity(
+    interpreter: str,
+    argv_tail: tuple[str, ...],
+    package_stamp: list[str | int] | None,
+) -> str:
+    """Identify the parser a probe would print, without importing it here.
+
+    The executable, its stat and the installed package's stat cover what changes
+    the output: a rebuilt venv, a reinstalled framework, a different interpreter
+    resolved out of the environment. Ambient env vars are deliberately absent --
+    per-round tuning overrides rewrite them constantly, and folding those in
+    would expire both the cache and the cooldown on every round.
+    """
+    executable = Path(shutil.which(interpreter) or interpreter)
+    try:
+        stat = executable.stat()
+        stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+    except OSError:
+        stamp = None
+    payload = (interpreter, str(executable.resolve()), stamp, argv_tail, package_stamp)
+    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+
+
 def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for flag validation."""
+    """Return the installed parser's help, reusing it while that parser is unchanged.
+
+    Every step runs under one handler: this is a best-effort predicate, and a
+    probe that cannot answer must leave the variant alone rather than fail the
+    explore task around it.
+    """
     fw = (framework or "").strip().lower()
-    if fw in _HELP_TEXT_CACHE:
-        return _HELP_TEXT_CACHE[fw]
     argv_tail = _HELP_PROBE_COMMANDS.get(fw)
     if argv_tail is None:
         return ""
-    expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
-    if expiry is not None and time.monotonic() < expiry:
-        return ""
-    from ._benchmark_interpreter import _resolve_probe_python
-
+    identity = ""
     try:
+        from ._benchmark_interpreter import _resolve_probe_python
+
         interpreter = _resolve_probe_python(fw)
+        package_stamp = _framework_package_stamp(interpreter, fw)
+        identity = _help_probe_launch_identity(interpreter, argv_tail, package_stamp)
+        cached = _HELP_TEXT_CACHE.get(fw)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        failure = _HELP_PROBE_FAILURES.get(fw)
+        if failure is not None and failure[0] == identity and time.monotonic() < failure[1]:
+            return ""
         proc = subprocess.run(
             [interpreter, *argv_tail],
             capture_output=True,
             text=True,
             timeout=_HELP_PROBE_TIMEOUT_SEC,
         )
-        # Only a clean exit is help text. stderr on a failed run is a traceback, and treating that as help makes every
-        # flag look absent, which drops the variants carrying them rather than sparing them.
+        # Failed stdout/stderr can contain tracebacks, not supported flags.
         out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
-        reason = f"exit={proc.returncode}"
-        if proc.returncode != 0:
-            # Without the tail the log says only "exit=1", which cannot tell a
-            # missing framework from a probe command that no longer matches it.
-            tail = " ".join((proc.stderr or "").split())[-300:]
-            if tail:
-                reason = f"{reason}: {tail}"
-    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
-        out, reason = "", repr(exc)
-    if out:
-        _HELP_TEXT_CACHE[fw] = out
-        return out
-    if fw not in _HELP_PROBE_FAILED_UNTIL:
+        if out:
+            _HELP_PROBE_FAILURES.pop(fw, None)
+            if package_stamp is not None:
+                # Without a package to watch, a cached help text has no event that
+                # would retire it, which is the staleness this cache had before.
+                _HELP_TEXT_CACHE[fw] = (identity, out)
+            return out
+        reason = f"exit={proc.returncode}: {' '.join((proc.stderr or '').split())[-300:]}"
+    except Exception as exc:  # noqa: BLE001 — see docstring: the filter degrades, it does not fail
+        reason = repr(exc)
+    previous = _HELP_PROBE_FAILURES.get(fw)
+    already_reported = previous is not None and previous[0] == identity
+    _HELP_PROBE_FAILURES[fw] = (identity, time.monotonic() + _HELP_PROBE_RETRY_SEC)
+    if not already_reported:
         log.warning(
             "compatibility probe for %s produced no help text (%s); flag-version drops are disabled for it",
             fw,
             reason,
         )
-    _HELP_PROBE_FAILED_UNTIL[fw] = time.monotonic() + _HELP_PROBE_RETRY_SEC
     return ""
 
 
@@ -446,8 +499,9 @@ def apply_compatibility_filter(
         is_mla, is_moe = True, True
 
     fw = framework.strip().lower()
-    help_text = _probe_server_help_text(fw)
-    help_available = bool(help_text)
+    # The probe forks an interpreter that imports the framework's parser, so it is paid only
+    # once a rule's help check is actually reached. ``None`` means "not probed in this call yet".
+    help_text: str | None = None
 
     is_xdit = fw == "xdit"
     unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
@@ -498,7 +552,9 @@ def apply_compatibility_filter(
                 )
                 break
             # Framework flag-support predicate (only when help is readable).
-            if help_available and flag not in help_text:
+            if help_text is None:
+                help_text = _probe_server_help_text(fw)
+            if help_text and flag not in help_text:
                 skip_reason = f"{flag} not present in `{fw} --help` output; current {fw} version likely too old"
                 break
         if skip_reason:

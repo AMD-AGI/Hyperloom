@@ -57,8 +57,21 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec, timed
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
-from ..state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
+from ..state.task_registry import TaskRegistry, task_dispatch_origin
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    EVENT_PROPOSAL,
+    EVENT_SESSION,
+    STATUS_CANCELLED,
+    TERMINAL_STATUSES,
+    llm_call_summary,
+    load_events,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
@@ -186,7 +199,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         self.bus = bus_class(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
-        self.tasks = TaskRegistry(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
         self.cursors = CursorStore(self.db)
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks,
@@ -282,6 +298,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
@@ -463,20 +480,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_framework_authoring_domain": "gap_refresh",
         "_gap_layer_for_action": "gap_refresh",
         "_seed_gaps_from_research_hints": "gap_refresh",
-        "_record_explore_round_gaps": "phase_framework",
-        "_record_explore_variant_failures": "phase_framework",
+        "_record_explore_round_gaps": "gap_refresh",
+        "_record_explore_variant_failures": "gap_refresh",
         "_maybe_materialize_mn_explore": "phase_framework",
         "_maybe_autosubmit_specialist_patches": "phase_framework",
         "_maybe_autosubmit_framework_config": "phase_framework",
-        "_config_lever_known_bad": "phase_framework",
         "_on_enter_framework": "phase_framework",
-        "_open_framework_timeline": "phase_framework",
         "_close_framework_timeline": "phase_framework",
-        "_framework_timeline": "phase_framework",
-        "_framework_policy_fields": "phase_framework",
-        "_pump_framework_agent_phase": "phase_framework",
-        "_framework_agent_authoring_inflight": "phase_framework",
-        "_enqueue_framework_agent_authoring_specialist": "phase_framework",
         "_framework_gpu_params": "gpu_lanes",
         "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
@@ -502,39 +512,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_note_build_routed": "enablement_build",
         "_build_probe_was_cancelled": "enablement_build",
         "_enqueue_build_launch_probe": "enablement_build",
-        "_maybe_rearm_authored_lane": "phase_framework",
-        "_enqueue_author_specialist": "phase_framework",
-        "_drain_apply_fail_retry_pending": "phase_framework",
-        "_framework_candidate_key": "phase_framework",
-        "_framework_processed_candidate_keys": "phase_framework",
-        "_unprocessed_framework_agent_candidates": "phase_framework",
-        "_select_next_framework_agent_candidate": "phase_framework",
-        "_framework_known_candidate_ids": "phase_framework",
-        "_framework_tried_refs": "phase_framework",
-        "_build_framework_working_memory": "phase_framework",
-        "_framework_agent_discover_repo_urls": "phase_framework",
-        "_record_framework_agent_phase_done": "phase_framework",
-        "_enqueue_framework_agent_task": "phase_framework",
-        "_collect_framework_agent_candidate_priors": "phase_framework",
-        "_submit_framework_agent_candidate_for_review": "phase_framework",
-        "_materialize_framework_agent_candidate": "phase_framework",
-        "_stamp_framework_progress": "phase_framework",
-        "_record_framework_agent_critic_denied": "phase_framework",
-        "_maybe_reauthor_from_critic_feedback": "phase_framework",
-        "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "enablement_lane",
         "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
         "_open_revalidation_row": "enablement_revalidation",
         "_open_round_past_spent_generations": "enablement_revalidation",
         "_open_row_past_spent_generations": "enablement_revalidation",
-        "_record_framework_agent_authored_outcome": "phase_framework",
-        "_recover_framework_agent_authoring_outcome": "phase_framework",
-        "_record_framework_agent_authoring_empty_outcome": "phase_framework",
-        "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_maybe_enqueue_candidate_discovery": "phase_framework",
-        "_candidate_discovery_inflight": "phase_framework",
-        "_ingest_candidate_discovery": "phase_framework",
-        "_candidates_from_discovery_proposals": "phase_framework",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -987,21 +969,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
-    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
-
-    # Max tried-candidate rows fed into the ranker/discovery working memory.
-    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
-
-    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it.
-    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
@@ -1040,7 +1010,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 )
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self._pump_framework_agent_phase_safely(caller="tick")
+            await self.phase_framework.pump(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
@@ -1091,7 +1061,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
 
-        for recorder in (active_kernel_recorder(), self._framework_timeline()):
+        for recorder in (active_kernel_recorder(), self.phase_framework.timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
@@ -1190,7 +1160,87 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+
+        The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
+        session dir and the live phase / tick.
+        """
+        with (
+            trajectory_scope(
+                session_dir=self.session_dir,
+                component="coordinator",
+                phase_tick_source=self._trajectory_phase_tick,
+            ),
+            trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
+        ):
+            stop_reason = await self._run_ticks(
+                objective=objective,
+                max_minutes=max_minutes,
+                tick_interval_sec=tick_interval_sec,
+                max_ticks=max_ticks,
+                stop_when=stop_when,
+                install_signal_handlers=install_signal_handlers,
+                crash_emergency_threshold=crash_emergency_threshold,
+                closing_grace_sec=closing_grace_sec,
+            )
+            self._close_undecided_proposals(stop_reason)
+            span.finish(stop_reason=stop_reason)
+            return stop_reason
+
+    def _close_undecided_proposals(self, stop_reason: str) -> None:
+        """Close the trajectory span of every proposal the session ends without a verdict on.
+
+        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
+        session may end again over proposals an earlier leg already closed, so those are skipped.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+
+        if stop_reason == SUPERVISOR_RESTART_REASON:
+            return
+        undecided = [p for p in self.state.pending_proposals.values() if not p.decided]
+        if not undecided:
+            return
+        try:
+            closed = {
+                row.get("span_id")
+                for row in load_events(self.session_dir)
+                if row.get("event_type") == EVENT_PROPOSAL and row.get("status") in TERMINAL_STATUSES
+            }
+            for pending in undecided:
+                if pending.proposal_msg_id in closed:
+                    continue
+                record_event(
+                    EVENT_PROPOSAL,
+                    status=STATUS_CANCELLED,
+                    span_id=pending.proposal_msg_id,
+                    attributes={
+                        "name": pending.action_name,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "reason": "session_ended_undecided",
+                        "stop_reason": stop_reason,
+                    },
+                )
+        except Exception:  # trace must never mask the stop reason
+            log.warning("trajectory: closing undecided proposals failed", exc_info=True)
+
+    def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
+        """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
+        return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
+
+    async def _run_ticks(
+        self,
+        *,
+        objective: Objective | None,
+        max_minutes: float | None,
+        tick_interval_sec: float,
+        max_ticks: int | None,
+        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
+        install_signal_handlers: bool,
+        crash_emergency_threshold: int,
+        closing_grace_sec: float | None,
+    ) -> str:
+        """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
@@ -1262,7 +1312,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        await self._pump_framework_agent_phase_safely(caller="run")
+                        await self.phase_framework.pump(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
@@ -1405,7 +1455,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents."""
+        """Run one reactor turn for ``agent_name`` and route its intents, scoped as that agent on the trajectory."""
+        with trajectory_scope(component=agent_name, agent=agent_name):
+            await self._reactor_turn(agent_name)
+
+    async def _reactor_turn(self, agent_name: str) -> None:
+        """Body of :meth:`_reactor_pass`."""
         backend = self.backends[agent_name]
         sys_prompt = await self._load_system_prompt(agent_name)
         prompt = await self._compose_prompt(agent_name)
@@ -1421,19 +1476,30 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
+        call_id = new_call_id()
         try:
-            result: BackendTurnResult = await backend.run(
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                max_turns=0,
-            )
+            with trajectory_span(
+                EVENT_LLM_CALL,
+                call_id=call_id,
+                attributes={"name": agent_name, "model": getattr(backend, "model", None)},
+            ) as call_span:
+                record_prompt_snapshot(
+                    self._prompt_snapshots.observe(agent_name, prompt=prompt, system_prompt=sys_prompt, tools=tools)
+                )
+                result: BackendTurnResult = await backend.run(
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    tools=tools,
+                    max_turns=0,
+                )
+                call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
+                    call_id=call_id,
                 )
             await self._record_observation(
                 "coordinator",
@@ -1476,8 +1542,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        for intent in result.intents:
-            await self._handle_intent(agent_name, intent)
+        with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
+            for intent in result.intents:
+                await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 
@@ -1538,6 +1605,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
@@ -1546,6 +1614,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 component=agent_name,
                 role=agent_name,
                 error=error,
+                call_id=call_id,
+                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
                 latency_ms=latency_ms,
@@ -1587,9 +1657,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     ),
                 },
             )
-
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP = 6
 
     # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})

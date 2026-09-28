@@ -120,8 +120,7 @@ the selected session's exact file manifest and replays one combined Recipe:
 the Config column, the ordered Patch column overlays, and the Kernel column's
 GEMM/Fusion/Rewrite content. Remote mode does not construct the local Recipe
 dispatcher or fall back to local Recipe data. Runtime amendments are skipped
-and CLOSE performs one best-effort final write. Optional `GBRAIN_*` credentials
-remain available for Framework PR capabilities.
+and CLOSE performs one best-effort final write.
 
 CLOSE writes only a Recipe whose validated gain was measured on it, in both
 modes. When `current_best` changed after the last validation, CLOSE first runs

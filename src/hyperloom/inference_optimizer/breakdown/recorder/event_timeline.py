@@ -77,6 +77,8 @@ def build_envelope(
     ext: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the envelope every event type shares."""
+    from ..workflow_contract import event_semantics
+
     parse_event_id(event)
     envelope: dict[str, Any] = {
         "type": str(event_type),
@@ -90,6 +92,7 @@ def build_envelope(
     if end_time:
         envelope["end_time"] = str(end_time)
     envelope["ext"] = dict(ext or {})
+    envelope.update(event_semantics(event_type, status, envelope["ext"]))
     return envelope
 
 

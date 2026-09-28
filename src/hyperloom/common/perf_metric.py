@@ -47,6 +47,11 @@ DURATION_DRIFT_PCT = 5.0
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
+#
+# Duration and error rate are members because they are decision inputs, not decoration: ``rounds_are_comparable``
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped more requests,
+# and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
+# are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -57,6 +62,8 @@ GRADED_AXIS_KEYS = (
     "ttft_p90_ms",
     "tpot_p50_ms",
     "tpot_p90_ms",
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
 )
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
