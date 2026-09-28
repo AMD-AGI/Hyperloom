@@ -22,10 +22,12 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
 from ._row_utils import coerce_optional_int, coerce_optional_str
@@ -419,6 +421,57 @@ def load_events(session_dir: Path) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda r: (str(r.get("ts") or ""), str(r.get("writer") or ""), int(r.get("seq") or 0)))
 
 
+TIMING_HTTP_RESPONSE = "http_response"
+TIMING_HTTP_STREAM = "http_stream"
+
+
+def _epoch_iso(epoch_s: float) -> str:
+    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
+
+
+def _elapsed_ms(start: float, end: float | None) -> int | None:
+    return None if end is None else max(0, int((end - start) * 1000))
+
+
+def record_gateway_request(record: LLMRequestRecord) -> None:
+    """Put one ``llm_config`` HTTP request on the ledger as an ``llm.request`` under the ambient scope.
+
+    The call site's attribution ``component`` wins over the ambient one when it is a known component, so a critic
+    or scorer request made inside a coordinator scope is still attributed to its caller.
+    """
+    if _CONTEXT.get().session_dir is None:
+        return
+    context = {"component": record.component} if record.component in VALID_COMPONENTS else {}
+    failed = record.error_type is not None
+    attributes: dict[str, Any] = {
+        "name": record.model or "llm",
+        "model": record.model,
+        "message_id": record.response_id,
+        "protocol": record.protocol,
+        "operation": record.operation or None,
+        "timing_source": TIMING_HTTP_STREAM if record.streamed else TIMING_HTTP_RESPONSE,
+        "complete": not failed,
+        "latency_ms": _elapsed_ms(record.start, record.end),
+        "ttft_ms": _elapsed_ms(record.start, record.first_token),
+        "stop_reason": record.stop_reason,
+        **record.usage,
+    }
+    if failed:
+        attributes["error_type"] = record.error_type
+        attributes["error_message"] = record.error_message
+    record_event(
+        EVENT_LLM_REQUEST,
+        status=STATUS_FAILED if failed else STATUS_COMPLETED,
+        start_ts=_epoch_iso(record.start),
+        ts=_epoch_iso(record.end),
+        attributes=attributes,
+        **context,
+    )
+
+
+add_llm_request_observer(record_gateway_request)
+
+
 __all__ = [
     "EVENT_CONTEXT_COMPACTION",
     "EVENT_INTENT",
@@ -440,6 +493,8 @@ __all__ = [
     "STATUS_QUEUED",
     "STATUS_STARTED",
     "TERMINAL_STATUSES",
+    "TIMING_HTTP_RESPONSE",
+    "TIMING_HTTP_STREAM",
     "TrajectoryContext",
     "TrajectoryRowError",
     "TrajectorySpan",
@@ -453,6 +508,7 @@ __all__ = [
     "load_shard",
     "new_span_id",
     "record_event",
+    "record_gateway_request",
     "scalar_attributes",
     "trajectory_scope",
     "trajectory_shards",
