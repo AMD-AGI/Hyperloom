@@ -25,8 +25,9 @@ class MachinePhase(CoordinatorCollaborator):
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
         state = self.shared_state
-        # Redistribute disabled phases' budget shares to the enabled work phases.
-        self._phase_budget_pct = _phase_state.redistribute_budget_pct(
+        # Redistribute disabled phases' budget shares to the enabled work phases. Written on the Coordinator, which
+        # dispatch, the prompt and the KERNEL timeouts read it from.
+        self._coord._phase_budget_pct = _phase_state.redistribute_budget_pct(
             self._phase_budget_pct,
             optimize_enabled=self._optimize_enabled(),
             kernel_enabled=self._kernel_enabled(),

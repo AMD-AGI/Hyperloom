@@ -557,6 +557,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_emit_lifecycle": "writeback",
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
+        "_close_enablement_lane": "writeback",
         "_record_integrate_keep": "writeback",
         "_is_promotable_result": "writeback",
         "_record_intervention_for_task": "writeback",
