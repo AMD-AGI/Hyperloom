@@ -758,7 +758,7 @@ def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: A
 
 def resolve_metrics_url(config_envs: dict[str, Any] | None = None) -> str | None:
     """Resolve a remote serving endpoint to its Prometheus metrics URL."""
-    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or os.environ.get("BENCHMARK_BASE_URL") or "").strip()
+    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or "").strip()
     if not raw:
         return None
     try:
