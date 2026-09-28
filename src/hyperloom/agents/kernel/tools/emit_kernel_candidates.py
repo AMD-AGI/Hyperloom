@@ -8,11 +8,9 @@
 
 """Emit ``kernel_candidates.json`` from an existing TraceLens ``analysis_output``.
 
-Reads ``analysis.md`` (ranking source of truth) plus TraceLens sidecars already
-on disk. Does not run the kernel-agent e2e path (no optimize / Magpie /
-Coordinator) and does not re-run the TraceLens orchestrator.
-
-Invoked like the other kernel-agent tools (absolute path, sibling imports):
+Thin CLI over :func:`tracelens_analysis.build_kernel_candidates_from_analysis_md`.
+Does not run the kernel-agent e2e path (no optimize / Magpie / Coordinator)
+and does not re-run the TraceLens orchestrator.
 
     python src/hyperloom/agents/kernel/tools/emit_kernel_candidates.py \\
         --analysis-output /path/to/analysis_output
@@ -30,99 +28,15 @@ from typing import Any
 # Sibling modules live next to this tool (invoked by absolute path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tracelens_analysis import (  # noqa: E402
-    _SOURCE_RESOLUTION_NAME,
-    _default_top_k,
-    _evaluate_high_idle_gate,
-    _evaluate_idle_gate_with_graph_guard,
-    _evaluate_low_compute_gate,
-    _extract_total_time_us_from_gpu_timeline,
-    _finalize_candidates,
-    _inject_collective_candidates,
-    load_roofline_results,
-    merge_roofline_into_candidates,
-    recover_other_bucket_candidates,
-    write_reports,
-)
-from tracelens_skill_runner import (  # noqa: E402
-    _parse_kernel_name_cell,
-    extract_compute_pct_from_analysis_md,
-    extract_exposed_comm_pct_from_analysis_md,
-    extract_idle_pct_from_analysis_md,
-    parse_analysis_md,
-)
+import tracelens_analysis as tla  # noqa: E402
+from _io_utils import read_json  # noqa: E402
 
-_TRUNCATION_MARK = "..."
-_INFERRED_PLACEHOLDERS = ("cannot be inferred", "unknown", "n/a", "-")
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    """Load a JSON object, or ``{}`` when the file is missing/invalid."""
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _looks_truncated(value: str) -> bool:
-    """True when a TraceLens markdown cell was truncated with ``...``."""
-    return _TRUNCATION_MARK in (value or "")
-
-
-def overlay_metrics_kernel_names(
-    candidates: list[dict[str, Any]],
-    analysis_output: Path,
-) -> None:
-    """Replace truncated ``device_kernel_name(s)`` from ``category_data/*_metrics.json``.
-
-    Mutates ``candidates`` in place. Matching is by operation name. Fusion
-    sidecars are skipped because they are not per-op ranking rows.
-    """
-    metrics_dir = analysis_output / "category_data"
-    if not metrics_dir.is_dir():
-        return
-    by_op: dict[str, dict[str, Any]] = {}
-    for path in sorted(metrics_dir.glob("*_metrics.json")):
-        if path.name == "kernel_fusion_metrics.json":
-            continue
-        payload = _load_json(path)
-        for op in payload.get("operations") or []:
-            if not isinstance(op, dict):
-                continue
-            name = str(op.get("name") or "").strip()
-            if name:
-                by_op[name] = op
-    for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
-        op = by_op.get(str(cand.get("name") or "").strip())
-        if not op:
-            continue
-        full_cell = str(op.get("kernel_name") or "")
-        parsed = _parse_kernel_name_cell(full_cell.replace("<br>", "\n"))
-        current_names = [str(n) for n in (cand.get("device_kernel_names") or []) if n]
-        current_one = str(cand.get("device_kernel_name") or "")
-        truncated = (
-            (not current_names and parsed)
-            or _looks_truncated(current_one)
-            or any(_looks_truncated(n) for n in current_names)
-        )
-        if parsed and truncated:
-            cand["device_kernel_name"] = parsed[0]
-            cand["device_kernel_names"] = parsed
-        if not cand.get("shapes"):
-            args = str(op.get("args") or "").replace("<br>", "\n").strip()
-            shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
-            if shapes:
-                cand["shapes"] = shapes
+_INFERRED_PLACEHOLDERS = frozenset({"cannot be inferred", "unknown", "n/a", "-"})
 
 
 def _infer_model_name(analysis_output: Path) -> str:
     """Return a usable model name from TraceLens metadata, or empty."""
-    info = _load_json(analysis_output / "metadata" / "model_info.json")
+    info = read_json(analysis_output / "metadata" / "model_info.json", default={}, require_dict=True)
     raw = str(info.get("model") or "").strip()
     if not raw:
         return ""
@@ -176,39 +90,27 @@ def emit_kernel_candidates_from_analysis_output(
     probe_graph: bool = False,
     runtime_env: str = "local",
 ) -> dict[str, Any]:
-    """Parse existing TraceLens artifacts and write Hyperloom candidate sidecars.
+    """Read an existing analysis_output and write Hyperloom candidate sidecars.
 
-    Args:
-        analysis_output: Directory that already contains ``analysis.md``.
-        out_dir: Directory to write ``kernel_candidates.json`` and related reports.
-        model_name: Optional model identity recorded on candidates.
-        framework: Optional framework (``vllm`` / ``sglang`` steer source routing).
-        target_platform: GPU target recorded in the candidate report.
-        analysis_mode: Hyperloom analysis mode (defaults from the manifest).
-        source_root: Optional root for launcher-path AST resolution.
-        top_k: Candidate cap; ``None`` uses Hyperloom's default / env override.
-        trace_input: Optional raw trace path for the written manifest.
-        roofline_json: Optional extra roofline JSON to merge.
-        probe_graph: When True and a trace file exists, apply the graph-guard idle gate.
-        runtime_env: Runtime label written into the report.
-
-    Returns:
-        A dict with ``kernel_candidates_path``, warnings, and the ``write_reports``
-        artifact map.
+    Candidate construction and report writing live in ``tracelens_analysis`` so
+    this path cannot drift from the pipeline. This function only fills in the
+    fields the CLI knows (model, platform, trace path) and prints a summary.
 
     Raises:
         FileNotFoundError: When ``analysis.md`` is missing.
-        RuntimeError: When analysis.md exists but yields no candidates and the
-            idle/low-compute gates did not fire (same contract as the
-            TraceLens analysis tool).
+        RuntimeError: When analysis.md yielded rows that finalizing dropped and
+            no idle/low-compute gate explains the empty list.
     """
     analysis_output = analysis_output.expanduser().resolve()
     report_path = analysis_output / "analysis.md"
     if not report_path.is_file():
         raise FileNotFoundError(f"analysis.md is required (TraceLens ranking source of truth): {report_path}")
 
-    cap = _default_top_k() if top_k is None else top_k
-    manifest = _load_json(analysis_output / "category_data" / "category_manifest.json")
+    manifest = read_json(
+        analysis_output / "category_data" / "category_manifest.json",
+        default={},
+        require_dict=True,
+    )
     model_name = model_name or _infer_model_name(analysis_output)
     target_platform = _infer_platform(manifest, target_platform)
     analysis_mode = (
@@ -219,130 +121,55 @@ def emit_kernel_candidates_from_analysis_output(
         manifest=manifest,
         analysis_output=analysis_output,
     )
-
-    idle_pct = extract_idle_pct_from_analysis_md(report_path)
-    compute_pct = extract_compute_pct_from_analysis_md(report_path)
-    exposed_comm_pct = extract_exposed_comm_pct_from_analysis_md(report_path)
-
-    trace_health_warnings: list[dict[str, Any]] = []
-    graph_warning = None
-    if probe_graph and resolved_trace.is_file():
-        idle_threshold, high_idle_warning, graph_warning = _evaluate_idle_gate_with_graph_guard(
-            idle_pct, report_path, resolved_trace
-        )
-    else:
-        idle_threshold, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
-    compute_threshold, low_compute_warning = _evaluate_low_compute_gate(compute_pct, exposed_comm_pct, report_path)
-    if graph_warning is not None:
-        high_idle_warning = None
-        low_compute_warning = None
-        trace_health_warnings.append(graph_warning)
-
-    allow_empty = False
-    report_source = "analysis.md"
-    candidates: list[dict[str, Any]] = []
-    if high_idle_warning is not None or low_compute_warning is not None:
-        allow_empty = True
-        skipped: list[str] = []
-        if high_idle_warning is not None:
-            trace_health_warnings.append(high_idle_warning)
-            skipped.append("skipped:high_gpu_idle_pct")
-        if low_compute_warning is not None:
-            trace_health_warnings.append(low_compute_warning)
-            skipped.append("skipped:low_gpu_compute_pct")
-        report_source = "+".join(skipped)
-    else:
-        report_cands = parse_analysis_md(report_path, cap)
-        overlay_metrics_kernel_names(report_cands, analysis_output)
-        fallback_cands = recover_other_bucket_candidates(
-            analysis_output,
-            report_cands,
-            top_k=cap,
-            total_window_us=_extract_total_time_us_from_gpu_timeline(analysis_output),
-        )
-        if fallback_cands:
-            overlay_metrics_kernel_names(fallback_cands, analysis_output)
-            report_cands = report_cands + fallback_cands
-        raw = _inject_collective_candidates(
-            analysis_output,
-            report_cands,
-            health_warnings=trace_health_warnings,
-        )
-        source_parts = ["analysis.md"]
-        if fallback_cands:
-            source_parts.append("other_bucket_fallback")
-        if len(raw) > len(report_cands):
-            source_parts.append("nccl_summary")
-        report_source = "+".join(source_parts)
-        if not raw:
-            allow_empty = True
-            candidates = []
-        else:
-            total_dur = _extract_total_time_us_from_gpu_timeline(analysis_output) or sum(
-                float(c.get("duration_us") or 0) for c in raw
-            )
-            out_dir.mkdir(parents=True, exist_ok=True)
-            candidates = _finalize_candidates(
-                raw,
-                total_dur=total_dur or None,
-                perf_report_csv_dir=(analysis_output / "perf_report_csvs"),
-                framework=framework or None,
-                trace_files=None,
-                log_path=out_dir / "emit_kernel_candidates.log",
-                source_resolution_out=(out_dir / _SOURCE_RESOLUTION_NAME),
-                model_name=model_name,
-            )
-
-    if not candidates and not allow_empty:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    built = tla.build_kernel_candidates_from_analysis_md(
+        report_path,
+        analysis_output,
+        top_k=top_k,
+        framework=framework or None,
+        model_name=model_name,
+        trace_files=None,
+        graph_trace_path=resolved_trace if probe_graph else None,
+        log_path=out_dir / "emit_kernel_candidates.log",
+        source_resolution_out=out_dir / tla._SOURCE_RESOLUTION_NAME,
+        roofline_json=roofline_json,
+        probe_graph=probe_graph,
+    )
+    candidates = built["candidates"]
+    if not candidates and not built["allow_empty"]:
         raise RuntimeError(
             "No hot-kernel candidates produced from analysis.md (and other-bucket "
             "recovery found nothing). Refusing CSV-as-ranking fallback because "
             "analysis.md is the single source of truth."
         )
-
-    merge_roofline_into_candidates(candidates, load_roofline_results(roofline_json or None))
-
-    args = argparse.Namespace(
-        trace_input=str(resolved_trace),
+    artifacts = tla.write_kernel_candidate_reports(
+        out_dir,
+        trace_input=resolved_trace,
+        trace_input_type="file" if resolved_trace.is_file() else "analysis_output",
+        trace_files=[resolved_trace] if resolved_trace.is_file() else [],
+        candidates=candidates,
         model_name=model_name,
         framework=framework,
         target_platform=target_platform,
         analysis_mode=analysis_mode,
         runtime_env=runtime_env,
-        dry_run=False,
         source_root=source_root,
         roofline_json=roofline_json,
-        roofline_output_name="kernel_roofline.json",
-        num_denoise_steps=0,
-        model_path="",
-        precision="",
-        height=0,
-        width=0,
-        cfg_batch=0,
-        top_k=cap,
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    artifacts = write_reports(
-        out_dir,
-        trace_input_type="file" if resolved_trace.is_file() else "analysis_output",
-        trace_files=[resolved_trace] if resolved_trace.is_file() else [],
-        candidates=candidates,
-        args=args,
         existing_report_path=report_path,
-        trace_health_warnings=trace_health_warnings,
+        trace_health_warnings=built["trace_health_warnings"],
+        top_k=top_k if top_k is not None else tla._default_top_k(),
     )
-    kernel_candidates_path = out_dir / "kernel_candidates.json"
     return {
         "tool": "emit_kernel_candidates",
         "analysis_md": str(report_path),
-        "kernel_candidates_path": str(kernel_candidates_path),
-        "report_source": report_source,
-        "idle_pct": idle_pct,
-        "compute_pct": compute_pct,
-        "idle_pct_threshold": idle_threshold,
-        "compute_pct_threshold": compute_threshold,
+        "kernel_candidates_path": str(out_dir / "kernel_candidates.json"),
+        "report_source": built["report_source"],
+        "idle_pct": built["idle_pct"],
+        "compute_pct": built["compute_pct"],
+        "idle_pct_threshold": built["idle_pct_threshold"],
+        "compute_pct_threshold": built["compute_pct_threshold"],
         "hot_kernel_count": len(candidates),
-        "trace_health_warnings": trace_health_warnings,
+        "trace_health_warnings": built["trace_health_warnings"],
         "artifact_paths": artifacts,
     }
 

@@ -20,6 +20,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import emit_kernel_candidates as ekc  # noqa: E402
+import tracelens_analysis as tla  # noqa: E402
 
 
 def _write(path: Path, text: str) -> Path:
@@ -56,13 +57,13 @@ def _stub_emit_deps(monkeypatch, *, parsed=None, recovered=None, finalized=None)
     if finalized is None:
         finalized = list(parsed) + list(recovered)
 
-    monkeypatch.setattr(ekc, "parse_analysis_md", lambda *_a, **_k: list(parsed))
-    monkeypatch.setattr(ekc, "recover_other_bucket_candidates", lambda *_a, **_k: list(recovered))
-    monkeypatch.setattr(ekc, "_inject_collective_candidates", lambda _d, cands, **_k: list(cands))
-    monkeypatch.setattr(ekc, "_extract_total_time_us_from_gpu_timeline", lambda *_a, **_k: 10890.0)
-    monkeypatch.setattr(ekc, "_finalize_candidates", lambda cands, **_k: list(finalized))
-    monkeypatch.setattr(ekc, "load_roofline_results", lambda *_a, **_k: {})
-    monkeypatch.setattr(ekc, "merge_roofline_into_candidates", lambda *_a, **_k: None)
+    monkeypatch.setattr(tla, "parse_analysis_md", lambda *_a, **_k: list(parsed))
+    monkeypatch.setattr(tla, "recover_other_bucket_candidates", lambda *_a, **_k: list(recovered))
+    monkeypatch.setattr(tla, "_inject_collective_candidates", lambda _d, cands, **_k: list(cands))
+    monkeypatch.setattr(tla, "_extract_total_time_us_from_gpu_timeline", lambda *_a, **_k: 10890.0)
+    monkeypatch.setattr(tla, "_finalize_candidates", lambda cands, **_k: list(finalized))
+    monkeypatch.setattr(tla, "load_roofline_results", lambda *_a, **_k: {})
+    monkeypatch.setattr(tla, "merge_roofline_into_candidates", lambda *_a, **_k: None)
 
     written: dict[str, object] = {}
 
@@ -74,7 +75,7 @@ def _stub_emit_deps(monkeypatch, *, parsed=None, recovered=None, finalized=None)
         path.write_text("{}", encoding="utf-8")
         return {"kernel_candidates": str(path)}
 
-    monkeypatch.setattr(ekc, "write_reports", _write_reports)
+    monkeypatch.setattr(tla, "write_reports", _write_reports)
     return written
 
 
@@ -97,7 +98,7 @@ def test_overlay_metrics_kernel_names_replaces_truncated_symbols(tmp_path):
             "shapes": [],
         }
     ]
-    ekc.overlay_metrics_kernel_names(cands, tmp_path)
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
     assert cands[0]["device_kernel_name"] == "Cijk_B_PostGSU2"
     assert cands[0]["device_kernel_names"] == ["Cijk_B_PostGSU2", "Cijk_Ailk_Bljk_FULL"]
     assert cands[0]["shapes"] == ["(256,131072) bf16", "(131072,512) bf16"]
@@ -116,7 +117,7 @@ def test_overlay_metrics_kernel_names_skips_fusion_sidecar(tmp_path):
             "shapes": ["already"],
         }
     ]
-    ekc.overlay_metrics_kernel_names(cands, tmp_path)
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
     assert cands[0]["device_kernel_name"] == "real_symbol"
     assert cands[0]["shapes"] == ["already"]
 
@@ -266,9 +267,9 @@ def test_emit_graph_under_recorded_keeps_candidates(tmp_path, monkeypatch):
         "message": "profiler captured ~1 of N graph replays",
     }
     monkeypatch.setattr(
-        ekc,
+        tla,
         "_evaluate_idle_gate_with_graph_guard",
-        lambda *_a, **_k: (80.0, {"code": "high_gpu_idle_pct"}, graph_warning),
+        lambda *_a, **_k: (80.0, None, graph_warning),
     )
     result = ekc.emit_kernel_candidates_from_analysis_output(
         analysis,

@@ -72,6 +72,7 @@ except Exception:
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from tracelens_skill_runner import (
+    _parse_kernel_name_cell,
     aggregate_by_source_function,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
@@ -83,7 +84,7 @@ from tracelens_skill_runner import (
 )
 
 from _bypass_report import partition_kernels
-from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _io_utils import append_log, atomic_write_json, read_json, read_last_lines, safe_float, utc_now
 from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from _literal_utils import safe_literal_eval as _safe_literal_eval
 from _nccl_summary_candidates import extract_collective_candidates
@@ -6537,6 +6538,255 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+_TRUNCATION_MARK = "..."
+
+
+def _kernel_name_looks_truncated(value: str) -> bool:
+    """True when a TraceLens markdown kernel-name cell was cut with ``...``."""
+    return _TRUNCATION_MARK in (value or "")
+
+
+def overlay_metrics_kernel_names(
+    candidates: list[dict[str, Any]],
+    analysis_output: Path,
+) -> None:
+    """Replace truncated device kernel names from ``category_data/*_metrics.json``.
+
+    ``analysis.md`` truncates long kernel symbols. The metrics sidecars keep the
+    full name, so both the pipeline and the offline emitter restore it here
+    before finalizing. Matching is by operation name. Fusion sidecars are
+    skipped because they are not per-op ranking rows.
+
+    Mutates ``candidates`` in place.
+    """
+    metrics_dir = analysis_output / "category_data"
+    if not metrics_dir.is_dir():
+        return
+    by_op: dict[str, dict[str, Any]] = {}
+    for path in sorted(metrics_dir.glob("*_metrics.json")):
+        if path.name == "kernel_fusion_metrics.json":
+            continue
+        payload = read_json(path, default={}, require_dict=True)
+        for op in payload.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = str(op.get("name") or "").strip()
+            if name:
+                by_op[name] = op
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        op = by_op.get(str(cand.get("name") or "").strip())
+        if not op:
+            continue
+        full_cell = str(op.get("kernel_name") or "")
+        parsed = _parse_kernel_name_cell(full_cell.replace("<br>", "\n"))
+        current_names = [str(n) for n in (cand.get("device_kernel_names") or []) if n]
+        current_one = str(cand.get("device_kernel_name") or "")
+        truncated = (
+            (not current_names and parsed)
+            or _kernel_name_looks_truncated(current_one)
+            or any(_kernel_name_looks_truncated(n) for n in current_names)
+        )
+        if parsed and truncated:
+            cand["device_kernel_name"] = parsed[0]
+            cand["device_kernel_names"] = parsed
+        if not cand.get("shapes"):
+            shape_args = str(op.get("args") or "").replace("<br>", "\n").strip()
+            shapes = [s.strip() for s in shape_args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
+            if shapes:
+                cand["shapes"] = shapes
+
+
+def build_kernel_candidates_from_analysis_md(
+    report_path: Path,
+    analysis_output: Path,
+    *,
+    top_k: int | None = None,
+    framework: str | None = None,
+    model_name: str = "",
+    trace_files: list[Path] | None = None,
+    graph_trace_path: str | Path | None = None,
+    log_path: Path | None = None,
+    source_resolution_out: Path | None = None,
+    roofline_json: str = "",
+    probe_graph: bool = True,
+    health_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Turn an existing ``analysis.md`` into finalized hot-kernel candidates.
+
+    This is the analysis.md segment of :func:`main`: idle and low-compute gates,
+    ``parse_analysis_md``, truncated-name overlay, other-bucket recovery,
+    collective injection, ``_finalize_candidates``, and roofline merge. The
+    TraceLens orchestrator and the optimize loop are not run.
+
+    Args:
+        report_path: Path to ``analysis.md``.
+        analysis_output: Directory holding that report and its sidecars.
+        top_k: Candidate cap. ``None`` uses :func:`_default_top_k`.
+        framework: Trace framework forwarded to source resolution.
+        model_name: Model identity recorded on the resolution artifact.
+        trace_files: Optional raw traces for launcher resolution.
+        graph_trace_path: Raw trace used by the graph-under-recording idle guard.
+        log_path: Optional log file for collective injection and source resolution.
+        source_resolution_out: Where ``_finalize_candidates`` writes its artifact.
+        roofline_json: Optional roofline JSON merged into the candidates.
+        probe_graph: When true, idle% is gated with the graph-under-recording guard.
+        health_warnings: List mutated with gate and collective warnings.
+        log: Optional line logger. Pipeline callers pass their run log.
+
+    Returns:
+        Dict with ``candidates``, ``allow_empty``, ``report_source``, idle and
+        compute percentages plus thresholds, and ``trace_health_warnings``.
+        ``allow_empty`` is true when a gate suppressed the list or analysis.md
+        had nothing to recover, so callers may write an empty ``hot_kernels``.
+    """
+
+    def _log(message: str) -> None:
+        if log is not None:
+            log(message)
+
+    cap = _default_top_k() if top_k is None else top_k
+    warnings = health_warnings if health_warnings is not None else []
+    idle_pct = extract_idle_pct_from_analysis_md(report_path)
+    compute_pct = extract_compute_pct_from_analysis_md(report_path)
+    exposed_comm_pct = extract_exposed_comm_pct_from_analysis_md(report_path)
+    graph_warning = None
+    if probe_graph:
+        idle_threshold, high_idle_warning, graph_warning = _evaluate_idle_gate_with_graph_guard(
+            idle_pct,
+            report_path,
+            graph_trace_path,
+        )
+    else:
+        idle_threshold, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
+    compute_threshold, low_compute_warning = _evaluate_low_compute_gate(
+        compute_pct,
+        exposed_comm_pct,
+        report_path,
+    )
+    if graph_warning is not None:
+        low_compute_warning = None
+        warnings.append(graph_warning)
+        _log(
+            "TraceLens high idle% is a graph under-recording "
+            "artifact (profiler captured ~1 of N graph replays); "
+            "skipping the idle/compute gates and keeping hot_kernels[]."
+        )
+
+    allow_empty = False
+    report_source = ""
+    candidates: list[dict[str, Any]] = []
+    if high_idle_warning is not None or low_compute_warning is not None:
+        allow_empty = True
+        skipped_sources: list[str] = []
+        if high_idle_warning is not None:
+            assert idle_pct is not None
+            warnings.append(high_idle_warning)
+            skipped_sources.append("skipped:high_gpu_idle_pct")
+            _log(
+                f"TraceLens Executive Summary reports "
+                f"Idle % = {idle_pct:.2f}% (threshold "
+                f"{idle_threshold:.2f}%); suppressing "
+                "hot_kernels[] — kernel rewriting cannot move "
+                "end-to-end latency in the high-idle regime. "
+                "Coordinator will see this in "
+                "trace_health_warnings[] and route to "
+                "parameter optimization."
+            )
+        if low_compute_warning is not None:
+            assert compute_pct is not None
+            warnings.append(low_compute_warning)
+            skipped_sources.append("skipped:low_gpu_compute_pct")
+            _log(
+                f"TraceLens Executive Summary reports "
+                f"Compute % = {compute_pct:.2f}% "
+                f"(threshold {compute_threshold:.2f}%); "
+                "suppressing hot_kernels[] — a kernel rewrite "
+                "is bounded by the compute share and cannot "
+                "move end-to-end latency here. Coordinator "
+                "will see this in trace_health_warnings[] and "
+                "route to comm/parameter optimization."
+            )
+        report_source = "+".join(skipped_sources)
+    else:
+        if idle_pct is not None and graph_warning is None:
+            _log(
+                f"TraceLens Executive Summary: "
+                f"Idle % = {idle_pct:.2f}% "
+                f"(threshold {idle_threshold:.2f}%) — "
+                "below gate, continuing with kernel "
+                "candidate extraction"
+            )
+        report_cands = parse_analysis_md(report_path, cap)
+        overlay_metrics_kernel_names(report_cands, analysis_output)
+        fallback_cands = recover_other_bucket_candidates(
+            analysis_output,
+            report_cands,
+            top_k=cap,
+            total_window_us=_extract_total_time_us_from_gpu_timeline(analysis_output),
+            log=_log,
+        )
+        if fallback_cands:
+            overlay_metrics_kernel_names(fallback_cands, analysis_output)
+            report_cands = report_cands + fallback_cands
+        raw_candidates = _inject_collective_candidates(
+            analysis_output,
+            report_cands,
+            log_path=log_path,
+            health_warnings=warnings,
+        )
+        source_parts = ["analysis.md"]
+        if fallback_cands:
+            source_parts.append("other_bucket_fallback")
+        if len(raw_candidates) > len(report_cands):
+            source_parts.append("nccl_summary")
+        report_source = "+".join(source_parts)
+        if not raw_candidates:
+            allow_empty = True
+            _log(
+                "TraceLens analysis.md had no Detailed "
+                "Analysis compute candidate blocks "
+                "(v0.3 contract: analysis.md is the single "
+                "source of truth) and the other-bucket "
+                "fallback found no high-GPU-time op to "
+                "recover. Producing empty hot_kernels[] — "
+                "downstream Coordinator will route to "
+                "params/backends."
+            )
+        else:
+            total_dur = _extract_total_time_us_from_gpu_timeline(analysis_output) or sum(
+                float(c.get("duration_us") or 0) for c in raw_candidates
+            )
+            candidates = _finalize_candidates(
+                raw_candidates,
+                total_dur=total_dur or None,
+                perf_report_csv_dir=(analysis_output / "perf_report_csvs"),
+                framework=framework,
+                trace_files=trace_files,
+                log_path=log_path,
+                source_resolution_out=source_resolution_out,
+                model_name=model_name,
+            )
+            _log(f"TraceLens SDK orchestrator produced {len(candidates)} hot kernels (source={report_source})")
+
+    roofline_by_name = load_roofline_results(roofline_json or None)
+    if roofline_by_name:
+        _log(f"merged roofline results: {len(roofline_by_name)} kernels")
+    merge_roofline_into_candidates(candidates, roofline_by_name)
+    return {
+        "candidates": candidates,
+        "allow_empty": allow_empty,
+        "report_source": report_source,
+        "idle_pct": idle_pct,
+        "compute_pct": compute_pct,
+        "idle_pct_threshold": idle_threshold,
+        "compute_pct_threshold": compute_threshold,
+        "trace_health_warnings": warnings,
+    }
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -6755,6 +7005,71 @@ def write_reports(
     if diffusion_roofline_path:
         artifact_paths["diffusion_roofline"] = diffusion_roofline_path
     return artifact_paths
+
+
+def write_kernel_candidate_reports(
+    run_dir: Path,
+    *,
+    trace_input: str | Path,
+    trace_input_type: str,
+    trace_files: list[Path],
+    candidates: list[dict[str, Any]],
+    model_name: str = "",
+    framework: str = "",
+    target_platform: str = "",
+    analysis_mode: str = "",
+    runtime_env: str = "",
+    dry_run: bool = False,
+    source_root: str | None = None,
+    roofline_json: str = "",
+    existing_report_path: Path | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
+    num_denoise_steps: int = 0,
+    model_path: str = "",
+    precision: str = "",
+    height: int = 0,
+    width: int = 0,
+    cfg_batch: int = 0,
+    top_k: int = 10,
+    roofline_output_name: str = "kernel_roofline.json",
+) -> dict[str, str]:
+    """Write candidate sidecars from explicit fields.
+
+    :func:`write_reports` still takes the analysis CLI namespace because the
+    pipeline already has one. This adapter is the only place that builds that
+    namespace, so offline callers pass the fields they actually have.
+
+    Returns:
+        The artifact map from :func:`write_reports`.
+    """
+    report_args = argparse.Namespace(
+        trace_input=str(trace_input),
+        model_name=model_name,
+        framework=framework,
+        target_platform=target_platform,
+        analysis_mode=analysis_mode,
+        runtime_env=runtime_env,
+        dry_run=dry_run,
+        source_root=source_root,
+        roofline_json=roofline_json,
+        roofline_output_name=roofline_output_name,
+        num_denoise_steps=num_denoise_steps,
+        model_path=model_path,
+        precision=precision,
+        height=height,
+        width=width,
+        cfg_batch=cfg_batch,
+        top_k=top_k,
+    )
+    return write_reports(
+        run_dir,
+        trace_input_type=trace_input_type,
+        trace_files=trace_files,
+        candidates=candidates,
+        args=report_args,
+        existing_report_path=existing_report_path,
+        trace_health_warnings=trace_health_warnings,
+    )
 
 
 def _default_workspace_path() -> str:
@@ -7034,6 +7349,7 @@ def main() -> int:
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
     allow_empty_candidates = False
+    analysis_candidates_built = False
     orchestrator_mode = "inline"
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
@@ -7772,159 +8088,23 @@ def main() -> int:
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = skill_result.runner
 
-                    raw_agent_candidates = []
-                    report_source = ""
-                    idle_pct_value = extract_idle_pct_from_analysis_md(
+                    built = build_kernel_candidates_from_analysis_md(
                         skill_result.report_path,
+                        skill_result.output_dir,
+                        framework=args.framework or None,
+                        model_name=args.model_name,
+                        trace_files=trace_files,
+                        graph_trace_path=raw_trace_path,
+                        log_path=log_path,
+                        source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
+                        roofline_json=args.roofline_json,
+                        probe_graph=True,
+                        health_warnings=trace_health_warnings,
+                        log=lambda msg: append_log(log_path, msg),
                     )
-                    idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = (
-                        _evaluate_idle_gate_with_graph_guard(
-                            idle_pct_value,
-                            skill_result.report_path,
-                            raw_trace_path,
-                        )
-                    )
-                    compute_pct_value = extract_compute_pct_from_analysis_md(
-                        skill_result.report_path,
-                    )
-                    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(
-                        skill_result.report_path,
-                    )
-                    compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
-                        compute_pct_value,
-                        exposed_comm_pct_value,
-                        skill_result.report_path,
-                    )
-                    if graph_under_recorded_warning is not None:
-                        # Under-recording deflates every recorded share alike, so
-                        # the compute share is as unreliable as idle% here.
-                        low_compute_warning = None
-                        trace_health_warnings.append(graph_under_recorded_warning)
-                        append_log(
-                            log_path,
-                            "TraceLens high idle% is a graph under-recording "
-                            "artifact (profiler captured ~1 of N graph replays); "
-                            "skipping the idle/compute gates and keeping hot_kernels[].",
-                        )
-                    if high_idle_warning is not None or low_compute_warning is not None:
-                        agent_candidates = []
-                        allow_empty_candidates = True
-                        # Both gates can fire on one window (95% idle AND 3%
-                        # compute is a real shape), so accumulate rather than
-                        # let the second suppression erase the first, matching
-                        # the "+".join the non-suppressed path already uses.
-                        skipped_sources: list[str] = []
-                        if high_idle_warning is not None:
-                            assert idle_pct_value is not None
-                            trace_health_warnings.append(high_idle_warning)
-                            skipped_sources.append("skipped:high_gpu_idle_pct")
-                            append_log(
-                                log_path,
-                                f"TraceLens Executive Summary reports "
-                                f"Idle % = {idle_pct_value:.2f}% (threshold "
-                                f"{idle_pct_threshold:.2f}%); suppressing "
-                                "hot_kernels[] — kernel rewriting cannot move "
-                                "end-to-end latency in the high-idle regime. "
-                                "Coordinator will see this in "
-                                "trace_health_warnings[] and route to "
-                                "parameter optimization.",
-                            )
-                        if low_compute_warning is not None:
-                            assert compute_pct_value is not None
-                            trace_health_warnings.append(low_compute_warning)
-                            skipped_sources.append("skipped:low_gpu_compute_pct")
-                            append_log(
-                                log_path,
-                                f"TraceLens Executive Summary reports "
-                                f"Compute % = {compute_pct_value:.2f}% "
-                                f"(threshold {compute_pct_threshold:.2f}%); "
-                                "suppressing hot_kernels[] — a kernel rewrite "
-                                "is bounded by the compute share and cannot "
-                                "move end-to-end latency here. Coordinator "
-                                "will see this in trace_health_warnings[] and "
-                                "route to comm/parameter optimization.",
-                            )
-                        report_source = "+".join(skipped_sources)
-                    else:
-                        if idle_pct_value is not None and graph_under_recorded_warning is None:
-                            append_log(
-                                log_path,
-                                f"TraceLens Executive Summary: "
-                                f"Idle % = {idle_pct_value:.2f}% "
-                                f"(threshold {idle_pct_threshold:.2f}%) — "
-                                "below gate, continuing with kernel "
-                                "candidate extraction",
-                            )
-                        report_cands = parse_analysis_md(
-                            skill_result.report_path,
-                            _default_top_k(),
-                        )
-                        # Defense-in-depth: recover any high-GPU-time op that
-                        # TraceLens filed without a reasoning-candidate block from
-                        # the per-op ranking sidecar. analysis.md stays primary.
-                        fallback_cands = recover_other_bucket_candidates(
-                            skill_result.output_dir,
-                            report_cands,
-                            top_k=_default_top_k(),
-                            total_window_us=_extract_total_time_us_from_gpu_timeline(
-                                skill_result.output_dir,
-                            ),
-                            log=lambda msg: append_log(log_path, msg),
-                        )
-                        if fallback_cands:
-                            report_cands = report_cands + fallback_cands
-                        raw_agent_candidates = _inject_collective_candidates(
-                            skill_result.output_dir,
-                            report_cands,
-                            log_path=log_path,
-                            health_warnings=trace_health_warnings,
-                        )
-                        collective_injected = len(raw_agent_candidates) > len(report_cands)
-                        if raw_agent_candidates:
-                            source_parts = ["analysis.md"]
-                            if fallback_cands:
-                                source_parts.append("other_bucket_fallback")
-                            if collective_injected:
-                                source_parts.append("nccl_summary")
-                            report_source = "+".join(source_parts)
-                        else:
-                            agent_candidates = []
-                            allow_empty_candidates = True
-                            append_log(
-                                log_path,
-                                "TraceLens analysis.md had no Detailed "
-                                "Analysis compute candidate blocks "
-                                "(v0.3 contract: analysis.md is the single "
-                                "source of truth) and the other-bucket "
-                                "fallback found no high-GPU-time op to "
-                                "recover. Producing empty hot_kernels[] — "
-                                "downstream Coordinator will route to "
-                                "params/backends.",
-                            )
-
-                    if raw_agent_candidates:
-                        # Use whole-trace GPU time as the gpu_pct denominator,
-                        # falling back to the candidate sum only when
-                        # gpu_timeline.csv is missing.
-                        total_dur = _extract_total_time_us_from_gpu_timeline(skill_result.output_dir) or sum(
-                            float(c.get("duration_us") or 0) for c in raw_agent_candidates
-                        )
-                        agent_candidates = _finalize_candidates(
-                            raw_agent_candidates,
-                            total_dur=total_dur or None,
-                            perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
-                            framework=args.framework or None,
-                            trace_files=trace_files,
-                            log_path=log_path,
-                            source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
-                            model_name=args.model_name,
-                        )
-                        append_log(
-                            log_path,
-                            f"TraceLens SDK orchestrator produced "
-                            f"{len(agent_candidates)} hot kernels "
-                            f"(source={report_source})",
-                        )
+                    agent_candidates = built["candidates"]
+                    allow_empty_candidates = built["allow_empty"]
+                    analysis_candidates_built = True
                 except Exception as exc:  # noqa: BLE001
                     orchestrator_error = f"{type(exc).__name__}: {exc}"
                     append_log(
@@ -7977,6 +8157,7 @@ def main() -> int:
                     "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
                 )
                 candidates = analyze_trace_files(trace_files, _default_top_k())
+                analysis_candidates_built = False
             else:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
@@ -7985,10 +8166,11 @@ def main() -> int:
                     "truth. Inspect the TraceLens skill log and report "
                     "upstream if reproducible."
                 )
-        roofline_by_name = load_roofline_results(args.roofline_json)
-        if roofline_by_name:
-            append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
-        merge_roofline_into_candidates(candidates, roofline_by_name)
+        if not analysis_candidates_built:
+            roofline_by_name = load_roofline_results(args.roofline_json)
+            if roofline_by_name:
+                append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
+            merge_roofline_into_candidates(candidates, roofline_by_name)
         source_resolution_path = run_dir / _SOURCE_RESOLUTION_NAME
         if _KSC is not None:
             if not source_resolution_path.is_file():
