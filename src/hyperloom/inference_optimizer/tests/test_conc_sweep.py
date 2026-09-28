@@ -23,18 +23,17 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
-from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
+from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
-    _flush_partial_conc_sweep_report,
     _grading_of,
-    _has_optimization,
+    _optimized_arm,
     _order_concs_desc,
     _point_from_variant,
-    _SweepRun,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -86,37 +85,45 @@ def baseline_yaml(tmp_path: Path) -> Path:
     return p
 
 
-# _has_optimization
-def test_has_optimization_args_only():
+# _optimized_arm
+def test_optimized_arm_args_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "--a 1", "extra_envs": {}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == "--a 1"
-    assert envs == {}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.name == "optimized"
+    assert arm.args == "--a 1"
+    assert arm.envs == {}
 
 
-def test_has_optimization_envs_only():
+def test_optimized_arm_envs_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {"X": "1"}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == ""
-    assert envs == {"X": "1"}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.args == ""
+    assert arm.envs == {"X": "1"}
 
 
-def test_has_optimization_both_empty():
+def test_optimized_arm_carries_overlay_and_controls():
+    s = SharedState()
+    s.current_best = {"extra_server_args": "", "remove_args": ["--foo"], "final_overlay": " /opt/overlay "}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.overlay == "/opt/overlay"
+    assert arm.controls == {"remove_args": ["--foo"]}
+
+
+def test_optimized_arm_both_empty():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {}}
-    has, _args, _envs = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
 
 
-def test_has_optimization_missing_current_best():
+def test_optimized_arm_missing_current_best():
     s = SharedState()
     s.current_best = {}
-    has, _, _ = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
 
 
 @pytest.mark.parametrize("persistent_server", [False, True])
@@ -1302,15 +1309,7 @@ def test_order_concs_desc_single():
 
 
 def test_build_arm_grid_single_arm_descending():
-    grid = _build_arm_grid(
-        "baseline",
-        [64, 32, 16],
-        isl=512,
-        osl=512,
-        num_prompts_factor=5,
-        arm_args="",
-        arm_envs={},
-    )
+    grid = _build_arm_grid(_Arm(name="baseline"), [64, 32, 16], isl=512, osl=512, num_prompts_factor=5)
     assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
     assert grid[0].extra_envs["CONC"] == "64"
     assert grid[0].extra_envs["RUN_EVAL"] == "false"
@@ -1318,13 +1317,11 @@ def test_build_arm_grid_single_arm_descending():
 
 def test_build_arm_grid_optimized_arm_carries_args():
     grid = _build_arm_grid(
-        "optimized",
+        _Arm(name="optimized", args="--my-flag", envs={"MY_ENV": "1"}),
         [4],
         isl=1024,
         osl=512,
         num_prompts_factor=3,
-        arm_args="--my-flag",
-        arm_envs={"MY_ENV": "1"},
     )
     assert len(grid) == 1
     assert grid[0].extra_server_args == "--my-flag"
@@ -1700,47 +1697,103 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     _flush_conc_sweep_report(payload, session_dir)  # must not raise
 
 
-def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
-    """_flush_partial_conc_sweep_report writes status=in_progress."""
-    rdir = session_dir / "reports"
-    rdir.mkdir(parents=True, exist_ok=True)
-    json_path = rdir / "conc_sweep_summary.json"
-    csv_path = rdir / "conc_sweep_raw.csv"
-    state = _make_state()
-    result = _fake_variant(
-        "baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"}
-    )
-    run = _SweepRun(
-        state=state,
-        session_dir=session_dir,
-        workspace=session_dir / "ws",
-        base_yaml_path=session_dir / "base.yaml",
-        model_path="/models/m",
-        gpu_type="mi300x",
-        benchmark_script=None,
-        isl=512,
-        osl=512,
-        concs_desc=[8, 4],
-        num_prompts_factor=5,
-        opt_args="--x",
-        opt_envs={},
-        benchmark_timeout_sec=600.0,
-        session_deadline_sec=None,
-        variant_expected_sec=None,
-        deadline_stop=STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
-        started_at=0.0,
-        total_budget_sec=9000,
-        json_path=json_path,
-        csv_path=csv_path,
-        results=[result],
-    )
-    _flush_partial_conc_sweep_report(run)
-    assert json_path.exists()
-    loaded = json.loads(json_path.read_text())
-    assert loaded["status"] == "in_progress"
-    assert loaded["concs_requested"] == [8, 4]
-    assert loaded["total_budget_sec"] == 9000
-    assert [p["conc"] for p in loaded["baseline"]["points"]] == [4]
+def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
+    writes: list[dict[str, Any]] = []
+    real_flush = conc_sweep_module._flush_conc_sweep_report
+
+    def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
+        error = real_flush(payload, session_dir)
+        writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
+        return error
+
+    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    return writes
+
+
+_END_ONLY_FIELDS = {"roofline_ceiling", "was_skipped", "skip_reason"}
+
+
+def test_mid_sweep_summary_is_the_final_report_in_progress(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Every write between rungs carries the final report's fields, for the rungs measured so far."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert [write["status"] for write in progress] == ["in_progress"] * 4
+    assert final["status"] == "succeeded"
+    assert [[p["conc"] for p in write["optimized"]["points"]] for write in progress] == [
+        [16],
+        [4, 16],
+        [4, 16],
+        [4, 16],
+    ]
+    assert [[p["conc"] for p in write["baseline"]["points"]] for write in progress] == [[], [], [16], [4, 16]]
+    varying = {"status", "comparison", "summary", "elapsed_sec", "baseline", "optimized"}
+    for write in progress:
+        assert set(write) == set(final) - _END_ONLY_FIELDS
+        assert {k: v for k, v in write.items() if k not in varying} == {
+            k: v for k, v in final.items() if k not in varying | _END_ONLY_FIELDS
+        }
+    assert progress[-1]["comparison"] == final["comparison"]
+    assert final == json.loads(json.dumps(payload))
+
+
+def test_mid_sweep_summary_keeps_the_requested_conc_order(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``concs_requested`` is the caller's ladder in every write, not the order the sweep visits it in."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4]))
+
+    assert len(writes) > 1
+    assert [write["concs_requested"] for write in writes] == [[1, 8, 4]] * len(writes)
+
+
+def test_mid_sweep_summary_writes_the_remaining_budget_as_the_final_report_does(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once the budget stops the sweep, every later write names the same remaining seconds."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        stopped = _fake_variant(grid[0].name, throughput=None, status="skipped", envs=grid[0].extra_envs)
+        stopped.error_class = "budget_exhausted"
+        return [stopped]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert progress and all(write["budget_exhausted"] for write in progress)
+    assert final["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert 0.0 < final["budget_remaining_sec"] <= 9000.0
+    assert [write["budget_remaining_sec"] for write in progress] == [final["budget_remaining_sec"]] * len(progress)
+    assert payload["budget_remaining_sec"] == final["budget_remaining_sec"]
 
 
 # ───────────────────────────────────────────────────────────────────────────── Change 3: plotting
