@@ -759,7 +759,7 @@ SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
 #: Frameworks ``install_baremetal.sh --install-framework`` accepts; it exits 2 on
 #: anything else. A test asserts this stays equal to the installer's own list.
-_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
+_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 
 
 def _setup_install_command(framework: str) -> str:
@@ -1022,12 +1022,17 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
     if framework == "atom" and (not found or probe.verdict is not True):
+        remedy = (
+            "Select the existing ATOM Python and put its bin directory first on PATH, or install ATOM into it:\n"
+            f"    {_setup_install_command(framework)}"
+            if not found
+            else "Select an ATOM Python whose torch is a ROCm build and put its bin directory first on PATH."
+        )
         print(
             f"Preflight: ERROR — atom runtime check failed in python3 ({found or ', '.join(interpreters) or 'not on PATH'}). "
             "ATOM must import with a ROCm torch build (torch.version.hip) in the selected Python environment."
             f"{_probe_detail_block(probe.detail)}\n"
-            "Select the existing ATOM Python and put its bin directory first on PATH; "
-            "setup does not install ATOM.",
+            f"{remedy}",
             file=sys.stderr,
         )
         raise SystemExit(2)

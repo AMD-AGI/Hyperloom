@@ -1343,6 +1343,267 @@ def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
     assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
 
 
+_ATOM_DEV_IMAGE_COMMIT = "fe1099b15ddc52e6873e1932935f722864cdeee0"
+
+
+def _logging_python(
+    tmp_path: Path,
+    *,
+    atom_importable: bool,
+    atom_import_after_install: bool = True,
+    server_module_imports: bool = True,
+) -> Path:
+    """A python stub that records every invocation and answers the ATOM probes."""
+    log = tmp_path / "python-calls.log"
+    stub = tmp_path / "logging-python"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'printf "%s\\n" "$*" >> "{log.as_posix()}"',
+                'case "$*" in',
+                f"""  *"find_spec('atom')"*) exit {0 if atom_importable else 1} ;;""",
+                "  *find_spec*) exit 1 ;;",
+                f'  "-c import atom") exit {0 if atom_import_after_install else 1} ;;',
+                f'  "-c import atom.entrypoints.openai.api_server") exit {0 if server_module_imports else 1} ;;',
+                # ATOM's own --help crashes: its argparse help text carries an unescaped "%".
+                '  *"atom.entrypoints.openai_server --help"*) exit 1 ;;',
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_atom_installer(tmp_path: Path, python: Path, body: str) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    runner = tmp_path / "atom-runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'source "{lib.as_posix()}"',
+                f'REPO_ROOT="{tmp_path.as_posix()}"',
+                f'HYPERLOOM_CACHE_DIR="{tmp_path.as_posix()}/deps"',
+                "INSTALL_FRAMEWORK=atom",
+                "FRAMEWORK_ENV=shared",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'resolve_python() {{ printf "%s" "{python.as_posix()}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return subprocess.run(["bash", runner.as_posix()], text=True, capture_output=True)
+
+
+def test_installer_accepts_install_framework_atom():
+    """Argument parsing must not reject atom before --help is reached."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        ["bash", install_script.as_posix(), "--install-framework", "atom", "--help"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "none, sglang, vllm, atom" in res.stdout
+
+
+def test_install_requested_framework_dispatches_atom(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body="install_atom_framework() { echo ATOM_INSTALLER_CALLED; }\ninstall_requested_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM_INSTALLER_CALLED" in res.stdout
+
+
+def test_atom_install_defaults_to_the_atom_dev_image_commit(tmp_path: Path):
+    """The default ATOM source is the commit rocm/atom-dev:v0.1.7-rc0 was built from."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(tmp_path, python, "DRY_RUN=1\ninstall_atom_framework")
+
+    assert res.returncode == 0, res.stderr
+    assert f"https://github.com/ROCm/ATOM.git@{_ATOM_DEV_IMAGE_COMMIT}" in res.stdout
+    assert "AITER" in res.stdout
+
+
+def test_atom_check_only_reports_a_missing_atom_without_installing(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "CHECK_ONLY=1\n"
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP" not in res.stdout
+    assert "atom missing" in res.stderr
+
+
+def test_atom_install_puts_aiter_first_and_verifies_the_server(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    steps = [line for line in res.stdout.splitlines() if line.startswith("STEP ")]
+    assert steps == ["STEP aiter", "STEP atom-source"]
+    calls = (tmp_path / "python-calls.log").read_text(encoding="utf-8")
+    assert "-c import atom.entrypoints.openai.api_server" in calls
+
+
+def test_atom_install_does_not_depend_on_atom_help_rendering(tmp_path: Path):
+    """ATOM fe1099b15 crashes printing --help, yet its server imports and serves."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM framework install complete" in res.stdout
+
+
+def test_atom_install_fails_when_the_server_module_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, server_module_imports=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom.entrypoints.openai.api_server" in res.stderr
+
+
+def test_atom_install_fails_when_atom_still_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, atom_import_after_install=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom not importable after install" in res.stderr
+
+
+def test_atom_install_skips_the_source_build_when_atom_already_imports(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=True)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP atom-source" not in res.stdout
+
+
+def test_atom_source_install_fetches_the_pinned_commit_under_rocm_torch_constraints(tmp_path: Path):
+    """Without the constraint file pip is free to replace ROCm torch with a PyPI CUDA build."""
+    python = _logging_python(tmp_path, atom_importable=False)
+    git_log = tmp_path / "git-calls.log"
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "\n".join(
+            [
+                f'git() {{ printf "%s\\n" "$*" >> "{git_log.as_posix()}"; }}',
+                "write_rocm_torch_constraints() { printf 'torch==2.11.0\\n' > \"$2\"; }",
+                f'install_atom_from_source "{python.as_posix()}" "{tmp_path.as_posix()}/deps"',
+            ]
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    git_calls = git_log.read_text(encoding="utf-8")
+    assert f"fetch --depth 1 origin {_ATOM_DEV_IMAGE_COMMIT}" in git_calls
+    pip_calls = [
+        line
+        for line in (tmp_path / "python-calls.log").read_text(encoding="utf-8").splitlines()
+        if "pip install" in line
+    ]
+    atom_install = [line for line in pip_calls if f"{tmp_path.as_posix()}/deps/atom" in line]
+    assert atom_install, pip_calls
+    assert "--constraint" in atom_install[0]
+    assert " -e " in f" {atom_install[0]} "
+
+
+def test_atom_install_records_framework_atom_over_an_existing_sglang(tmp_path: Path):
+    """The engine the operator asked setup to install is the one downstream skills must use."""
+    dotenv = tmp_path / ".env"
+
+    res = _drive_installer(
+        tmp_path,
+        importable={"sglang", "atom"},
+        dotenv=dotenv,
+        install_framework="atom",
+        body="write_runtime_dotenv",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+def test_atom_install_rejects_an_isolated_framework_env(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", tmp_path.as_posix())
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        [
+            "bash",
+            install_script.as_posix(),
+            "--install-framework",
+            "atom",
+            "--framework-env",
+            "isolated",
+            "--dry-run",
+            "--yes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode != 0
+    assert "isolated is currently supported for vLLM only" in res.stderr
+
+
 def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
     """A re-imaged host must not keep pointing at an engine that is gone."""
     dotenv = tmp_path / ".env"

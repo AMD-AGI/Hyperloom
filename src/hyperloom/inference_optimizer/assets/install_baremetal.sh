@@ -6,10 +6,10 @@
 #
 # Runs Hyperloom directly on a host that already provides the ROCm framework
 # base (ROCm runtime + a ROCm-built torch + a serving framework). For bare-metal
-# installs, the script can optionally install SGLang or vLLM ROCm framework layers.
+# installs, the script can optionally install SGLang, vLLM or ATOM ROCm framework layers.
 #
 # Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
-# Phase 2  framework       — optional bare-metal SGLang/vLLM install
+# Phase 2  framework       — optional bare-metal SGLang/vLLM/ATOM install
 # Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 4  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
@@ -81,6 +81,10 @@ VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
 # The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
 # setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
 VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"
+# ATOM publishes no release tags. ATOM_REF is the ATOM_COMMIT build argument of
+# rocm/atom-dev:v0.1.7-rc0, the only ATOM stack docs/compatibility.rst records.
+ATOM_REPO="${ATOM_REPO:-https://github.com/ROCm/ATOM.git}"
+ATOM_REF="${ATOM_REF:-fe1099b15ddc52e6873e1932935f722864cdeee0}"
 VLLM_ROOT="${VLLM_ROOT:-/opt/hyperloom/vllm}"
 # Index publishing the TheRock ROCm SDK wheels these images are built from;
 # rocm-sdk-devel is pulled from here to supply source-build headers.
@@ -101,8 +105,8 @@ usage() {
 Usage: src/hyperloom/inference_optimizer/assets/install_baremetal.sh [options]
 
 Set up a bare-metal host with ROCm + ROCm torch for Hyperloom. Verifies the base,
-optionally installs SGLang/vLLM, resolves credentials, and writes the combined
-runtime env. Stops BEFORE launching.
+optionally installs SGLang/vLLM/ATOM, resolves credentials, and writes the
+combined runtime env. Stops BEFORE launching.
 
 Options:
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
@@ -111,7 +115,7 @@ Options:
                          sglang,vllm,atom). Phase 1 passes when at least one
                          entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
-                         Supported: none, sglang, vllm. Default: none.
+                         Supported: none, sglang, vllm, atom. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
                          isolated. Default: shared, except vLLM which defaults
                          to isolated so it never replaces the shared ROCm
@@ -141,7 +145,7 @@ SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, ROCM_SDK_INDEX_URL, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
 VLLM_INSTALL_METHOD, VLLM_REPO, VLLM_SOURCE_REF, VLLM_ROOT, VLLM_VENV_ROOT,
-HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
+ATOM_REPO, ATOM_REF, ATOM_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -155,8 +159,8 @@ while [ "$#" -gt 0 ]; do
       shift
       INSTALL_FRAMEWORK="${1:-}"
       case "$INSTALL_FRAMEWORK" in
-        none|sglang|vllm) ;;
-        *) echo "[install-baremetal] ERROR: --install-framework must be one of: none, sglang, vllm" >&2; exit 2 ;;
+        none|sglang|vllm|atom) ;;
+        *) echo "[install-baremetal] ERROR: --install-framework must be one of: none, sglang, vllm, atom" >&2; exit 2 ;;
       esac
       ;;
     --framework-env)
@@ -233,9 +237,9 @@ framework_probe_python() {
 # none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
 # — so an engine that passes preflight is always the one written to .env.
 resolve_installed_framework() {
-  if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
-    printf '%s' "$INSTALL_FRAMEWORK"; return 0
-  fi
+  case "$INSTALL_FRAMEWORK" in
+    sglang|vllm|atom) printf '%s' "$INSTALL_FRAMEWORK"; return 0 ;;
+  esac
   local py fw probe_py _rif_arr
   py="$(resolve_python)" || return 0
   IFS=',' read -r -a _rif_arr <<< "$FRAMEWORKS"
@@ -956,6 +960,80 @@ PY
   log "SGLang framework install complete (SGLANG_USE_AITER=${SGLANG_USE_AITER})"
 }
 
+# Editable, as in the rocm/atom-dev image, so framework-agent patches land in
+# the tree the server imports. The Rust atomesh build stays off (ATOM_MESH_BUILD
+# unset): the optimizer launches atom.entrypoints.openai_server, not atomesh.
+install_atom_from_source() {
+  local py="$1" deps_root="$2" atom_root constraint_file
+  atom_root="${ATOM_ROOT:-${deps_root}/atom}"
+
+  log "installing ATOM from source at ${atom_root} (ref=${ATOM_REF})"
+  if [ ! -d "${atom_root}/.git" ]; then
+    mkdir -p "$atom_root"
+    git init -q "$atom_root"
+    git -C "$atom_root" remote add origin "$ATOM_REPO"
+  fi
+  # Fetch the ref rather than `clone --branch`: ATOM_REF is a commit, which
+  # GitHub serves directly only as a full 40-char SHA.
+  git -C "$atom_root" fetch --depth 1 origin "$ATOM_REF"
+  git -C "$atom_root" checkout -q FETCH_HEAD
+
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$py" "$constraint_file"
+  "$py" -m pip install --constraint "$constraint_file" -e "$atom_root" \
+    || { rm -f "$constraint_file"; die "ATOM ${ATOM_REF} install failed under the current torch/triton constraints"; }
+  rm -f "$constraint_file"
+}
+
+# ATOM runs its kernels through AITER, so AITER goes in first, selected the same
+# way as for SGLang: the newest tag compatible with the installed torch/triton.
+install_atom_framework() {
+  local py deps_root aiter_root
+  py="$(resolve_python)" || die "no usable Python found for ATOM install"
+  deps_root="$(framework_deps_root)"
+  aiter_root="${AITER_ROOT:-${deps_root}/aiter}"
+
+  log "Phase 2: installing ATOM framework layer"
+  log "framework python: ${py}"
+  log "ATOM source: ${ATOM_REPO}@${ATOM_REF}"
+  log "AITER_ROOT=${aiter_root}"
+  if [ -n "$AITER_REF" ]; then
+    log "AITER_REF=${AITER_REF}"
+  else
+    log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
+  fi
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    _py_has "$py" atom && log "atom import OK" \
+      || warn "atom missing (check-only; would install ${ATOM_REPO}@${ATOM_REF})"
+    _py_has "$py" aiter && log "aiter import OK" \
+      || warn "aiter missing (check-only; would install ${AITER_REF:-the newest compatible tag} from ${AITER_REPO})"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install AITER ${AITER_REF:-(newest compatible tag)} from ${AITER_REPO} at ${aiter_root} with current torch/triton constraints"
+    log "would clone ${ATOM_REPO}@${ATOM_REF} at ${ATOM_ROOT:-${deps_root}/atom} and install it editable with current torch/triton constraints"
+    return 0
+  fi
+
+  ensure_aiter_for_python "$py" "$aiter_root"
+  if _py_has "$py" atom; then
+    log "atom already importable; skipping ATOM source install"
+  else
+    install_atom_from_source "$py" "$deps_root"
+  fi
+
+  "$py" -c "import aiter" >/dev/null || die "aiter not importable after install"
+  "$py" -c "import atom" >/dev/null || die "atom not importable after install"
+  # Import the server module rather than run `--help`: ATOM's argparse help
+  # text carries unescaped "%" (e.g. at fe1099b15), so rendering help raises
+  # even though the server itself starts and serves.
+  "$py" -c "import atom.entrypoints.openai.api_server" >/dev/null \
+    || die "atom.entrypoints.openai.api_server not importable after install"
+  log "ATOM framework install complete"
+}
+
 # Verify that the installed vLLM package resolves to a ROCm runtime.
 verify_vllm_rocm() {
   local py="$1"
@@ -1451,6 +1529,7 @@ install_requested_framework() {
     none) log "Phase 2: framework install skipped (--install-framework none)" ;;
     sglang) install_sglang_framework ;;
     vllm) install_vllm_framework ;;
+    atom) install_atom_framework ;;
   esac
 }
 
@@ -2609,7 +2688,7 @@ main() {
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
   esac
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "sglang" ]; then
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && { [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "atom" ]; }; then
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 

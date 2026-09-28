@@ -140,8 +140,11 @@ Both modes use the following steps in the shell where ATOM will run.
 
 ### Framework
 
-ATOM must already be installed with ROCm torch. Hyperloom does not install ATOM:
-use `--install-framework none --frameworks atom --require-frameworks` below.
+ATOM runs on the environment's ROCm torch. When ATOM is already installed, use
+`--install-framework none --frameworks atom --require-frameworks` below. On a
+baremetal environment without ATOM, setup can install it with
+`--install-framework atom` (see the setup skill); do not do this in Docker mode,
+where ATOM comes from the image.
 This example is single-node, fixes `FRAMEWORK=atom`, and lets Hyperloom detect the
 GPU rather than passing `--gpu-type`.
 
@@ -191,6 +194,16 @@ changes and obtain approval before running:
 ```bash
 "$PYTHON" -m hyperloom.inference_optimizer.setup -- \
   --install-framework none --frameworks atom --require-frameworks \
+  --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
+```
+
+If the check reports ATOM missing in a baremetal environment and the operator
+approves installing it, run setup with `atom` instead of `none`. It installs
+AITER and ATOM from source into the selected Python, keeping its ROCm torch:
+
+```bash
+"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+  --install-framework atom \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
 

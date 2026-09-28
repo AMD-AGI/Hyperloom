@@ -124,7 +124,7 @@ The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
-2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
+2. **Framework install**: optionally installs the SGLang, vLLM or ATOM framework layer.
 3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
 4. **Credentials**: resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,

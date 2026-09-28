@@ -25,6 +25,7 @@ import pytest
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ATOM_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom" / "SKILL.md"
+ATOM_FORGE_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom-forge" / "SKILL.md"
 SETUP_DOC = REPO_ROOT / "src" / "hyperloom" / "skills" / "hyperloom-setup" / "SKILL.md"
 
 # In-package docs ship in the wheel; examples/ only exists in a source checkout.
@@ -36,7 +37,7 @@ RECIPE_DOCS = (
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md",
     ATOM_DOC,
-    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom-forge" / "SKILL.md",
+    ATOM_FORGE_DOC,
 )
 CREDENTIAL_ONLY_DOC = REPO_ROOT / "docs" / "how-to" / "optimize-custom-workload.md"
 
@@ -473,6 +474,7 @@ def test_atom_recipe_provides_direct_setup_commands(tmp_path: Path, doc: Path) -
         for block in blocks
         if any("hyperloom.inference_optimizer.setup" in line for line in block)
         and not any("docker" in line for line in block)
+        and any("--install-framework none" in line for line in block)
         and (doc == ATOM_DOC or any("--frameworks atom" in line for line in block))
     ]
     assert len(setup_blocks) == 2, "direct mode needs a check-only command and a separate approved setup command"
@@ -493,6 +495,34 @@ export PYTHON=python_probe
         assert "--user-data-path /selected/data" in args
         assert ("--check-only" in args) == (key == "CHECK_ARGS")
         assert ("--yes" in args) == (key == "INSTALL_ARGS")
+
+
+@pytest.mark.parametrize("doc", [ATOM_DOC, ATOM_FORGE_DOC], ids=["atom-demo", "atom-forge-demo"])
+def test_atom_recipe_provides_an_approved_atom_install_command(tmp_path: Path, doc: Path) -> None:
+    """The baremetal install path must run with the selected Python and artifact root."""
+    blocks = _bash_blocks(doc.read_text(encoding="utf-8"))
+    install_blocks = [
+        "\n".join(block)
+        for block in blocks
+        if any("hyperloom.inference_optimizer.setup" in line for line in block)
+        and any("--install-framework atom" in line for line in block)
+    ]
+    assert len(install_blocks) == 1
+    fragment = """
+setup_args=()
+python_probe() { setup_args+=("$*"); }
+export PYTHON=python_probe
+""" + install_blocks[0]
+    fragment += '\nINSTALL_ARGS="${setup_args[0]}"'
+    result = _run_recipe(fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("INSTALL_ARGS",))
+
+    args = result["INSTALL_ARGS"]
+    assert "-m hyperloom.inference_optimizer.setup" in args
+    assert "--install-framework atom" in args
+    assert "--user-data-path /selected/data" in args
+    assert "--yes" in args
+    assert "--check-only" not in args
+    assert "docker" not in install_blocks[0]
 
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)
