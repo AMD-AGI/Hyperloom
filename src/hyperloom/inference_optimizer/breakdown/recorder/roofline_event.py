@@ -587,9 +587,9 @@ class RooflineEventRecorder:
             row_type=ROW_PROFILE_RUN,
             natural_ids=(self._action_id, str(int(run_index))),
         )
-        # An action-level rollup of the per-run flag. Roofline no longer falls back to eager on a capture failure,
+        # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
         # so this only latches when the arm or the operator override asked for graph capture to be off -- which
-        # still matters downstream, because kernel shapes differ between eager and captured execution.
+        # matters downstream, because kernel shapes differ between eager and captured execution.
         if disable_cuda_graph:
             self._record_action({"graph_capture_disabled": True})
 

@@ -748,13 +748,13 @@ def inject_sglang_attention_backend(
     )
 
 
-# sglang MoE runner backend: Hyperloom no longer forces a backend. sglang's own
-# ``--moe-runner-backend auto`` correctly follows ``SGLANG_USE_AITER`` (aiter
-# when the harness pre-shuffles MoE weights for it, triton otherwise) without
-# crashing on current sglang/ROCm images; verified end-to-end on a real MoE
-# checkpoint before this override was removed. ``moe_runner_requires_aiter``
-# below is still used to strip an *inherited* ``--moe-runner-backend`` that
-# would crash an aiter-only quant scheme (grid variants, baseline retries).
+# sglang MoE runner backend: Hyperloom forces none. sglang's own
+# ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
+# harness pre-shuffles MoE weights for it, triton otherwise) on current
+# sglang/ROCm images, verified end-to-end on a real MoE checkpoint.
+# ``moe_runner_requires_aiter`` below strips an *inherited*
+# ``--moe-runner-backend`` that would crash an aiter-only quant scheme (grid
+# variants, baseline retries).
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.

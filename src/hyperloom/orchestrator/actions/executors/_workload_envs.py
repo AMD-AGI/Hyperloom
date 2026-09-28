@@ -1132,11 +1132,10 @@ def _finalize_framework_server_args(
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
     )
-    # 4. MoE runner backend: no longer forced. sglang's own
-    #    ``--moe-runner-backend auto`` (the default) correctly follows
-    #    SGLANG_USE_AITER without crashing on current sglang/ROCm images, so
-    #    Hyperloom leaves the choice to sglang. A baseline retry can still ask
-    #    to strip an inherited/pinned flag that crashed the server.
+    # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
+    #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
+    #    A baseline retry can still ask to strip an inherited/pinned flag that
+    #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
         resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
     resolved_server_args = inject_vllm_expert_parallel(
@@ -1584,9 +1583,8 @@ def materialize_config_with_envs(
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
-        # "never tried because the image already carries it", and those two call for different reactions when a
-        # trace later turns up without annotations.
+        # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
+        # already carries it" call for different reactions when a trace later turns up without annotations.
         envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
         if patch_attempted:
             if "vllm" in fw:
@@ -1804,8 +1802,8 @@ def materialize_config_with_envs(
                 # than relying on duplicate last-wins flags.
                 existing = _remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
-    # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
-    # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
+    # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
+    # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
     if extra_envs:
         combined_extra.update(extra_envs)

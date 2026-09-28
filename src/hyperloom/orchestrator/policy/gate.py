@@ -953,8 +953,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: When ``action_name`` is the GEMM tuning action.
         """
-        # Called unconditionally for every action, so it must answer only for
-        # its own; it used to never raise, which hid that.
+        # Called unconditionally for every action, so it answers only for its own.
         if action_name != GEMM_TUNING_ACTION_NAME:
             return
         raise PolicyDenied(

@@ -3497,9 +3497,9 @@ async def _run_forge_gemm_tuning(
             result["skip_reason"] = reason
 
     # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision, but this array was previously dropped
-    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
-    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
+    # regardless of the overall decision; dropped here, a dense tuner winning
+    # would hide a MoE tuner's crash, and a KEEP would read as "no headroom
+    # elsewhere" when siblings had in fact hard-failed.
     # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
     # keep it on the envelope for the trace row / breakdown, and log it so the
     # failure is never silent even when the session is kept.

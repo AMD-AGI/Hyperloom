@@ -422,7 +422,7 @@ class IntentRouter:
 
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
+            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
             # specialist moves.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"

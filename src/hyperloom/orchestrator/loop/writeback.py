@@ -320,10 +320,10 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
     return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
-#: The one owner label a patch KEEP stages under. Explore- and framework-agent
-#: lifts used to route to two separate columns; the three-column layout has a
-#: single ``patch`` column, so both collapse to this marker. Attribution keeps
-#: its own explore/framework split on the lever kind -- that is unaffected.
+#: The one owner label a patch KEEP stages under. The three-column layout has a
+#: single ``patch`` column, so explore- and framework-agent lifts both stage
+#: under this marker. Attribution keeps its own explore/framework split on the
+#: lever kind.
 _PATCH_KEEP_OWNER = "PATCH"
 
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through
@@ -5455,9 +5455,9 @@ class WritebackCollaborator:
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
         # (0) Interrupted stack unwind: its members are still applied to the
-        # framework tree. SWEEP entry is where this used to be retried, so
-        # everything a resumed leg benchmarked before reaching SWEEP measured
-        # the patched tree -- the failure the halt exists to prevent.
+        # framework tree. Retried here, before a resumed leg benchmarks
+        # anything: a measurement taken first would measure the patched tree --
+        # the failure the halt exists to prevent.
         await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything

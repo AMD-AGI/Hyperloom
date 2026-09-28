@@ -5050,8 +5050,8 @@ def _resolve_trace_launchers(
             file_errors=file_errors,
         )
         if file_errors:
-            # A per-file failure previously surfaced only as "0 resolved",
-            # which reads the same as "no candidate needed a launcher".
+            # Named, because "0 resolved" alone reads the same as "no
+            # candidate needed a launcher".
             reason = f"trace_resolver_error: {'; '.join(file_errors[:2])}"
             log.warning("trace launcher tier hit %d unreadable file(s)", len(file_errors))
             for item in candidates:

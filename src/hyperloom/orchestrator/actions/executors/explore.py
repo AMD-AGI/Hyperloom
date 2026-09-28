@@ -1516,9 +1516,9 @@ class ExploreExecutor:
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
         status = "succeeded" if produced_measurement or winners else "failed"
-        # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and
-        # it used to be reported as a bare ``failed`` with no error_class at all -- nothing downstream could tell the
-        # two apart, so the KB could learn that these variants are bad.
+        # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
+        # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
+        # these variants are bad.
         budget_error: dict[str, Any] = {}
         if status == "failed" and run_stop is not None:
             budget_error = {

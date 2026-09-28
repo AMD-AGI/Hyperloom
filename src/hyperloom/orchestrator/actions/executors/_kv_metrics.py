@@ -738,10 +738,10 @@ def port_from_server_command(workspace: Any) -> int | None:
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
-    A ``PORT`` in the caller's env, then in the ambient env, is an operator pin and wins. Otherwise the round's
-    materialized ``benchmark.envs.PORT`` -- an ephemeral port assigned per session, never exported into the
-    subprocess env -- then the port the server logged at bind. The default is a last resort that is only ever right by
-    coincidence.
+    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
+    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
+    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
+    env, and the default last, which is only ever right by coincidence.
     """
     port = _port_value((config_envs or {}).get("PORT"))
     if port is not None:

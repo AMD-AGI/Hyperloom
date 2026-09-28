@@ -502,8 +502,6 @@ class ConversationCollaborator:
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
 
-        # NOTE: there is deliberately no "=== Specialist health ===" block.
-
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
