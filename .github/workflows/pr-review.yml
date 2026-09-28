@@ -1,0 +1,263 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: PR Review
+
+# Runs the review-pr skill (.claude/skills/review-pr) when the PR author or a repository member
+# comments `/review` on a same-repository PR. Publishing is done by .github/scripts/pr-review-publish.sh:
+# blocking issues become a request-changes review; a clean card dismisses the bot's earlier
+# request-changes reviews and is posted as an LGTM comment. The bot never approves or merges.
+#
+# The review job holds a read-only token; only the gate and publish jobs can write to the PR.
+#
+# Secret:    PR_REVIEW_ANTHROPIC_API_KEY
+# Variables: PR_REVIEW_ANTHROPIC_BASE_URL, PR_REVIEW_MODEL, PR_REVIEW_CLAUDE_CLI_VERSION,
+#            PR_REVIEW_RUNNER_LABEL (optional, defaults to ubuntu-latest)
+
+on:
+  issue_comment:
+    types: [created]
+  # TEMP: runs the workflow from its development branch; remove before merge.
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+# Ordinary comments get a per-run group so they never queue behind or replace a pending review.
+concurrency:
+  group: >-
+    pr-review-${{
+      (github.event_name == 'pull_request' || startsWith(github.event.comment.body, '/review'))
+      && format('pr-{0}', github.event.issue.number || github.event.pull_request.number)
+      || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: >-
+      (github.event_name == 'pull_request' && github.head_ref == 'ci/pr-review-bot')
+      || (github.event_name == 'issue_comment' && github.event.issue.pull_request
+          && startsWith(github.event.comment.body, '/review'))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      pr: ${{ steps.check.outputs.pr }}
+      head: ${{ steps.check.outputs.head }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          BODY: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          set -euo pipefail
+          refuse() {
+            gh pr comment "$PR" --repo "$REPO" --body "Automated review not started: $1"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$EVENT" = issue_comment ]; then
+            first_line=${BODY%%$'\n'*}
+            if ! [[ "$first_line" =~ ^/review[[:space:]]*$ ]]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
+          fi
+          meta=$(gh pr view "$PR" --repo "$REPO" --json state,isCrossRepository,headRefOid,author \
+            --jq '[.state, .isCrossRepository, .headRefOid, .author.login] | @tsv')
+          IFS=$'\t' read -r state cross head author <<< "$meta"
+          if [ "$EVENT" = issue_comment ]; then
+            case "$ASSOCIATION" in
+              OWNER | MEMBER | COLLABORATOR) ;;
+              *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
+            esac
+          fi
+          [ "$state" = OPEN ] || refuse "the PR is ${state}."
+          [ "$cross" = false ] || refuse "pull requests from forks are not supported."
+          {
+            echo "proceed=true"
+            echo "pr=$PR"
+            echo "head=$head"
+          } >> "$GITHUB_OUTPUT"
+      - if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body "Automated review failed to start. Run: ${RUN_URL}"
+
+  # TEMP: exercises request-changes, dismissal and LGTM with fixed cards; remove before merge.
+  publish-selftest:
+    needs: gate
+    if: github.event_name == 'pull_request' && needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ needs.gate.outputs.pr }}
+      REVIEWED_SHA: ${{ needs.gate.outputs.head }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      REVIEW_RESULT: success
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          decision() {
+            gh pr view "$PR" --repo "$REPO" --json reviewDecision,mergeStateStatus \
+              --jq '"\(.reviewDecision) \(.mergeStateStatus)"'
+          }
+          export CARD="$RUNNER_TEMP/card.md"
+          printf '%s\n' "## PR #$PR -- publish self-test" "" "What it does: synthetic card." "" \
+            "Blocking issues: 1" "" "1. [free:selftest] Synthetic blocking finding [verified]" \
+            "   Problem: synthetic .github/scripts/pr-review-publish.sh:1" "   Impact: none" \
+            "   Action: none" "" "Checked: - | Ran: - | Base: - | Head: $REVIEWED_SHA" > "$CARD"
+          bash .github/scripts/pr-review-publish.sh
+          after_block=$(decision)
+          echo "after request-changes: $after_block"
+          printf '%s\n' "## PR #$PR -- publish self-test" "" "What it does: synthetic card." "" \
+            "Blocking issues: none" "" "Checked: - | Ran: - | Base: - | Head: $REVIEWED_SHA" > "$CARD"
+          bash .github/scripts/pr-review-publish.sh
+          after_clean=$(decision)
+          echo "after clean: $after_clean"
+          [[ "$after_block" == CHANGES_REQUESTED* ]] || { echo "::error::request-changes did not set CHANGES_REQUESTED"; exit 1; }
+          [[ "$after_clean" != CHANGES_REQUESTED* ]] || { echo "::error::dismissal did not clear CHANGES_REQUESTED"; exit 1; }
+
+  review:
+    needs: [gate, publish-selftest]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true'
+      && (needs.publish-selftest.result == 'success' || needs.publish-selftest.result == 'skipped')
+    runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      statuses: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HL_REPO: ${{ github.repository }}
+      PR: ${{ needs.gate.outputs.pr }}
+      HEAD_SHA: ${{ needs.gate.outputs.head }}
+      WORK: ${{ github.workspace }}/review-work
+      ANTHROPIC_BASE_URL: ${{ vars.PR_REVIEW_ANTHROPIC_BASE_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.PR_REVIEW_ANTHROPIC_API_KEY }}
+      PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
+      CLI_VERSION: ${{ vars.PR_REVIEW_CLAUDE_CLI_VERSION }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.head }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Check configuration and LLM proxy
+        run: |
+          set -euo pipefail
+          for name in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY PR_REVIEW_MODEL CLI_VERSION; do
+            [ -n "${!name}" ] || { echo "::error::$name is empty; set the PR_REVIEW_* secret/variables"; exit 1; }
+          done
+          payload=$(jq -nc --arg m "$PR_REVIEW_MODEL" \
+            '{model: $m, max_tokens: 8, messages: [{role: "user", content: "ping"}]}')
+          code=$(curl -sS -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' --max-time 60 \
+            "$ANTHROPIC_BASE_URL/v1/messages" -H 'content-type: application/json' \
+            -H 'anthropic-version: 2023-06-01' -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "Ocp-Apim-Subscription-Key: $ANTHROPIC_API_KEY" -d "$payload") \
+            || { echo "::error::cannot reach $ANTHROPIC_BASE_URL from this runner"; exit 1; }
+          [ "$code" = 200 ] || { echo "::error::LLM proxy returned HTTP $code"; cat "$RUNNER_TEMP/probe.json"; exit 1; }
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${CLI_VERSION}"
+
+      - name: Run review-pr skill
+        run: |
+          set -euo pipefail
+          export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
+          export ANTHROPIC_MODEL="$PR_REVIEW_MODEL"
+          export ANTHROPIC_DEFAULT_OPUS_MODEL="$PR_REVIEW_MODEL"
+          export ANTHROPIC_DEFAULT_SONNET_MODEL="$PR_REVIEW_MODEL"
+          export ANTHROPIC_DEFAULT_HAIKU_MODEL="$PR_REVIEW_MODEL"
+          export CLAUDE_CODE_SUBAGENT_MODEL="$PR_REVIEW_MODEL"
+          export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1
+          mkdir -p "$WORK"
+          prompt=$(cat <<EOF
+          Review pull request #${PR} of ${HL_REPO} with the review-pr skill: read
+          .claude/skills/review-pr/SKILL.md and follow it top to bottom, with these overrides for this CI run.
+
+          - Step 1: run \`bash .claude/skills/review-pr/fetch.sh ${PR} ${WORK}\`. \$WORK is ${WORK}.
+          - The repository root is the base branch. The PR head tree (commit ${HEAD_SHA}) is checked out
+            at pr-head/; every head-tree read or grep the skill asks for targets pr-head/.
+          - Do not run any code from either tree other than fetch.sh: no python, pytest, pip, make or
+            scripts. Where a step asks you to reproduce by running code, apply the SKIPPED protocol.
+          - Step 7's independent reader is a Task sub-agent given only card.md, diff.txt and base.txt.
+          - Do not publish. Your last action is writing the final card to ${WORK}/card.md; the workflow
+            publishes it.
+          - card.md is exactly the card contract, in English, with no LGTM line. The verdict line reads
+            exactly \`Blocking issues: none\` or \`Blocking issues: N\` with N from 1 to 5: on its own
+            line, no markdown emphasis, no heading, nothing after it. Numbered findings start at column
+            0 as \`1. [\`, \`2. [\`. The final line carries \`Head: ${HEAD_SHA}\` with the full sha.
+          EOF
+          )
+          tools=(Read Grep Glob Write Edit Task TodoWrite
+            "Bash(bash .claude/skills/review-pr/fetch.sh *)" "Bash(gh *)" "Bash(git *)" "Bash(rg *)"
+            "Bash(grep *)" "Bash(cat *)" "Bash(head *)" "Bash(tail *)" "Bash(wc *)" "Bash(ls *)"
+            "Bash(sort *)" "Bash(uniq *)" "Bash(diff *)" "Bash(jq *)")
+          claude -p "$prompt" --model "$PR_REVIEW_MODEL" --permission-mode dontAsk \
+            --allowedTools "${tools[@]}"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: review-work
+          path: review-work/
+          if-no-files-found: ignore
+
+  publish:
+    needs: [gate, review]
+    if: always() && needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v8
+        if: needs.review.result == 'success'
+        continue-on-error: true
+        with:
+          name: review-work
+          path: review-work
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.gate.outputs.pr }}
+          REVIEWED_SHA: ${{ needs.gate.outputs.head }}
+          CARD: review-work/card.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+        run: bash .github/scripts/pr-review-publish.sh
