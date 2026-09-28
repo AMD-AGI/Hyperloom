@@ -702,14 +702,53 @@ def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
     assert "e2e_norm_intvty_p50" not in md
 
 
-def test_an_axis_no_verdict_reads_does_not_make_a_round_agentx_graded() -> None:
-    """``total_throughput`` is filled for any benchmark, so counting it would head the block over a
-    session that was never graded on an AgentX axis."""
+def test_only_the_interactivity_pair_marks_a_round_agentx_graded() -> None:
+    """Every other published axis is filled for an ordinary measurement too.
+
+    ``_merge_raw_result`` fills duration from raw ``duration``, the latency percentiles from ``median_ttft_ms`` and
+    friends, and the error rate whenever the raw result has it, none of them gated on the workload;
+    ``_promote_baseline`` stamps per-GPU output unconditionally. Only the interactivity pair has a single producer,
+    ``agentx/mapping.py``, so only it proves the agentic mapper ran.
+    """
     from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import has_graded_axes
 
-    assert not has_graded_axes({"total_throughput": 26500.0, "input_throughput": 24296.0})
+    for key, value in (
+        ("total_throughput", 26500.0),
+        ("input_throughput", 24296.0),
+        ("output_tput_per_gpu", 275.6),
+        ("duration_seconds", 3600.0),
+        ("request_error_rate", 0.0),
+        ("ttft_p50_ms", 110.0),
+        ("ttft_p90_ms", 240.0),
+        ("tpot_p50_ms", 18.0),
+        ("tpot_p90_ms", 34.0),
+    ):
+        assert not has_graded_axes({key: value}), f"{key} is measured off AgentX too and cannot gate the block"
     assert has_graded_axes({"e2e_norm_intvty_p50": 41.8})
-    assert has_graded_axes({"request_error_rate": 0.0}), "a comparability input is one the verdict reads"
+    assert has_graded_axes({"e2e_norm_intvty_p90": 22.4})
+
+
+def test_a_synthetic_round_that_reports_a_duration_heads_no_agentx_section() -> None:
+    """The reported trigger: an ordinary SGLang round whose report carries a duration, a median TTFT and a zero
+    error rate, and which never measured interactivity, must not be headed as AgentX-graded."""
+    b = _fixture_breakdown()
+    synthetic_perf = {
+        "e2e_norm_intvty_p50": None,
+        "e2e_norm_intvty_p90": None,
+        "duration_seconds": 3600.0,
+        "ttft_p50_ms": 110.0,
+        "tpot_p50_ms": 18.0,
+        "request_error_rate": 0.0,
+        "total_throughput": 26500.0,
+    }
+    b["outcome"]["baseline"]["perf"] = dict(synthetic_perf)
+    b["outcome"]["validation"]["perf"] = dict(synthetic_perf)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(synthetic_perf)
+
+    md = render_session_report(b).markdown
+
+    assert "throughput_tok_s_per_gpu" in md
+    assert "AgentX graded axes" not in md
 
 
 def test_a_non_finite_axis_reads_the_same_in_the_facts_as_in_the_table() -> None:
