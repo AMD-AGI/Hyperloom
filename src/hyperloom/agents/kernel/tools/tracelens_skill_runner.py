@@ -156,6 +156,59 @@ def _tool_call_transition(message: Any) -> str | None:
     return transition
 
 
+# For SDK builds that do not export TERMINAL_TASK_STATUSES.
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed", "cancelled"})
+
+
+def _terminal_task_statuses() -> frozenset[str]:
+    try:
+        from claude_agent_sdk import TERMINAL_TASK_STATUSES  # type: ignore[import-not-found]
+    except ImportError:
+        return _TERMINAL_TASK_STATUSES
+    return frozenset(str(s) for s in TERMINAL_TASK_STATUSES)
+
+
+class _InFlight:
+    """Whether the run is waiting on work that emits no SDK message until it ends.
+
+    That is a foreground tool call, or a background task (an async sub-agent)
+    whose launching tool call already returned. A background task is tracked by
+    id from ``TaskStartedMessage`` until a ``TaskNotificationMessage`` or a
+    ``TaskUpdatedMessage`` with a terminal status, which is how the SDK says
+    active task ids must be cleared.
+    """
+
+    def __init__(self) -> None:
+        self.tool = False
+        self.tasks: set[str] = set()
+
+    @property
+    def busy(self) -> bool:
+        return self.tool or bool(self.tasks)
+
+    def observe(self, message: Any) -> None:
+        transition = _tool_call_transition(message)
+        if transition == "start":
+            self.tool = True
+        elif transition == "end":
+            self.tool = False
+        name = type(message).__name__
+        task_id = str(getattr(message, "task_id", "") or "")
+        if name == "ResultMessage":
+            self.tasks.clear()
+        elif not task_id:
+            return
+        elif name == "TaskStartedMessage":
+            self.tasks.add(task_id)
+        elif name == "TaskNotificationMessage":
+            self.tasks.discard(task_id)
+        elif name == "TaskUpdatedMessage":
+            patch = getattr(message, "patch", None)
+            status = patch.get("status") if isinstance(patch, dict) else getattr(patch, "status", None)
+            if str(status or getattr(message, "status", "") or "") in _terminal_task_statuses():
+                self.tasks.discard(task_id)
+
+
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
 
@@ -674,12 +727,12 @@ async def run_tracelens_skill(
     # SDK has no client-side read timeout and would otherwise block on a stall.
     idle_timeout = _resolve_stream_idle_timeout_sec()
     tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
-    tool_in_flight = False
+    in_flight = _InFlight()
     stream = sdk_query_factory(prompt=prompt, options=options)
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
         while True:
-            wait_for = tool_idle_timeout if tool_in_flight else idle_timeout
+            wait_for = tool_idle_timeout if in_flight.busy else idle_timeout
             try:
                 if wait_for > 0:
                     message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
@@ -692,7 +745,12 @@ async def run_tracelens_skill(
                 # down so its transport/subprocess does not leak. Name the phase —
                 # silence during a tool call means the tool overran its bound, not
                 # that the gateway died.
-                phase = "while a tool call was in flight" if tool_in_flight else "with no tool call in flight"
+                if in_flight.tool:
+                    phase = "while a tool call was in flight"
+                elif in_flight.tasks:
+                    phase = f"while {len(in_flight.tasks)} background task(s) were running"
+                else:
+                    phase = "with no tool call in flight"
                 sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
                 if log:
                     log(f"[claude-sdk] WARNING: {sdk_error}")
@@ -703,11 +761,7 @@ async def run_tracelens_skill(
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
                         pass
                 break
-            transition = _tool_call_transition(message)
-            if transition == "start":
-                tool_in_flight = True
-            elif transition == "end":
-                tool_in_flight = False
+            in_flight.observe(message)
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
