@@ -4244,10 +4244,7 @@ class IntegratePatchExecutor:
         try:
             from ...source_snapshot import snapshot_source_layer
 
-            base_sha = ""
-            _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-            if _cp is not None and getattr(_cp, "returncode", 1) == 0:
-                base_sha = (_cp.stdout or "").strip()
+            base_sha = _git_head_sha(framework_root)
             dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
             snap = snapshot_source_layer(
                 framework_root=framework_root,
@@ -4582,9 +4579,7 @@ class IntegratePatchExecutor:
             from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
             if framework_root is not None:
-                _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
-                if _cp is not None and getattr(_cp, "returncode", 1) == 0:
-                    source_base_sha = (_cp.stdout or "").strip()
+                source_base_sha = _git_head_sha(framework_root)
                 upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
                 declared_ops = {r: "upsert" for r in upserted_patch}
                 declared_ops.update({r: "delete" for r in deleted_patch})
