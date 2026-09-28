@@ -130,6 +130,26 @@ def test_list_form_args_are_space_joined_not_repr(value, expected):
     assert normalize_proposal({"extra_args": value})["extra_args"] == expected
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ({"--kv-cache-dtype": "fp8_e4m3"}, "--kv-cache-dtype fp8_e4m3"),
+        ({"--mem-fraction-static": 0.9, "--max-running-requests": 128}, "--mem-fraction-static 0.9 --max-running-requests 128"),
+        ({"--enable-mixed-chunk": True, "--disable-radix-cache": False}, "--enable-mixed-chunk"),
+        ({"--served-model-name": "a b"}, "--served-model-name 'a b'"),
+    ],
+)
+def test_mapping_form_args_render_as_flags_not_repr(value, expected):
+    assert normalize_proposal({"extra_args": value})["extra_args"] == expected
+
+
+def test_mapping_form_args_pass_the_grid_argv_gate():
+    from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+
+    args = normalize_proposal({"extra_args": {"--kv-cache-dtype": "fp8_e4m3"}})["extra_args"]
+    assert validate_server_args_shell_safe(args) == args
+
+
 def test_the_queue_and_the_grid_parser_agree_on_a_list_form_variant():
     from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
 

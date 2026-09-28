@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_str_list
@@ -22,9 +23,23 @@ __all__ = [
 
 
 def coerce_args(value: Any) -> str:
-    """Coerce a payload ``extra_args`` / ``extra_server_args`` value to a shell-arg string."""
+    """Coerce a payload ``extra_args`` / ``extra_server_args`` value to a shell-arg string.
+
+    A mapping is read as flag -> value: ``True`` (or an empty value) is a bare
+    flag and ``False`` drops it.
+    """
     if isinstance(value, (list, tuple)):
         return " ".join(str(v).strip() for v in value if str(v).strip())
+    if isinstance(value, Mapping):
+        parts: list[str] = []
+        for flag, flag_value in value.items():
+            name = str(flag).strip()
+            if not name or flag_value is False:
+                continue
+            parts.append(name)
+            if flag_value is not True and str(flag_value if flag_value is not None else "").strip():
+                parts.append(shlex.quote(str(flag_value).strip()))
+        return " ".join(parts)
     return str(value or "").strip()
 
 
