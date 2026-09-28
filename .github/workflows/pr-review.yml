@@ -12,7 +12,8 @@ name: PR Review
 #
 # Secret:    PR_REVIEW_ANTHROPIC_API_KEY
 # Variables: PR_REVIEW_ANTHROPIC_BASE_URL, PR_REVIEW_MODEL, PR_REVIEW_CLAUDE_CLI_VERSION,
-#            PR_REVIEW_RUNNER_LABEL (optional, defaults to ubuntu-latest)
+#            PR_REVIEW_RUNNER_LABEL (optional, defaults to ubuntu-latest),
+#            PR_REVIEW_INSECURE (optional, 1 skips TLS verification of the LLM proxy)
 
 on:
   issue_comment:
@@ -162,6 +163,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.PR_REVIEW_ANTHROPIC_API_KEY }}
       PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
       CLI_VERSION: ${{ vars.PR_REVIEW_CLAUDE_CLI_VERSION }}
+      INSECURE: ${{ vars.PR_REVIEW_INSECURE }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -192,9 +194,13 @@ jobs:
           for name in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY PR_REVIEW_MODEL CLI_VERSION; do
             [ -n "${!name}" ] || { echo "::error::$name is empty; set the PR_REVIEW_* secret/variables"; exit 1; }
           done
+          tls_args=()
+          if [ "$INSECURE" = 1 ]; then
+            tls_args=(-k)
+          fi
           payload=$(jq -nc --arg m "$PR_REVIEW_MODEL" \
             '{model: $m, max_tokens: 8, messages: [{role: "user", content: "ping"}]}')
-          code=$(curl -sS -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' --max-time 60 \
+          code=$(curl -sS "${tls_args[@]}" -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' --max-time 60 \
             "$ANTHROPIC_BASE_URL/v1/messages" -H 'content-type: application/json' \
             -H 'anthropic-version: 2023-06-01' -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "Ocp-Apim-Subscription-Key: $ANTHROPIC_API_KEY" -d "$payload") \
@@ -214,6 +220,9 @@ jobs:
           export ANTHROPIC_DEFAULT_HAIKU_MODEL="$PR_REVIEW_MODEL"
           export CLAUDE_CODE_SUBAGENT_MODEL="$PR_REVIEW_MODEL"
           export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1
+          if [ "$INSECURE" = 1 ]; then
+            export NODE_TLS_REJECT_UNAUTHORIZED=0
+          fi
           mkdir -p "$WORK"
           prompt=$(cat <<EOF
           Review pull request #${PR} of ${HL_REPO} with the review-pr skill: read
