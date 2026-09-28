@@ -1,6 +1,6 @@
 ---
 name: hyperloom-qwen3-14b-fp8-12h-atom
-description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM in an existing development environment or Docker, with KernelForge by default.
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM in an existing development environment or Docker.
 ---
 
 # Hyperloom Qwen3-14B-FP8 12h Run (ATOM Framework)
@@ -143,20 +143,13 @@ For additional serving settings, use the optimizer's `--server-args` option.
 Do not launch a separate server or export `EXTRA_ATOM_ARGS`: Hyperloom materializes
 that transport variable. Keep the initial configuration untuned; do not copy
 another GPU's block/KV settings or the final settings of a previous optimization.
+Persist `FRAMEWORK=atom` in `.env` only when requested.
 
-### Kernel Backend
-
-Preserve an explicit `KERNEL_OPT_BACKEND_ORDER` from the caller or `.env`.
-Otherwise leave it unset/empty so the ATOM CLI defaults to `forge`. Exact
-`forge` opts in; other non-empty values, including `forge,geak`, route to
-GEAK. Report
-GEAK's unproven ATOM rewrite-seam support and obtain the operator's choice before
-continuing; do not silently clear or replace it. There is no backend CLI flag.
-
-Forge is included in Hyperloom; do not clone it or set `FORGE_PATH`. Preserve the
-selected agent provider and `FORGE_AGENT_CLI`; the runtime installer prepares
-and checks that CLI. Persist `FRAMEWORK=atom` in `.env` only when
-requested, and never add a backend key merely to reproduce the CLI default.
+The KERNEL_AGENT phase runs GEAK, the same backend every other framework gets
+when the operator names none. Preserve an explicit `KERNEL_OPT_BACKEND_ORDER`
+from the caller or `.env` rather than clearing it; for the per-kernel KernelForge
+backend use the [12h ATOM forge
+example](../hyperloom-qwen3-14b-fp8-12h-atom-forge/SKILL.md).
 
 ### Selected Python and Setup
 
@@ -300,9 +293,9 @@ grep -o '"framework": *"[^"]*"' "$SESSION_DIR/state.json"
 grep -o '"kernel_optimizer": *"[^"]*"' "$SESSION_DIR/state.json"
 ```
 
-Expect `atom` and the approved backend (`forge` by default). Report mismatches
-without silently replacing the session. On requested checks report process state,
-phase, accepted throughput/gain and the latest business outcome, not just heartbeats.
+Expect `atom` and `geak`. Report mismatches without silently replacing the
+session. On requested checks report process state, phase, accepted
+throughput/gain and the latest business outcome, not just heartbeats.
 
 At completion, report final throughput/gain and accuracy evidence, the final
 report path, stop reason, incomplete phases, and this session's process/GPU state.
