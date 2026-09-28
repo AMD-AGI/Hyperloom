@@ -51,6 +51,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,7 @@ __all__ = [
     "find_server_metrics_export",
     "parse_prometheus_text",
     "read_aiperf_server_metrics",
+    "resolve_metrics_url",
     "resolve_metrics_port",
     "sample_from_families",
 ]
@@ -680,6 +682,28 @@ def port_from_workspace(workspace: Any) -> int | None:
     return None
 
 
+def port_from_server_command(workspace: Any) -> int | None:
+    """Read ``--port`` from the command that launched the serving process.
+
+    AgentX vLLM rounds do not pin ``benchmark.envs.PORT`` and the Rust frontend
+    does not emit the Python API server's bind banner.  The materialized command
+    is therefore the only durable authority for those rounds.
+    """
+    try:
+        root = Path(workspace)
+        for pattern in ("vllm_command.txt", "*/vllm_command.txt"):
+            for candidate in sorted(root.glob(pattern)):
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
+                if match:
+                    port = _port_value(match.group(1))
+                    if port is not None:
+                        return port
+    except OSError:
+        return None
+    return None
+
+
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
@@ -687,16 +711,32 @@ def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: A
     session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
     paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
     """
-    for source in (config_envs or {}, os.environ):
-        port = _port_value(source.get("PORT"))
-        if port is not None:
-            return port
+    port = _port_value((config_envs or {}).get("PORT"))
+    if port is not None:
+        return port
     if workspace is not None:
-        for probe in (port_from_workspace, port_from_server_log):
+        for probe in (port_from_workspace, port_from_server_command, port_from_server_log):
             port = probe(workspace)
             if port is not None:
                 return port
+    port = _port_value(os.environ.get("PORT"))
+    if port is not None:
+        return port
     return DEFAULT_METRICS_PORT
+
+
+def resolve_metrics_url(config_envs: dict[str, Any] | None = None) -> str | None:
+    """Resolve a remote serving endpoint to its Prometheus metrics URL."""
+    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or os.environ.get("BENCHMARK_BASE_URL") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/metrics", "", ""))
 
 
 class KvMetricsPoller:
@@ -728,6 +768,7 @@ class KvMetricsPoller:
         """
         self._explicit_port = int(port) if port else None
         self._config_envs = dict(config_envs or {})
+        self._remote_url = resolve_metrics_url(self._config_envs)
         self._host = host
         self._port_workspace = workspace
         self._port: int | None = None
@@ -748,6 +789,8 @@ class KvMetricsPoller:
     @property
     def url(self) -> str:
         """Endpoint this poller scrapes."""
+        if self._explicit_port is None and self._remote_url is not None:
+            return self._remote_url
         return f"http://{self._host}:{self.port}/metrics"
 
     @property

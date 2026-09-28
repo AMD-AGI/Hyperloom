@@ -999,6 +999,28 @@ def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     assert resolve_metrics_port({}, tmp_path) == 8000
 
 
+def test_agentx_rust_frontend_port_is_read_from_vllm_command(tmp_path):
+    """Rust frontend logs omit the API bind URL, but the launch command is exact."""
+    nested = tmp_path / "benchmark_vllm_1"
+    nested.mkdir()
+    (nested / "vllm_command.txt").write_text(
+        "vllm serve /models/x --host 0.0.0.0 --port 8000 --tensor-parallel-size 4\n",
+        encoding="utf-8",
+    )
+    (nested / "server.log").write_text(
+        "Launching Rust frontend: vllm-rs frontend --listen-fd 3\n",
+        encoding="utf-8",
+    )
+
+    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+        port_from_server_command,
+        resolve_metrics_port,
+    )
+
+    assert port_from_server_command(tmp_path) == 8000
+    assert resolve_metrics_port({}, tmp_path) == 8000
+
+
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
@@ -1205,6 +1227,25 @@ def test_explicit_env_still_outranks_the_config(tmp_path):
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
     assert resolve_metrics_port({"PORT": "9001"}, tmp_path) == 9001
+
+
+def test_ambient_port_does_not_outrank_round_config(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+
+    monkeypatch.setenv("PORT", "9999")
+    (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
+
+    assert resolve_metrics_port({}, tmp_path) == 34407
+
+
+def test_remote_benchmark_base_url_selects_remote_metrics_endpoint():
+    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+
+    poller = KvMetricsPoller(
+        config_envs={"BENCHMARK_BASE_URL": "http://head-pod:8000/v1"}
+    )
+
+    assert poller.url == "http://head-pod:8000/metrics"
 
 
 def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
