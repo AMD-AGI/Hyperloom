@@ -63,7 +63,10 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
 - **SGLang DSpark**: `--speculative-dspark-block-size` (gamma) — this is the
   golden-table key. `--speculative-num-draft-tokens` is the verify window
   (gamma + 1) and is **not** the lookup key for DSpark curves.
-- **SGLang MTP/EAGLE**: `--speculative-num-draft-tokens` (or equivalent).
+- **SGLang MTP/EAGLE**: `--speculative-num-steps` (the draft length, same as
+  vLLM's `num_speculative_tokens`). With `--speculative-eagle-topk 1`,
+  `--speculative-num-draft-tokens` is `num_steps + 1` and is **not** the
+  lookup key.
 - **vLLM**: `num_speculative_tokens` inside `--speculative-config` JSON, and any
   switch of `method` (eagle3 / mtp / dspark) — golden AL is keyed on method as
   well as model, so a method change invalidates the previously matched row.
@@ -74,7 +77,8 @@ model's golden AL curve (if one exists per the lookup above):
 
 1. Note the draft length the config uses. **Method matters for which knob is the
    key:** DSpark → gamma / block-size (not `--speculative-num-draft-tokens`);
-   MTP / EAGLE / EAGLE3 → `num_speculative_tokens` / draft-token count.
+   MTP / EAGLE / EAGLE3 → vLLM `num_speculative_tokens` / SGLang
+   `--speculative-num-steps` (not `--speculative-num-draft-tokens`).
 2. Look up golden AL for that exact `(model, method, draft length, thinking
    mode)` cell (e.g. `dsv4-pro-0813-dspark.yaml` key `6` → `3.77` for gamma 6,
    not draft_tokens 7).
