@@ -102,7 +102,8 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
     # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
-    # asking for interactivity there would only degrade every round.
+    # asking for interactivity there would only degrade every round. Adding that series upstream in
+    # mlcommons/endpoints is future work, if MLPerf mandates grading on interactivity.
     from hyperloom.common.agentx_workload import is_mlperf_backend
 
     if is_mlperf_backend():
