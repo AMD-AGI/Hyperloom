@@ -767,8 +767,7 @@ The request kinds you may emit here are `trace_analyze`, `integrate`, and
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
-verdict (KEEP→integrate next; PARTIAL→the lane retries at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+verdict (KEEP→integrate next; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
 A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low

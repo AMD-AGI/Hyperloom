@@ -243,15 +243,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Soft cap on concurrent kernel-backend coroutines.
-_DEFAULT_KERNEL_BATCH_PARALLEL = 8
-# forge-loop holds back a finalize reserve of half this window, so the figure
-# here buys only half as much search as it reads. At 60 a campaign completed one
-# iteration -- planning alone took 16 of its 30 usable minutes -- and terminated
-# on budget_exhausted with nothing kept, which reads as "the kernel cannot be
-# optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
-# minutes, enough for a second iteration to act on what the first measured.
-_DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
 # for large models with many GEMM shapes. Independent of the session --max-hours
 # budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).

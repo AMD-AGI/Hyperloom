@@ -521,9 +521,11 @@ to `all`:
 - `off` — neither lane engages, and a baseline that keeps failing terminates the
   run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
 
-The accuracy floor shared by the eval trigger and the enablement KEEP gate is the
-fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`): a score
-passes when `score >= floor`.
+The eval trigger judges the baseline against the fixed constant
+`_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`), and an `eval`-lane
+round's KEEP gate holds each candidate to that same floor (`score >= floor`
+passes). A `launch`-lane round records no floor, so its KEEP gate rejects only a
+score that is not finite or not above zero.
 
 ---
 

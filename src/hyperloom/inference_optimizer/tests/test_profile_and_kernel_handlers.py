@@ -4092,12 +4092,6 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
-def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a typical ``run_optimization`` batch does NOT serialize behind an asyncio semaphore tighter than Ray's view of the cluster."""
-    assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
-
-
 # Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
 @pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(

@@ -141,7 +141,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 | Former rule | Real enforcer |
 |---|---|
-| IR-1 submit all candidates in parallel | `_batch_kernel_candidates` + `_DEFAULT_KERNEL_BATCH_PARALLEL=8` in `request_handlers.py` |
+| IR-1 submit all candidates in parallel | None in Hyperloom: #1408 moved kernel selection into KernelForge |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
