@@ -69,6 +69,7 @@ _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
+        "recipe_lever_unavailable",
     }
 )
 _NON_RETRYABLE_CAPTURE_REASONS = frozenset(

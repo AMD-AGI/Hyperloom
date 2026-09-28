@@ -43,7 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import recipe_launch_contract
+from ._recipe_script import RecipeLeverUnavailableError, launcher_overwritten_envs, recipe_owns_argv
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -473,9 +473,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    # The recipe re-exports these unconditionally, so a value carried here is
-    # one the run never used.
-    for k in recipe_launch_contract(bench)[1] & envs.keys():
+    # The launcher re-exports these unconditionally, so a value carried here is
+    # one the run never used. (Returns empty set when the recipe owns argv.)
+    for k in launcher_overwritten_envs(bench) & envs.keys():
         log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
         envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
@@ -527,8 +527,14 @@ def _build_variant_yaml(
             port=int(server_lifecycle["port"]),
         )
 
+    if recipe_owns_argv(bench) and str(envs.get("PROFILE", "")).strip() == "1":
+        raise RecipeLeverUnavailableError(
+            "profiling is not available on agentic recipes: the recipe runs its own "
+            "replay and returns before the aiperf client opens its profiling window"
+        )
+
     # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"), bench=bench)
+    seal_server_argv(envs, bench.get("framework"))
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -1106,6 +1112,36 @@ async def run_grid(
                 base_remove_args=base_remove_args,
                 base_unset_envs=base_unset_envs,
             )
+        except RecipeLeverUnavailableError as exc:
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: recipe_lever_unavailable: %r",
+                i + 1,
+                len(grid),
+                variant.name,
+                exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="recipe_lever_unavailable",
+                error_summary=str(exc),
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=str(exc),
+                    error_class="recipe_lever_unavailable",
+                    note=variant.note,
+                )
+            )
+            await _report_finished_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
@@ -1206,6 +1242,36 @@ async def run_grid(
                     base_remove_args=base_remove_args,
                     base_unset_envs=base_unset_envs,
                 )
+            except RecipeLeverUnavailableError as exc:
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: recipe_lever_unavailable: %r",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="recipe_lever_unavailable",
+                    error_summary=str(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=str(exc),
+                        error_class="recipe_lever_unavailable",
+                        note=variant.note,
+                    )
+                )
+                await _report_finished_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",

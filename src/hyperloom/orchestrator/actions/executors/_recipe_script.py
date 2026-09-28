@@ -12,17 +12,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-
 log = logging.getLogger(__name__)
 
 # ``export NAME=value`` with no ``${NAME:-...}`` guard: the recipe's own value
 # wins over anything the caller exported under that name.
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
-
-# ``"$@"`` / ``${@}``: forwarding its own positional arguments is the other way
-# a script accepts extra server args, alongside the framework's args variable.
-_POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
 
 # Spelled out rather than imported from ``agentx.deploy``: this module is on the
 # default benchmark path, which is pinned not to import the agentx package.
@@ -32,9 +26,9 @@ _AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 class RecipeLeverUnavailableError(ValueError):
     """Raised when the recipe cannot carry a lever the variant depends on.
 
-    Measuring such a variant produces a precise re-run of the baseline under
-    the variant's name, which no downstream reader can tell apart from a
-    change that simply had no effect.
+    On the agentic-recipe surface this means the edit is structurally
+    inexpressible (e.g. the flag lives in a spliced sub-array, or the recipe
+    has no single server-command array).
     """
 
 
@@ -89,27 +83,42 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     return ""
 
 
-def recipe_launch_contract(bench: Mapping[str, Any]) -> tuple[bool, frozenset[str]]:
-    """What the resolved server script accepts: ``(reads_extra_args, names_it_overwrites)``.
+def recipe_owns_argv(bench: Mapping[str, Any]) -> bool:
+    """True when the resolved server script lives under an ``agentic/`` directory.
 
-    ``reads_extra_args`` is False only for a script that names neither the
-    framework's extra-args variable nor its positional arguments, which makes
-    every ``extra_server_args`` on that recipe a no-op the measurement cannot
-    distinguish from a proposal that simply did not help. Both answers default
-    to "imposes nothing" when the script cannot be read, so an unresolvable
-    recipe never drops a lever.
+    On this surface the recipe hardcodes its own argv and env; Hyperloom
+    delivers levers by rendering an edited copy rather than through
+    ``EXTRA_*_ARGS``.
     """
     path = resolve_launch_server_script(bench)
     if not path:
-        return True, frozenset()
+        return False
+    return "agentic" in Path(path).parts
+
+
+def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
+    """Env names the resolved server script re-exports unconditionally.
+
+    Returns an empty set when the recipe owns its argv (where Hyperloom writes
+    env levers directly into the script copy rather than through the YAML).
+    Returns an empty set when the script cannot be read (safe default: no drop).
+    """
+    if recipe_owns_argv(bench):
+        return frozenset()
+    path = resolve_launch_server_script(bench)
+    if not path:
+        return frozenset()
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         log.warning("recipe: could not read the server script %s; assuming it constrains nothing", path)
-        return True, frozenset()
-    args_env = server_args_env_name(bench.get("framework"))
-    reads_extra_args = args_env in text or bool(_POSITIONAL_ARGS_RE.search(text))
-    return reads_extra_args, frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
+        return frozenset()
+    return frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
 
 
-__all__ = ["RecipeLeverUnavailableError", "recipe_launch_contract", "resolve_launch_server_script"]
+__all__ = [
+    "RecipeLeverUnavailableError",
+    "launcher_overwritten_envs",
+    "recipe_owns_argv",
+    "resolve_launch_server_script",
+]
