@@ -154,6 +154,8 @@ class Coordinator(
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
         self._init_dispatch_state()
+        # KernelStackPhase's per-kernel in-flight integrate guard, keyed on the recorded integrate-attempt count.
+        self._attempt_marks: dict[str, int] = {}
         # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
         # path.
         bind_session(self.session_dir)

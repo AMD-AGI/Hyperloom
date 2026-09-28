@@ -147,15 +147,6 @@ def _matching_stack_entries(
 class KernelStackPhase(CoordinatorCollaborator):
     """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
-    def __init__(self, coordinator) -> None:
-        """Initialise the phase with its own in-flight integrate guard."""
-        super().__init__(coordinator)
-        # Per-kernel in-flight guard, keyed on the recorded integrate-attempt
-        # count. Declared here because ``__getattr__`` forwards anything this
-        # object does not own to the Coordinator, and the Coordinator has no
-        # such field to forward to.
-        self._attempt_marks: dict[str, int] = {}
-
     async def _drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
