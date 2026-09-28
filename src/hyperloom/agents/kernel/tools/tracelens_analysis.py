@@ -6203,9 +6203,10 @@ def main() -> int:
 
             if agent_candidates is None:
                 raise RuntimeError(
-                    "TraceLens analysis.md was not produced; refusing to "
+                    "TraceLens analysis.json was not produced; refusing to "
                     "fall back to priority_data/category_data/CSV candidate "
-                    "parsers because analysis.md is the single source of truth."
+                    "parsers because the orchestrator's analysis.json is the "
+                    "candidate source of truth."
                 )
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
@@ -6219,7 +6220,7 @@ def main() -> int:
             run_id=run_id,
             started_at=started_at,
         )
-        # Production candidate extraction is analysis.md-only.
+        # Production candidates come only from the orchestrator's analysis.json.
         candidates = agent_candidates
         if candidates:
             append_log(
