@@ -1227,7 +1227,6 @@ def fused_symbol_invocation_evidence(
     return WiringEvidence("unchecked", f"unchecked ({'; '.join(silent)})")
 
 
-
 def validate_recipe(
     recipe: Recipe,
     runner: KernelValidationRunner,

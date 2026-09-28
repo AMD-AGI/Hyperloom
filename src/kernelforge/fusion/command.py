@@ -415,8 +415,7 @@ def _author_baseline_harness(
             build_campaign_program_md(recipe, harness_path="")
             + harness_contract(target, recipe.env_flag)
             + "\nWrite ONLY that harness. Do not edit the framework source and do "
-            "not create any other file; the fused kernel is authored after this.\n"
-            + feedback
+            "not create any other file; the fused kernel is authored after this.\n" + feedback
         )
         suffix = "" if attempt == 1 else f".retry{attempt}"
         (out / f"harness_prompt{suffix}.md").write_text(prompt, encoding="utf-8")

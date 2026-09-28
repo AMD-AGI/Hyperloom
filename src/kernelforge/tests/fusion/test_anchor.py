@@ -232,7 +232,10 @@ class TestProposedSourceFileRouting:
         assert resolve_proposed_source_file("compressor.py", self.FILES, self.FILES[0]) == "/fw/layers/compressor.py"
 
     def test_a_trailing_path_fragment_resolves(self):
-        assert resolve_proposed_source_file("layers/compressor.py", self.FILES, self.FILES[0]) == "/fw/layers/compressor.py"
+        assert (
+            resolve_proposed_source_file("layers/compressor.py", self.FILES, self.FILES[0])
+            == "/fw/layers/compressor.py"
+        )
 
     def test_an_unlisted_file_falls_back_to_the_primary(self):
         """An invented target is one the loop cannot track, keep, or revert."""

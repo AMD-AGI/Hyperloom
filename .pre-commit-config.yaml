@@ -40,7 +40,6 @@ repos:
     rev: v0.15.20
     hooks:
       - id: ruff
-        args: ["--force-exclude"]
       - id: ruff-format
 
   # --- Python: security (production paths; tests excluded) ---

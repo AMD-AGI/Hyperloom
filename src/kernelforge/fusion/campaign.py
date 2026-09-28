@@ -172,12 +172,7 @@ def _to_validation_result(
     fused_launches = launch_count(report.get("fused_launches"))
     regression = launch_regression_reason(eager_launches, fused_launches)
     verified = committed and measured
-    kept = (
-        verified
-        and speedup is not None
-        and speedup >= target_speedup
-        and not regression
-    )
+    kept = verified and speedup is not None and speedup >= target_speedup and not regression
     if not committed:
         note = "forge-loop produced no validated candidate"
     elif not measured:
@@ -539,9 +534,7 @@ call — it will score your fusion as absent.
             "and change only the producer; touch these files solely to keep the consumer's\n"
             "observable output identical to eager. They are tracked by the loop, so edits\n"
             "are kept/reverted with the fusion. Change ONLY what the fusion needs, and do\n"
-            "not alter unrelated call sites:\n"
-            + "\n".join(f"    {e}" for e in extra_editable)
-            + "\n"
+            "not alter unrelated call sites:\n" + "\n".join(f"    {e}" for e in extra_editable) + "\n"
         )
         if extra_editable
         else ""
