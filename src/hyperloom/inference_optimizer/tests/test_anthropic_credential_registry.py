@@ -67,7 +67,7 @@ def test_detection_sites_recognize_a_newly_registered_form(registered_fake_crede
     assert pf._provider_only_mode() == "anthropic"
     # The forced-protocol gate: an unrecognized form here would reject a host that the rest of the runtime considers
     # fully configured.
-    assert bk._resolve_critic_protocol("anthropic", provider_anthropic_only=True) == "anthropic"
+    assert bk._resolve_critic_protocol("anthropic", orchestration_on_codex=False) == "anthropic"
 
 
 def test_oauth_only_probe_skips_only_for_the_token_itself(registered_fake_credential, monkeypatch):
