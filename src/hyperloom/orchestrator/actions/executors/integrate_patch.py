@@ -2829,7 +2829,6 @@ class IntegratePatchExecutor:
                 _switch_manifest.summarize(switch_manifest, switch_problems),
             )
         attempt.switch_manifest = switch_manifest
-        attempt.switch_problems = switch_problems
 
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
@@ -4387,7 +4386,6 @@ class IntegratePatchExecutor:
         )
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
-        switch_problems: list[str] = list(attempt.switch_problems)
 
         # Switch-off parity. Run before either KEEP verdict, since both of them
         # leave the patch on disk and therefore both depend on it being inert when
@@ -4495,7 +4493,6 @@ class IntegratePatchExecutor:
                     applied=applied,
                     applied_artifacts=applied_artifacts,
                     switch_manifest=switch_manifest,
-                    switch_problems=switch_problems,
                     parity=parity,
                     bench_result=bench_result,
                     new_tput=new_tput,
@@ -4860,7 +4857,6 @@ class IntegratePatchExecutor:
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
         switch_manifest: list[dict[str, Any]],
-        switch_problems: list[str],
         parity: dict[str, Any],
         bench_result: dict[str, Any],
         new_tput: Any,
@@ -4895,7 +4891,6 @@ class IntegratePatchExecutor:
             applied: Patches that were applied and are being kept.
             applied_artifacts: Artifacts that were installed.
             switch_manifest: Parsed switch manifest.
-            switch_problems: Problems found while parsing it.
             parity: The switch-off parity verdict, recorded on the result so the
                 inert KEEP carries its own evidence of being inert.
             bench_result: The measured bench result (switches on).
