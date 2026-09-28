@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The InferenceX server script a recipe boots through, and what it does to the launch it is handed."""
+"""The InferenceX server script a recipe boots through, and the edited copy that carries levers into it."""
 
 from __future__ import annotations
 
@@ -9,9 +9,13 @@ import hashlib
 import logging
 import os
 import re
-from collections.abc import Mapping
+import shlex
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.io import atomic_write_text
+from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 
 log = logging.getLogger(__name__)
 
@@ -23,23 +27,12 @@ _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(
 # default benchmark path, which is pinned not to import the agentx package.
 _AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 
-# Pattern for the server command array declaration: NAME=(
-_CMD_ARRAY_OPEN_RE = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\(", re.MULTILINE)
-# Pattern for a spliced sub-array inside the command: "${NAME[@]}"
-_SPLICED_ARRAY_RE = re.compile(r'"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"')
-# Pattern for the array launch line: "${CMD_ARRAY[@]}" ...
-_ARRAY_LAUNCH_RE = re.compile(r'"?\$\{?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?\s')
-# Normalize flag names: leading dashes, convert underscores to dashes, lowercase.
-_FLAG_NAME_RE = re.compile(r"^--?")
+_SPLICE_RE = re.compile(r'^"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?$')
+_COPY_SUFFIX_RE = re.compile(r"\.hl-[0-9a-f]{12}(?=\.sh$)")
 
 
 class RecipeLeverUnavailableError(ValueError):
-    """Raised when the recipe cannot carry a lever the variant depends on.
-
-    On the agentic-recipe surface this means the edit is structurally
-    inexpressible (e.g. the flag lives in a spliced sub-array, or the recipe
-    has no single server-command array).
-    """
+    """Raised when a lever or run mode cannot be expressed on the recipe that boots the server."""
 
 
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
@@ -94,24 +87,16 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
 
 
 def recipe_owns_argv(bench: Mapping[str, Any]) -> bool:
-    """True when the resolved server script lives under an ``agentic/`` directory.
-
-    On this surface the recipe hardcodes its own argv and env; Hyperloom
-    delivers levers by rendering an edited copy rather than through
-    ``EXTRA_*_ARGS``.
-    """
+    """Whether the resolved server script is an agentic recipe, which hardcodes its own argv and env."""
     path = resolve_launch_server_script(bench)
-    if not path:
-        return False
-    return "agentic" in Path(path).parts
+    return bool(path) and "agentic" in Path(path).parent.parts
 
 
 def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
-    """Env names the resolved server script re-exports unconditionally.
+    """Env names the launcher re-exports unconditionally.
 
-    Returns an empty set when the recipe owns its argv (where Hyperloom writes
-    env levers directly into the script copy rather than through the YAML).
-    Returns an empty set when the script cannot be read (safe default: no drop).
+    Empty for an agentic recipe: its rendered copy re-exports every env lever
+    after the recipe's own exports.
     """
     if recipe_owns_argv(bench):
         return frozenset()
@@ -126,403 +111,166 @@ def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
 
 
-def _normalize_flag_name(flag: str) -> str:
-    """Lowercase flag name with dashes (--flag-name -> flag-name)."""
-    return _FLAG_NAME_RE.sub("", flag).lower().replace("_", "-")
+def _official(script: str) -> str:
+    """The recipe a rendered copy was derived from (``x.hl-<digest>.sh`` -> ``x.sh``)."""
+    return _COPY_SUFFIX_RE.sub("", script)
 
 
-def _parse_flag_tokens(argv_str: str) -> list[str]:
-    """Split an argv string into tokens, handling single-quoted values."""
-    import shlex
-
-    try:
-        return shlex.split(argv_str)
-    except ValueError:
-        return argv_str.split()
+def _flag_key(token: str) -> str:
+    """Identity of a ``--flag`` / ``--flag=value`` token; vLLM treats ``_`` and ``-`` alike."""
+    return token.split("=", 1)[0].lstrip("-").lower().replace("_", "-")
 
 
-def _find_server_cmd_array(text: str, framework: str) -> tuple[str, int, int] | None:
-    """Return ``(array_name, open_line_index, close_line_index)`` for the server command array.
-
-    Looks for the framework-appropriate array name pattern: VLLM_CMD, SGLANG_CMD, ATOM_CMD,
-    or any NAME=( pattern whose expansion appears on a launch line.
-
-    Returns None when the array cannot be identified unambiguously.
-    """
-    fw = framework.lower()
-    if "vllm" in fw:
-        preferred = "VLLM_CMD"
-    elif "sglang" in fw:
-        preferred = "SGLANG_CMD"
-    elif "atom" in fw:
-        preferred = "ATOM_CMD"
-    else:
-        preferred = None
-
-    lines = text.splitlines(keepends=True)
-
-    # Find array declaration spans.
-    arrays: dict[str, tuple[int, int]] = {}
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m = _CMD_ARRAY_OPEN_RE.match(line.lstrip())
-        if m:
-            name = m.group("name")
-            # Scan for the closing paren on its own line.
-            depth = 1
-            j = i + 1
-            while j < len(lines) and depth > 0:
-                stripped = lines[j].strip()
-                if stripped == ")":
-                    depth -= 1
-                elif stripped.endswith("(") and not stripped.startswith("#"):
-                    depth += 1
-                j += 1
-            if depth == 0:
-                arrays[name] = (i, j - 1)
-        i += 1
-
-    if preferred and preferred in arrays:
-        open_idx, close_idx = arrays[preferred]
-        return preferred, open_idx, close_idx
-
-    # Fall back to the array whose expansion appears first on a launch line.
-    launch_names = [m.group("name") for m in _ARRAY_LAUNCH_RE.finditer(text)]
-    for name in launch_names:
-        if name in arrays:
-            open_idx, close_idx = arrays[name]
-            return name, open_idx, close_idx
-
-    return None
+def _words(line: str) -> list[str]:
+    """Shell words of one array line, quotes kept, comments dropped."""
+    lexer = shlex.shlex(line, posix=False)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    return list(lexer)
 
 
-def _array_lines_contain_spliced(lines: list[str], open_idx: int, close_idx: int) -> list[str]:
-    """Return spliced sub-array names found inside the command array body."""
-    spliced = []
-    for line in lines[open_idx + 1 : close_idx]:
-        if _SPLICED_ARRAY_RE.search(line):
-            spliced.append(line.strip())
-    return spliced
+def _array_span(lines: list[str], name: str) -> tuple[int, int]:
+    """Line indexes of ``NAME=(`` and its closing ``)`` for the one multi-line server array."""
+    opens = [i for i, line in enumerate(lines) if re.fullmatch(rf"\s*{name}=\(\s*", line)]
+    if len(opens) != 1:
+        raise RecipeLeverUnavailableError(f"the recipe has {len(opens)} multi-line {name}=( arrays; expected one")
+    start = opens[0]
+    for end in range(start + 1, len(lines)):
+        if lines[end].strip() == ")":
+            return start, end
+    raise RecipeLeverUnavailableError(f"the recipe's {name} array is never closed")
 
 
-def _flag_in_array_body(lines: list[str], open_idx: int, close_idx: int, flag_name: str) -> bool:
-    """True when ``flag_name`` appears as a flag token in the array body lines."""
-    for line in lines[open_idx + 1 : close_idx]:
-        stripped = line.strip()
-        if stripped.startswith("#"):
+def _array_flags(lines: list[str], name: str) -> set[str]:
+    """Flag keys assigned to ``name`` anywhere in the recipe, single- or multi-line."""
+    flags: set[str] = set()
+    for i, line in enumerate(lines):
+        match = re.match(rf"\s*{name}\+?=\((.*)$", line)
+        if not match:
             continue
-        # Token may be bare (--flag) or combined with value (--flag value or --flag=value).
-        token = stripped.split()[0] if stripped.split() else ""
-        if not token.startswith("-"):
-            continue
-        tok_name = _normalize_flag_name(token.split("=")[0])
-        if tok_name == flag_name:
-            return True
-    return False
+        body = [match.group(1)]
+        if not match.group(1).rstrip().endswith(")"):
+            for tail in lines[i + 1 :]:
+                if tail.strip() == ")":
+                    break
+                body.append(tail)
+        flags.update(
+            _flag_key(w) for part in body for w in _words(part.rstrip().removesuffix(")")) if w.startswith("--")
+        )
+    return flags
 
 
-def _remove_flag_from_body(
-    lines: list[str],
-    open_idx: int,
-    close_idx: int,
-    flag_name: str,
-) -> list[str]:
-    """Remove all occurrences of ``flag_name`` (and its value line) from the array body."""
-    result = list(lines)
-    to_delete: set[int] = set()
-    i = open_idx + 1
-    while i < close_idx:
-        line = result[i]
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            i += 1
-            continue
-        parts = stripped.split()
-        if not parts or not parts[0].startswith("-"):
-            i += 1
-            continue
-        tok = parts[0]
-        tok_name = _normalize_flag_name(tok.split("=")[0])
-        if tok_name == flag_name:
-            to_delete.add(i)
-            # If the flag is on one line and value is on the next (no = sign),
-            # also remove the value line unless it starts with a dash.
-            if "=" not in tok and len(parts) == 1 and i + 1 < close_idx:
-                next_stripped = result[i + 1].strip()
-                if next_stripped and not next_stripped.startswith("-") and not next_stripped.startswith(")"):
-                    to_delete.add(i + 1)
-                    i += 2
-                    continue
-        i += 1
-    return [line for idx, line in enumerate(result) if idx not in to_delete]
-
-
-def _set_flag_in_body(
-    lines: list[str],
-    open_idx: int,
-    close_idx: int,
-    flag_name: str,
-    flag_line: str,
-) -> list[str]:
-    """Remove existing occurrences of flag and append the new value before the closing paren."""
-    after_remove = _remove_flag_from_body(lines, open_idx, close_idx, flag_name)
-    # Find ) on its own line from open_idx onward.
-    new_close_idx = open_idx + 1
-    depth = 1
-    while new_close_idx < len(after_remove) and depth > 0:
-        stripped = after_remove[new_close_idx].strip()
-        if stripped == ")":
-            depth -= 1
-        new_close_idx += 1
-    close_real = new_close_idx - 1
-    indent = "    "
-    new_line = f"{indent}{flag_line}\n"
-    return after_remove[:close_real] + [new_line] + after_remove[close_real:]
-
-
-def _export_block(env_sets: dict[str, str], env_unsets: list[str]) -> str:
-    """Render a shell export block for the given env lever state."""
-    lines = []
-    for name in sorted(env_unsets):
-        lines.append(f"unset {name}")
-    for name in sorted(env_sets):
-        val = env_sets[name]
-        # Shell-quote the value if it contains spaces or special chars.
-        if any(c in val for c in (" ", '"', "'", "$", "\\", "`")):
-            import shlex
-
-            quoted = shlex.quote(val)
+def _flag_groups(tokens: Sequence[str]) -> list[list[str]]:
+    """Split argv tokens into ``[flag, *values]`` groups."""
+    groups: list[list[str]] = []
+    for token in tokens:
+        if token.startswith("-") or not groups:
+            groups.append([token])
         else:
-            quoted = val
-        lines.append(f"export {name}={quoted}")
-    return "\n".join(lines) + "\n" if lines else ""
+            groups[-1].append(token)
+    return groups
+
+
+def _render(
+    text: str,
+    framework: str,
+    tokens: Sequence[str],
+    remove_args: Sequence[str],
+    env_levers: Mapping[str, str | None],
+) -> str:
+    """Apply set/remove edits to the server array and export env levers ahead of its launch."""
+    name = f"{framework.upper()}_CMD"
+    lines = text.splitlines(keepends=True)
+    start, end = _array_span(lines, name)
+    groups = _flag_groups(tokens)
+    drop = {_flag_key(g[0]) for g in groups} | {_flag_key(r.split()[0]) for r in remove_args if r.strip()}
+
+    words = [(i, w) for i in range(start + 1, end) for w in _words(lines[i])]
+    for _, word in words:
+        splice = _SPLICE_RE.match(word)
+        if splice and (clash := drop & _array_flags(lines, splice.group(1))):
+            raise RecipeLeverUnavailableError(f"{sorted(clash)} are set inside {splice.group(1)}, not in {name}")
+
+    kept: dict[int, list[str]] = {i: [] for i in range(start + 1, end)}
+    value_pending = False
+    for i, word in words:
+        if value_pending:
+            value_pending = False
+            if not word.startswith("-") and not _SPLICE_RE.match(word):
+                continue
+        if word.startswith("--") and _flag_key(word) in drop:
+            value_pending = "=" not in word
+            continue
+        kept[i].append(word)
+
+    indent = re.match(r"\s*", lines[start + 1]).group(0)
+    body: list[str] = []
+    for i in range(start + 1, end):
+        if kept[i] == _words(lines[i]):
+            body.append(lines[i])
+        elif kept[i]:
+            body.append(indent + " ".join(kept[i]) + "\n")
+    body.extend(indent + " ".join(shlex.quote(t) for t in group) + "\n" for group in groups)
+    lines[start + 1 : end] = body
+    end = start + 1 + len(body)
+
+    if env_levers:
+        expansion = f"${{{name}[@]}}"
+        launch = next((i for i in range(end + 1, len(lines)) if expansion in lines[i]), None)
+        if launch is None:
+            raise RecipeLeverUnavailableError(f"the recipe never expands {name} after defining it")
+        lead = re.match(r"\s*", lines[launch]).group(0)
+        block = [
+            f"{lead}unset {key}\n" if value is None else f"{lead}export {key}={shlex.quote(value)}\n"
+            for key, value in env_levers.items()
+        ]
+        lines[launch:launch] = block
+    return "".join(lines)
 
 
 def apply_recipe_levers(
     bench: Mapping[str, Any],
     *,
     inherited_script: str,
-    argv: list[str],
-    remove_args: list[str],
-    env_sets: dict[str, str],
-    env_unsets: list[str],
+    server_args: str,
+    remove_args: Sequence[str],
+    env_levers: Mapping[str, str | None],
 ) -> str:
-    """Return the path (relative to ``benchmarks/``) of a rendered recipe copy.
+    """Render the levers into a copy of the agentic recipe; return its ``AGENTX_SERVER_SCRIPT`` value.
 
-    The copy is a sibling of the official recipe under
-    ``benchmarks/single_node/agentic/``, named
-    ``<official-stem>.hl-<sha256[:12]>.sh``.  It is written atomically only
-    when absent.  When there are no levers and no inherited copy the official
-    recipe path (relative form) is returned unchanged so the baseline runs
-    byte-for-byte on the official recipe.
+    The base is ``inherited_script`` when it derives from the session's recipe,
+    otherwise the session's recipe itself (``""`` under replace mode). The copy
+    sits beside the recipe as ``<stem>.hl-<digest>.sh``; with nothing to apply
+    the base is returned unchanged.
 
     Args:
-        bench: Materialised benchmark dict (must have ``inferencex_path``).
-        inherited_script: Current value of ``AGENTX_SERVER_SCRIPT`` in the
-            bench envs, or ``""`` when ``args_mode=replace``.
-        argv: Declared server-arg tokens to apply (set/append semantics).
-        remove_args: Flag names to delete from the recipe array.
-        env_sets: Env names to set (export) in the copy.
-        env_unsets: Env names to unset in the copy.
-
-    Returns:
-        Path relative to ``benchmarks/``, suitable for ``AGENTX_SERVER_SCRIPT``.
+        bench: Benchmark mapping whose ``AGENTX_SERVER_SCRIPT`` names the session's recipe.
+        inherited_script: ``AGENTX_SERVER_SCRIPT`` the loaded config declared.
+        server_args: Declared lever string; each flag replaces the recipe's own.
+        remove_args: Flags deleted from the recipe's server array.
+        env_levers: Env name to value, or ``None`` to unset, applied in order.
 
     Raises:
-        RecipeLeverUnavailableError: when the recipe structure cannot express
-            the requested edit (no server-cmd array, a flag in a spliced
-            sub-array, or the recipe file is unreadable).
+        RecipeLeverUnavailableError: When the recipe's shape cannot carry an edit.
     """
-    from hyperloom.common.io import atomic_write_text
-
-    has_levers = bool(argv or remove_args or env_sets or env_unsets)
-    has_inherited = bool(inherited_script)
-
-    if not has_levers and not has_inherited:
-        # No edits and no prior copy: run the official recipe as-is.
-        official_path = resolve_launch_server_script(bench)
-        if not official_path:
-            return ""
-        # Return relative to benchmarks/.
-        benchmarks = Path(official_path).parent
-        while benchmarks.name != "benchmarks" and benchmarks.parent != benchmarks:
-            benchmarks = benchmarks.parent
-        try:
-            return str(Path(official_path).relative_to(benchmarks))
-        except ValueError:
-            return ""
-
-    # Resolve the base script to edit from.
-    if has_inherited:
-        # Inherited copy exists: build on top of it.
-        for root in (
-            str(bench.get("inferencex_path") or "").strip(),
-            os.environ.get("INFERENCEX_PATH", "").strip(),
-        ):
-            if not root:
-                continue
-            base_candidate = Path(root) / "benchmarks" / inherited_script
-            if base_candidate.is_file():
-                base_path = base_candidate
-                benchmarks_root = Path(root) / "benchmarks"
-                break
-        else:
-            base_path = None
-            benchmarks_root = None
-    else:
-        base_path = None
-        benchmarks_root = None
-
-    if base_path is None:
-        # Fall back to the official recipe.
-        official_path = resolve_launch_server_script(bench)
-        if not official_path:
-            raise RecipeLeverUnavailableError("cannot resolve the agentic server script for this bench")
-        base_path = Path(official_path)
-        benchmarks_root = base_path.parent
-        while benchmarks_root.name != "benchmarks" and benchmarks_root.parent != benchmarks_root:
-            benchmarks_root = benchmarks_root.parent
-
-    try:
-        text = base_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise RecipeLeverUnavailableError(f"cannot read the agentic server script {base_path}: {exc}") from exc
-
-    framework = str(bench.get("framework") or "").lower()
-    result = _apply_edits(text, framework, argv=argv, remove_args=remove_args)
-
-    # Append env block immediately after the launch call line.
-    if env_sets or env_unsets:
-        result = _insert_env_block(result, env_sets=env_sets, env_unsets=env_unsets)
-
-    # Content-addressed name so identical lever combinations share one copy.
-    digest = hashlib.sha256(result.encode("utf-8", "replace")).hexdigest()[:12]
-    # Find the official recipe to derive the stem name.
-    official_path = resolve_launch_server_script(bench)
-    if official_path:
-        stem = Path(official_path).stem
-    else:
-        stem = base_path.stem.split(".hl-")[0]
-    copy_name = f"{stem}.hl-{digest}.sh"
-    copy_path = base_path.parent / copy_name
-    if not copy_path.exists():
-        atomic_write_text(copy_path, result, preserve_mode=True)
-    # Return path relative to benchmarks/.
-    try:
-        return str(copy_path.relative_to(benchmarks_root))
-    except ValueError:
-        return str(copy_path)
-
-
-def _apply_edits(text: str, framework: str, *, argv: list[str], remove_args: list[str]) -> str:
-    """Apply argv set/append and remove_args to the server command array in ``text``."""
-    if not argv and not remove_args:
-        return text
-
-    result = _find_server_cmd_array(text, framework)
-    if result is None:
-        if not argv and not remove_args:
-            return text
-        raise RecipeLeverUnavailableError(
-            f"the agentic recipe has no recognisable server-command array for framework={framework!r}; "
-            "cannot deliver server-arg levers"
-        )
-    array_name, open_idx, close_idx = result
-    lines = text.splitlines(keepends=True)
-
-    # Check for spliced sub-arrays that might contain the flags being changed.
-    spliced = _array_lines_contain_spliced(lines, open_idx, close_idx)
-
-    # Build (flag_name, raw_line) pairs from the declared argv.
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
-    parsed = tokenize_server_args_preserving_json(" ".join(argv)) if argv else None
-    flag_pairs: list[tuple[str, str]] = []
-    if parsed is not None:
-        _, tokens = parsed
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok.startswith("-"):
-                flag_name = _normalize_flag_name(tok.split("=")[0])
-                if "=" in tok:
-                    raw_line = tok
-                    flag_pairs.append((flag_name, raw_line))
-                    i += 1
-                elif i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-                    raw_line = f"{tok} {tokens[i + 1]}"
-                    flag_pairs.append((flag_name, raw_line))
-                    i += 2
-                else:
-                    raw_line = tok
-                    flag_pairs.append((flag_name, raw_line))
-                    i += 1
-            else:
-                i += 1
-
-    # Validate: no spliced sub-array should contain the flags we're editing.
-    all_flag_names = {fn for fn, _ in flag_pairs} | {_normalize_flag_name(r) for r in remove_args}
-    if spliced and all_flag_names:
-        # We cannot safely check which flags are inside spliced arrays without
-        # following the variable, so refuse conservatively when any spliced
-        # array exists alongside flag edits.
-        raise RecipeLeverUnavailableError(
-            f"the agentic recipe uses spliced sub-arrays ({spliced[0]}); "
-            "cannot safely locate flags to edit without evaluating shell variables"
-        )
-
-    # Apply removals first, then set/append.
-    for flag_spec in remove_args:
-        flag_name = _normalize_flag_name(flag_spec.lstrip("-"))
-        lines = _remove_flag_from_body(lines, open_idx, close_idx, flag_name)
-        # close_idx may have shrunk; re-locate it.
-        close_idx, open_idx = _relocate_array_bounds(lines, array_name, open_idx)
-
-    for flag_name, raw_line in flag_pairs:
-        lines = _set_flag_in_body(lines, open_idx, close_idx, flag_name, raw_line)
-        close_idx, open_idx = _relocate_array_bounds(lines, array_name, open_idx)
-
-    return "".join(lines)
-
-
-def _relocate_array_bounds(lines: list[str], array_name: str, hint_open: int) -> tuple[int, int]:
-    """Re-find the array bounds after edits that may have shifted lines."""
-    # Scan from hint forward/backward to find open and close.
-    # The array name is stable; search near hint.
-    for i in range(max(0, hint_open - 2), min(len(lines), hint_open + 3)):
-        if _CMD_ARRAY_OPEN_RE.match(lines[i].lstrip()) and array_name in lines[i]:
-            open_idx = i
-            break
-    else:
-        open_idx = hint_open
-    # Find close from open.
-    depth = 1
-    j = open_idx + 1
-    while j < len(lines) and depth > 0:
-        stripped = lines[j].strip()
-        if stripped == ")":
-            depth -= 1
-        j += 1
-    return j - 1, open_idx
-
-
-def _insert_env_block(text: str, *, env_sets: dict[str, str], env_unsets: list[str]) -> str:
-    """Insert the env block after the line that expands the server command array."""
-    block = _export_block(env_sets, env_unsets)
-    if not block:
-        return text
-    lines = text.splitlines(keepends=True)
-    # Find the first line that expands the array: "${CMD_ARRAY[@]}" ...
-    insert_after = len(lines)
-    for i, line in enumerate(lines):
-        if _ARRAY_LAUNCH_RE.search(line) and ">" in line:
-            insert_after = i + 1
-            break
-    # Also accept a write_command or run call immediately before the launch.
-    return (
-        "".join(lines[:insert_after]) + "# env levers from Hyperloom config\n" + block + "".join(lines[insert_after:])
-    )
+    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    current = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+    base = inherited_script if inherited_script and _official(inherited_script) == _official(current) else current
+    parsed = tokenize_server_args_preserving_json(server_args)
+    if parsed is None:
+        raise RecipeLeverUnavailableError(f"{server_args!r} does not split into argv tokens")
+    tokens = parsed[1]
+    if not tokens and not remove_args and not env_levers:
+        return base
+    benchmarks = Path(resolve_launch_server_script(bench)).parents[len(Path(current).parts) - 1]
+    text = (benchmarks / base).read_text(encoding="utf-8")
+    rendered = _render(text, str(bench.get("framework") or ""), tokens, remove_args, env_levers)
+    official = Path(_official(base))
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:12]
+    copy = official.with_name(f"{official.stem}.hl-{digest}.sh")
+    if not (benchmarks / copy).exists():
+        atomic_write_text(benchmarks / copy, rendered)
+    return str(copy)
 
 
 __all__ = [

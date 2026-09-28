@@ -43,7 +43,12 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import RecipeLeverUnavailableError, launcher_overwritten_envs, recipe_owns_argv
+from ._recipe_script import (
+    RecipeLeverUnavailableError,
+    apply_recipe_levers,
+    launcher_overwritten_envs,
+    recipe_owns_argv,
+)
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -417,12 +422,13 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
-    # Capture before apply_runtime_benchmark_overrides (which calls apply_agentx_switch).
-    _bench_envs_pre = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    _inherited_agentx_script = str(_bench_envs_pre.get("AGENTX_SERVER_SCRIPT") or "").strip()
     replacing = str(base_args_mode).strip().lower() == "replace"
-    if replacing or str(getattr(variant, "args_mode", "append")).strip().lower() == "replace":
-        _inherited_agentx_script = ""
+    # Read before the AgentX switch resets it to the session's recipe.
+    inherited_script = (
+        ""
+        if replacing or variant.args_mode == "replace"
+        else str((bench.get("envs") or {}).get("AGENTX_SERVER_SCRIPT") or "").strip()
+    )
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -431,6 +437,7 @@ def _build_variant_yaml(
         conc=variant_conc(variant),
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
+
     variant_remove = to_str_list(getattr(variant, "remove_args", []))
     # A replacing base drops the inherited string wholesale, so only the
     # variant's own removals still name flags that survive to be stripped.
@@ -478,7 +485,7 @@ def _build_variant_yaml(
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
     # The launcher re-exports these unconditionally, so a value carried here is
-    # one the run never used. (Returns empty set when the recipe owns argv.)
+    # one the run never used.
     for k in launcher_overwritten_envs(bench) & envs.keys():
         log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
         envs.pop(k, None)
@@ -531,43 +538,23 @@ def _build_variant_yaml(
             port=int(server_lifecycle["port"]),
         )
 
-    if recipe_owns_argv(bench) and str(envs.get("PROFILE", "")).strip() == "1":
-        raise RecipeLeverUnavailableError(
-            "profiling is not available on agentic recipes: the recipe runs its own "
-            "replay and returns before the aiperf client opens its profiling window"
-        )
-
     if recipe_owns_argv(bench):
-        from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
-        from ._recipe_script import apply_recipe_levers
-
-        _lever_str = str(envs.get(extra_args_env, "")).strip()
-        _parsed = tokenize_server_args_preserving_json(_lever_str) if _lever_str else ("", [])
-        _lever_argv = list(_parsed[1]) if _parsed else []
-        _env_sets: dict[str, str] = {}
-        _env_unsets: list[str] = []
-        for _k in to_str_list(base_unset_envs):
-            _env_unsets.append(str(_k))
-        for _k in to_str_list(getattr(variant, "unset_envs", [])):
-            _env_unsets.append(str(_k))
-        for _k, _v in (base_extra_envs or {}).items():
-            _env_sets[str(_k)] = str(_v)
-        for _k, _v in variant.extra_envs.items():
-            _env_sets[str(_k)] = str(_v)
-        _new_script = apply_recipe_levers(
-            bench,
-            inherited_script=_inherited_agentx_script,
-            argv=_lever_argv,
-            remove_args=list(
-                dict.fromkeys(to_str_list(base_remove_args) + to_str_list(getattr(variant, "remove_args", [])))
-            ),
-            env_sets=_env_sets,
-            env_unsets=_env_unsets,
+        env_levers: dict[str, str | None] = {
+            str(k): None for k in to_str_list(base_unset_envs) if k.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES
+        }
+        env_levers.update({str(k): str(v) for k, v in (base_extra_envs or {}).items()})
+        env_levers.update(
+            {str(k): None for k in variant.unset_envs if str(k).strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES}
         )
-        if _new_script:
-            envs["AGENTX_SERVER_SCRIPT"] = _new_script
-            bench["envs"]["AGENTX_SERVER_SCRIPT"] = _new_script
+        env_levers.update({str(k): str(v) for k, v in variant.extra_envs.items()})
+        # The recipe's argv is never dropped, so base removals apply even under replace.
+        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
+            bench,
+            inherited_script=inherited_script,
+            server_args=str(envs.get(extra_args_env, "")),
+            remove_args=list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove)),
+            env_levers=env_levers,
+        )
 
     # The final write to the argument env; nothing below may touch it.
     seal_server_argv(envs, bench.get("framework"))
@@ -1148,48 +1135,22 @@ async def run_grid(
                 base_remove_args=base_remove_args,
                 base_unset_envs=base_unset_envs,
             )
-        except RecipeLeverUnavailableError as exc:
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: recipe_lever_unavailable: %r",
-                i + 1,
-                len(grid),
-                variant.name,
-                exc,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="recipe_lever_unavailable",
-                error_summary=str(exc),
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=str(exc),
-                    error_class="recipe_lever_unavailable",
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
         except Exception as exc:  # noqa: BLE001
+            build_error = (
+                "recipe_lever_unavailable" if isinstance(exc, RecipeLeverUnavailableError) else "yaml_build_error"
+            )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
+                "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                 i + 1,
                 len(grid),
                 variant.name,
+                build_error,
                 exc,
             )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
-                error_class="yaml_build_error",
+                error_class=build_error,
                 error_summary=repr(exc),
                 extra_args=variant.extra_server_args,
             )
@@ -1199,8 +1160,8 @@ async def run_grid(
                     extra_server_args=variant.extra_server_args,
                     extra_envs=dict(variant.extra_envs),
                     status="failed",
-                    error=f"yaml_build_error: {exc!r}",
-                    error_class="yaml_build_error",
+                    error=f"{build_error}: {exc!r}",
+                    error_class=build_error,
                     note=variant.note,
                 )
             )
@@ -1278,36 +1239,6 @@ async def run_grid(
                     base_remove_args=base_remove_args,
                     base_unset_envs=base_unset_envs,
                 )
-            except RecipeLeverUnavailableError as exc:
-                log.warning(
-                    "grid_runner: variant %d/%d name=%s aborted: recipe_lever_unavailable: %r",
-                    i + 1,
-                    len(grid),
-                    variant.name,
-                    exc,
-                )
-                _write_variant_abort_marker(
-                    slot,
-                    variant_name=variant.name,
-                    error_class="recipe_lever_unavailable",
-                    error_summary=str(exc),
-                    extra_args=variant.extra_server_args,
-                )
-                results.append(
-                    VariantResult(
-                        name=variant.name,
-                        extra_server_args=variant.extra_server_args,
-                        extra_envs=dict(variant.extra_envs),
-                        status="failed",
-                        error=str(exc),
-                        error_class="recipe_lever_unavailable",
-                        note=variant.note,
-                    )
-                )
-                await _report_finished_variant(i)
-                if not keep_going_on_failure:
-                    break
-                continue
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",

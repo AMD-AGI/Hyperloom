@@ -70,7 +70,12 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import RecipeLeverUnavailableError, launcher_overwritten_envs, recipe_owns_argv
+from ._recipe_script import (
+    RecipeLeverUnavailableError,
+    apply_recipe_levers,
+    launcher_overwritten_envs,
+    recipe_owns_argv,
+)
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -819,19 +824,6 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 
 
-def _parse_server_args_for_recipe(text: str) -> list[str]:
-    """Split a sealed server-args string into a token list for the recipe renderer."""
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
-    if not text:
-        return []
-    parsed = tokenize_server_args_preserving_json(text)
-    if parsed is None:
-        return text.split()
-    _, tokens = parsed
-    return list(tokens)
-
-
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
@@ -1106,16 +1098,27 @@ def _finalize_framework_server_args(
     drop_moe_runner_backend: bool = False,
     recipe_owns: bool = False,
 ) -> None:
-    """Apply the final framework server-arg guard pipeline in place.
+    """Apply the final framework server-arg guard pipeline in place
+    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
 
-    Steps 1-3 inject launcher defaults for sglang (context-length, watchdog,
-    dual-chunk attention-backend). Step 4b injects vLLM expert-parallel.
-    These are skipped when the agentic recipe owns the argv (``recipe_owns``).
-    Steps 5-7 (moe-drop, dedup, JSON-compact, shell-safety) always run.
+    1. --context-length cap: sglang sizes max_total_tokens off the model's
+       max_position_embeddings, so a huge native window balloons the aiter
+       workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
+       native window AND to the run's MAX_MODEL_LEN.
+    2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
+       first-request aiter JIT compile survives (the 300s default fires
+       SIGQUIT mid-warmup on a cold aiter cache).
 
-    ``drop_moe_runner_backend`` turns step 4a into a removal for baseline
-    retry after a moe-runner crash.
-    """
+    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale.
+
+    ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
+    already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
+    SERVER_ARGS``, the reference recipe, the YAML base), so stripping here is
+    what guarantees a retry launches without the backend that killed it.
+
+    ``recipe_owns`` skips the injections (steps 1-3 and EP): an agentic recipe
+    already pins what its model needs."""
     framework_env = server_args_env_name(bench.get("framework"))
     resolved_server_args = str(envs.get(framework_env, "")).strip()
     if not recipe_owns:
@@ -1131,12 +1134,18 @@ def _finalize_framework_server_args(
             resolved_server_args,
             bench.get("framework"),
         )
+        # 3. Dual-chunk attention backend: Qwen 1M models need
+        #    dual_chunk_flash_attn; inject it unless --attention-backend is pinned.
         resolved_server_args = inject_sglang_attention_backend(
             resolved_server_args,
             bench.get("framework"),
             bench.get("model"),
             gpu_type=gpu_type or bench.get("runner_type"),
         )
+    # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
+    #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
+    #    A baseline retry can still ask to strip an inherited/pinned flag that
+    #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
         resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
     if not recipe_owns:
@@ -1145,10 +1154,17 @@ def _finalize_framework_server_args(
             bench.get("framework"),
             os.environ.get("EP", "").strip() or envs.get("EP"),
         )
+    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
+    #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
+    #    sglang.
     resolved_server_args = dedup_vllm_server_args(
         resolved_server_args,
         bench.get("framework"),
     )
+    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
+    #    compact each JSON blob to be space-free so it survives as one shell
+    #    word. No-op for sglang and for arg strings with no JSON.
     resolved_server_args = compact_json_server_args(
         resolved_server_args,
         bench.get("framework"),
@@ -1369,12 +1385,8 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    # Capture before apply_agentx_switch may overwrite benchmark.envs.
-    _bench_envs_pre = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    _inherited_agentx_script = str(_bench_envs_pre.get("AGENTX_SERVER_SCRIPT") or "").strip()
-    # On replace mode the copy inherits nothing from the prior round.
-    if replace_args:
-        _inherited_agentx_script = ""
+    # Read before the AgentX switch resets it to the session's recipe.
+    _inherited_script = "" if replace_args else str(envs.get("AGENTX_SERVER_SCRIPT") or "").strip()
     apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
@@ -1397,8 +1409,7 @@ def materialize_config_with_envs(
         # Persist the resolved InferenceX checkout so Magpie's runtime checkout
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
-    # Resolved after apply_agentx_switch and inferencex_path write so the
-    # script path is final before any launcher-default logic reads it.
+    # An agentic recipe owns its argv: launcher defaults stay out of it.
     _recipe_owns = recipe_owns_argv(bench)
     for env_key in (
         "CONC",
@@ -1500,8 +1511,7 @@ def materialize_config_with_envs(
     pending_vllm_profiler_cap: int = 0
     if is_profile and _recipe_owns:
         raise RecipeLeverUnavailableError(
-            "profiling is not available on agentic recipes: the recipe runs its own "
-            "replay and returns before the aiperf client opens its profiling window"
+            "an agentic recipe runs its own replay, so there is no server phase to profile"
         )
     if is_profile and not _is_scriptable_profile:
         try:
@@ -1923,68 +1933,67 @@ def materialize_config_with_envs(
         # freedom to try alternative backends.
         if establish_quality_ref:
             envs["XDIT_ATTENTION_BACKEND"] = os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
+    # ── Per-model MI300X baseline work-arounds ─────────────────────────
+    # A handful of flagship models SIGABRT during CUDA-graph capture on the
+    # sglang ROCm image because their DEFAULT fused kernels are buggy on
+    # gfx942. Inject the verified per-model work-around unless the caller
+    # already pinned it (setdefault/merge, never overwrite). Matched on the
+    # model basename.
     _model_basename = Path(str(model_path or os.environ.get("MODEL_PATH", ""))).name.lower()
-    if not _recipe_owns:
-        # ── Per-model MI300X baseline work-arounds ─────────────────────────
-        # A handful of flagship models SIGABRT during CUDA-graph capture on the
-        # sglang ROCm image because their DEFAULT fused kernels are buggy on
-        # gfx942. Inject the verified per-model work-around unless the caller
-        # already pinned it (setdefault/merge, never overwrite). Matched on the
-        # model basename.
-        if "kimi-k2" in _model_basename:
-            # Kimi K2.x at tp8 takes sglang's ROCm fused-decode-MLA path, whose RoPE
-            # kernel aborts during CUDA-graph capture. Disabling the fused decode
-            # pipeline keeps tp8 + the clean aiter MLA path.
-            envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-        if "mimo-v2" in _model_basename:
-            # MiMo-V2.x's DEFAULT aiter attention backend SIGABRTs during CUDA-graph
-            # capture on gfx942. Pin the triton attention backend. sglang accepts
-            # lowercase `triton`; vLLM only knows TRITON_ATTN.
-            _mimo_is_vllm = "vllm" in str(bench.get("framework") or "").lower()
-            _mimo_attn_backend = "TRITON_ATTN" if _mimo_is_vllm else "triton"
+    if not _recipe_owns and "kimi-k2" in _model_basename:
+        # Kimi K2.x at tp8 takes sglang's ROCm fused-decode-MLA path, whose RoPE
+        # kernel aborts during CUDA-graph capture. Disabling the fused decode
+        # pipeline keeps tp8 + the clean aiter MLA path.
+        envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
+    if not _recipe_owns and "mimo-v2" in _model_basename:
+        # MiMo-V2.x's DEFAULT aiter attention backend SIGABRTs during CUDA-graph
+        # capture on gfx942. Pin the triton attention backend. sglang accepts
+        # lowercase `triton`; vLLM only knows TRITON_ATTN.
+        _mimo_is_vllm = "vllm" in str(bench.get("framework") or "").lower()
+        _mimo_attn_backend = "TRITON_ATTN" if _mimo_is_vllm else "triton"
+        add_server_arg_unless_pinned(
+            envs,
+            bench.get("framework"),
+            f"--attention-backend {_mimo_attn_backend}",
+            pinned_by=("attention-backend",),
+        )
+        # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
+        # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
+        # rejects at boot. Remap the arch via --hf-overrides. vLLM-only; JSON
+        # kept space-free so it survives Magpie's unquoted splice.
+        if _mimo_is_vllm:
             add_server_arg_unless_pinned(
                 envs,
                 bench.get("framework"),
-                f"--attention-backend {_mimo_attn_backend}",
-                pinned_by=("attention-backend",),
+                '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}',
+                pinned_by=("hf-overrides", "hf_overrides"),
             )
-            # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
-            # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
-            # rejects at boot. Remap the arch via --hf-overrides. vLLM-only; JSON
-            # kept space-free so it survives Magpie's unquoted splice.
-            if _mimo_is_vllm:
-                add_server_arg_unless_pinned(
-                    envs,
-                    bench.get("framework"),
-                    '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}',
-                    pinned_by=("hf-overrides", "hf_overrides"),
-                )
-        # Sparse-attention KV-cache block size (config-derived, model-agnostic).
-        # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
-        # in one KV-cache group whose sparse backends only accept the model's
-        # sparse_attention_config.sparse_block_size (e.g. 128). vLLM's default
-        # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
-        # empty) has no common block size with it, so KV-cache init aborts with
-        # "No common block size for 16" -- baseline, roofline, and every
-        # explore variant crash at startup. Read the required size from the
-        # model config and pin --block-size at this shared choke point so it rides
-        # EXTRA_VLLM_ARGS on every path (the roofline path in particular seeds from
-        # the current-best delta and would otherwise drop the baseline's block size
-        # and fall back to the default). vLLM-only: --block-size is a vLLM flag
-        # (sglang rejects it; its sparse page size is set differently). Merge (never
-        # overwrite) and skip when a --block-size is already pinned so an explicit
-        # operator/explore choice wins; the later dedup_vllm_server_args collapses
-        # any duplicate last-wins anyway. Config unreadable (e.g. an uncached
-        # hub-id) -> None -> no injection, prior behaviour preserved.
-        if "vllm" in str(bench.get("framework") or "").lower():
-            _sparse_bs = _sparse_kv_block_size(str(model_path or bench.get("model") or ""))
-            if _sparse_bs:
-                add_server_arg_unless_pinned(
-                    envs,
-                    bench.get("framework"),
-                    f"--block-size {_sparse_bs}",
-                    pinned_by=("block-size", "block_size"),
-                )
+    # Sparse-attention KV-cache block size (config-derived, model-agnostic).
+    # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
+    # in one KV-cache group whose sparse backends only accept the model's
+    # sparse_attention_config.sparse_block_size (e.g. 128). vLLM's default
+    # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
+    # empty) has no common block size with it, so KV-cache init aborts with
+    # "No common block size for 16" -- baseline, roofline, and every
+    # explore variant crash at startup. Read the required size from the
+    # model config and pin --block-size at this shared choke point so it rides
+    # EXTRA_VLLM_ARGS on every path (the roofline path in particular seeds from
+    # the current-best delta and would otherwise drop the baseline's block size
+    # and fall back to the default). vLLM-only: --block-size is a vLLM flag
+    # (sglang rejects it; its sparse page size is set differently). Merge (never
+    # overwrite) and skip when a --block-size is already pinned so an explicit
+    # operator/explore choice wins; the later dedup_vllm_server_args collapses
+    # any duplicate last-wins anyway. Config unreadable (e.g. an uncached
+    # hub-id) -> None -> no injection, prior behaviour preserved.
+    if not _recipe_owns and "vllm" in str(bench.get("framework") or "").lower():
+        _sparse_bs = _sparse_kv_block_size(str(model_path or bench.get("model") or ""))
+        if _sparse_bs:
+            add_server_arg_unless_pinned(
+                envs,
+                bench.get("framework"),
+                f"--block-size {_sparse_bs}",
+                pinned_by=("block-size", "block_size"),
+            )
     # Single choke point every benchmark path funnels through: the final
     # server-arg guards, applied at the FINAL framework env so any
     # operator-pinned flag is honored and never doubled.
@@ -2188,28 +2197,18 @@ def materialize_config_with_envs(
         envs.clear()
         envs.update(filtered_envs)
     if _recipe_owns:
-        from ._recipe_script import apply_recipe_levers
-
-        _fw_env = server_args_env_name(bench.get("framework"))
-        _lever_argv_str = str(envs.get(_fw_env, "")).strip()
-        _lever_argv = _parse_server_args_for_recipe(_lever_argv_str)
-        _env_sets: dict[str, str] = {}
-        _env_unsets: list[str] = []
-        for _k in to_str_list(remove_args) + to_str_list(unset_envs):
-            _env_unsets.append(str(_k))
-        for _k, _v in safe_extra_envs.items():
-            _env_sets[str(_k)] = str(_v)
-        _new_script = apply_recipe_levers(
-            bench,
-            inherited_script=_inherited_agentx_script,
-            argv=_lever_argv,
-            remove_args=to_str_list(remove_args),
-            env_sets=_env_sets,
-            env_unsets=_env_unsets,
+        env_levers: dict[str, str | None] = {str(k): None for k in reference_controls.get("unset_envs", [])}
+        env_levers.update({str(k): str(v) for k, v in safe_extra_envs.items()})
+        env_levers.update(
+            {str(k): None for k in unset_list if str(k).strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES}
         )
-        if _new_script:
-            envs["AGENTX_SERVER_SCRIPT"] = _new_script
-            bench["envs"]["AGENTX_SERVER_SCRIPT"] = _new_script
+        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
+            bench,
+            inherited_script=_inherited_script,
+            server_args=str(envs.get(framework_env, "")),
+            remove_args=remove_list + to_str_list(reference_controls.get("remove_args")),
+            env_levers=env_levers,
+        )
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
