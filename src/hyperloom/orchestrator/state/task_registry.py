@@ -263,7 +263,13 @@ def _insert_queued_task(
         ),
     )
     # A rolled-back insert leaves an open row that never closes, and open rows never project.
-    _record_task_state(task.task_id, task.kind, "queued", requires_lanes=task.requires_lanes)
+    _record_task_state(
+        task.task_id,
+        task.kind,
+        "queued",
+        requires_lanes=task.requires_lanes,
+        **({"dispatch_class": dispatch_class} if dispatch_class else {}),
+    )
     return task
 
 

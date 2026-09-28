@@ -73,6 +73,25 @@ async def test_task_rows_follow_the_registry_state_machine(tmp_path):
     assert spec.start == trajmap.lfmap.parse_ts(mine[1]["ts"])
 
 
+@pytest.mark.asyncio
+async def test_a_queued_task_row_carries_its_dispatch_class(tmp_path):
+    registry = TaskRegistry(SqliteConnection(tmp_path / "db.sqlite"))
+    try:
+        with tt.trajectory_scope(session_dir=tmp_path):
+            task = await registry.create(
+                kind="explore",
+                params={},
+                idempotency_key="k1",
+                dispatch_class="llm",
+                dispatch_origin={"phase": "EXPLORE", "macro_cycle": 0, "tick": 3},
+            )
+    finally:
+        registry.db.close()
+
+    (queued,) = [r for r in _rows(tmp_path, tt.EVENT_TASK) if r["span_id"] == task.task_id]
+    assert queued["attributes"]["dispatch_class"] == "llm"
+
+
 def test_a_phase_transition_is_a_point_event_in_the_new_phase(tmp_path):
     state = SharedState()
     state.phase = "BASELINE"
