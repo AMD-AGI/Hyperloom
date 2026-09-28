@@ -152,12 +152,13 @@ def test_shared_state_phase_status_summary_renders_compact_block():
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = _ps.phase_status_summary(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    s.phase_budget_pct = {phase: 0.5}
+    out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
-    expected_rem = int(_ps.phase_budget_remaining_seconds(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0))
+    expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
     assert f"remaining_sec={expected_rem}" in out
     # The merged phase's allowlist carries both arms' levers.
     assert "explore" in out and "integrate_patch" in out and "specialist" in out

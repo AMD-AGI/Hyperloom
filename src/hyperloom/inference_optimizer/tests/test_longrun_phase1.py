@@ -305,16 +305,8 @@ def test_per_cycle_budget_shrinks_phase_window():
     # Long bounded runs charge back (base * pct / denom); the per-cycle window caps the base, so a 6h cycle plans a
     # smaller EXPLORE than the 96h run.
     denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :] if budget[p] > 0)
-    rem_run = ps.phase_budget_remaining_seconds(
-        whole_run,
-        budget_pct=budget,
-        now_unix=now,
-    )
-    rem_cycle = ps.phase_budget_remaining_seconds(
-        per_cycle,
-        budget_pct=budget,
-        now_unix=now,
-    )
+    rem_run = ps.phase_budget_remaining_seconds(whole_run, now_unix=now)
+    rem_cycle = ps.phase_budget_remaining_seconds(per_cycle, now_unix=now)
     # whole-run base = full 96h session; per-cycle base = capped to the 6h window.
     assert rem_run == pytest.approx(96 * 3600 * pct / denom)
     assert rem_cycle == pytest.approx(6 * 3600 * pct / denom)

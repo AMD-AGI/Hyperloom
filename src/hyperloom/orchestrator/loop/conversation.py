@@ -382,10 +382,7 @@ class ConversationCollaborator:
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        phase_block = _phase_state.phase_status_summary(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_block = _phase_state.phase_status_summary(self.shared_state)
         if phase_block:
             sections.append("=== Phase ===")
             sections.append(phase_block)

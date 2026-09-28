@@ -84,7 +84,6 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.knowledge_plane = None
     c._run_deadline = None
     c._run_started_monotonic = None
-    c._phase_budget_pct = {}
 
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     async def _skip_controller(

@@ -474,29 +474,23 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 
 @pytest.mark.asyncio
-async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.shared_state import (
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-    )
+@pytest.mark.parametrize(
+    ("hint", "phase"),
+    [("extend_explore_budget", "FRAMEWORK_AGENT"), ("extend_kernel_budget", "KERNEL_AGENT")],
+)
+async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator, hint: str, phase: str) -> None:
+    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_DELTA
 
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate(ESCALATE_HINT_EXTEND_EXPLORE_BUDGET),
-    )
-    assert coord.shared_state.last_consumed_escalate_hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
+    before = dict(coord.shared_state.phase_budget_pct)
 
+    await coord._handle_escalate_strategy_change("orchestration", _escalate(hint))
 
-@pytest.mark.asyncio
-async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.shared_state import (
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-    )
-
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate(ESCALATE_HINT_EXTEND_KERNEL_BUDGET),
-    )
-    assert coord.shared_state.last_consumed_escalate_hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET
+    after = coord.shared_state.phase_budget_pct
+    assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
+    assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
+    assert coord.shared_state.last_consumed_escalate_hint == hint
+    assert coord.shared_state.last_consumed_escalate_hint_ts
+    assert coord.shared_state.pending_escalate_hint == ""
 
 
 @pytest.mark.asyncio

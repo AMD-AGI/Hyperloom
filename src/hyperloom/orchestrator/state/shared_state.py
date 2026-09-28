@@ -750,7 +750,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
-    # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
+    # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
+    # redistributed, raised by ``extend_*_budget`` hints, kept as-is on resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
@@ -1455,6 +1456,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = now_iso()
         return hint
+
+    def bump_phase_budget(self, hint: str) -> None:
+        """Apply an ``extend_*_budget`` hint to its phase's ``phase_budget_pct`` share and record it as consumed."""
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
+
+        phase = {
+            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
+            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
+        }[hint]
+        self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
+        self.last_consumed_escalate_hint = hint
+        self.last_consumed_escalate_hint_ts = now_iso()
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""

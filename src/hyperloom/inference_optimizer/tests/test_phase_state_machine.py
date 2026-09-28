@@ -660,10 +660,126 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     c.shared_state.phase = "EXPLORE"
 
     with pytest.raises(RuntimeError) as excinfo:
-        c._ensure_phase_initialised()
+        c._ensure_phase_initialised(None)
 
     assert "EXPLORE" in str(excinfo.value)
     assert c.shared_state.phase == "EXPLORE"
+
+
+_NO_KERNEL_CYCLE_SEC = 600 * 60.0
+# Low enough that one extend hint stays under the bump cap after the KERNEL share is redistributed.
+_NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
+
+
+@pytest.fixture
+def no_kernel_coordinator(session_dir):
+    """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    SharedState(
+        kernel_enabled=False,
+        max_minutes=0,
+        cycle_minutes=_NO_KERNEL_CYCLE_SEC / 60.0,
+        baseline_tput=100.0,
+    ).save(session_dir)
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return Coordinator(
+        session_dir,
+        backends={"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()},
+        phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT),
+    )
+
+
+def _enter_framework_for(c, elapsed_sec: float) -> None:
+    import time
+
+    phase_state.record_phase_transition(
+        c.shared_state,
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        reason="prelude_done",
+        evidence={},
+        ts_unix=time.time() - elapsed_sec,
+    )
+
+
+async def _phase_block(c) -> str:
+    prompt = await c._compose_prompt("orchestration")
+    return prompt.split("=== Phase ===", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_prompt(no_kernel_coordinator):
+    c = no_kernel_coordinator
+    unredistributed = _NO_KERNEL_CLI_BUDGET_PCT[phase_state.PHASE_FRAMEWORK_AGENT]
+    share = phase_state.redistribute_budget_pct(
+        phase_state.normalize_budget_pct(_NO_KERNEL_CLI_BUDGET_PCT), kernel_enabled=False
+    )[phase_state.PHASE_FRAMEWORK_AGENT]
+    assert share > unredistributed
+    assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(share)
+    try:
+        # Past the unredistributed share's allotment, well inside the redistributed one.
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (unredistributed + share) / 2)
+        assert c._dispatch_paused_for_phase_budget() is False
+        block = await _phase_block(c)
+        assert f"pct={share:.2f}" in block
+        assert "remaining_sec=0 " not in block
+        await c._advance_phase_if_needed()
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * share + 60.0)
+        assert c._dispatch_paused_for_phase_budget() is True
+        assert "remaining_sec=0" in await _phase_block(c)
+        await c._advance_phase_if_needed()
+        framework_exit = c.shared_state.phase_history[-1]
+        assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
+        assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel_coordinator):
+    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
+
+    c = no_kernel_coordinator
+    share = c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT]
+    bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
+    try:
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
+        assert c._dispatch_paused_for_phase_budget() is True
+        assert "remaining_sec=0" in await _phase_block(c)
+
+        await c._handle_escalate_strategy_change(
+            "orchestration",
+            Intent(
+                type=IntentType.ESCALATE_STRATEGY_CHANGE,
+                payload={"summary": "s", "next_action_hint": ESCALATE_HINT_EXTEND_EXPLORE_BUDGET},
+            ),
+        )
+
+        assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
+        assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
+        assert c._dispatch_paused_for_phase_budget() is False
+        block = await _phase_block(c)
+        assert f"pct={bumped:.2f}" in block
+        assert "remaining_sec=0 " not in block
+        await c._advance_phase_if_needed()
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+    finally:
+        await c.stop()
+
+
+def test_a_resumed_session_keeps_its_budget_over_the_cli_map(coordinator_with_mocks):
+    c = coordinator_with_mocks
+    persisted = dict(c.shared_state.phase_budget_pct)
+
+    c._ensure_phase_initialised({phase_state.PHASE_FRAMEWORK_AGENT: 0.1})
+
+    assert c.shared_state.phase_budget_pct == persisted
 
 
 @pytest.mark.asyncio

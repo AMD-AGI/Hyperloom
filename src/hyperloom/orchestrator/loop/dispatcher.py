@@ -225,10 +225,7 @@ class DispatcherCollaborator:
         phase = (getattr(state, "phase", "") or "").upper()
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
-        remaining = _phase_state.phase_budget_remaining_seconds(
-            state,
-            budget_pct=self._phase_budget_pct,
-        )
+        remaining = _phase_state.phase_budget_remaining_seconds(state)
         return remaining is not None and remaining <= 0.0
 
     async def cancel_inflight_actions(
