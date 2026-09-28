@@ -168,8 +168,8 @@ strategy internally. ATOM defaults to the per-kernel Forge backend at CLI launch
   the job / container environment; their behavior is unchanged.
 - **Explicit selection**: only an exact, case-insensitive `forge` enables
   per-kernel Forge. Other nonblank values, including `forge,geak`, retain GEAK;
-  `--backends` CLI flags, payload `backends` hints, and `GEMM_TUNING_BACKEND`
-  do not override this choice.
+  `--backends` CLI flags and payload `backends` hints do not override this
+  choice.
 
 `run_gemm_tuning_handler` also defaults to GEAK unless the effective
 `KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
@@ -238,9 +238,6 @@ Optional:
 | Variable | Purpose |
 |---|---|
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
-| `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
-| `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 90); wins over the LLM-authored payload value |
 
 Fusion lane:
 

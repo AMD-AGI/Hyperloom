@@ -243,7 +243,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
+# Soft cap on concurrent kernel-backend coroutines.
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 # forge-loop holds back a finalize reserve of half this window, so the figure
 # here buys only half as much search as it reads. At 60 a campaign completed one

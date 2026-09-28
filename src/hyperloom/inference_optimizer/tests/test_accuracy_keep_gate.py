@@ -9,7 +9,6 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_ACCURACY_STOP_REASON,
     accuracy_keep_block,
     request_baseline_accuracy_stop,
-    require_framework_accuracy_default,
 )
 
 
@@ -49,16 +48,6 @@ def test_none_required_with_non_numeric_baseline_degrades():
     blocked, _reason, degraded = accuracy_keep_block(None, required=True, baseline_accuracy=None)
     assert blocked is False
     assert degraded is True
-
-
-def test_require_default_on(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", raising=False)
-    assert require_framework_accuracy_default() is True
-
-
-def test_require_default_env_off(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "0")
-    assert require_framework_accuracy_default() is False
 
 
 class _StopRecorder:
