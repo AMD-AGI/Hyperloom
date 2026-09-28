@@ -3,7 +3,7 @@
 
 name: PR Review
 
-# Runs the review-pr skill (.claude/skills/review-pr) when the PR author or a repository member
+# Runs the review-pr skill (.claude/skills/review-pr) when the PR author or a user with write access
 # comments `/review` on a same-repository PR. Publishing is done by .github/scripts/pr-review-publish.sh:
 # blocking issues become a request-changes review; a clean card dismisses the bot's earlier
 # request-changes reviews and is posted as an LGTM comment. The bot never approves or merges.
@@ -53,7 +53,6 @@ jobs:
           PR: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
-          ASSOCIATION: ${{ github.event.comment.author_association }}
         run: |
           set -euo pipefail
           refuse() {
@@ -65,10 +64,13 @@ jobs:
           meta=$(gh pr view "$PR" --repo "$REPO" --json state,isCrossRepository,headRefOid,baseRefOid,author \
             --jq '[.state, .isCrossRepository, .headRefOid, .baseRefOid, .author.login] | @tsv')
           IFS=$'\t' read -r state cross head base author <<< "$meta"
-          case "$ASSOCIATION" in
-            OWNER | MEMBER | COLLABORATOR) ;;
-            *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
-          esac
+          if [ "$COMMENTER" != "$author" ]; then
+            permission=$(gh api "repos/$REPO/collaborators/$COMMENTER/permission" --jq .permission)
+            case "$permission" in
+              admin | write) ;;
+              *) refuse "@${COMMENTER} does not have write access to ${REPO}." ;;
+            esac
+          fi
           [ "$state" = OPEN ] || refuse "the PR is ${state}."
           [ "$cross" = false ] || refuse "pull requests from forks are not supported."
           {
