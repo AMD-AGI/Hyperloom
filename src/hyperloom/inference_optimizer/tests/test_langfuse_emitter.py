@@ -825,8 +825,10 @@ def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path
     monkeypatch.setattr(em, "_open_decision_span", _second_row_fails)
     em.flush_session()
     assert "decision_scores" not in em._flush_steps_done
+    flushes_before_retry = client.flushed
     em.flush_session()
 
+    assert client.flushed == flushes_before_retry + 1
     steps = [
         s.kwargs["metadata"]["task_id"] for s in client.spans if s.kwargs["name"] == "optimization_step:kernel_opt"
     ]
