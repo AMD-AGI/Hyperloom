@@ -3,10 +3,10 @@
 Default configs live in
 `src/hyperloom/inference_optimizer/assets/configs/`, one
 `baseline_<framework>.yaml` + `profile_<framework>.yaml` pair per supported
-framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The resolvers are the
-source of truth: `_workload_envs.py` for the baseline map and
-`_default_profile_config()` in
-`src/hyperloom/orchestrator/actions/executors/profile.py` for the profile map.
+framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The names come from
+`framework_registry.shipped_config_name()`: a framework registered in
+`src/hyperloom/inference_optimizer/framework_registry.py` must ship both files, and
+an unregistered name resolves to the sglang pair.
 
 Two fields in each YAML are **fallback only** — the optimizer overrides them at
 runtime:
