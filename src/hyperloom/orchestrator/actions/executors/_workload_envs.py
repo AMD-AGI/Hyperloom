@@ -819,6 +819,19 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 
 
+def _parse_server_args_for_recipe(text: str) -> list[str]:
+    """Split a sealed server-args string into a token list for the recipe renderer."""
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    if not text:
+        return []
+    parsed = tokenize_server_args_preserving_json(text)
+    if parsed is None:
+        return text.split()
+    _, tokens = parsed
+    return list(tokens)
+
+
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
@@ -1356,6 +1369,12 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
+    # Capture before apply_agentx_switch may overwrite benchmark.envs.
+    _bench_envs_pre = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    _inherited_agentx_script = str(_bench_envs_pre.get("AGENTX_SERVER_SCRIPT") or "").strip()
+    # On replace mode the copy inherits nothing from the prior round.
+    if replace_args:
+        _inherited_agentx_script = ""
     apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
@@ -2168,6 +2187,29 @@ def materialize_config_with_envs(
         )
         envs.clear()
         envs.update(filtered_envs)
+    if _recipe_owns:
+        from ._recipe_script import apply_recipe_levers
+
+        _fw_env = server_args_env_name(bench.get("framework"))
+        _lever_argv_str = str(envs.get(_fw_env, "")).strip()
+        _lever_argv = _parse_server_args_for_recipe(_lever_argv_str)
+        _env_sets: dict[str, str] = {}
+        _env_unsets: list[str] = []
+        for _k in to_str_list(remove_args) + to_str_list(unset_envs):
+            _env_unsets.append(str(_k))
+        for _k, _v in safe_extra_envs.items():
+            _env_sets[str(_k)] = str(_v)
+        _new_script = apply_recipe_levers(
+            bench,
+            inherited_script=_inherited_agentx_script,
+            argv=_lever_argv,
+            remove_args=to_str_list(remove_args),
+            env_sets=_env_sets,
+            env_unsets=_env_unsets,
+        )
+        if _new_script:
+            envs["AGENTX_SERVER_SCRIPT"] = _new_script
+            bench["envs"]["AGENTX_SERVER_SCRIPT"] = _new_script
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name

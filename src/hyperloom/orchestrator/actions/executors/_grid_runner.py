@@ -417,6 +417,12 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
+    # Capture before apply_runtime_benchmark_overrides (which calls apply_agentx_switch).
+    _bench_envs_pre = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    _inherited_agentx_script = str(_bench_envs_pre.get("AGENTX_SERVER_SCRIPT") or "").strip()
+    replacing = str(base_args_mode).strip().lower() == "replace"
+    if replacing or str(getattr(variant, "args_mode", "append")).strip().lower() == "replace":
+        _inherited_agentx_script = ""
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -425,8 +431,6 @@ def _build_variant_yaml(
         conc=variant_conc(variant),
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
-
-    replacing = str(base_args_mode).strip().lower() == "replace"
     variant_remove = to_str_list(getattr(variant, "remove_args", []))
     # A replacing base drops the inherited string wholesale, so only the
     # variant's own removals still name flags that survive to be stripped.
@@ -532,6 +536,38 @@ def _build_variant_yaml(
             "profiling is not available on agentic recipes: the recipe runs its own "
             "replay and returns before the aiperf client opens its profiling window"
         )
+
+    if recipe_owns_argv(bench):
+        from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+        from ._recipe_script import apply_recipe_levers
+
+        _lever_str = str(envs.get(extra_args_env, "")).strip()
+        _parsed = tokenize_server_args_preserving_json(_lever_str) if _lever_str else ("", [])
+        _lever_argv = list(_parsed[1]) if _parsed else []
+        _env_sets: dict[str, str] = {}
+        _env_unsets: list[str] = []
+        for _k in to_str_list(base_unset_envs):
+            _env_unsets.append(str(_k))
+        for _k in to_str_list(getattr(variant, "unset_envs", [])):
+            _env_unsets.append(str(_k))
+        for _k, _v in (base_extra_envs or {}).items():
+            _env_sets[str(_k)] = str(_v)
+        for _k, _v in variant.extra_envs.items():
+            _env_sets[str(_k)] = str(_v)
+        _new_script = apply_recipe_levers(
+            bench,
+            inherited_script=_inherited_agentx_script,
+            argv=_lever_argv,
+            remove_args=list(
+                dict.fromkeys(to_str_list(base_remove_args) + to_str_list(getattr(variant, "remove_args", [])))
+            ),
+            env_sets=_env_sets,
+            env_unsets=_env_unsets,
+        )
+        if _new_script:
+            envs["AGENTX_SERVER_SCRIPT"] = _new_script
+            bench["envs"]["AGENTX_SERVER_SCRIPT"] = _new_script
 
     # The final write to the argument env; nothing below may touch it.
     seal_server_argv(envs, bench.get("framework"))
