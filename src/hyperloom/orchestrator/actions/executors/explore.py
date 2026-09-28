@@ -1295,6 +1295,8 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            # Promotion re-checks the latency budget against this row, not the round's measurement.
+                            "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,

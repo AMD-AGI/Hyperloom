@@ -60,6 +60,7 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -1717,6 +1718,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 "Start a fresh session instead of mixing the two measurement sets.",
                 file=sys.stderr,
             )
+            sys.exit(2)
+        _latency_conflict = latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
             sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
