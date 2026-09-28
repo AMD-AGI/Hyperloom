@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.env import is_truthy
+
 if TYPE_CHECKING:
     from .domains import SpecialistDomain
 
@@ -57,22 +59,6 @@ class SpecialistProfile:
         return self.mode == MODE_PATCH and self.bench
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Coerce a loosely-typed value to a boolean."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on"):
-        return True
-    if text in ("0", "false", "no", "off"):
-        return False
-    return default
-
-
 def _infer_scope(p: dict[str, Any]) -> str:
     """Infer the dispatch scope when none is explicitly given."""
     # Local import avoids a module-load cycle.
@@ -86,12 +72,17 @@ def _infer_scope(p: dict[str, Any]) -> str:
     return SCOPE_FREEFORM
 
 
+def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
+    """True for a FRAMEWORK or ENABLEMENT authoring specialist, which defaults to every GPU on the machine."""
+    p = params or {}
+    return bool(p.get("framework_agent_authoring")) or bool(p.get("enablement"))
+
+
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
-    p = params or {}
-    if bool(p.get("framework_agent_authoring")):
+    if is_authoring_specialist(params):
         return True
-    return resolve_specialist_profile(p).reserves_benchmark_lane
+    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 
 def holds_serving_slot(params: dict[str, Any] | None) -> bool:
@@ -118,7 +109,7 @@ def resolve_specialist_profile(
         else:
             mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
 
-    bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
+    bench = is_truthy(p.get("bench"), default=DEFAULT_BENCH)
     if mode != MODE_PATCH:
         bench = False
 
@@ -146,6 +137,7 @@ __all__ = [
     "SCOPE_VALUES",
     "SpecialistProfile",
     "holds_serving_slot",
+    "is_authoring_specialist",
     "resolve_specialist_profile",
     "uses_whole_machine_gpu_lane",
 ]

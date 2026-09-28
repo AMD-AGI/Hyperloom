@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 
 log = logging.getLogger(__name__)
@@ -21,31 +22,15 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 )
 
 
-def ray_exec_enabled() -> bool:
-    """Return whether GPU/serving work should run through the Ray backend."""
-    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
-    if val in {"1", "true", "yes", "on"}:
-        return True
-    if val in {"0", "false", "no", "off"}:
-        return False
-    # Unset: single-node forced ON, multi-node OFF.
-    from ._multi_node_env import is_multi_node
-
-    return not is_multi_node()
-
-
 def _should_use_ray_backend() -> bool:
-    """Like :func:`ray_exec_enabled` but stays OFF under pytest when unset."""
-    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
-    if val in {"1", "true", "yes", "on"}:
-        return True
-    if val in {"0", "false", "no", "off"}:
-        return False
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return False
+    """Whether GPU/serving work runs through the Ray backend.
+
+    ``INFERENCE_OPTIMIZER_RAY_EXEC`` wins when set; otherwise single-node is ON, multi-node OFF, and pytest OFF.
+    """
     from ._multi_node_env import is_multi_node
 
-    return not is_multi_node()
+    auto = not os.environ.get("PYTEST_CURRENT_TEST") and not is_multi_node()
+    return env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=auto)
 
 
 def ray_gpu_specialist_exec_enabled() -> bool:
@@ -66,8 +51,7 @@ def ray_gpu_pending_limit() -> int:
 
 def ray_serving_priority_enabled() -> bool:
     """Whether serving is prioritized over GPU research specialists (§3.4)."""
-    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", "").strip().lower()
-    return val not in {"0", "false", "no", "off"}
+    return env_flag("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", default=True)
 
 
 def serving_slot_busy() -> bool:
@@ -75,7 +59,7 @@ def serving_slot_busy() -> bool:
     if not ray_gpu_specialist_exec_enabled():
         return False
     try:
-        import ray  # noqa: PLC0415
+        import ray
 
         if not ray.is_initialized():
             return False
@@ -214,7 +198,7 @@ def get_ray_backend() -> RayExecutionBackend:
 def mark_ray_backend_unhealthy() -> None:
     """Disconnect the current Ray driver and force the next use to re-ensure."""
     try:
-        import ray  # noqa: PLC0415
+        import ray
 
         ray.shutdown()
     except Exception:  # noqa: BLE001 - recovery must never raise
@@ -229,7 +213,6 @@ __all__ = [
     "_should_use_ray_backend",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
-    "ray_exec_enabled",
     "resolve_shared_artifact_root",
     "strip_visible_devices_from_config",
 ]

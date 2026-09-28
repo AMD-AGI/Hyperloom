@@ -64,7 +64,7 @@ class RayDashboardClient:
 
     def close(self) -> None:
         """Close the underlying HTTP client, ignoring any errors."""
-        with suppress(Exception):
+        with suppress(OSError, RuntimeError):
             self._client.close()
 
     def __enter__(self) -> "RayDashboardClient":

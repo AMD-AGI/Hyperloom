@@ -16,12 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.roles._llm_stability_env import (
+from hyperloom.common.llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )
-from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _run_subprocess, _tool_label
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import chatty_child
 

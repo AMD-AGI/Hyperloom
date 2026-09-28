@@ -37,11 +37,12 @@ configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
 disables the features that speak its protocol; a half-configured side fails
 preflight rather than being silently completed from the other provider.
 
-The only values still filled for you are the internal LLM aliases
-(`LLM_API_KEY`, `AMD_LLM_API_KEY`, `LLM_API_BASE`), which the inference optimizer
-CLI preflight copies from the OpenAI side. You do not set those by hand.
-`GEAK_API_KEY` / `GEAK_BASE_URL` are never filled from either side: GEAK runs on
-the Anthropic side, so set them only to point GEAK at something else.
+No key is derived for you under any other name. The one value the inference
+optimizer CLI preflight still fills is `LLM_API_BASE`, which addresses an
+OpenAI-protocol endpoint rather than authenticating to one, and which it takes
+from the resolved OpenAI-side URL. `GEAK_API_KEY` / `GEAK_BASE_URL` are never
+filled from either side: GEAK runs on the Anthropic side, so set them only to
+point GEAK at something else.
 
 ---
 
@@ -102,16 +103,16 @@ Downstream tooling reads the side it belongs to:
 
 * GEAK runs Claude Code, so it uses the Anthropic-side base URL + key plus
   `GEAK_CLAUDE_MODEL`. An OpenAI-only deployment cannot start it.
-* Kernel tools inherit the OpenAI-side credential from preflight
-  (`LLM_API_KEY` / `AMD_LLM_API_KEY`).
+* Kernel tools inherit the OpenAI-side credential under its own name,
+  `OPENAI_API_KEY`, which is what crosses the Ray boundary to a worker.
 * Orchestration Claude uses the Anthropic-side base URL + key, including the
   generated `~/.claude/config.json` primary key.
 * Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
-You *never* need to copy a key into the internal LLM slots in `.env`;
-preflight fills those from the OpenAI-side key. Preflight does **not** cross-fill
-the per-provider primary keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
-`ANTHROPIC_AUTH_TOKEN`), and an explicitly set provider key is never overwritten.
+There are no internal key slots in `.env` to fill: each side's credential
+travels under its own name. Preflight does **not** cross-fill the per-provider
+primary keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`),
+and an explicitly set provider key is never overwritten.
 
 The recommended setup, run once per shell:
 
@@ -286,8 +287,9 @@ At preflight, the inference optimizer CLI:
   Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
   (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
   `OPENAI_API_KEY`). A `CLAUDE_CODE_OAUTH_TOKEN` is never written here.
-- Fills the internal LLM aliases from the OpenAI-side key for child processes;
-  the per-provider primary keys and the GEAK aliases are not filled.
+- Sets `LLM_API_BASE` to the resolved OpenAI-side URL. No key is filled: the
+  per-provider primary keys and the GEAK aliases all stay as the operator left
+  them.
 
 **401 recovery:**
 

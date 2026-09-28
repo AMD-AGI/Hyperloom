@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .tuners.base import TuneResult
+from .tuners.base import TuneResult, published_metric
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,9 @@ class TunerCandidate:
     tuner: str
     env: dict[str, str]
     artifact_path: str
-    best_micro_speedup: float
-    improved_shapes: int
+    #: None when the tuner had no comparable untuned baseline to measure against.
+    best_micro_speedup: float | None
+    improved_shapes: int | None
     #: True when the artifact must still be confirmed at e2e before final deploy
     #: (always true today: micro is a screen, not the verdict).
     requires_e2e_validation: bool = True
@@ -29,7 +30,7 @@ class TunerCandidate:
             "tuner": self.tuner,
             "env": dict(self.env),
             "artifact_path": self.artifact_path,
-            "best_micro_speedup": round(self.best_micro_speedup, 4),
+            "best_micro_speedup": published_metric(self.best_micro_speedup),
             "improved_shapes": self.improved_shapes,
             "requires_e2e_validation": self.requires_e2e_validation,
         }
@@ -70,8 +71,8 @@ def per_tuner_candidates(results: Iterable[TuneResult]) -> list[TunerCandidate]:
                 tuner=result.tuner_name,
                 env=env,
                 artifact_path=artifact,
-                best_micro_speedup=float(result.best_micro_speedup or 1.0),
-                improved_shapes=int(result.improved_shapes or 0),
+                best_micro_speedup=result.best_micro_speedup,
+                improved_shapes=result.improved_shapes,
             )
         )
     return candidates

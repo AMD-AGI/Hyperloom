@@ -1298,3 +1298,171 @@ def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
         silence_timeout_sec=None,
     )
     assert cp.returncode == 0
+
+
+def _engine_death_log(tmp_path, *, downstream_errors: int = 4000):
+    """A server that served, then died: the cause, then the cascade it caused.
+
+    Mirrors the shape a real run produces -- a multi-megabyte log whose last
+    megabyte is one downstream error per rejected request, with the scheduler
+    state dumped just above the fatal line.
+    """
+    log = tmp_path / "server.log"
+    lines = [
+        "(APIServer pid=1) INFO:     Application startup complete.",
+        "(EngineCore pid=2) ERROR [dump_input.py:79] Dumping scheduler output: " + "x=1, " * 6000,
+        "(EngineCore pid=2) ERROR [core.py:1138] EngineCore encountered a fatal error.",
+        "(EngineCore pid=2) ERROR [core.py:1138] Traceback (most recent call last):",
+    ]
+    lines += [f'(EngineCore pid=2) ERROR [core.py:1138]   File "/vllm/x{i}.py", line {i}, in step' for i in range(22)]
+    lines.append(
+        "(EngineCore pid=2) ERROR [core.py:1138] RuntimeError: Worker failed with error "
+        "'HIP out of memory. Tried to allocate 10.54 GiB. GPU 0 has a total capacity of 255.98 GiB'"
+    )
+    lines += [
+        "(APIServer pid=1) ERROR [serving.py:448] vllm.v1.engine.exceptions.EngineDeadError: "
+        "EngineCore encountered an issue."
+    ]
+    lines += [
+        '(APIServer pid=1) INFO:     127.0.0.1:5 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error'
+    ] * downstream_errors
+    log.write_text("\n".join(lines), encoding="utf-8")
+    return log
+
+
+def test_a_server_that_dies_after_serving_yields_a_classifiable_excerpt(tmp_path):
+    """The defect this closes: no excerpt at all, so the failure read as unknown.
+
+    The fatal markers only named pre-serving bootstrap failures, and the search
+    only read the log's tail -- which an engine that dies mid-serving fills with
+    one downstream error per rejected request. The cause sits at the head of
+    that cascade, so nothing was ever returned and the specialist was handed
+    ``failure_kind: unknown``.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert "EngineCore encountered a fatal error" in excerpt
+    assert "HIP out of memory" in excerpt
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_the_excerpt_leads_with_the_marker_not_the_scheduler_dump(tmp_path):
+    """vLLM dumps its whole scheduler state on the line above the fatal error."""
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert excerpt.splitlines()[0].endswith("EngineCore encountered a fatal error.")
+    assert "Dumping scheduler output" not in excerpt
+
+
+def test_the_cause_outranks_the_consequence_it_triggered(tmp_path):
+    """`EngineDeadError` is what the API server saw; the OOM is why."""
+    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+
+    assert excerpt is not None
+    assert "HIP out of memory" in excerpt
+    lines = excerpt.splitlines()
+    oom = next(i for i, line in enumerate(lines) if "HIP out of memory" in line)
+    dead = next((i for i, line in enumerate(lines) if "EngineDeadError" in line), len(lines))
+    assert oom < dead, "the cause must reach the classifier ahead of the consequence"
+
+
+def test_a_log_with_no_fatal_marker_still_yields_nothing(tmp_path):
+    """Unchanged: a healthy log must not produce a death excerpt."""
+    log = tmp_path / "server.log"
+    log.write_text("(APIServer pid=1) INFO:     Application startup complete.\n" * 50, encoding="utf-8")
+
+    assert server_log_death_excerpt(str(log)) is None
+
+
+def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
+    """The legacy markers wrap a cause that sits *above* them.
+
+    "Engine core initialization failed ... See root cause above" names nothing
+    a classifier can act on; the exception on the preceding line does. Extracting
+    only the marker and what follows -- right for a post-startup engine death --
+    would drop that cause and classify the failure as unknown.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    log = tmp_path / "server.log"
+    log.write_text(
+        "\n".join(
+            [
+                "(VllmWorker pid=3) INFO starting engine",
+                "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+                "(EngineCore pid=2) ERROR RuntimeError: Engine core initialization failed. "
+                "See root cause above. Failed core proc(s): {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    excerpt = server_log_death_excerpt(str(log))
+
+    assert excerpt is not None
+    assert "out of memory" in excerpt.lower(), "the cause above the wrapper must survive"
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_a_death_past_any_head_bound_and_outside_the_tail_is_still_found(tmp_path):
+    """Streaming, not sampling: a bounded head read leaves the middle unsearched.
+
+    A server healthy for a long while, then dead, then flooding the log with
+    downstream errors puts its fatal marker beyond any fixed head window and
+    before any fixed tail window.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    log = tmp_path / "server.log"
+    filler = "(APIServer pid=1) INFO:     healthy request served fine and produced ordinary output\n"
+    with log.open("w", encoding="utf-8") as fh:
+        written = 0
+        while written < 17 * 1024 * 1024:  # past a 16 MiB head bound
+            fh.write(filler)
+            written += len(filler)
+        fh.write("(EngineCore pid=2) ERROR [core.py:1138] EngineCore encountered a fatal error.\n")
+        fh.write(
+            "(EngineCore pid=2) ERROR [core.py:1138] RuntimeError: Worker failed with error "
+            "'HIP out of memory. Tried to allocate 10.54 GiB'\n"
+        )
+        trailing = '(APIServer pid=1) INFO:     "POST /v1/completions HTTP/1.1" 500 Internal Server Error\n'
+        for _ in range(4000):  # past a 64 KiB tail window
+            fh.write(trailing)
+
+    excerpt = server_log_death_excerpt(str(log))
+
+    assert excerpt is not None
+    assert "HIP out of memory" in excerpt
+    assert classify_failure(excerpt).kind == "resource_constraint"
+
+
+def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_path):
+    """``EngineDeadError`` is a substring of ``AsyncEngineDeadError``.
+
+    Classing by substring without ordering sends a legacy line down the
+    post-startup path, which keeps no leading context -- and for these markers
+    the actionable cause is exactly the line above.
+    """
+    from hyperloom.common.failure_signature import classify_failure
+
+    for legacy in ("AsyncEngineDeadError", "raise EngineDeadError"):
+        log = tmp_path / f"server-{legacy.replace(' ', '_')}.log"
+        log.write_text(
+            "\n".join(
+                [
+                    "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+                    f"(APIServer pid=1) ERROR {legacy}: the engine is gone",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        excerpt = server_log_death_excerpt(str(log))
+
+        assert excerpt is not None, legacy
+        assert "out of memory" in excerpt.lower(), f"{legacy} must keep the cause above it"
+        assert classify_failure(excerpt).kind == "resource_constraint", legacy

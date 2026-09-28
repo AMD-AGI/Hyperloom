@@ -14,7 +14,8 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator, PendingProposal
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -119,7 +120,7 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
     """The first 3 needs_review verdicts re-author with incrementing ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
     from types import SimpleNamespace
-    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
 
     created: list[dict[str, Any]] = []
 
@@ -225,7 +226,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         payload={"params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert len(calls) == 1
     assert calls[0]["candidate"]["candidate_id"] == _CANDIDATE["candidate_id"]
@@ -290,7 +291,7 @@ async def test_non_framework_agent_proposal_does_not_reauthor(coord: Coordinator
         payload={"params": {"specialist_task_id": "s-1"}},
     )
 
-    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
 
     assert calls == []
     assert coord.shared_state.specialist_reauthor_attempts == {}

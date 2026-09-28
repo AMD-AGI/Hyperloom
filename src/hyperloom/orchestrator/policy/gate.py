@@ -15,16 +15,17 @@ second gate, not the first one.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
-from ..framework.paths import (
+from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
+from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.framework_arm import verdict_subject
+from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -52,6 +53,7 @@ from ..specialists.profile import (
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 from ..specialists.patch_safety import parse_patch_targets
+from ..state._shared_state.phase_state import gap_actionability_key
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -107,54 +109,6 @@ BASELINE_ACTION_NAME: str = "baseline"
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
 
 
-def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
-
-    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
-    pinning mask per the repo's GPU runner convention (and the CLI preflight
-    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
-    GPU-specialist capacity scoped to the operator's mask instead of the whole
-    machine.
-
-    Returns:
-        int: the number of visible GPUs derived from the
-            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
-            count parsed from ``rocm-smi``; 0 when nothing can be probed.
-    """
-    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        raw = raw.strip()
-        if raw == "":
-            return 0
-        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
-        if ids:
-            return len(ids)
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
-
-
 def research_lane_ceiling() -> int:
     """Dynamic ceiling on concurrent research-lane specialists (``2 × GPU``; falls back to :data:`RESEARCH_LANE_CEILING_FALLBACK`).
 
@@ -175,23 +129,6 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
         "advise",
     }
 )
-
-
-def patch_verdict_subject(params: Mapping[str, Any]) -> str:
-    """Return the id an ``integrate_patch``'s Critic verdict is filed under.
-
-    An authored patch is reviewed as the specialist that wrote it. An
-    upstream-PR candidate is pre-screened before any specialist exists, so the
-    candidate id is what the verdict names.
-
-    Args:
-        params: The action's params.
-
-    Returns:
-        The subject id, or ``""`` when the params name neither.
-    """
-    sid = str(params.get("specialist_task_id") or "").strip()
-    return sid or str(params.get("framework_agent_candidate_id") or "").strip()
 
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
@@ -360,6 +297,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "working_recipe_generation",
+        "validated_recipe_generation",
         "pending_integrate",
         "resume_pending_revalidation",
         "baseline_tput",
@@ -406,6 +345,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",
+        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
+        # that can.
+        "gpu_trace_unsupported_reason",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -421,7 +363,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        "explore_elapsed_accum_s",
         "phase_elapsed_totals",
         # KERNEL idle-streak bookkeeping. Forging these is how a model could talk
         # the phase machine into winding KERNEL down early, or hold it open while
@@ -466,6 +407,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
+        # per-lever attempt ledger; one Coordinator-side writer per lever.
+        "attempts",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
         # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
         # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.
@@ -520,15 +463,9 @@ class PolicyGate:
     # attempt goes straight to its acquire.
     resources: ResourceFacts = field(default_factory=ResourceFacts)
 
-    def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+    def __post_init__(self) -> None:
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
-        import os as _os
-
-        if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if not self.strict_paths and env_bool("INFERENCE_OPTIMIZER_STRICT_PATHS"):
             self.strict_paths = True
 
     # Public API
@@ -1102,7 +1039,7 @@ class PolicyGate:
         # cancelled, so a successful from-source build never reaches KEEP.
         if params.get("enablement_launch_only"):
             return
-        sid = patch_verdict_subject(params)
+        sid = verdict_subject(params)
         if not sid:
             raise PolicyDenied(
                 "integrate_patch.params names no Critic review subject",
@@ -1261,11 +1198,7 @@ class PolicyGate:
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu_raw = params.get("needs_gpu", False)
-        if isinstance(needs_gpu_raw, str):
-            needs_gpu = needs_gpu_raw.strip().lower() in ("1", "true", "yes", "y", "on")
-        else:
-            needs_gpu = bool(needs_gpu_raw)
+        needs_gpu = is_truthy(params.get("needs_gpu"))
         reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         if not needs_gpu and reserves_bench_lane:
             needs_gpu = True
@@ -1376,24 +1309,6 @@ class PolicyGate:
         if not candidates:
             return ""
 
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
-
-        def _selection_key(g: dict[str, Any]) -> tuple[int, int, str]:
-            """Sort key ranking gaps by actionability for autofill.
-
-            Args:
-                g (dict[str, Any]): a gaps[] ledger entry.
-
-            Returns:
-                tuple[int, int, str]: ``(-severity_rank, attempt_count,
-                first_seen_ts)`` so the highest-severity, least-attempted,
-                oldest gap sorts first.
-            """
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            return (-sev, attempts, first_seen)
-
         matches = [
             g
             for g in gaps
@@ -1403,7 +1318,7 @@ class PolicyGate:
         ]
         if not matches:
             return ""
-        matches.sort(key=_selection_key)
+        matches.sort(key=gap_actionability_key)
         chosen = str(matches[0].get("canonical_id") or "").strip()
         if chosen:
             params["gap_canonical_id"] = chosen
@@ -1798,106 +1713,6 @@ class PolicyGate:
             )
 
 
-# ---------------------------------------------------------------------------
-# Policy-denial write-owner functions: they take ``state`` first and own the
-# denial-streak bookkeeping + its prompt summary. ``SharedState`` exposes
-# forwarding shims so existing callers reach these.
-# ---------------------------------------------------------------------------
-def record_policy_denial(
-    state,
-    *,
-    action_name: str,
-    rule: str,
-    hint: str,
-    intent_type: str,
-    tick: int,
-    intent_payload: dict[str, Any] | None = None,
-) -> int:
-    """Append a PolicyGate denial row and bump the per-(action, rule) streak.
-
-    Records a capped rolling history entry and increments the
-    consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
-
-    Args:
-        action_name (str): The action the denied intent targeted (empty
-            is normalized to ``"*"`` in the streak key).
-        rule (str): The PolicyGate rule id that fired.
-        hint (str): Human-readable remediation hint surfaced to the LLM.
-        intent_type (str): The denied intent's type.
-        tick (int): The Coordinator tick at which the denial occurred.
-        intent_payload (dict[str, Any] | None): Optional intent payload;
-            when present, its sorted keys are recorded for context.
-
-    Returns:
-        int: The new consecutive-denial streak value for this
-            (action, rule) pair.
-    """
-    from ..state.shared_state import _now_iso
-
-    key = f"{action_name or '*'}:{rule}"
-    streak = int(state.policy_denial_streak.get(key, 0)) + 1
-    state.policy_denial_streak[key] = streak
-    entry = {
-        "tick": int(tick),
-        "action_name": action_name or "",
-        "rule": rule,
-        "hint": hint or "",
-        "intent_type": intent_type,
-        "streak": streak,
-        "ts": _now_iso(),
-    }
-    if intent_payload:
-        entry["intent_payload_keys"] = sorted(intent_payload.keys())
-    history = list(state.policy_denial_history or [])
-    history.append(entry)
-    if len(history) > state._POLICY_DENIAL_HISTORY_CAP:
-        history = history[-state._POLICY_DENIAL_HISTORY_CAP :]
-    state.policy_denial_history = history
-    return streak
-
-
-def reset_policy_denial_streak(state, action_name: str) -> None:
-    """Clear all consecutive-denial streaks for a given action.
-
-    Drops every ``policy_denial_streak`` entry whose key begins with
-    ``"<action_name>:"`` — called when the action finally succeeds so a
-    later denial starts a fresh streak.
-
-    Args:
-        action_name (str): The action whose streaks should be reset; a
-            falsy value is a no-op.
-    """
-    if not action_name:
-        return
-    prefix = f"{action_name}:"
-    state.policy_denial_streak = {
-        k: v for k, v in (state.policy_denial_streak or {}).items() if not k.startswith(prefix)
-    }
-
-
-def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
-    """Render the most recent PolicyGate denials for prompt injection.
-
-    Args:
-        top_k (int): Maximum number of newest denial rows to render.
-
-    Returns:
-        str: A ``=== Recent policy denials ===`` block, or ``""`` when
-            no denials have been recorded.
-    """
-    if not state.policy_denial_history:
-        return ""
-    rows = list(state.policy_denial_history)[-top_k:]
-    lines = [f"=== Recent policy denials (newest last, total={len(state.policy_denial_history)}) ==="]
-    for r in rows:
-        lines.append(
-            f"  tick={r.get('tick')} action={r.get('action_name')!r} "
-            f"rule={r.get('rule')!r} streak={r.get('streak')} "
-            f"hint={str(r.get('hint') or '')[:140]!r}"
-        )
-    return "\n".join(lines)
-
-
 def validate_specialist_max_turns_raw(
     max_turns_raw: Any,
     *,
@@ -1981,7 +1796,6 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
-    "patch_verdict_subject",
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",

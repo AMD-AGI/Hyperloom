@@ -55,6 +55,7 @@ def _make_bare_shared_state():
 
     @dataclass
     class _SS:
+        phase: str = ""
         baseline_tput: float = 0.0
         last_roofline_tput: float = 0.0
         last_trace_analyze: dict = field(default_factory=dict)

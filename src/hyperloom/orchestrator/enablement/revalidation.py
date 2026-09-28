@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator_helpers import baseline_benchmark_script
-from ..state.task_registry import TerminalTaskReuse, create_in_cursor
+from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -42,12 +42,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
         # If we already have a tracked revalidation task that is still alive, do not create another one.
         tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if tracked_tid:
-            try:
-                for t in (*await self.tasks.queued(), *await self.tasks.running()):
-                    if str(getattr(t, "task_id", "") or "") == tracked_tid:
-                        return tracked_tid
-            except Exception:  # noqa: BLE001 — defensive
-                pass
+            for t in (*await self.tasks.queued(), *await self.tasks.running()):
+                if str(getattr(t, "task_id", "") or "") == tracked_tid:
+                    return tracked_tid
         # Do not open a row the dispatcher would cancel on sight.
         denied = self._time_budget_denial_for_action("baseline")
         if denied is not None:
@@ -94,7 +91,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
 
@@ -143,6 +140,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=key_for(generation),
                 **create_kwargs,
+                dispatch_class="coordinator",
             )
             if str(getattr(task, "state", "") or "") not in TERMINAL_STATES:
                 return task, generation
@@ -205,6 +203,8 @@ class EnablementRevalidation(CoordinatorCollaborator):
                     requires_lanes=requires_lanes,
                     lease_ttl_sec=lease_ttl_sec,
                     task_id=_holder,
+                    dispatch_class="coordinator",
+                    dispatch_origin=task_dispatch_origin(self.shared_state),
                 )
                 if existing:
                     # A live row already runs this generation, under the round

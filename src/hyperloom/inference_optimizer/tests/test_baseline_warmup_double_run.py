@@ -40,7 +40,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (
     chatty_child,
@@ -977,7 +977,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
     shared.framework = "vllm"
     shared.benchmark_mode = "synthetic"
     shared.baseline_tput = 100.0
-    shared.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    shared.baseline_perf = {
+        "output_throughput": 100.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
     shared.current_best = {"action": "baseline", "tput": 100.0, **shared.baseline_perf}
     shared.optimization_stack = []
     output_dir = tmp_path / "ws"
@@ -998,6 +1005,9 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         "output_throughput": 90.0,
         "total_token_throughput": 1100.0,
         "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     captured: list = []
     inner, calls = _cold_then_hot_fake_run(captured)
@@ -1009,7 +1019,14 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         axes = (
             measurement
             if slot.name == "measure_round"
-            else {"output_throughput": 9999.0, "total_token_throughput": 99999.0, "e2e_norm_intvty_p90": 999.0}
+            else {
+                "output_throughput": 9999.0,
+                "total_token_throughput": 99999.0,
+                "e2e_norm_intvty_p90": 999.0,
+                "e2e_norm_intvty_p50": 999.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            }
         )
         report_path = workspace / "benchmark_report.json"
         report = json.loads(report_path.read_text())
@@ -1049,17 +1066,16 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct",
     [
-        pytest.param(90.0, 1100.0, 110.0, False, True, 10.0, id="intvty-win-output-drop"),
-        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-output-floor-does-not-apply"),
-        pytest.param(100.1, 1509.0, 150.9, True, False, 0.6, id="stack-below-primary"),
-        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-below-agentx-floor"),
-        pytest.param(100.1, 1500.0, 153.0, True, True, 2.0, id="stack-exact-agentx-floor"),
-        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="primary-below-agentx-floor"),
-        pytest.param(90.0, 950.0, 102.0, False, True, 2.0, id="exact-floor-and-throughput-guard"),
-        pytest.param(110.0, 949.9, 110.0, False, False, 10.0, id="throughput-guard-breach"),
-        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="interactivity-tradeoff-recorded"),
-        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="flat-interactivity-recorded"),
-        pytest.param(110.0, 900.0, 90.0, False, False, -10.0, id="both-axes-regress"),
+        pytest.param(90.0, 1100.0, 110.0, False, False, 10.0, id="output-guard-breach"),
+        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-median-just-above-flat"),
+        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-median-below-the-bar"),
+        pytest.param(100.1, 1500.0, 154.5, True, True, 3.0, id="stack-median-at-the-bar"),
+        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="median-below-the-bar"),
+        pytest.param(110.0, 1030.0, 103.0, False, True, 3.0, id="median-at-the-bar"),
+        pytest.param(90.0, 950.0, 102.0, False, False, 2.0, id="median-below-bar-and-output-breach"),
+        pytest.param(110.0, 949.9, 110.0, False, True, 10.0, id="total-no-longer-participates"),
+        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="median-regresses"),
+        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="median-flat"),
     ],
 )
 def test_deferred_accuracy_keep_policy_uses_graded_performance(
@@ -1067,11 +1083,19 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
 ):
     case = deferred_accuracy_keep_policy
     case.measurement.update(
-        output_throughput=output_tput, total_token_throughput=total_tput, e2e_norm_intvty_p90=intvty
+        output_throughput=output_tput,
+        total_token_throughput=total_tput,
+        e2e_norm_intvty_p90=intvty,
+        e2e_norm_intvty_p50=intvty,
     )
     reference = 150.0 if stack else 100.0
     if stack:
-        case.shared.current_best.update(action="integrate", total_throughput=1500.0, e2e_norm_intvty_p90=reference)
+        case.shared.current_best.update(
+            action="integrate",
+            total_throughput=1500.0,
+            e2e_norm_intvty_p90=reference,
+            e2e_norm_intvty_p50=reference,
+        )
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
 
     result = case.run()
@@ -1104,9 +1128,9 @@ def test_deferred_accuracy_keep_policy_uses_graded_performance(
     else:
         assert result.get("accuracy") is None
         assert stage["status"] == "skipped"
-        both_axes_regress = intvty < reference * 0.95 and total_tput < (1500.0 if stack else 1000.0) * 0.95
-        assert stage["reason"] == ("intvty_regression" if both_axes_regress else "performance_keep_not_eligible")
-        assert stage["graded_objective"] == "e2e_norm_intvty_p90"
+        # Every non-KEEP on the graded axis is a revert now, so the skip always names the objective.
+        assert stage["reason"] == "intvty_regression"
+        assert stage["graded_objective"] == "e2e_norm_intvty_p50"
         assert stage["candidate"] == pytest.approx(intvty)
         assert stage["reference"] == pytest.approx(reference)
         assert stage["gain_pct"] == pytest.approx(gain_pct)
@@ -1210,9 +1234,15 @@ def test_deferred_accuracy_skips_incomparable_performance(
         case.shared.current_best["action"] = "integrate"
         case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
     if missing_from == "candidate":
-        case.measurement.pop("total_token_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_token_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.measurement.pop(_axis, None)
     else:
-        case.shared.current_best.pop("total_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+        for _axis in (
+            ("total_throughput",) if missing_axis == "total" else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
+        ):
+            case.shared.current_best.pop(_axis, None)
 
     result = case.run()
 
@@ -2133,96 +2163,6 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
 
 
-def test_pre_start_cleanup_unlinks_meta_and_kills_unconditionally(tmp_path, monkeypatch):
-    """Pre-start cleanup no longer probes port health: it unconditionally (a) unlinks stale pid/json without sending signals to potentially-recycled PIDs, and (b) invokes _kill_stale_servers() -- Hyperloom's own scheduling (gpu_research_lane, capacity 1) guarantees nothing matching should be alive at this point, so no extra evidence is required before reaping."""
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    pid_file = output_dir / "vllm_8888.pid"
-    meta_file = output_dir / "vllm_8888.json"
-    pid_file.write_text("2147483646")
-    meta_file.write_text("{}")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-
-    assert kill_calls["n"] == 1
-    assert not pid_file.exists()
-    assert not meta_file.exists()
-
-
-def test_pre_start_cleanup_skipped_under_pytest(tmp_path):
-    """Direct guard: _kill_stale_servers must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the same guard on the per-launch preclean in ``_grid_runner.py``."""
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    pid_file = output_dir / "vllm_8888.pid"
-    meta_file = output_dir / "vllm_8888.json"
-    pid_file.write_text("2147483646")
-    meta_file.write_text("{}")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-
-    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"
-    assert not pid_file.exists()
-    assert not meta_file.exists()
-
-
-def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
-    """The pre-start cleanup is best-effort: a raising _kill_stale_servers() must not propagate out of _pre_start_cleanup() itself."""
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-
-    def boom():
-        raise RuntimeError("proc scan blew up")
-
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-        side_effect=boom,
-    ):
-        _run(
-            executor._pre_start_cleanup(
-                pid_dir=output_dir,
-                framework="vllm",
-                port=8888,
-            )
-        )
-    # No exception propagated past _pre_start_cleanup: that's the assertion.
-
-
 def test_pre_start_cleanup_skipped_when_round_is_not_affordable(tmp_path):
     """The pre-start cleanup must not pay its cost for a round the budget gate is about to refuse: it now runs right before the round actually boots (after the affordability check and the Ray lease construction), not up front where an unaffordable round would still have paid for a scan it gets no benefit from (review on AMD-AGI/Hyperloom#1354)."""
     base = tmp_path / "base.yaml"
@@ -2297,14 +2237,14 @@ def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseli
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     """The defensive teardown unlinks stale pid/meta files without raising."""
-    executor = _executor(tmp_path / "base.yaml", tmp_path)
-    _write_yaml(tmp_path / "base.yaml", framework="vllm")
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     (pid_dir / "vllm_8888.pid").write_text("2147483646")
     (pid_dir / "vllm_8888.json").write_text("{}")
 
-    executor._teardown_lifecycle_server(
+    sl.teardown_lifecycle_server(
         pid_dir=pid_dir,
         framework="vllm",
         port=8888,

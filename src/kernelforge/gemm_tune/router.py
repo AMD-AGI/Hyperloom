@@ -116,14 +116,10 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
     path = Path(log_path)
     if not path.is_file():
         return {}
-    try:
-        from .evidence import moe_ck_missed_keys, parse_log_file
+    from .evidence import moe_ck_missed_keys, parse_log_file
 
-        report = parse_log_file(path)
-        moe = (report.get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - detection must never break routing
-        log.debug("MoE stage parse failed for %s", path, exc_info=True)
-        return {}
+    report = parse_log_file(path)
+    moe = (report.get("dispatch") or {}).get("moe") or {}
     by_stage = moe.get("by_stage") or {}
     return {
         "stages_seen": moe.get("stages_seen") or [],
@@ -176,6 +172,23 @@ def _normalize_quant_type(quant_type_arg: str) -> str:
     """Map a caller-supplied quant_type onto the router's canonical vocabulary."""
     qt = (quant_type_arg or "").strip().lower()
     return _QUANT_TYPE_ALIASES.get(qt, qt)
+
+
+# Spellings of a precision the router routes on, mapped onto its canonical vocabulary. The torch dtype names arrive
+# from a checkpoint's config.json, and "auto" is the runtime's own "unset" -- both spell a precision the router
+# already knows. A label absent from this table keeps its spelling, so an unrecognized precision stays distinct from
+# an unstated one.
+_PRECISION_ALIASES: dict[str, str] = {
+    "bfloat16": "bf16",
+    "float16": "fp16",
+    "auto": "",
+}
+
+
+def _normalize_precision(precision_arg: str) -> str:
+    """Map a caller-supplied precision onto the router's canonical vocabulary."""
+    p = (precision_arg or "").strip().lower()
+    return _PRECISION_ALIASES.get(p, p)
 
 
 def _profile_can_derive_dense(profile: ModelProfile) -> bool:
@@ -240,7 +253,8 @@ def select_tuners(
     demand_report: dict[str, Any] | None = None,
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision."""
-    resolved_qt = _resolve_quant_type(precision, quant_type, profile, kernel_signature_log)
+    resolved_precision = _normalize_precision(precision)
+    resolved_qt = _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log)
     gfx_arch = _resolve_gfx_arch(gpu_type)
     tuners: list[TunerSpec] = []
 
@@ -248,7 +262,7 @@ def select_tuners(
         tuners.extend(
             _select_sglang_tuners(
                 profile,
-                precision,
+                resolved_precision,
                 resolved_qt,
                 kernel_signature_log,
                 has_untuned_csv,
@@ -260,7 +274,7 @@ def select_tuners(
         tuners.extend(
             _select_vllm_tuners(
                 profile,
-                precision,
+                resolved_precision,
                 resolved_qt,
                 has_shapes_json,
                 has_tunableop_input,
@@ -527,6 +541,33 @@ def _dense_bf16_is_dispatched(
     return precision in ("bf16", "fp16") and quant_type == "none"
 
 
+# The precisions the bf16 Triton sweep is a faithful stand-in for. Empty means the caller stated none, which leaves
+# the checkpoint and the resolved quant type to say what the experts run.
+_MEASURABLE_MOE_TRITON_PRECISIONS = ("bf16", "fp16", "")
+
+
+def _unmeasurable_moe_triton_quantization(
+    profile: ModelProfile,
+    precision: str,
+    quant_type: str,
+) -> str:
+    """Name the quantization the bf16-only vLLM Triton MoE sweep cannot stand in for, or an empty string.
+
+    The sweep builds bf16 tensors and calls the unquantized fused_experts, and vLLM picks a tuned config by the dtype
+    in its filename -- so a quantized deployment would only ever be offered tile sizes measured on weights it does not
+    run. Only an unquantized bf16/fp16 deployment is therefore measurable, and a precision outside that set is
+    refused whether or not the router has met it before. The checkpoint is read directly because
+    ``_resolve_quant_type`` carries only AWQ/GPTQ across from it, so any other declared method reaches here as
+    ``none``.
+    """
+    checkpoint_quant = (profile.quant_method or "").strip().lower()
+    if checkpoint_quant:
+        return checkpoint_quant
+    if precision not in _MEASURABLE_MOE_TRITON_PRECISIONS:
+        return precision
+    return "" if quant_type == "none" else quant_type
+
+
 def _select_vllm_tuners(
     profile: ModelProfile,
     precision: str,
@@ -538,7 +579,18 @@ def _select_vllm_tuners(
     tuners: list[TunerSpec] = []
 
     if profile.is_moe:
-        tuners.append(TunerSpec("vllm_moe_triton", priority=10, estimated_minutes=30))
+        unmeasurable = _unmeasurable_moe_triton_quantization(profile, precision, quant_type)
+        if unmeasurable:
+            tuners.append(
+                TunerSpec(
+                    "vllm_moe_triton",
+                    skip_reason=f"MoE Triton sweep measures bf16 only; {unmeasurable} is not tuned",
+                    priority=10,
+                    estimated_minutes=0,
+                )
+            )
+        else:
+            tuners.append(TunerSpec("vllm_moe_triton", priority=10, estimated_minutes=30))
 
     # Dense GEMM via TunableOp
     if has_tunableop_input or has_shapes_json:

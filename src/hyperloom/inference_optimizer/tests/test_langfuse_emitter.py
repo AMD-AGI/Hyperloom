@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
-from hyperloom.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
+from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
 
 class _FakeObservation:

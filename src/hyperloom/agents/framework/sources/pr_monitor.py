@@ -11,9 +11,10 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
-from ._shared import GitHubPr, _repo_slug
+from ._shared import GitHubPr
 
 
 class PRMonitorError(RuntimeError):
@@ -144,126 +145,22 @@ def list_perf_prs(
     base_url: str,
     limit: int = 5,
     state: str = "open",
-    label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """List PRs from pr_monitor."""
     try:
-        repo_slug = _repo_slug(repo_url)
+        slug = repo_slug(repo_url)
     except ValueError as exc:
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     query: dict[str, Any] = {"state": state, "limit": limit}
-    if label:
-        query["label"] = label
-    url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs", query)
+    url = _build_url(base_url, f"/v1/repos/{slug}/prs", query)
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
     out: list[GitHubPr] = []
     for item in items[:limit]:
         out.append(_coerce_pr_item(item, source_url=url))
     return out
-
-
-def pr_get(
-    repo_slug: str,
-    number: int,
-    *,
-    base_url: str,
-    timeout_sec: float = 10.0,
-) -> dict[str, Any]:
-    """GET ``/v1/repos/{repo}/prs/{number}`` returning the PR detail object."""
-    url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}")
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
-    if not isinstance(payload, dict):
-        raise PRMonitorError(f"pr_monitor pr_get at {url} did not return an object: {type(payload).__name__}")
-    return payload
-
-
-def pr_files(
-    repo_slug: str,
-    number: int,
-    *,
-    base_url: str,
-    timeout_sec: float = 10.0,
-) -> list[dict[str, Any]]:
-    """GET ``/v1/repos/{repo}/prs/{number}/files`` returning the file list."""
-    url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/files")
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        for key in ("files", "items", "data"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                items = value
-                break
-        else:
-            raise PRMonitorError(
-                f"pr_monitor pr_files at {url} returned dict without list field "
-                f"(tried files/items/data); keys={list(payload.keys())!r}"
-            )
-    else:
-        raise PRMonitorError(f"pr_monitor pr_files at {url} returned non-list/dict: {type(payload).__name__}")
-    return [item for item in items if isinstance(item, dict)]
-
-
-def pr_patches(
-    repo_slug: str,
-    number: int,
-    *,
-    base_url: str,
-    timeout_sec: float = 30.0,
-) -> str:
-    """GET ``/v1/repos/{repo}/prs/{number}/patches`` and render as unified diff."""
-    url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        for key in ("patches", "items", "data"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                items = value
-                break
-        else:
-            raise PRMonitorError(
-                f"pr_monitor pr_patches at {url} returned dict without list field "
-                f"(tried patches/items/data); keys={list(payload.keys())!r}"
-            )
-    elif isinstance(payload, str):
-        return payload
-    else:
-        raise PRMonitorError(f"pr_monitor pr_patches at {url} returned non-list/dict/str: {type(payload).__name__}")
-
-    chunks: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        file_meta = item.get("file") if isinstance(item.get("file"), dict) else item
-        path = file_meta.get("file_path") or file_meta.get("filename") or file_meta.get("path") or ""
-        if not isinstance(path, str) or not path:
-            continue
-        previous_path = file_meta.get("previous_path") or path
-        status = (file_meta.get("status") or "").lower()
-        old_path = previous_path if isinstance(previous_path, str) and previous_path else path
-        if status == "added":
-            old_label = "/dev/null"
-        else:
-            old_label = f"a/{old_path}"
-        if status == "deleted" or status == "removed":
-            new_label = "/dev/null"
-        else:
-            new_label = f"b/{path}"
-        chunks.append(f"diff --git a/{old_path} b/{path}")
-        chunks.append(f"--- {old_label}")
-        chunks.append(f"+++ {new_label}")
-        patch_body = item.get("patch")
-        if isinstance(patch_body, str) and patch_body:
-            chunks.append(patch_body.rstrip("\n"))
-    if not chunks:
-        return ""
-    return "\n".join(chunks) + "\n"
 
 
 def search_perf_prs_via_pr_monitor_search(
@@ -277,14 +174,14 @@ def search_perf_prs_via_pr_monitor_search(
 ) -> list[GitHubPr]:
     """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
     try:
-        repo_slug = _repo_slug(repo_url)
+        slug = repo_slug(repo_url)
     except ValueError as exc:
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     url = _build_url(
         base_url,
         "/v1/search/prs",
-        {"q": query, "repo": repo_slug, "state": state, "limit": limit},
+        {"q": query, "repo": slug, "state": state, "limit": limit},
     )
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
@@ -294,8 +191,5 @@ def search_perf_prs_via_pr_monitor_search(
 __all__ = [
     "PRMonitorError",
     "list_perf_prs",
-    "pr_files",
-    "pr_get",
-    "pr_patches",
     "search_perf_prs_via_pr_monitor_search",
 ]

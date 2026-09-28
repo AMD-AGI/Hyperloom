@@ -111,10 +111,9 @@ class KnowledgeConfig:
             else:
                 env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
-        # GBrain credentials are used by the Framework PR client but must never cross into the KernelForge child.
+        # GBrain credentials must never cross into the KernelForge child.
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)
-        env["KERNELFORGE_GBRAIN_ENABLED"] = "false"
         # Section drafts are owned by the parent inference Recipe publisher.
         env.pop("KB_DRAFT_DIR", None)
         env.pop("KB_WARM_START_DIR", None)

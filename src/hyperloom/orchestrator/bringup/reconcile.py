@@ -22,6 +22,7 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,12 @@ class ReconcileReport:
 
     Attributes:
         leases_reaped: Lease rows the pass swept.
+        leases_unverifiable: Lane rows still held after the sweep by a holder
+            that ended without confirming its cleanup. Nothing decides these:
+            no probe here can tell a lane in use from one merely abandoned, so
+            they are retained by contract rather than left over by accident.
+            Not a failure count -- but the number an operator needs to see
+            climb, and the maintenance summary carries it out of here.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
@@ -92,6 +99,7 @@ class ReconcileReport:
     """
 
     leases_reaped: int = 0
+    leases_unverifiable: int = 0
     settled: list[tuple[str, str]] = field(default_factory=list)
     handed_off: list[str] = field(default_factory=list)
     failed_tasks: list[str] = field(default_factory=list)
@@ -178,7 +186,7 @@ class Reconciler:
         ):
             try:
                 await rule(now_unix, report)
-            except Exception:  # noqa: BLE001 — independent repairs; one failing must not skip the rest
+            except Exception:
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report
@@ -207,6 +215,7 @@ class Reconciler:
             msg_id = str(row["msg_id"])
             if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
                 report.denied_reviews.append(msg_id)
+                self._record_timeout_terminal(msg_id, age=age)
             # Marked either way: a verdict that beat this write to the log is
             # still one the copy the loop reads has to carry.
             self._mark_decided(msg_id)
@@ -240,6 +249,23 @@ class Reconciler:
             log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
         return applied
 
+    def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
+        """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
+        pending = self._proposals().get(msg_id) if self._proposals is not None else None
+        action_name = str(getattr(pending, "action_name", "") or "") or None
+        record_event(
+            EVENT_PROPOSAL,
+            status=STATUS_CANCELLED,
+            span_id=msg_id,
+            attributes={
+                "name": action_name,
+                "action_name": action_name,
+                "verdict": TIMEOUT_VERDICT,
+                "reason": "review_timeout",
+                "waited_sec": round(age, 1),
+            },
+        )
+
     def _mark_decided(self, msg_id: str) -> None:
         """Record the deny on the in-memory proposal the loop consults."""
         if self._proposals is None:
@@ -272,9 +298,53 @@ class Reconciler:
         report.closed_windows.append(tracked)
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """How often an ended task confirmed its teardown, this session.
+
+        Exposed here rather than leaving the caller to reach into ``_locks``:
+        the maintenance summary carries this next to ``leases_unverifiable``,
+        and a rename of a private attribute should not be able to silently drop
+        the one ratio that says whether retained lanes are routine.
+
+        Returns:
+            tuple[int, int]: Ended tasks whose cleanup was not confirmed, and
+            ended tasks in total.
+        """
+        return await self._locks.cleanup_confirmation_rate()
+
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
-        """Release only leases with confirmed-dead local owners."""
+        """Release confirmed-dead local owners, then lanes nothing is using.
+
+        Liveness alone cannot refute a coordinator-side holder that dropped its
+        work without releasing -- the pid on the lane row is this process.
+        2026-09-21: six lanes were held that way for two hours, starving 19
+        queued tasks, by holders that had already ended and whose processes had
+        gone with them. The same thing would happen under this code, and is
+        meant to: nothing here decides that a lane is free. What changed is that
+        it announces itself within a tick, naming the lane and the statement
+        that clears it, instead of taking an hour of py-spy and sqlite to find.
+
+        A holder that ended with its cleanup unconfirmed keeps its lane, and
+        nothing here takes it back. Seven rounds of review each proposed a
+        cheaper proof that the lane was free -- the holder is terminal, its
+        recorded process group is empty, no pidfile names a live server -- and
+        each was shown by probe to be a proxy a real process can slip out of. A
+        served process is setsid'd by design, its pidfile appears only after it
+        answers, and a cmdline is a guess. Releasing a lane wrongly puts two
+        rounds on the same cards, which corrupts quietly; holding one wrongly
+        stalls a queue until an operator spends 90 seconds. The asymmetry
+        decides it.
+
+        So this pass reclaims only what liveness alone settles
+        (:meth:`reap_dead_holders`), and everything else is counted and handed
+        to an operator by :meth:`diagnose_unverifiable_holders`, once per
+        ``(lane, holder)``, with the statement that releases it. Closing that
+        gap for real needs an identity a descendant cannot escape -- a
+        per-execution cgroup -- which is its own project.
+        """
         report.leases_reaped = len(await self._locks.reap_dead_holders())
+        # After the sweep, so a row it just took back is not also reported stuck.
+        report.leases_unverifiable = len(await self._locks.diagnose_unverifiable_holders())
 
     async def _advance_or_expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Move a terminal-holder round forward, or end it once its cap passes."""

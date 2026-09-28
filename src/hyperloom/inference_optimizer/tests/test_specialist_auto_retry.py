@@ -130,14 +130,22 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
 
 
 def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
-    """Return a minimal ExplorePhase-like stub with a fake TaskRegistry."""
-    from hyperloom.orchestrator.phases.explore import ExplorePhase
+    """Return a minimal SpecialistDispatchCollaborator-like stub with a fake TaskRegistry."""
+    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 
     # Fake Task returned by create_or_return_existing.
     fake_task = MagicMock()
     fake_task.task_id = "retry-task-1"
 
-    async def _fake_create(kind, params, idempotency_key, requires_lanes, lease_ttl_sec):
+    async def _fake_create(
+        kind,
+        params,
+        idempotency_key,
+        requires_lanes,
+        lease_ttl_sec,
+        dispatch_class=None,
+        dispatch_origin=None,
+    ):
         captured_tasks.append(
             {
                 "kind": kind,
@@ -156,8 +164,8 @@ def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tas
     coord_stub._gpu_lease_ttl_sec = MagicMock(return_value=gpu_ttl)
     coord_stub._record_observation = AsyncMock()
 
-    # Build ExplorePhase with __init__ bypassed.
-    phase = ExplorePhase.__new__(ExplorePhase)
+    # Build SpecialistDispatchCollaborator with __init__ bypassed.
+    phase = SpecialistDispatchCollaborator.__new__(SpecialistDispatchCollaborator)
     phase._coord = coord_stub
     return phase
 

@@ -66,8 +66,8 @@ delegate{
    retry once with `git apply -3 -p1`. On second failure, mark the
    patch as REVERT-immediate (record `apply_failed`).
 4. Layer `config_changes` onto the server-launch env.
-5. Stop the existing server (`pkill -9 -f "VLLM::EngineCore|VLLM::Worker"`
-   or sglang equivalents); wait for VRAM to drain.
+5. Stop the server this session launched, by the pid and process group it
+   recorded; wait for VRAM to drain. No pattern-based kill runs.
 6. Launch via `$ARBOR_LAUNCH_SCRIPT` (or the installed scripts);
    health-check until ready (≤ 20min for large MoE models).
 7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via

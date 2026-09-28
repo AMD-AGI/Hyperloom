@@ -28,12 +28,13 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
+    benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
 from ._xdit_patcher import verify_xdit_profiler_baked
-from .baseline import BaselineExecutor
+from .baseline import BenchmarkRunExecutor
 
 
 log = logging.getLogger(__name__)
@@ -800,10 +801,8 @@ def _default_profile_config() -> Path:
     return asset_root() / "assets" / "configs" / name
 
 
-class ProfileExecutor(BaselineExecutor):
-    """Subclass that swaps the default config + extracts trace_dir."""
-
-    benchmark_watchdog = False
+class ProfileExecutor(BenchmarkRunExecutor):
+    """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     def __init__(
         self,
@@ -832,12 +831,8 @@ class ProfileExecutor(BaselineExecutor):
         # checks ship alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
-    def _resolve_sink(self, ctx) -> Any:
-        """Decline the baseline event a profile run must never open."""
-        return None
-
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Pick the profile yaml for $FRAMEWORK."""
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -886,12 +881,9 @@ class ProfileExecutor(BaselineExecutor):
             log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
             return ""
 
-        from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
+        roots = list(resolve_kernel_search_roots())
         probe_env = _evidence.build_probe_env(
             probe_dir=probe_dir,
             source_roots=roots,
@@ -935,7 +927,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+        except Exception as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1003,7 +995,10 @@ class ProfileExecutor(BaselineExecutor):
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
+        # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
+        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
+        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
+        serving_path = benchmark_serving_path_in(ix_root)
 
         def _contains(path: Path, needle: str) -> bool:
             """Check whether ``needle`` appears in ``path``'s text."""
@@ -1059,7 +1054,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+        except Exception as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,
@@ -1134,7 +1129,7 @@ class ProfileExecutor(BaselineExecutor):
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Stash so BaselineExecutor.__call__ picks it up via ctx.extra.
+            # Stash so the benchmark round picks it up via ctx.extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
                 extra = ctx.extra
@@ -1172,7 +1167,7 @@ class ProfileExecutor(BaselineExecutor):
         )
 
         # Multi-node only: pre-restart the server with this round's profiler dir, marking
-        # ``ctx.extra['mn_round_restarted']`` so BaselineExecutor skips a second restart.
+        # ``ctx.extra['mn_round_restarted']`` so the benchmark round skips a second restart.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
         if round_trace_root and agentx_session:
             return {

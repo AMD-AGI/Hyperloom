@@ -62,7 +62,7 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.plateau_overrides = {"explore_lookback": 7, "explore_keep_gain_pct": 1.25}
 
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     policy = _events(session_dir)[0]["ext"]["policy"]
@@ -82,7 +82,7 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
 def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     assert _events(session_dir)[0]["ext"]["policy"]["force_exit_budget_pct"] is None
@@ -93,7 +93,7 @@ async def test_phase_transition_closes_the_event(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.phase_history = [{"to_phase": "FRAMEWORK_AGENT", "reason": "prelude_done", "evidence": {}}]
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     await coord._on_phase_entered(
         from_phase="FRAMEWORK_AGENT",
@@ -113,7 +113,7 @@ async def test_phase_transition_closes_the_event(session_dir: Path):
 async def test_exit_plateau_comes_from_the_deciding_evidence(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     await coord._on_phase_entered(
         from_phase="FRAMEWORK_AGENT",
@@ -148,7 +148,7 @@ async def test_exit_plateau_comes_from_the_deciding_evidence(session_dir: Path):
 async def test_a_transition_without_a_plateau_reading_writes_no_rows(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     await coord._on_phase_entered(
         from_phase="FRAMEWORK_AGENT",
@@ -164,7 +164,7 @@ def test_advisory_plateau_snapshots_both_arms(session_dir: Path):
     coord = _coordinator(session_dir)
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     coord._plateau_advisory_block()
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -181,13 +181,13 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     task = SimpleNamespace(
         task_id="t-disc-1",
         params={"candidate_discovery": True, "domain": "candidate_discovery_specialist"},
     )
-    coord._ingest_candidate_discovery(
+    coord.phase_framework._ingest_candidate_discovery(
         task=task,
         done_payload={
             "proposal_set": [
@@ -224,9 +224,9 @@ def test_failed_discovery_round_records_the_failure(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
-    coord._ingest_candidate_discovery(
+    coord.phase_framework._ingest_candidate_discovery(
         task=SimpleNamespace(task_id="t-disc-2", params={"candidate_discovery": True, "domain": "d"}),
         done_payload={},
         run_error="worktree checkout failed",
@@ -245,9 +245,9 @@ def test_failed_discovery_round_records_the_failure(session_dir: Path):
 def test_terminal_row_settles_the_proposal(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
-    coord._stamp_framework_progress(
+    coord.phase_framework._stamp_framework_progress(
         candidate_id="cand-1",
         batch_id="b1",
         status="apply_failed",
@@ -267,13 +267,13 @@ def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     pending = SimpleNamespace(
         payload={"framework_agent_candidate_id": "cand-9", "batch_id": "b1"},
         action_name="integrate_patch",
     )
-    asyncio.run(coord._record_framework_agent_critic_denied(pending, "touches the serving loop"))
+    asyncio.run(coord.phase_framework.record_critic_denial(pending, "touches the serving loop"))
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
@@ -292,7 +292,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={})
     result = {
@@ -342,11 +342,157 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert killed["attribution_eligible"] is False
 
 
+@pytest.mark.asyncio
+async def test_a_raising_pump_is_named_on_the_event(session_dir: Path, monkeypatch):
+    """The pump must not take the tick down, but it cannot vanish either: an entry
+    whose pump raised every tick otherwise closes on whatever it managed to dispatch."""
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    async def _boom(_self) -> None:
+        raise RuntimeError("task store went away")
+
+    monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _boom)
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    await coord.phase_framework.pump(caller="tick")
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    event = _events(session_dir)[0]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["stage"] == "framework_pump:tick"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
+    assert "task store went away" in event["ext"]["failure"]["message"]
+    # The exit evidence still stands: the fault did not close the entry.
+    assert event["ext"]["exit"]["reason"] == "optimize_budget_cap"
+    # Filed against the session as well, the way every coordinator-side stage is.
+    assert coord.shared_state.crash_count == 1
+
+
+def test_the_config_arms_grid_lands_a_run_row(session_dir: Path):
+    """Both arms' dispatches belong to this event, or its status reduces over half of them."""
+    import asyncio
+    from types import SimpleNamespace
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={}, created_at="2026-09-18T01:00:00Z")
+    asyncio.run(
+        coord._fact_write_hook(
+            task=task,
+            result={
+                "status": "succeeded",
+                "round_id": "explore-001",
+                "workspace": "/w/explore-001",
+                "per_variant_outcomes": [
+                    {"variant_name": "v1", "outcome": "REVERT", "fingerprint": "fp1", "metrics": {}, "variant": {}}
+                ],
+            },
+            kept=False,
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    run = _events(session_dir)[0]["ext"]["runs"][0]
+    assert run["run_id"] == "t-exp-1"
+    assert (run["role"], run["arm"]) == ("config", "config")
+    assert run["status"] == "succeeded"
+    assert run["dispatched_at"] == "2026-09-18T01:00:00Z"
+    assert run["empty"] is False
+    # The attempt names the task, which is what ties it back to this run.
+    assert _events(session_dir)[0]["ext"]["attempts"][0]["task_id"] == "t-exp-1"
+
+
+def test_a_grid_that_measured_nothing_still_lands_a_run_row(session_dir: Path):
+    """The failure no attempt row can carry: the task never produced a variant outcome."""
+    import asyncio
+    from types import SimpleNamespace
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={}, created_at="2026-09-18T02:00:00Z")
+    asyncio.run(
+        coord._fact_write_hook(
+            task=task,
+            result={"status": "failed", "error_class": "empty_grid", "error": "params.grid has no valid variants"},
+            kept=False,
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    event = _events(session_dir)[0]
+    assert event["ext"]["attempts"] == []
+    run = event["ext"]["runs"][0]
+    assert run["status"] == "failed"
+    assert run["empty"] is True
+    assert "no valid variants" in run["reason"]
+    # An arm whose grid came back with nothing is not an arm that was never tried.
+    assert event["status"] == "failed"
+
+
+def test_a_config_variants_accuracy_is_reported_as_well_as_gated(session_dir: Path):
+    """Both arms carry the block; this arm's is projected from the gate that ruled."""
+    import asyncio
+    from types import SimpleNamespace
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    task = SimpleNamespace(task_id="t-exp-3", kind="explore", params={}, created_at="")
+    asyncio.run(
+        coord._fact_write_hook(
+            task=task,
+            result={
+                "round_id": "explore-003",
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "v-gated",
+                        "outcome": "REVERT",
+                        "fingerprint": "fp1",
+                        "metrics": {},
+                        "variant": {},
+                        "gates": [
+                            {
+                                "gate": "accuracy",
+                                "passed": False,
+                                "observed": 0.71,
+                                "threshold": 0.80,
+                                "reason": "accuracy_drop",
+                            }
+                        ],
+                    },
+                    {"variant_name": "v-ungated", "outcome": "REVERT", "fingerprint": "fp2", "metrics": {}},
+                ],
+            },
+            kept=False,
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
+    assert attempts["fp1"]["accuracy"] == {
+        "required": True,
+        "value": 0.71,
+        "reference": 0.80,
+        "passed": False,
+    }
+    # Nothing gated it, which is not a gate that refused it.
+    assert attempts["fp2"]["accuracy"]["required"] is None
+    assert attempts["fp2"]["accuracy"]["passed"] is None
+
+
 def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.framework_agent_specialist_candidate_map = {"t-auth-1": "https://x/pr/1"}
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     from types import SimpleNamespace
 
@@ -361,7 +507,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "lever_kind": "upstream_pr",
         },
     )
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result={
             "status": "kept",
@@ -400,14 +546,70 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
     assert proposal["terminal"]["disposition"] == "attempted"
 
 
+def _authored_outcome(coord, result: dict) -> dict:
+    """One authored-patch outcome recorded, and the attempt row it produced."""
+    from types import SimpleNamespace
+
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.framework_agent_specialist_candidate_map = {"t-auth-1": "https://x/pr/1"}
+    coord.phase_framework._open_framework_timeline()
+    coord.phase_framework._record_framework_agent_authored_outcome(
+        task=SimpleNamespace(
+            task_id="t-int-1",
+            kind="integrate_patch",
+            params={
+                "framework_agent_authoring": True,
+                "specialist_task_id": "t-auth-1",
+                "framework_agent_candidate_id": "https://x/pr/1",
+                # The stack as of dispatch, which the executor rebinds past.
+                "base_extra_args": "--stale 1",
+                "base_tput": 90.0,
+            },
+        ),
+        result=result,
+    )
+    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+    return _events(coord.session_dir)[0]["ext"]["attempts"][0]
+
+
+def test_a_source_attempt_names_the_stack_it_was_measured_on(session_dir: Path):
+    """The executor's answer wins over the task's, which is stale by the time it runs."""
+    attempt = _authored_outcome(
+        _coordinator(session_dir),
+        {
+            "status": "kept",
+            "base_tput": 100.0,
+            "output_throughput": 108.0,
+            "delta_pct": 8.0,
+            "measured_against": {
+                "throughput": 100.0,
+                "extra_server_args": "--already-won 1",
+                "extra_envs": {"KEPT": "1"},
+                "args_mode": "append",
+            },
+        },
+    )
+    assert attempt["measured_against"]["throughput"] == 100.0
+    assert attempt["measured_against"]["extra_server_args"] == "--already-won 1"
+    assert attempt["measured_against"]["extra_envs"] == {"KEPT": "1"}
+
+
+def test_an_attempt_that_never_measured_claims_no_stack(session_dir: Path):
+    attempt = _authored_outcome(
+        _coordinator(session_dir),
+        {"status": "failed", "error_class": "patch_apply_failed", "error": "does not apply"},
+    )
+    assert "measured_against" not in attempt
+
+
 def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
     from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=SimpleNamespace(
             task_id="t-int-2",
             kind="integrate_patch",
@@ -448,7 +650,7 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
 def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(
         coord,
@@ -474,7 +676,7 @@ def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
 def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "specialist:attention", "scope": "domain"}])
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -488,7 +690,7 @@ def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
 def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "default_grid"}])
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -499,7 +701,7 @@ def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
 def test_a_mixed_grid_is_the_assemblers(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     _propose_grid(coord, [{"provenance": "specialist:attention"}, {"provenance": "default_grid"}])
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -514,7 +716,7 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     asyncio.run(
@@ -558,7 +760,7 @@ def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:
 def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     _review(
@@ -594,7 +796,7 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
 def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     _review(
@@ -619,7 +821,7 @@ def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
 def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(
         coord,
@@ -653,7 +855,7 @@ def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
 def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     _review(
@@ -681,8 +883,8 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
-    coord._framework_timeline().record_proposal(
+    coord.phase_framework._open_framework_timeline()
+    coord.phase_framework.timeline().record_proposal(
         "cand-42",
         arm=ARM_SOURCE,
         producer=PRODUCER_SPECIALIST,
@@ -725,7 +927,7 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.macro_cycle = 0
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     _review(coord, msg_id, {"verdict": "reject", "reasoning": "raises the memory floor"})
@@ -782,7 +984,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     task = SimpleNamespace(task_id="t-exp-9", kind="explore", params={"proposal_msg_id": msg_id})
@@ -820,7 +1022,7 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     asyncio.run(
@@ -854,9 +1056,9 @@ def test_every_applied_patch_is_recorded_not_just_the_primary(session_dir: Path)
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=SimpleNamespace(
             task_id="t-int-7",
             kind="integrate_patch",
@@ -885,7 +1087,7 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={})
     asyncio.run(
@@ -945,7 +1147,7 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord._open_framework_timeline()
+    coord.phase_framework._open_framework_timeline()
 
     asyncio.run(
         coord._fact_write_hook(

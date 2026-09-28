@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
+    ALLOWED_VERDICTS,
     IntentType,
     IntentValidationError,
 )
@@ -28,18 +29,6 @@ ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
         IntentType.REVIEW_VERDICT.value,
         IntentType.SEND_MESSAGE.value,
         IntentType.ALERT.value,
-    }
-)
-
-
-# Verdict vocabulary.
-ALLOWED_VERDICTS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "reject",
-        "redirect",
-        "advise",
-        "needs_review",
     }
 )
 
@@ -189,7 +178,6 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
 
 __all__ = [
     "ALLOWED_CRITIC_INTENTS",
-    "ALLOWED_VERDICTS",
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "DEFAULT_IDLE_BODY",

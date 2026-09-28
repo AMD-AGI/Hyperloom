@@ -98,7 +98,7 @@ class TestExecutor:
         session_dir,
     ):
         target = session_dir / "session_breakdown.json"
-        target.write_text(json.dumps({"warnings": ["w1"]}))
+        target.write_text(json.dumps({"metadata": {"warnings": ["w1"]}}))
 
         def fake_writer(_sd, *, output_path=None):
             return target
@@ -106,10 +106,6 @@ class TestExecutor:
         monkeypatch.setattr(
             "hyperloom.inference_optimizer.breakdown.write_breakdown_json",
             fake_writer,
-        )
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.breakdown.build",
-            lambda *a, **k: {"metadata": {"warnings": ["w1"]}},
         )
         ctx = _ctx(extra={"session_dir": str(session_dir)})
         result = await sb.SessionBreakdownExecutor()(ctx)
@@ -119,7 +115,7 @@ class TestExecutor:
         assert result["size_bytes"] > 0
 
     @pytest.mark.asyncio
-    async def test_build_exception_yields_empty_warnings(
+    async def test_a_breakdown_without_warnings_reports_none(
         self,
         monkeypatch,
         session_dir,
@@ -130,14 +126,6 @@ class TestExecutor:
         monkeypatch.setattr(
             "hyperloom.inference_optimizer.breakdown.write_breakdown_json",
             lambda *a, **k: target,
-        )
-
-        def raise_build(*args, **kwargs):
-            raise RuntimeError("build failure")
-
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.breakdown.build",
-            raise_build,
         )
         ctx = _ctx(extra={"session_dir": str(session_dir)})
         result = await sb.SessionBreakdownExecutor()(ctx)

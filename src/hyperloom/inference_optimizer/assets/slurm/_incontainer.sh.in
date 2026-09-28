@@ -73,16 +73,24 @@ Target:
 - max hours: ${MAX_HOURS}
 
 Load the repository skill instructions, then run this exact optimizer command
-for the workload. Do not omit the env exports, model-class, precision, or
-launch-info-file wiring:
+for the workload. Every element of the declared shape is a flag: the optimizer
+resolves these as flag > persisted state > default and never reads them from
+the environment, so a dropped flag silently benchmarks a default instead. The
+exports remain only for the framework recipes downstream, which do read them.
 
-export TP=${TP} EP=1 CONC=${CONC} ISL=${ISL} OSL=${OSL} PRECISION=${PREC} NODES=1
+export TP=${TP} EP=${EP_SIZE:-1} CONC=${CONC} ISL=${ISL} OSL=${OSL} PRECISION=${PREC} NODES=1
 export KERNEL_OPT_BACKEND_ORDER="\${KERNEL_OPT_BACKEND_ORDER:-geak}"
 python3 -m hyperloom.inference_optimizer.cli --verbose optimize \\
   --model "${MODEL_PATH:-$REPO_ID}" \\
   --framework "${FRAMEWORK}" \\
   --gpu-type "${GPU_TYPE}" \\
   --model-class "${MODEL_CLASS}" \\
+  --tp "${TP}" \\
+  --conc "${CONC}" \\
+  --ep "${EP_SIZE:-1}" \\
+  --isl "${ISL}" \\
+  --osl "${OSL}" \\
+  --precision "${PREC}" \\
   --target-gain "${TARGET_GAIN}" \\
   --max-hours "${MAX_HOURS}" \\
   --tick-interval-sec 30 \\
@@ -95,14 +103,21 @@ PROMPT_EOF
 
 case "$BACKEND" in
   python)
-    # Workload envs the Coordinator reuses for baseline -> params -> sweep.
-    export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
+    # Workload envs the framework recipes read; the optimizer itself takes the
+    # shape from the flags below and never consults the environment for it.
+    export TP EP="${EP_SIZE:-1}" CONC ISL OSL PRECISION="$PREC" NODES=1
     export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
     exec python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
       --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
       --gpu-type "$GPU_TYPE" \
       --model-class "$MODEL_CLASS" \
+      --tp "$TP" \
+      --conc "$CONC" \
+      --ep "${EP_SIZE:-1}" \
+      --isl "$ISL" \
+      --osl "$OSL" \
+      --precision "$PREC" \
       --target-gain "$TARGET_GAIN" \
       --max-hours "$MAX_HOURS" \
       --tick-interval-sec 30 \

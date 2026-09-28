@@ -107,6 +107,7 @@ PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     "phase_action",
     "phase_marker",
     "phase_proposal",
+    "phase_denial",
 )
 
 STACK_EVENT_SECTIONS: tuple[str, ...] = (
@@ -118,6 +119,7 @@ STACK_EVENT_SECTIONS: tuple[str, ...] = (
 WARM_REPLAY_EVENT_SECTIONS: tuple[str, ...] = (
     "warm_replay_event",
     "warm_replay_gate",
+    "warm_replay_apply",
 )
 
 WARM_START_EVENT_SECTIONS: tuple[str, ...] = (

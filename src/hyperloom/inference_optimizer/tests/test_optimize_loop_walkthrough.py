@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -31,18 +32,44 @@ def _coordinator(session_dir: Path):
             payload={"topic": "heartbeat", "body_md": "ok"},
         ),
     )
-    return Coordinator(
+    coord = Coordinator(
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="orch"),
             "critic": MockCriticBackend(),
         },
     )
+    coord.sub.register_executor("kernel_agent", coord._run_kernel_agent)
+    return coord
+
+
+async def _settle_unjoined_actions(coord: Any) -> None:
+    """Let the actions the pump dispatched without joining run to completion."""
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
+    if handles:
+        await asyncio.gather(*handles)
+
+
+def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
+    return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
 
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
+    from hyperloom.orchestrator.kernel import controller_submit
+
+    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
+
+    def _tool_path_without_geak_runner(tool_name: str) -> Path:
+        if tool_name == "backends/geak_runner.py":
+            raise FileNotFoundError(tool_name)
+        return real_tool_path(tool_name)
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
+    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
 
@@ -77,8 +104,27 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 
 @pytest.mark.asyncio
-async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
-    """With nothing left to try, the run reaches CLOSE through every phase."""
+@pytest.mark.parametrize(
+    ("backend_order", "result_field", "result_key", "expected"),
+    [
+        ("", "geak_result", "error_class", "runner_not_found"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
+    ],
+    ids=["geak", "forge"],
+)
+async def test_both_arms_dry_walks_the_rest_of_the_chain(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_order: str,
+    result_field: str,
+    result_key: str,
+    expected: str,
+):
+    """With nothing left to try, the run reaches CLOSE through every phase, on either kernel route."""
+    from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
+
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
+
     coord = _coordinator(session_dir)
     try:
         state = coord.shared_state
@@ -87,15 +133,30 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
         # Source arm: no local exploration, and discovery past its retries.
         state.framework_local_explore_enabled = False
         state.framework_agent_empty_discoveries = 99
-        # Config arm: trailing winners below the gain floor, rounds producing nothing.
-        state.explore_search = {"winners_history": [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)]}
-        state.specialist_rounds = [{"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(6)]
+        # Config arm: a run of benched variants past the streak floor, none adopted.
+        for i in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK + 1):
+            record_config_attempt(
+                state,
+                task_id=f"explore-{i}",
+                round_id=f"round-{i}",
+                fingerprint=f"fp-{i}",
+                variant_name=f"variant-{i}",
+                outcome="REVERT",
+                gain_pct=0.01,
+                before_tput=1500.0,
+                after_tput=1500.15,
+                error_class="",
+                provenance="default_grid",
+            )
         state.save(session_dir)
 
         for tick in range(1, 12):
             await coord.tick(tick)
+            # The kernel_agent task is not joined by the pump and holds the phase until it returns.
+            await _settle_unjoined_actions(coord)
 
         assert state.phase == ps.PHASE_CLOSE
+        assert getattr(state, result_field)[result_key] == expected
         visited = [to_phase for _, to_phase, _ in _chain(state)]
         assert visited[:2] == [ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT]
         assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]

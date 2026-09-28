@@ -13,7 +13,7 @@ from typing import NoReturn
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
-from hyperloom.common.llm_config import provider_model_defaults
+from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
 # Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
 # can read the same numbers without importing this module, which would close a
@@ -25,7 +25,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
     DEFAULT_TP,
 )
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
@@ -116,18 +116,14 @@ def _default_claude_model_env() -> str:
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    if openai_url and not anthropic_url:
+    if is_openai_only():
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     return DEFAULT_CLAUDE_MODEL
 
 
 def _default_codex_model_env() -> str:
     """Resolve the default Codex-style model from env."""
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if anthropic_url and not openai_url:
+    if is_anthropic_only():
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
     if explicit:
@@ -147,7 +143,7 @@ def _default_research_lane_capacity() -> int:
 
 def _default_gpu_specialist_capacity() -> int:
     """Default ``--gpu-specialist-capacity`` to the whole visible machine."""
-    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
 
@@ -747,8 +743,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Protocol for the Critic's review inference. 'openai' uses the "
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential. "
+        "'auto' (default) reviews with the orchestration model over the protocol "
+        "orchestration runs on; an explicit value reviews with that side's model "
+        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
+        "credential. Preflight sends the review model one request and refuses to "
+        "start when it does not answer; there is no fallback model. "
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
     )

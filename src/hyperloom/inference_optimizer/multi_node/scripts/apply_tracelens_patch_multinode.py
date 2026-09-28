@@ -115,7 +115,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
     """Prepend a ``safe.directory`` exception for the checkout at ``cwd``."""
     try:
-        from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+        from hyperloom.common.git_safety import safe_directory_args
     except ImportError:
         return list(args)
     return safe_directory_args(list(args), cwd=cwd)
@@ -123,7 +123,7 @@ def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
     """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         ["git", *_safe_directory_args(args, cwd)],
         cwd=str(cwd),
         capture_output=True,
@@ -154,7 +154,7 @@ def _apply_on_pod(
     }
     try:
         try:
-            import sglang  # type: ignore  # noqa: I001 - runtime probe
+            import sglang  # type: ignore
         except Exception as e:  # noqa: BLE001
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
 from hyperloom.inference_optimizer.agentx.mapping import map_aiperf, pct, stat
 
 
@@ -35,7 +36,7 @@ def _sample():
         "total_isl": {"unit": "tok", "avg": 4200.0},
         "total_output_tokens": {"unit": "tok", "avg": 2100.0},
         "benchmark_duration": {"unit": "s", "avg": 14.0},
-        "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
+        "time_to_first_token": _metric(120.0, p50=110.0, p90=170.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
         # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
         "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
@@ -46,27 +47,25 @@ def _sample():
     }
 
 
-@pytest.fixture(params=[False, True], ids=["package", "standalone-fallback"])
-def error_rate_mapper(request, monkeypatch):
-    if not request.param:
-        return map_aiperf
-    asset = Path(__file__).parents[1] / "assets" / "agentx" / "map_aiperf.py"
-    monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
-    spec = importlib.util.spec_from_file_location("_error_rate_asset", asset)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.map_aiperf.__module__ == "_error_rate_asset"
-    return module.map_aiperf
+@pytest.fixture
+def deployed_mapper(tmp_path, monkeypatch):
+    """``map_aiperf.py`` as deployed, beside the mapping module it imports."""
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.delitem(sys.modules, "agentx_mapping", raising=False)
+    deployed = deploy_agentx_assets(tmp_path / "benchmarks")
+    yield next(path for path in deployed if path.name == "map_aiperf.py")
+    sys.modules.pop("agentx_mapping", None)
 
 
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("success", [441, 1289, 1293])
-def test_zero_errors_from_profiling_summary(error_rate_mapper, nested, success):
+def test_zero_errors_from_profiling_summary(nested, success):
     metrics = {"request_count": {"avg": success}}
     export = {"metrics": metrics} if nested else metrics.copy()
     export["error_summary"] = []
     export["request_accounting"] = {"records_error_dropped": 3}
-    assert error_rate_mapper(export)["request_error_rate"] == 0.0
+    assert map_aiperf(export)["request_error_rate"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -97,20 +96,20 @@ def test_zero_errors_from_profiling_summary(error_rate_mapper, nested, success):
         ({"request_count": 10, "request_error_rate": None}, [], 0.0),
     ],
 )
-def test_error_rate_from_counts(error_rate_mapper, fields, summary, expected):
+def test_error_rate_from_counts(fields, summary, expected):
     export = {**fields, "error_summary": summary}
-    assert error_rate_mapper(export)["request_error_rate"] == expected
+    assert map_aiperf(export)["request_error_rate"] == expected
 
 
 @pytest.mark.parametrize("invalid", [True, -1, "10", float("nan"), float("inf")])
-def test_invalid_success_count_is_unknown(error_rate_mapper, invalid):
-    result = error_rate_mapper({"request_count": invalid, "error_summary": []})
+def test_invalid_success_count_is_unknown(invalid):
+    result = map_aiperf({"request_count": invalid, "error_summary": []})
     assert result["request_error_rate"] is None
 
 
 @pytest.mark.parametrize("invalid", [True, -1, 101, "0", float("nan"), float("inf")])
-def test_invalid_explicit_rate_is_unknown(error_rate_mapper, invalid):
-    result = error_rate_mapper({"request_count": 10, "error_summary": [], "request_error_rate": invalid})
+def test_invalid_explicit_rate_is_unknown(invalid):
+    result = map_aiperf({"request_count": 10, "error_summary": [], "request_error_rate": invalid})
     assert result["request_error_rate"] is None
 
 
@@ -185,6 +184,20 @@ def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
     assert r["e2e_norm_intvty_p90"] == 0.0, f"expected 0.0 (no p10 present), got {r['e2e_norm_intvty_p90']!r}"
 
 
+def test_e2e_norm_intvty_p50_reads_the_median_rate():
+    """The median needs no slow-tail inversion, so it is the rate's own P50 -- not 1/ITL's."""
+    r = map_aiperf(_sample())
+    assert r["e2e_norm_intvty_p50"] == pytest.approx(55.0)  # not 84.1, the per-user 1/ITL p50
+
+
+def test_e2e_norm_intvty_p50_is_zero_when_export_has_no_p50():
+    """An export where e2e_output_token_throughput carries no p50 must emit 0.0, not the mean."""
+    s = _sample()
+    s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
+    r = map_aiperf(s)
+    assert r["e2e_norm_intvty_p50"] == 0.0, f"expected 0.0 (no p50 present), got {r['e2e_norm_intvty_p50']!r}"
+
+
 def test_map_accepts_metrics_wrapped():
     r = map_aiperf({"metrics": _sample()})
     assert r["output_throughput"] == 500.0
@@ -222,43 +235,6 @@ def test_empty_noncanonical_reasons_leave_the_verdict_alone():
         r = map_aiperf(export, noncanonical_reasons=reasons)
         assert r["submission_valid"] is True, reasons
         assert r["submission_invalid_reasons"] == []
-
-
-def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
-    """The fallback runs on boxes where the package is not importable, i.e."""
-    import importlib.util
-    import sys
-
-    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
-
-    monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
-    spec = importlib.util.spec_from_file_location("_asset_map_aiperf_nc", str(agentx_asset_dir() / "map_aiperf.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
-    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"]) == map_aiperf(
-        export, noncanonical_reasons=["entries=50"]
-    )
-    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"])["submission_valid"] is False
-
-
-def test_vendored_asset_fallback_matches_package(monkeypatch):
-    """The deployed asset vendors a fallback map_aiperf for when the package is not importable; guard it against drifting from the package implementation."""
-    import importlib.util
-    import sys
-
-    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
-
-    asset = agentx_asset_dir() / "map_aiperf.py"
-    # Force the asset's `from ...mapping import map_aiperf` to raise so the vendored fallback branch is the one
-    # exercised.
-    monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
-    spec = importlib.util.spec_from_file_location("_asset_map_aiperf", str(asset))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    assert mod.map_aiperf(_sample()) == map_aiperf(_sample())
 
 
 def test_map_corpus_shape_projects_the_measured_distributions():
@@ -308,7 +284,6 @@ def test_a_non_list_invalid_reason_is_coerced_to_one():
     assert map_aiperf(export)["submission_invalid_reasons"] == ["unsafe_override"]
 
 
-@pytest.mark.parametrize("standalone", [False, True], ids=["installed-package", "standalone-fallback"])
 @pytest.mark.parametrize(
     "records",
     [
@@ -319,15 +294,11 @@ def test_a_non_list_invalid_reason_is_coerced_to_one():
     ],
     ids=["missing-records", "valid-records", "malformed-records"],
 )
-def test_file_mapper_uses_only_summary(monkeypatch, tmp_path, capsys, standalone, records):
-    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
-
-    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
-    if standalone:
-        monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
-    spec = importlib.util.spec_from_file_location("_summary_asset_mapper", agentx_asset_dir() / "map_aiperf.py")
+def test_file_mapper_uses_only_summary(deployed_mapper, tmp_path, capsys, records):
+    spec = importlib.util.spec_from_file_location("_summary_asset_mapper", deployed_mapper)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    assert sys.modules["agentx_mapping"].__file__ == str(deployed_mapper.with_name("agentx_mapping.py"))
 
     source = tmp_path / "profile_export_aiperf.json"
     source.write_text(json.dumps(_sample()), encoding="utf-8")
@@ -347,19 +318,41 @@ def test_file_mapper_uses_only_summary(monkeypatch, tmp_path, capsys, standalone
     assert json.loads(capsys.readouterr().out) == result
 
 
-def test_deployed_mapper_maps_summary_without_installed_hyperloom(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
-
-    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
-    deployed = deploy_agentx_assets(tmp_path / "benchmarks")
-    script = next(path for path in deployed if path.name == "map_aiperf.py")
+def _run_deployed(script, tmp_path, export, **env):
+    """Run the deployed script with no site-packages, so hyperloom cannot be imported."""
     source = tmp_path / "profile_export_aiperf.json"
-    source.write_text(json.dumps(_sample()), encoding="utf-8")
+    source.write_text(json.dumps(export), encoding="utf-8")
     output = tmp_path / "result.json"
-    proc = subprocess.run([sys.executable, "-I", str(script), str(source), str(output)], capture_output=True, text=True)
+    proc = subprocess.run(
+        [sys.executable, "-I", "-S", str(script), str(source), str(output)],
+        capture_output=True,
+        text=True,
+        cwd="/",
+        env=env,
+    )
     assert proc.returncode == 0, proc.stderr
     result = json.loads(output.read_text(encoding="utf-8"))
+    assert json.loads(proc.stdout) == result
+    return result
+
+
+def test_deployed_mapper_maps_summary_without_installed_hyperloom(deployed_mapper, tmp_path):
+    result = _run_deployed(deployed_mapper, tmp_path, _sample())
     assert "comparison_metrics" not in result
     assert result["e2e_norm_intvty_p90"] == 22.6
     assert result == map_aiperf(_sample())
-    assert json.loads(proc.stdout) == result
+
+
+def test_deployed_mapper_honours_noncanonical_reasons(deployed_mapper, tmp_path):
+    """The client hands its detected deviations over through the environment."""
+    export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
+    result = _run_deployed(deployed_mapper, tmp_path, export, AGENTX_NONCANONICAL_REASONS="entries=50, ,duration=120s")
+    assert result["submission_valid"] is False
+    assert result == map_aiperf(export, noncanonical_reasons=["entries=50", "duration=120s"])
+
+
+def test_ttft_p90_is_mapped():
+    """The detail view reports TTFT at p50 and p90; only p50 and p99 used to be carried."""
+    r = map_aiperf(_sample())
+    assert r["p90_ttft_ms"] == pytest.approx(170.0)
+    assert r["median_ttft_ms"] == pytest.approx(110.0)

@@ -11,6 +11,7 @@ from kernelforge.knowledge.experience_sink import (
     resolve_operation,
 )
 from kernelforge.knowledge.implementation_identity import (
+    canonical_framework_version,
     implementation_signature,
     normalize_operator_name,
 )
@@ -26,11 +27,6 @@ REWRITE_PRODUCER = "flydsl"
 #: Stands in for a dimension that could not be resolved, and is also what
 #: ``detect_framework`` returns for a file owned by no framework package.
 UNKNOWN_SEGMENT = "unknown"
-#: The version of a framework that is not there. A literal keeps the dimension
-#: populated without pretending a version was observed.
-NO_FRAMEWORK_VERSION = "none"
-#: The framework is known but its distribution is not installed here.
-UNKNOWN_VERSION = "unspecified"
 
 _DISALLOWED = re.compile(r"[^a-z0-9._+-]+")
 _LEADING = re.compile(r"^[^a-z0-9_]+")
@@ -51,14 +47,20 @@ def segment(value: str, *, fallback: str) -> str:
 
 
 def framework_version(framework: str) -> str:
-    """Read the installed version of the framework that owns the source."""
+    """Read the release of the framework that owns the source.
+
+    A framework that is not there, one whose distribution is not installed, and
+    one whose wheel was built on another machine each used to answer in their
+    own words -- ``none``, ``unspecified``, ``0.24.0+rocm723`` -- so one kernel
+    accumulated a page per answer. Every one of them resolves here to the
+    release, or to the single word for not knowing it.
+    """
     name = str(framework or "").strip().lower()
-    if not name or name == UNKNOWN_SEGMENT:
-        return NO_FRAMEWORK_VERSION
     try:
-        return segment(metadata.version(name), fallback=UNKNOWN_VERSION)
+        installed = metadata.version(name) if name and name != UNKNOWN_SEGMENT else ""
     except metadata.PackageNotFoundError:
-        return UNKNOWN_VERSION
+        installed = ""
+    return segment(canonical_framework_version(installed), fallback=UNKNOWN_SEGMENT)
 
 
 def session_id(canonical_id: str, kernel_name: str, port_digest: str) -> str:

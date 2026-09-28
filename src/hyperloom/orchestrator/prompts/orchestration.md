@@ -292,10 +292,10 @@ exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
 reloop gives OPTIMIZE another round.
 
-**Source-level failures can go straight to a specialist.** A variant
-crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
-`delegate{action_name='specialist', params={scope='freeform', ...}}`
-is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
+**Integrate defers while the kernel pipeline runs.** The Coordinator holds the
+benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
+that arrives while it is running will be returned as `deferred`; re-send it on
+the next turn.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.

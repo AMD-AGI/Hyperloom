@@ -549,7 +549,7 @@ def test_a_raising_renderer_does_not_lose_the_other_sections(restore_registry) -
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("session")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise TypeError("drifted shape")
 
     r = render_session_report(_fixture_breakdown())
@@ -565,7 +565,7 @@ def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
     from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
 
     @register_renderer("baseline")
-    def _boom(_breakdown):  # noqa: ANN001, ANN202
+    def _boom(_breakdown):
         raise ValueError("bad row")
 
     r = render_session_report(_fixture_breakdown())
@@ -622,3 +622,139 @@ def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
     )
 
     assert "+10.99% validated gain" in r.global_facts.headline
+
+
+#: One AgentX round's axes, as the recorder stamps them onto ``perf``.
+_AGENTX_PERF = {
+    "e2e_norm_intvty_p50": 41.8,
+    "e2e_norm_intvty_p90": 22.4,
+    "output_tput_per_gpu": 275.6,
+    "total_throughput": 26500.0,
+    "input_throughput": 24296.0,
+    "ttft_p50_ms": 110.0,
+    "ttft_p90_ms": 240.0,
+    "tpot_p50_ms": 18.0,
+    "tpot_p90_ms": 34.0,
+    "duration_seconds": 3600.0,
+    "request_error_rate": 0.0,
+}
+
+
+def _agentx_breakdown() -> dict[str, Any]:
+    """A breakdown whose baseline and validation rounds both carry graded axes."""
+    b = _fixture_breakdown()
+    b["outcome"]["baseline"]["perf"] = dict(_AGENTX_PERF)
+    b["outcome"]["baseline"]["submission_valid"] = True
+    b["outcome"]["validation"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(_AGENTX_PERF)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["submission_valid"] = True
+    return b
+
+
+def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
+    """The ``perf`` block reached the artifact from the first V6 recorder and no renderer read it.
+
+    An AgentX session is ranked on median interactivity with the tail and per-GPU output as guards, so a report
+    that shows only ``throughput_tok_s_per_gpu`` states a figure the verdict was not taken on.
+    """
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    for key in ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "output_tput_per_gpu"):
+        assert key in md, f"{key} is graded but never rendered"
+    for key in ("ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
+        assert key in md, f"{key} was asked for in the detail view"
+    # The inputs a pair is refused on. Without them a REVERT on the objective and one on a drifted window read the
+    # same in the report.
+    for key in ("duration_seconds", "request_error_rate"):
+        assert key in md, f"{key} decides comparability and must be auditable"
+    assert "submission_valid" in md
+
+
+def test_a_refused_round_says_why_upstream_refused_it() -> None:
+    """``submission_valid: false`` alone leaves a reader with a rejected round and no reason for it."""
+    b = _agentx_breakdown()
+    measurement = b["timeline"][0]["ext"]["actions"][0]["measurement"]
+    measurement["submission_valid"] = False
+    measurement["submission_invalid_reasons"] = ["duration=120s(canonical 3600s)"]
+
+    md = render_session_report(b).markdown
+
+    assert "submission_invalid_reasons" in md
+    assert "duration=120s(canonical 3600s)" in md
+
+
+def test_an_accepted_round_carries_no_refusal_reasons() -> None:
+    """The reasons list is empty on every accepted round; rendering the key would be noise on all of them."""
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    assert "submission_valid" in md
+    assert "submission_invalid_reasons" not in md
+
+
+def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
+    """A synthetic session measures none of them, and eleven nulls would claim it was graded on them."""
+    md = render_session_report(_fixture_breakdown()).markdown
+
+    # Anchored on a positive assertion first: both checks below would also pass on an empty report, and
+    # reporters/base.py substitutes a warning section for a renderer that raises.
+    assert "throughput_tok_s_per_gpu" in md
+    assert "AgentX graded axes" not in md
+    assert "e2e_norm_intvty_p50" not in md
+
+
+def test_only_the_interactivity_pair_marks_a_round_agentx_graded() -> None:
+    """Every other published axis is filled for an ordinary measurement too.
+
+    ``_merge_raw_result`` fills duration from raw ``duration``, the latency percentiles from ``median_ttft_ms`` and
+    friends, and the error rate whenever the raw result has it, none of them gated on the workload;
+    ``_promote_baseline`` stamps per-GPU output unconditionally. Only the interactivity pair has a single producer,
+    ``agentx/mapping.py``, so only it proves the agentic mapper ran.
+    """
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import has_graded_axes
+
+    for key, value in (
+        ("total_throughput", 26500.0),
+        ("input_throughput", 24296.0),
+        ("output_tput_per_gpu", 275.6),
+        ("duration_seconds", 3600.0),
+        ("request_error_rate", 0.0),
+        ("ttft_p50_ms", 110.0),
+        ("ttft_p90_ms", 240.0),
+        ("tpot_p50_ms", 18.0),
+        ("tpot_p90_ms", 34.0),
+    ):
+        assert not has_graded_axes({key: value}), f"{key} is measured off AgentX too and cannot gate the block"
+    assert has_graded_axes({"e2e_norm_intvty_p50": 41.8})
+    assert has_graded_axes({"e2e_norm_intvty_p90": 22.4})
+
+
+def test_a_synthetic_round_that_reports_a_duration_heads_no_agentx_section() -> None:
+    """The reported trigger: an ordinary SGLang round whose report carries a duration, a median TTFT and a zero
+    error rate, and which never measured interactivity, must not be headed as AgentX-graded."""
+    b = _fixture_breakdown()
+    synthetic_perf = {
+        "e2e_norm_intvty_p50": None,
+        "e2e_norm_intvty_p90": None,
+        "duration_seconds": 3600.0,
+        "ttft_p50_ms": 110.0,
+        "tpot_p50_ms": 18.0,
+        "request_error_rate": 0.0,
+        "total_throughput": 26500.0,
+    }
+    b["outcome"]["baseline"]["perf"] = dict(synthetic_perf)
+    b["outcome"]["validation"]["perf"] = dict(synthetic_perf)
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["perf"] = dict(synthetic_perf)
+
+    md = render_session_report(b).markdown
+
+    assert "throughput_tok_s_per_gpu" in md
+    assert "AgentX graded axes" not in md
+
+
+def test_a_non_finite_axis_reads_the_same_in_the_facts_as_in_the_table() -> None:
+    """``_md_cell`` renders NaN as an em dash; a key fact saying "nan" would be a second answer."""
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import graded_axes_facts
+
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("nan")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": float("inf")}, label="X") == []
+    assert graded_axes_facts({"e2e_norm_intvty_p50": 41.8}, label="X") == ["X e2e_norm_intvty_p50: 41.8."]

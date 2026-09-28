@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -422,10 +423,10 @@ def _archive_stale_campaign_output(repo_root: Path, destination: Path) -> None:
 
 
 def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> None:
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         git("worktree", "remove", "--force", str(workspace), cwd=repo_root, check=False)
     shutil.rmtree(workspace, ignore_errors=True)
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         git("branch", "-D", branch, cwd=repo_root, check=False)
 
 

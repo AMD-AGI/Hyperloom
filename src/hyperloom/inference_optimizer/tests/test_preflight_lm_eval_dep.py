@@ -13,6 +13,19 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import preflight
 
+#: The commit the pin held until it was moved past EleutherAI/lm-evaluation-harness#3293. Its accuracy path
+#: logs ``outputs`` when a request fails, but that name is only bound once a response has been parsed, so a
+#: refused connection raises UnboundLocalError over the real error and ends the eval. InferenceX's
+#: ``benchmark_lib.sh`` force-reinstalls whatever ref it names over the one installed here, so the two have to
+#: agree -- pinning back to this, on either side, restores the crash.
+_LM_EVAL_REF_WITH_UNBOUND_OUTPUTS = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+
+
+def test_the_pinned_harness_is_not_the_one_that_crashes_on_a_refused_connection():
+    assert preflight._LM_EVAL_PINNED_REF != _LM_EVAL_REF_WITH_UNBOUND_OUTPUTS
+    for _source, spec in preflight._LM_EVAL_PINNED_SPECS:
+        assert _LM_EVAL_REF_WITH_UNBOUND_OUTPUTS not in spec
+
 
 class _FakeRun:
     """Stand-in for ``subprocess.run`` driving one probe subprocess per module."""

@@ -27,12 +27,15 @@ import os
 import re
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
@@ -52,11 +55,11 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_OSL,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
-from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
+from ._benchmark_interpreter import _resolve_probe_python
+from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -64,9 +67,10 @@ from ._grid_server_args import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import remove_server_args
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -82,9 +86,10 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
-# gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
-# gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
-_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
+# has no such kernel. The gate is the arch, so the board list is read off the
+# identity table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
 
 # Value is optional so a bare, value-less flag (an operator typo, or a flag
@@ -118,6 +123,64 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # was attempted and did not apply. Distinct from "never attempted": patching can
 # be disabled for an image that already ships the patch.
 _TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
+
+# Installed ATOM (docker) TraceLens knobs. One subprocess; cached for the process.
+_ATOM_CAPS_PROBE = (
+    "import argparse\n"
+    "from atom.model_engine.arg_utils import EngineArgs\n"
+    "from atom.utils import envs\n"
+    "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p)\n"
+    "h = p.format_help()\n"
+    'print(int("--mark-trace" in h))\n'
+    'print(int(hasattr(envs, "ATOM_ENABLE_DETAILED_ANNOTATION")))\n'
+    'print(int(hasattr(envs, "ATOM_PROFILER_MORE")))\n'
+)
+
+
+class _AtomTracelensCaps(NamedTuple):
+    """Installed-atom support for TraceLens profile knobs."""
+
+    mark_trace: bool
+    detailed_annotation: bool
+    profiler_more: bool
+
+
+_ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
+
+
+@cache
+def _atom_tracelens_caps() -> _AtomTracelensCaps:
+    """Probe the installed atom for ``--mark-trace`` and annotation envs.
+
+    Fail-soft: import / help / parse errors return all-false so an older ATOM
+    argparse never sees ``--mark-trace``. Cached after the first call.
+    """
+    try:
+        proc = subprocess.run(
+            [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning(
+            "atom TraceLens caps probe failed (%s); omitting --mark-trace / annotation envs",
+            exc,
+        )
+        return _ATOM_CAPS_NONE
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if proc.returncode != 0 or len(lines) < 3 or any(ln not in {"0", "1"} for ln in lines[:3]):
+        log.warning(
+            "atom TraceLens caps probe unavailable (exit=%s); omitting --mark-trace / annotation envs",
+            proc.returncode,
+        )
+        return _ATOM_CAPS_NONE
+    return _AtomTracelensCaps(
+        mark_trace=lines[0] == "1",
+        detailed_annotation=lines[1] == "1",
+        profiler_more=lines[2] == "1",
+    )
+
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
@@ -180,17 +243,6 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     if not conc or conc <= 0:
         return os.environ
     return {**os.environ, "CONC": str(conc)}
-
-
-def agentx_kb_blocked(shared_state: Any = None) -> bool:
-    """Whether an AgentX session must skip its Recipe KB exchange, in either direction."""
-    # The recipe canonical id is a seven-tuple of model / hardware / framework / precision identity: no workload, no
-    # mode. Row workload tags come from ``SharedState.isl``/``osl``, the inert 1024/1024 placeholders under AgentX, so
-    # a write would overwrite a synthetic ``best_throughput`` on a bare numeric comparison and tag the row as a
-    # 1024/1024 synthetic run. Reads are blocked for the mirror-image reason: a recipe validated on that synthetic
-    # shape clears the donor shape gate and would warm-start an AgentX session onto the wrong regime. The store is
-    # machine-global and ``--reset-state`` does not clear it, so the damage outlives its session.
-    return agentx_active(shared_state)
 
 
 # The 1M-context families that replay the unfiltered corpus; everything else
@@ -607,6 +659,23 @@ def _resolve_framework_repo_path(
     return ""
 
 
+def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
+    """Route a prepared image checkout into the vLLM server launch."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return
+    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    if not repo_path:
+        return
+    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+        envs[name] = repo_path
+        os.environ[name] = repo_path
+    existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")
+    entries = [repo_path, *(part for part in existing.split(os.pathsep) if part)]
+    envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
+
+
 def _custom_script_path(runner_type: str) -> str:
     """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
 
@@ -777,6 +846,52 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
     return isinstance(auto_map, dict) and bool(auto_map.get("AutoTokenizer"))
 
 
+#: Tokenizer modes the benchmark client actually implements a loader for.
+#:
+#: A tokenizer mode is a loader backend, not a model type: naming one the client
+#: does not implement makes it reject the flag, which fails exactly the way the
+#: unnamed tokenizer did. So "transformers cannot map this model_type" is
+#: necessary but not sufficient -- the mode has to be one the client knows.
+#: ``deepseek_v4`` is routed by InferenceX's ``benchmark_serving.py`` to vLLM's
+#: own loader; other custom-code checkpoints (``kimi_k25``, say) are served by
+#: the trust-remote-code path above and must NOT be named here.
+_CLIENT_TOKENIZER_MODES: frozenset[str] = frozenset({"deepseek_v4"})
+
+
+def _client_tokenizer_mode(model_path: str | None) -> str:
+    """Return the tokenizer mode the benchmark client must be told, or ``""``.
+
+    The generic bench client resolves a checkpoint through HF ``AutoConfig``. A
+    model whose ``model_type`` this transformers build does not know dies there
+    with ``KeyError: '<model_type>'`` before issuing a request, so no throughput
+    result is written and the round is graded a boot failure with the server up
+    and serving. InferenceX's client already routes ``--tokenizer-mode`` to
+    vLLM's own loader, which does know it; this names the mode to pass.
+
+    Model-agnostic on purpose: the question asked is "can HF resolve this
+    model_type", not "is this DeepSeek-V4". A model HF understands returns ``""``
+    and the client argv is unchanged.
+    """
+    model = str(model_path or "").strip()
+    if not model:
+        return ""
+    data = _load_model_config_dict(model)
+    if data is None:
+        return ""
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if model_type not in _CLIENT_TOKENIZER_MODES:
+        return ""
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+    except ImportError:
+        # No transformers, no HF resolution to reason about; naming a mode here
+        # would be a guess.
+        return ""
+    if model_type in CONFIG_MAPPING:
+        return ""
+    return model_type
+
+
 def inject_vllm_expert_parallel(
     server_args: str | None,
     framework: Any,
@@ -831,7 +946,7 @@ def _visible_gpu_count() -> int:
         count = int(torch.cuda.device_count() or 0)
         if count > 0:
             return count
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
     if shutil.which("rocm-smi"):
         try:
@@ -924,7 +1039,6 @@ def default_baseline_config() -> Path:
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
-_TRUTHY_FLAG_VALUES = frozenset({"1", "on", "true", "yes"})
 
 
 def _profiler_flag_value(server_args: str, name: str) -> str | None:
@@ -965,7 +1079,7 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
             return False
         return 0 < iterations <= cap
     if name == "ignore_frontend":
-        return value.strip().lower() in _TRUTHY_FLAG_VALUES
+        return is_truthy(value)
     return True
 
 
@@ -1252,6 +1366,9 @@ def materialize_config_with_envs(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
+    runtime_path = os.environ.get("PATH", "").strip()
+    if "PATH" in envs and runtime_path:
+        envs["PATH"] = runtime_path
     apply_scriptable_runtime_defaults(
         bench,
         envs,
@@ -1368,6 +1485,7 @@ def materialize_config_with_envs(
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
     profile_num_prompts: int | None = None
+    atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
     # this function can restore exactly the profiler flags that some later step
     # dropped, without re-stating the ones that survived. See that block for why a
@@ -1485,9 +1603,10 @@ def materialize_config_with_envs(
                     fw or "<unset>",
                 )
         if is_atom:
-            # atom's profile window lives only in Magpie's atom_mi*x.sh
-            # (ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS); defer to Magpie.
-            profile_num_prompts = None
+            # ATOM has no delay/max-iteration window; extra prompts only grow
+            # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
+            profile_num_prompts = conc_val
+            atom_caps = _atom_tracelens_caps()
         elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_flags = [
@@ -1496,25 +1615,25 @@ def materialize_config_with_envs(
             ]
             # ``profiler`` and ``torch_profiler_dir`` are normally set by
             # Magpie's launcher script, not by this layer -- but that script
-            # appends its own flags *after* EXTRA_VLLM_ARGS in the real
+            # appends its own flags *before* EXTRA_VLLM_ARGS in the real
             # ``vllm serve`` invocation, so the argv preflight probe (which
             # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
             # delay_iterations/max_iterations against a ProfilerConfig that
             # never saw ``profiler=torch`` or a trace dir. vLLM's validator
             # requires both whenever those bounds are present, so the probe
-            # fails an argv that will be valid once Magpie's flags are
             # appended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Asserting placeholders
-            # here keeps the probed fragment self-consistent; the actual
-            # ``torch_profiler_dir`` Magpie computes from ``$WORKSPACE_DIR``
-            # overrides this one at real launch time via vLLM's dotted-flag
-            # last-wins merge, so the value here only has to be a valid
-            # absolute path, not the directory the trace ends up under. An
-            # operator-set flag is left untouched either way.
+            # invalid and dropped instead of launched. Assert ``profiler=torch``
+            # here so the probed fragment is self-consistent; do not append a
+            # ``torch_profiler_dir`` here. On the real ``vllm serve`` line Magpie's
+            # launcher emits ``<workspace>/torch_trace`` *before* ``EXTRA_VLLM_ARGS``;
+            # vLLM's last-wins merge would let a second ``torch_profiler_dir`` in
+            # ``EXTRA_VLLM_ARGS`` override Magpie and send traces to the task root.
+            # With no dir in ``EXTRA_VLLM_ARGS``, steady-state traces stay under
+            # ``<workspace>/torch_trace``. ``baseline.py`` / ``bypass_engine`` use
+            # probe-only dirs on other paths; an operator-set flag in the YAML is
+            # left untouched.
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
-            if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
-                profiler_flags.append(("torch_profiler_dir", f"--profiler-config.torch_profiler_dir {output_dir}"))
             if tracelens_patch_ok:
                 profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1555,19 +1674,13 @@ def materialize_config_with_envs(
             extra_body["num_steps"] = max_iters
             # shape_discovery balloons an eager+with_stack trace; allow disabling
             # it via env for eager profiles.
-            _shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY",
-                "1",
-            ).strip().lower() not in {"0", "false", "no", "off"}
+            _shape_disc = env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True)
             # Gemma2 + shape-discovery crashes CUDA-graph capture, so disable
             # shape-discovery for Gemma2. Escape hatch
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips the Gemma2
             # gate; it does NOT override a global
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
-            _force_shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE",
-                "0",
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            _force_shape_disc = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
             if _shape_disc and not _force_shape_disc:
                 _model = str(bench.get("model") or "")
                 if _model_is_gemma2(_model):
@@ -1659,7 +1772,7 @@ def materialize_config_with_envs(
         envs.pop(name, None)
     if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        from ._grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[_ref_fw_env] = compose_server_args(
             base_extra_args=ref_args,
@@ -1676,6 +1789,7 @@ def materialize_config_with_envs(
 
         overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
         envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
+    _, recipe_overwritten = recipe_launch_contract(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1697,10 +1811,12 @@ def materialize_config_with_envs(
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         combined_extra,
-        allow_predicate=is_allowed_variant_env_key,
+        # A name the recipe re-exports unconditionally cannot be overridden
+        # here; carrying it into the YAML publishes a value the run never used.
+        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
@@ -1883,6 +1999,12 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    # ── Client tokenizer mode (model-agnostic) ───────────────────────────
+    # Trusting remote code is not enough when transformers cannot map the
+    # model_type at all: the client has to be told which loader to use.
+    _client_tok_mode = _client_tokenizer_mode(model_path or bench.get("model"))
+    if _client_tok_mode:
+        envs.setdefault("HYPERLOOM_CLIENT_TOKENIZER_MODE", _client_tok_mode)
     if _model_requires_remote_code(model_path or bench.get("model")):
         add_server_arg_unless_pinned(
             envs,
@@ -1940,7 +2062,7 @@ def materialize_config_with_envs(
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
-    if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(envs.get("RUN_EVAL", ""), default=True):
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
             log.warning(
@@ -2030,6 +2152,19 @@ def materialize_config_with_envs(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if atom_caps is not None:
+        # After extra_envs / replace_args / remove_args so TraceLens knobs
+        # survive the same last-wins path as vLLM profiler bounds. Must land
+        # before seal_server_argv — that function is the last write.
+        if atom_caps.detailed_annotation:
+            envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
+        if atom_caps.profiler_more:
+            envs["ATOM_PROFILER_MORE"] = "1"
+        if atom_caps.mark_trace:
+            extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
+            if "--mark-trace" not in extra:
+                envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+    _apply_vllm_source_runtime(bench, envs)
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
@@ -2042,7 +2177,7 @@ def materialize_config_with_envs(
         )
         envs.clear()
         envs.update(filtered_envs)
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

@@ -638,7 +638,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
 def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.framework_agent_batches = []
-    assert coord._select_next_framework_agent_candidate() is None
+    assert coord.phase_framework._select_next_framework_agent_candidate() is None
     ss.framework_agent_batches = [
         {
             "candidates": [
@@ -648,7 +648,7 @@ def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
         }
     ]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    nxt = coord._select_next_framework_agent_candidate()
+    nxt = coord.phase_framework._select_next_framework_agent_candidate()
     assert nxt == {"candidate_id": "c2"}
 
 
@@ -664,7 +664,7 @@ def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
         }
     ]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    out = coord._unprocessed_framework_agent_candidates()
+    out = coord.phase_framework._unprocessed_framework_agent_candidates()
     assert [c["candidate_id"] for c in out] == ["c2", "c3"]
 
 
@@ -673,7 +673,7 @@ def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coor
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []
-    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
+    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
 
 
 def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinator) -> None:
@@ -681,7 +681,7 @@ def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinato
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
+    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
 
 
 def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Coordinator) -> None:
@@ -689,7 +689,7 @@ def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Co
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}]}]
     ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord._select_next_framework_agent_candidate() is None
+    assert coord.phase_framework._select_next_framework_agent_candidate() is None
 
 
 def test_framework_known_candidate_ids(coord: Coordinator) -> None:
@@ -698,14 +698,13 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
         {"candidates": [{"candidate_id": "c1"}, {"pr_url": "u2"}]},
     ]
     ss.research_scout_seen_pr_ids = ["p3"]
-    ids = coord._framework_known_candidate_ids()
+    ids = coord.phase_framework._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
-    assert set(coord._framework_tried_refs()) == ids
 
 
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _first_present
+    from hyperloom.orchestrator.loop.conversation import _first_present
 
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
@@ -714,7 +713,7 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _lifecycle_paths
+    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
@@ -722,7 +721,7 @@ def test_lifecycle_paths() -> None:
 
 
 def test_format_inbox_event_variants() -> None:
-    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
     delegated = Message.new(

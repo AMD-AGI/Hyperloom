@@ -93,7 +93,7 @@ def render_conc_sweep_curve(
             osl=osl,
             draw_ceiling=draw_ceiling,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
 
@@ -161,10 +161,10 @@ def _render(
     osl: int,
     draw_ceiling: bool,
 ) -> Path | None:
-    import matplotlib  # noqa: PLC0415
+    import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import matplotlib.pyplot as plt
 
     data = _load_payload(payload)
     tp_eff = float(max(tp, 1))

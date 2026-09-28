@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-import kernelforge.loop.editable_repo as editable_repo  # noqa: E402
+import kernelforge.loop.editable_repo as editable_repo
 
 
 @pytest.fixture(autouse=True)

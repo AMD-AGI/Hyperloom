@@ -890,6 +890,30 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
     assert drifted != signature
 
 
+def test_an_unreachable_base_commit_is_not_signed_as_pristine(tmp_path, monkeypatch):
+    """A lineage the workspace cannot reach must fail, not quietly become the working tree."""
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
+    config = create_campaign_config(
+        workspace_dir=str(workspace),
+        kernel=str(kernel),
+        driver=str(driver),
+        source_files=[],
+        program_md_file=None,
+    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n")
+
+    with pytest.raises(ValueError, match="pristine base commit"):
+        derive_campaign_implementation_contract(
+            workspace_dir=str(workspace),
+            kernel_path=config.kernel_path,
+            source_files=config.source_files,
+            framework=config.framework,
+            base_commit="0" * 40,
+        )
+
+
 def test_pending_campaign_head_accepts_only_its_own_lineage(tmp_path, monkeypatch):
     """A pending retry may advance by one `kb warm-start:` commit and no further."""
     workspace, _kernel, helper, _driver = _git_workspace(tmp_path)

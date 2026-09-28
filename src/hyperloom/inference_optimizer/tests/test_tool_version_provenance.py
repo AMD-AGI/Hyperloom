@@ -179,3 +179,6 @@ def test_tool_version_probe_cmd_and_dist() -> None:
     # dist strategy resolves an installed package and rejects a bogus name.
     assert tool_versions._dist_version(("pytest",))
     assert tool_versions._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
+    # A missing binary is an environmental miss, not a recorder defect.
+    assert tool_versions._run_first_line(["definitely-not-a-hyperloom-binary"]) == ""
+    assert tool_versions._probe_tool_version(("cmd", ("definitely-not-a-hyperloom-binary",)), "") == ""

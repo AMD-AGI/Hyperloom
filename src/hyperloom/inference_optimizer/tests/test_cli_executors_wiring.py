@@ -129,7 +129,7 @@ def test_register_executors_covers_every_phase_allowed_action():
 
     coord = _fake_coordinator()
 
-    async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
+    async def _spec(ctx):
         return {}
 
     _register_executors(coord, session_dir=None, specialist_executor=_spec)
@@ -158,14 +158,14 @@ def test_register_executors_never_wires_kernel_owned_actions(caplog):
 def test_register_executors_registers_optional_specialist():
     coord = _fake_coordinator()
 
-    async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
+    async def _spec(ctx):
         return {}
 
     _register_executors(coord, specialist_executor=_spec, session_dir=Path("."))
     assert coord.sub.executor_registry["specialist"] is _spec
 
 
-async def _spec_stub(ctx):  # noqa: ANN001, ANN202 - test stub
+async def _spec_stub(ctx):
     return {}
 
 

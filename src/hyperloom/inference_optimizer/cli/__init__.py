@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
+from hyperloom.common.env import env_bool
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -30,8 +32,8 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
-    _official_anthropic_only,
-    _official_openai_only,
+    critic_review_target,
+    orchestration_runs_on_codex,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -91,7 +93,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -365,9 +367,7 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
-    from hyperloom.common.env import forge_explicitly_enabled
-
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -382,33 +382,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    # The kernel phase runs on atom, but GEAK -- the backend everything else
-    # defaults to -- does not produce kernel candidates there: its extraction step
-    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
-    # default phase split gives the kernel phase half the session, defaulting to
-    # GEAK on atom means defaulting to half a session of nothing. forge is the
-    # backend that works here, so on atom it is the default rather than an opt-in
-    # the operator has to know about.
-    #
-    # Only an unset value is filled in. An operator who named a backend keeps it:
-    # running GEAK on atom on purpose, to measure exactly this, stays possible.
-    if not getattr(args, "no_kernel", False):
-        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
-            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
-            print(
-                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
-                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
-            )
-        elif not forge_explicitly_enabled():
-            print(
-                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
-                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
-                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
-                "a rewrite seam -- it has to resolve one from the live server, which "
-                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
-                "to skip the phase.",
-                file=sys.stderr,
-            )
     return auto_disabled
 
 
@@ -576,14 +549,14 @@ def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    return _official_anthropic_only()
+    return llm_config.is_anthropic_only()
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    return _official_openai_only()
+    return llm_config.is_openai_only()
 
 
 def _catalog_probe_has_no_credential() -> bool:
@@ -600,17 +573,8 @@ def _catalog_probe_has_no_credential() -> bool:
 
 
 def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _custom_orch_model_explicitly_disabled() -> bool:
-    """Whether the operator explicitly requested strict AMD model allowlisting."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
+    return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
@@ -626,8 +590,6 @@ def _validate_and_resolve_claude_model(
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    if not _custom_orch_model_explicitly_disabled():
-        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -777,7 +739,7 @@ def _resolve_models_for_run(
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
-        _smoke_test_codex_model(args, resolved_urls, required=True)
+        _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
@@ -785,24 +747,80 @@ def _resolve_models_for_run(
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-    elif not claude_follows_codex:
-        # Codex smoke probes the OpenAI side independently (split entrypoints).
-        _smoke_test_codex_model(args, resolved_urls)
+
+    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+
+
+_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
+
+    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
+    fallback model: a review path that fails every call must stop the launch rather than run a session without a
+    critic.
+    """
+    if _resolve_critic_choice(args) != "agent":
+        return
+    try:
+        protocol, model = critic_review_target(
+            args.critic_protocol,
+            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    model=model,
+                    messages=messages,
+                    max_tokens=16,
+                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    component="critic",
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
+                    component="critic",
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            last_error = exc
+            continue
+        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
+        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
-    *,
-    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts."""
-    if not required:
-        if _codex_model_should_follow_claude():
-            return
-        if args.critic_backend != "agent":
-            return
+    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
+    Steps down the ladder before Coordinator starts.
+    """
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -841,8 +859,7 @@ def _smoke_test_codex_model(
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
         f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
-        f"avoid the Codex path entirely."
+        f"{list(_CODEX_FALLBACK_MODELS)})."
     )
 
 
@@ -1347,16 +1364,16 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
-def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
-    Reads the same set the breakdown grades outcomes against. A second copy here
-    would decide CI's verdict on a vocabulary that had drifted from the one the
-    report was written from.
+    Reads the same classifier the breakdown grades outcomes against. A second
+    copy here would decide CI's verdict on a vocabulary that had drifted from
+    the one the report was written from.
     """
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 
-    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
+    return 0 if outcome_status(str(stop_reason or ""), baseline_tput) == "completed" else 1
 
 
 def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
@@ -1373,7 +1390,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         with timed_teardown_step(state, "final_json"):
             final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
     if state.close_sequence_done:
         print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
@@ -1384,7 +1401,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "session_breakdown"):
                 breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
@@ -1392,10 +1409,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "final_md"):
                 final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
-        from hyperloom.orchestrator.trace.langfuse_emitter import flush_session, record_session_breakdown
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
 
         with timed_teardown_step(state, "langfuse"):
             flush_session(session_dir)
@@ -1403,7 +1420,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
             patch_breakdown_langfuse(session_dir)
             record_session_breakdown(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
     # the sequencer; ordered after langfuse so the package carries its patch.
@@ -1414,7 +1431,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("session artifact package failed (non-fatal)")
 
 
@@ -1447,14 +1464,14 @@ def _persist_preflight_failure_artifacts(
             args,
             failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
         )
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
         return None
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None
@@ -1466,7 +1483,7 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:  # noqa: BLE001 — the install event can still stand alone
+            except Exception as write_exc:
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
@@ -1477,7 +1494,7 @@ def _persist_preflight_failure_artifacts(
             from ..breakdown import write_breakdown_json
 
             write_breakdown_json(session_dir)
-        except Exception as write_exc:  # noqa: BLE001 — never replace the original preflight failure
+        except Exception as write_exc:
             log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
             from ..session.sbd_v6 import record_write_warning
 
@@ -1607,10 +1624,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
         resolved_urls = _preflight(args)
-    except Exception as exc:  # noqa: BLE001 — only unexpected defects create diagnostic sessions
+    except Exception as exc:
         try:
             _persist_preflight_failure_artifacts(args, exc)
-        except Exception:  # noqa: BLE001 — preserve the original failure exactly
+        except Exception:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
@@ -2091,10 +2108,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _persist_install_event(args, session_dir)
         # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
         try:
-            from hyperloom.orchestrator.trace.langfuse_emitter import record_session_start
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
             record_session_start(session_dir)
-        except Exception:  # noqa: BLE001 — startup marker must never break launch
+        except Exception:
             log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -2419,14 +2436,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist teardown timings (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:

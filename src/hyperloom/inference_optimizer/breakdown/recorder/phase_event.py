@@ -44,7 +44,6 @@ from .event_timeline import finish_event, open_event
 # Every section a phase event assembles from. Named from the leaf module the
 # assembler shares, so :func:`_finish` reads its parts without an import cycle.
 from .sections import PHASE_EVENT_SECTIONS
-from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +77,9 @@ SECTION_MARKER = "phase_marker"
 #: and the ruling would otherwise have no subject to be filed against.
 SECTION_PROPOSAL = "phase_proposal"
 
+#: One row per PolicyGate denial, including intents that never became proposals.
+SECTION_DENIAL = "phase_denial"
+
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_DEGRADED = "degraded"
@@ -87,6 +89,15 @@ STATUS_INTERRUPTED = "interrupted"
 MAX_REASON_CHARS = 500
 
 
+def is_phase_transition_row(row: Any) -> bool:
+    """True when ``row`` records an actual phase change, not an in-phase marker."""
+    if not isinstance(row, dict):
+        return False
+    to_phase = str(row.get("to_phase") or "").strip().upper()
+    from_phase = str(row.get("from_phase") or "").strip().upper()
+    return bool(to_phase) and to_phase != from_phase
+
+
 def phase_event_id(phase: str, macro_cycle: int) -> str:
     """Build ``{phase}:{macro_cycle}:phase``. Raises ``ValueError`` if ``phase``
     is not a token or ``macro_cycle`` is negative."""
@@ -94,16 +105,17 @@ def phase_event_id(phase: str, macro_cycle: int) -> str:
 
 
 def _sink(event: str) -> EventSink | None:
-    """The sink for ``event``, or ``None`` when no session is bound."""
-    try:
-        from ...session.session_binding import bound_session_or_none
+    """The sink for ``event``, or ``None`` when no session is bound.
 
-        if bound_session_or_none() is None:
-            return None
-        return make_sink(event, producer=PRODUCER)
-    except Exception as exc:  # noqa: BLE001 — the run outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve a sink")
+    The rows themselves are written best-effort by the sink, so nothing below
+    guards its own writes: a spool that cannot be written drops the row there
+    and the phase carries on.
+    """
+    from ...session.session_binding import bound_session_or_none
+
+    if bound_session_or_none() is None:
         return None
+    return make_sink(event, producer=PRODUCER)
 
 
 def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> int | None:
@@ -146,28 +158,25 @@ def record_entry(
     """Open the phase being entered and record how the run got there. Never
     raises. ``sequence`` is the transition's ``phase_history`` position and keys
     the segment row; ``entered_unix`` measures the segment when it closes."""
-    try:
-        event = phase_event_id(phase, macro_cycle)
-        sink = _sink(event)
-        if sink is None:
-            return
-        entered = str(entered_at or "") or _now()
-        _open(event, phase=phase, macro_cycle=macro_cycle, start_time=entered)
-        sink.record(
-            SECTION_SEGMENT,
-            {
-                "sequence": int(sequence or 0),
-                "from_phase": str(from_phase or "").strip().upper(),
-                "entered_at": entered,
-                "entered_unix": _float_or_none(entered_unix),
-                "entered_reason": _clip(reason, MAX_REASON_CHARS),
-                "entered_evidence": _as_dict(evidence),
-            },
-            row_type="segment",
-            natural_ids=str(int(sequence or 0)),
-        )
-    except Exception as exc:  # noqa: BLE001 — a phase change outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: entry record failed")
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return
+    entered = str(entered_at or "") or _now()
+    _open(event, phase=phase, macro_cycle=macro_cycle, start_time=entered)
+    sink.record(
+        SECTION_SEGMENT,
+        {
+            "sequence": int(sequence or 0),
+            "from_phase": str(from_phase or "").strip().upper(),
+            "entered_at": entered,
+            "entered_unix": _float_or_none(entered_unix),
+            "entered_reason": _clip(reason, MAX_REASON_CHARS),
+            "entered_evidence": _as_dict(evidence),
+        },
+        row_type="segment",
+        natural_ids=str(int(sequence or 0)),
+    )
 
 
 def record_exit(
@@ -188,40 +197,37 @@ def record_exit(
     event that was never opened. ``macro_cycle`` is only the fallback for when
     no open segment can be found.
     """
-    try:
-        found = _open_segment(phase)
-        if found is None:
-            event = phase_event_id(phase, macro_cycle)
-            row_sequence: int | None = None
-            entered_unix: float | None = None
-        else:
-            event, row_sequence, entered_unix = found
-        sink = _sink(event)
-        if sink is None:
-            return
-        exited = str(exited_at or "") or _now()
-        duration = None
-        if entered_unix is not None and exited_unix is not None:
-            duration = max(0.0, float(exited_unix) - float(entered_unix))
-        settle: dict[str, Any] = {
-            "to_phase": str(to_phase or "").strip().upper(),
-            "exited_at": exited,
-            "exited_unix": _float_or_none(exited_unix),
-            "exit_reason": _clip(reason, MAX_REASON_CHARS),
-            "exit_evidence": _as_dict(evidence),
-            "duration_sec": duration,
-        }
-        if row_sequence is not None:
-            sink.record(
-                SECTION_SEGMENT,
-                dict(settle, sequence=int(row_sequence)),
-                row_type="segment",
-                natural_ids=str(int(row_sequence)),
-            )
-        sink.record(SECTION_EVENT, {"end_time": exited})
-        _finish(event, end_time=exited)
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: exit record failed")
+    found = _open_segment(phase)
+    if found is None:
+        event = phase_event_id(phase, macro_cycle)
+        row_sequence: int | None = None
+        entered_unix: float | None = None
+    else:
+        event, row_sequence, entered_unix = found
+    sink = _sink(event)
+    if sink is None:
+        return
+    exited = str(exited_at or "") or _now()
+    duration = None
+    if entered_unix is not None and exited_unix is not None:
+        duration = max(0.0, float(exited_unix) - float(entered_unix))
+    settle: dict[str, Any] = {
+        "to_phase": str(to_phase or "").strip().upper(),
+        "exited_at": exited,
+        "exited_unix": _float_or_none(exited_unix),
+        "exit_reason": _clip(reason, MAX_REASON_CHARS),
+        "exit_evidence": _as_dict(evidence),
+        "duration_sec": duration,
+    }
+    if row_sequence is not None:
+        sink.record(
+            SECTION_SEGMENT,
+            dict(settle, sequence=int(row_sequence)),
+            row_type="segment",
+            natural_ids=str(int(row_sequence)),
+        )
+    sink.record(SECTION_EVENT, {"end_time": exited})
+    _finish(event, end_time=exited)
 
 
 def record_marker(
@@ -235,25 +241,22 @@ def record_marker(
 ) -> None:
     """Record one non-transition marker against the phase it was raised in.
     Never raises. ``sequence`` is its ``phase_history`` position and keys it."""
-    try:
-        event = phase_event_id(phase, macro_cycle)
-        sink = _sink(event)
-        if sink is None:
-            return
-        _open(event, phase=phase, macro_cycle=macro_cycle)
-        sink.record(
-            SECTION_MARKER,
-            {
-                "sequence": int(sequence or 0),
-                "reason": _clip(reason, MAX_REASON_CHARS),
-                "evidence": _as_dict(evidence),
-                "ts": str(ts or "") or _now(),
-            },
-            row_type="marker",
-            natural_ids=str(int(sequence or 0)),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: marker record failed")
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return
+    _open(event, phase=phase, macro_cycle=macro_cycle)
+    sink.record(
+        SECTION_MARKER,
+        {
+            "sequence": int(sequence or 0),
+            "reason": _clip(reason, MAX_REASON_CHARS),
+            "evidence": _as_dict(evidence),
+            "ts": str(ts or "") or _now(),
+        },
+        row_type="marker",
+        natural_ids=str(int(sequence or 0)),
+    )
 
 
 #: What a specialist round contributes to the action row that dispatched it.
@@ -278,42 +281,36 @@ def record_specialist_round(
     """Merge what a specialist round produced onto the action row that ordered it.
 
     Merged onto the action row the dispatcher already opened for ``task_id``,
-    not added as a second one. ``phase`` and ``macro_cycle`` are the fallback
-    for when no dispatch row exists.
+    not added as a second one. Missing dispatch evidence is left missing rather
+    than reconstructed after the fact with guessed provenance.
     """
-    try:
-        key = str(task_id or "")
-        if not key:
-            return
-        event = _action_event(key)
-        if event is None:
-            if not str(phase or ""):
-                return
-            event = phase_event_id(phase, macro_cycle)
-            record_dispatch(action="specialist", task_id=key, phase=phase, macro_cycle=macro_cycle)
-        sink = _sink(event)
-        if sink is None:
-            return
-        row: dict[str, Any] = {"task_id": key}
-        if str(round_id or "") and str(round_id) != key:
-            row["round_id"] = str(round_id)
-        for name in _ROUND_TEXT_FIELDS:
-            if name in fields:
-                row[name] = _clip(str(fields.get(name) or ""), MAX_REASON_CHARS)
-        for name in _ROUND_LIST_FIELDS:
-            if name in fields:
-                row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
-        if proposals_total is not None:
-            row["proposals_total"] = _int_or_none(proposals_total)
-        if empty is not None:
-            row["empty"] = bool(empty)
-        if confidence is not None:
-            row["confidence"] = _float_or_none(confidence)
-        if ensemble_scores:
-            row["ensemble_scores"] = _as_dict(ensemble_scores)
-        sink.record(SECTION_ACTION, row, row_type="action", natural_ids=key)
-    except Exception as exc:  # noqa: BLE001 — a round outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: specialist round record failed")
+    key = str(task_id or "")
+    if not key:
+        return
+    event = _action_event(key)
+    if event is None:
+        return
+    sink = _sink(event)
+    if sink is None:
+        return
+    row: dict[str, Any] = {"task_id": key}
+    if str(round_id or "") and str(round_id) != key:
+        row["round_id"] = str(round_id)
+    for name in _ROUND_TEXT_FIELDS:
+        if name in fields:
+            row[name] = _clip(str(fields.get(name) or ""), MAX_REASON_CHARS)
+    for name in _ROUND_LIST_FIELDS:
+        if name in fields:
+            row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
+    if proposals_total is not None:
+        row["proposals_total"] = _int_or_none(proposals_total)
+    if empty is not None:
+        row["empty"] = bool(empty)
+    if confidence is not None:
+        row["confidence"] = _float_or_none(confidence)
+    if ensemble_scores:
+        row["ensemble_scores"] = _as_dict(ensemble_scores)
+    sink.record(SECTION_ACTION, row, row_type="action", natural_ids=key)
 
 
 def record_dispatch(
@@ -323,39 +320,73 @@ def record_dispatch(
     phase: str,
     macro_cycle: int,
     tick: int = 0,
+    dispatch_class: str | None = None,
+    allowed: bool | None = True,
+    denial_rule: str | None = None,
     dispatched_at: str = "",
     dispatched_unix: float | None = None,
-) -> None:
-    """Record an action against the phase that ordered it, at dispatch. Never raises.
-
-    Written here rather than at settle because an action can outlive the phase
-    that ordered it: the phase in scope when the result lands would charge a
-    plateau-straddling baseline to whichever phase inherited it.
-    """
-    try:
-        if not str(task_id or ""):
-            return
-        event = phase_event_id(phase, macro_cycle)
-        sink = _sink(event)
-        if sink is None:
-            return
-        _open(event, phase=phase, macro_cycle=macro_cycle)
-        sink.record(
-            SECTION_ACTION,
-            {
-                "action": str(action or ""),
-                "task_id": str(task_id),
-                "phase": str(phase or "").strip().upper(),
-                "macro_cycle": int(macro_cycle or 0),
-                "tick": int(tick or 0),
-                "dispatched_at": str(dispatched_at or "") or _now(),
-                "dispatched_unix": _float_or_none(dispatched_unix),
-            },
-            row_type="action",
-            natural_ids=str(task_id),
+) -> bool:
+    """Record an action against its authoring phase and report durability."""
+    if not str(task_id or ""):
+        return False
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return False
+    opened = _open(event, phase=phase, macro_cycle=macro_cycle)
+    row: dict[str, Any] = {
+        "action": str(action or ""),
+        "task_id": str(task_id),
+        "phase": str(phase or "").strip().upper(),
+        "macro_cycle": int(macro_cycle or 0),
+        "tick": int(tick or 0),
+        "dispatched_at": str(dispatched_at or "") or _now(),
+        "dispatched_unix": _float_or_none(dispatched_unix),
+    }
+    if dispatch_class is not None:
+        row.update(
+            dispatch_class=str(dispatch_class),
+            allowed=bool(allowed),
+            denial_rule=_text_or_none(denial_rule),
         )
-    except Exception as exc:  # noqa: BLE001 — an action outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: dispatch record failed")
+    recorded = sink.record(
+        SECTION_ACTION,
+        row,
+        row_type="action",
+        natural_ids=str(task_id),
+    )
+    return opened is not None and recorded is not None
+
+
+def record_denial(
+    *,
+    actor: str,
+    proposal_msg_id: str | None,
+    action: str,
+    phase: str,
+    macro_cycle: int,
+    rule: str,
+    hint: str = "",
+    denied_at: str = "",
+) -> None:
+    """Record one PolicyGate denial at the point the decision is made."""
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return
+    _open(event, phase=phase, macro_cycle=macro_cycle)
+    sink.append(
+        SECTION_DENIAL,
+        {
+            "actor": str(actor or ""),
+            "proposal_msg_id": _text_or_none(proposal_msg_id),
+            "action": str(action or ""),
+            "phase": str(phase or "").strip().upper(),
+            "rule": str(rule or ""),
+            "hint": str(hint or ""),
+            "denied_at": str(denied_at or "") or _now(),
+        },
+    )
 
 
 def record_proposal(
@@ -377,33 +408,30 @@ def record_proposal(
     the Critic or left pending at the phase exit has no dispatch and so no other
     row, and the ruling needs a subject to be filed against.
     """
-    try:
-        if not str(proposal_msg_id or ""):
-            return
-        event = phase_event_id(phase, macro_cycle)
-        sink = _sink(event)
-        if sink is None:
-            return
-        _open(event, phase=phase, macro_cycle=macro_cycle)
-        sink.record(
-            SECTION_PROPOSAL,
-            {
-                "proposal_msg_id": str(proposal_msg_id),
-                "action": str(action or ""),
-                "from_agent": str(from_agent or ""),
-                "phase": str(phase or "").strip().upper(),
-                "macro_cycle": int(macro_cycle or 0),
-                "tick": int(tick or 0),
-                "predicted_gain_pct": _float_or_none(predicted_gain_pct),
-                "candidate_id": _text_or_none(candidate_id),
-                "variant_name": _text_or_none(variant_name),
-                "proposed_at": str(proposed_at or "") or _now(),
-            },
-            row_type="proposal",
-            natural_ids=str(proposal_msg_id),
-        )
-    except Exception as exc:  # noqa: BLE001 — a proposal outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: proposal record failed")
+    if not str(proposal_msg_id or ""):
+        return
+    event = phase_event_id(phase, macro_cycle)
+    sink = _sink(event)
+    if sink is None:
+        return
+    _open(event, phase=phase, macro_cycle=macro_cycle)
+    sink.record(
+        SECTION_PROPOSAL,
+        {
+            "proposal_msg_id": str(proposal_msg_id),
+            "action": str(action or ""),
+            "from_agent": str(from_agent or ""),
+            "phase": str(phase or "").strip().upper(),
+            "macro_cycle": int(macro_cycle or 0),
+            "tick": int(tick or 0),
+            "predicted_gain_pct": _float_or_none(predicted_gain_pct),
+            "candidate_id": _text_or_none(candidate_id),
+            "variant_name": _text_or_none(variant_name),
+            "proposed_at": str(proposed_at or "") or _now(),
+        },
+        row_type="proposal",
+        natural_ids=str(proposal_msg_id),
+    )
 
 
 def record_proposal_review(
@@ -430,45 +458,42 @@ def record_proposal_review(
     dropped rather than minting one. ``effective_verdict`` is what was
     committed, which the envelope validator can change.
     """
-    try:
-        if not str(proposal_msg_id or ""):
-            return
-        event = _proposal_event(str(proposal_msg_id))
-        if event is None:
-            log.debug("phase event: no proposal row for %s to file a ruling on", proposal_msg_id)
-            return
-        sink = _sink(event)
-        if sink is None:
-            return
-        authored = str(verdict or "")
-        effective = str(effective_verdict or "") or authored
-        sink.record(
-            SECTION_PROPOSAL,
-            {
-                "proposal_msg_id": str(proposal_msg_id),
-                "critic_review": {
-                    "verdict": authored,
-                    "effective_verdict": effective,
-                    # Its own field because the two verdicts alone say that they
-                    # differ, not that the envelope validator imposed it.
-                    "held_to_rule": effective != authored,
-                    "source": str(source or ""),
-                    "reasoning": _clip(reasoning, MAX_REASON_CHARS),
-                    "confidence": _float_or_none(confidence),
-                    "failure_reason_code": _text_or_none(failure_reason_code),
-                    "required_evidence": [str(item) for item in _as_list(required_evidence)],
-                    "risks": [dict(risk) for risk in _as_list(risks) if isinstance(risk, Mapping)],
-                    "advice_text": _text_or_none(advice_text),
-                    "alternative_action": _text_or_none(alternative_action),
-                    "variants": [dict(row) for row in _as_list(variants) if isinstance(row, Mapping)],
-                    "reviewed_at": str(reviewed_at or "") or _now(),
-                },
+    if not str(proposal_msg_id or ""):
+        return
+    event = _proposal_event(str(proposal_msg_id))
+    if event is None:
+        log.debug("phase event: no proposal row for %s to file a ruling on", proposal_msg_id)
+        return
+    sink = _sink(event)
+    if sink is None:
+        return
+    authored = str(verdict or "")
+    effective = str(effective_verdict or "") or authored
+    sink.record(
+        SECTION_PROPOSAL,
+        {
+            "proposal_msg_id": str(proposal_msg_id),
+            "critic_review": {
+                "verdict": authored,
+                "effective_verdict": effective,
+                # Its own field because the two verdicts alone say that they
+                # differ, not that the envelope validator imposed it.
+                "held_to_rule": effective != authored,
+                "source": str(source or ""),
+                "reasoning": _clip(reasoning, MAX_REASON_CHARS),
+                "confidence": _float_or_none(confidence),
+                "failure_reason_code": _text_or_none(failure_reason_code),
+                "required_evidence": [str(item) for item in _as_list(required_evidence)],
+                "risks": [dict(risk) for risk in _as_list(risks) if isinstance(risk, Mapping)],
+                "advice_text": _text_or_none(advice_text),
+                "alternative_action": _text_or_none(alternative_action),
+                "variants": [dict(row) for row in _as_list(variants) if isinstance(row, Mapping)],
+                "reviewed_at": str(reviewed_at or "") or _now(),
             },
-            row_type="proposal",
-            natural_ids=str(proposal_msg_id),
-        )
-    except Exception as exc:  # noqa: BLE001 — a ruling outranks its own record
-        note_failure(section="phase_event", error=exc, detail="phase event: proposal review record failed")
+        },
+        row_type="proposal",
+        natural_ids=str(proposal_msg_id),
+    )
 
 
 def record_proposal_outcome(
@@ -485,33 +510,30 @@ def record_proposal_outcome(
 
     ``task_id`` joins the proposal to the dispatch row it became, beside it on
     this same event. Located and dropped the same way as the ruling."""
-    try:
-        if not str(proposal_msg_id or ""):
-            return
-        event = _proposal_event(str(proposal_msg_id))
-        if event is None:
-            return
-        sink = _sink(event)
-        if sink is None:
-            return
-        sink.record(
-            SECTION_PROPOSAL,
-            {
-                "proposal_msg_id": str(proposal_msg_id),
-                "outcome": {
-                    "materialized": bool(materialized),
-                    "denied": bool(denied),
-                    "reauthored": bool(reauthored),
-                    "task_id": _text_or_none(task_id),
-                    "patch_verdict_key": _text_or_none(patch_verdict_key),
-                    "settled_at": str(settled_at or "") or _now(),
-                },
+    if not str(proposal_msg_id or ""):
+        return
+    event = _proposal_event(str(proposal_msg_id))
+    if event is None:
+        return
+    sink = _sink(event)
+    if sink is None:
+        return
+    sink.record(
+        SECTION_PROPOSAL,
+        {
+            "proposal_msg_id": str(proposal_msg_id),
+            "outcome": {
+                "materialized": bool(materialized),
+                "denied": bool(denied),
+                "reauthored": bool(reauthored),
+                "task_id": _text_or_none(task_id),
+                "patch_verdict_key": _text_or_none(patch_verdict_key),
+                "settled_at": str(settled_at or "") or _now(),
             },
-            row_type="proposal",
-            natural_ids=str(proposal_msg_id),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: proposal outcome record failed")
+        },
+        row_type="proposal",
+        natural_ids=str(proposal_msg_id),
+    )
 
 
 def record_settle(
@@ -530,133 +552,121 @@ def record_settle(
     """Settle a dispatched action's row with the verdict it got. Never raises.
 
     The row settled is the one the dispatch opened, found by reading the spool
-    back: the dispatching phase is not in scope at the settle, and a resumed
-    process holds no memory of it. The other arguments are only the fallback.
+    back: the dispatching phase is not in scope at the settle. Missing dispatch
+    evidence is left missing rather than reconstructed with guessed provenance.
     """
-    try:
-        if not str(task_id or ""):
-            return
-        event = _action_event(str(task_id))
-        if event is None:
-            # No dispatch row: a task settled by a path that never went through
-            # the runner, or an unreadable spool. Better placed than dropped.
-            if not str(phase or ""):
-                return
-            event = phase_event_id(phase, macro_cycle)
-            record_dispatch(
-                action=action,
-                task_id=str(task_id),
-                phase=phase,
-                macro_cycle=macro_cycle,
-            )
-        sink = _sink(event)
-        if sink is None:
-            return
-        settled = str(settled_at or "") or _now()
-        row: dict[str, Any] = {
-            "task_id": str(task_id),
-            "status": str(status or ""),
-            "decision": str(decision or ""),
-            "error_class": _text_or_none(error_class),
-            "workspace": _text_or_none(workspace),
-            "settled_at": settled,
-            "settled_unix": _float_or_none(settled_unix),
-        }
-        sink.record(SECTION_ACTION, row, row_type="action", natural_ids=str(task_id))
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: settle record failed")
+    if not str(task_id or ""):
+        return
+    event = _action_event(str(task_id))
+    if event is None:
+        return
+    sink = _sink(event)
+    if sink is None:
+        return
+    settled = str(settled_at or "") or _now()
+    row: dict[str, Any] = {
+        "task_id": str(task_id),
+        "status": str(status or ""),
+        "decision": str(decision or ""),
+        "error_class": _text_or_none(error_class),
+        "workspace": _text_or_none(workspace),
+        "settled_at": settled,
+        "settled_unix": _float_or_none(settled_unix),
+    }
+    sink.record(SECTION_ACTION, row, row_type="action", natural_ids=str(task_id))
 
 
 def _finish(event: str, *, end_time: str) -> None:
     """Close ``event`` on the rows recorded against it so far. The sequence is
     re-derived through :func:`_open`, which hands back the one the first open
-    took: a phase exited twice in a cycle would otherwise publish twice."""
+    took: a phase exited twice in a cycle would otherwise publish twice.
+
+    A spool that cannot be read, or an event id the spool handed back that will
+    not parse, is noted and dropped: ``record_exit`` must not raise into the
+    phase transition that asked for this close, and finalize recovers an event
+    left open as interrupted.
+    """
     from .assembler import event_parts
     from .event_ids import parse_event_id
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    parsed = parse_event_id(event)
-    sequence = _open(event, phase=parsed.phase, macro_cycle=parsed.macro_cycle)
-    parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
-    ext, status = assemble_phase_ext(parts, event=event)
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=event,
-        sequence=sequence,
-        status=status or STATUS_SUCCEEDED,
-        ext=ext,
-        kind=EVENT_KIND,
-        start_time=str(ext.get("entered_at") or ""),
-        end_time=end_time,
-    )
+    try:
+        parsed = parse_event_id(event)
+        sequence = _open(event, phase=parsed.phase, macro_cycle=parsed.macro_cycle)
+        parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
+        ext, status = assemble_phase_ext(parts, event=event)
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=event,
+            sequence=sequence,
+            status=status or STATUS_SUCCEEDED,
+            ext=ext,
+            kind=EVENT_KIND,
+            start_time=str(ext.get("entered_at") or ""),
+            end_time=end_time,
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"closing phase event {event}")
 
 
 def _rows(section: str, event: str) -> list[dict[str, Any]]:
     """Read one section's rows for one event back out of the spool."""
-    try:
-        from .assembler import event_parts
+    from .assembler import recorded_rows
 
-        return rows_for_event(event_parts((section,)).get(section) or [], event)
-    except Exception as exc:  # noqa: BLE001 — a read-back failure is not a write failure
-        note_failure(section=section, error=exc, detail=f"reading back the rows of event {event}")
-        return []
+    return recorded_rows(section, event=event)
 
 
 def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     """The phase's most recent unclosed entry: its event id, sequence, and
-    entry epoch. ``None`` at a first transition or on an unreadable spool."""
-    try:
-        from .assembler import event_parts
+    entry epoch. ``None`` at a first transition or on an unreadable spool.
 
-        wanted = str(phase or "").strip().upper()
-        rows = event_parts((SECTION_SEGMENT,)).get(SECTION_SEGMENT) or []
-        best: tuple[str, int, float | None] | None = None
-        best_sequence = -1
-        for row in rows:
-            if not isinstance(row, Mapping) or row.get("exited_at"):
-                continue
+    A segment whose ``event_id`` will not parse is skipped: handing it to
+    :func:`_sink` or :func:`_finish` would raise the same ``ValueError`` the
+    sink already swallows on write, and the exit must not surface it.
+    """
+    from .assembler import recorded_section
+    from .event_ids import parse_event_id
+
+    wanted = str(phase or "").strip().upper()
+    best: tuple[str, int, float | None] | None = None
+    best_sequence = -1
+    for row in recorded_section(SECTION_SEGMENT):
+        if row.get("exited_at"):
+            continue
+        event = str(row.get("event_id") or "")
+        if not event or str(event.split(":")[0]).upper() != wanted:
+            continue
+        try:
+            parse_event_id(event)
+        except ValueError:
+            continue
+        sequence = _int_or_none(row.get("sequence")) or 0
+        if sequence >= best_sequence:
+            best_sequence = sequence
+            best = (event, sequence, _float_or_none(row.get("entered_unix")))
+    return best
+
+
+def _event_holding(section: str, field: str, value: str) -> str | None:
+    """The phase event whose ``section`` row has ``field == value``, if any."""
+    from .assembler import recorded_section
+
+    for row in recorded_section(section):
+        if str(row.get(field) or "") == str(value):
             event = str(row.get("event_id") or "")
-            if not event or str(event.split(":")[0]).upper() != wanted:
-                continue
-            sequence = _int_or_none(row.get("sequence")) or 0
-            if sequence >= best_sequence:
-                best_sequence = sequence
-                best = (event, sequence, _float_or_none(row.get("entered_unix")))
-        return best
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the open segment")
-        return None
+            if event:
+                return event
+    return None
 
 
 def _action_event(task_id: str) -> str | None:
     """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
-    try:
-        from .assembler import event_parts
-
-        for row in event_parts((SECTION_ACTION,)).get(SECTION_ACTION) or []:
-            if isinstance(row, Mapping) and str(row.get("task_id") or "") == str(task_id):
-                event = str(row.get("event_id") or "")
-                if event:
-                    return event
-        return None
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the action's event")
-        return None
+    return _event_holding(SECTION_ACTION, "task_id", task_id)
 
 
 def _proposal_event(proposal_msg_id: str) -> str | None:
     """The phase event holding ``proposal_msg_id``'s row, if it was recorded."""
-    try:
-        from .assembler import event_parts
-
-        for row in event_parts((SECTION_PROPOSAL,)).get(SECTION_PROPOSAL) or []:
-            if isinstance(row, Mapping) and str(row.get("proposal_msg_id") or "") == str(proposal_msg_id):
-                event = str(row.get("event_id") or "")
-                if event:
-                    return event
-        return None
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the proposal's event")
-        return None
+    return _event_holding(SECTION_PROPOSAL, "proposal_msg_id", proposal_msg_id)
 
 
 def assemble_phase_ext(
@@ -694,6 +704,13 @@ def assemble_phase_ext(
         ),
         drop=("event_id",),
     )
+    denials = wire_rows(
+        sort_rows(
+            rows_for_event(parts.get(SECTION_DENIAL) or [], event),
+            keys=("denied_at", "proposal_msg_id", "action"),
+        ),
+        drop=("event_id",),
+    )
     # Summed over the entries, not measured first to last: a phase re-entered
     # inside one cycle did not own the time the run spent elsewhere in between.
     measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
@@ -716,6 +733,7 @@ def assemble_phase_ext(
             "rows": actions,
         },
         "markers": {"count": len(markers), "rows": markers},
+        "denials": {"count": len(denials), "rows": denials},
         "proposals": {
             "count": len(proposals),
             # The gap to ``count`` is the ones the Critic never reached, which
@@ -769,6 +787,7 @@ __all__ = [
     "PHASE_EVENT_SECTIONS",
     "PRODUCER",
     "SECTION_ACTION",
+    "SECTION_DENIAL",
     "SECTION_EVENT",
     "SECTION_MARKER",
     "SECTION_SEGMENT",
@@ -777,7 +796,9 @@ __all__ = [
     "STATUS_INTERRUPTED",
     "STATUS_SUCCEEDED",
     "assemble_phase_ext",
+    "is_phase_transition_row",
     "phase_event_id",
+    "record_denial",
     "record_dispatch",
     "record_entry",
     "record_exit",

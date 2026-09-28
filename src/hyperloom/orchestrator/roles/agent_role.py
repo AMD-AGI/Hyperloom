@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.inference_optimizer.protocol.intent import IntentType
 
@@ -19,9 +20,6 @@ class BackendType(str, Enum):
     CLAUDE = "claude"  # tool-using (emit_intent + Read/Bash/Edit gated by Policy)
     CODEX = "codex"  # no-tools, validated_json_output only
 
-
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
@@ -120,9 +118,7 @@ __all__ = [
     "AgentRole",
     "BackendType",
     "DEFAULT_CLAUDE_API_KEY_ENV",
-    "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_API_KEY_ENV",
-    "DEFAULT_CODEX_MODEL",
     "SPECIALIST_INTENTS",
     "default_role_registry",
 ]

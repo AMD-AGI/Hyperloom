@@ -9,17 +9,19 @@ import asyncio
 import inspect
 import json
 import sqlite3
+import sys
 import threading
 from contextlib import closing
 from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict
 from functools import partial
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
+from hyperloom.orchestrator.actions.executors import _ray_serving as ray_serving
 from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
@@ -254,6 +256,75 @@ def test_cancelled_shutdown_drain_retains_live_execution(tmp_path, monkeypatch):
         dispatcher.db.close()
 
 
+def test_a_caller_that_gave_up_on_its_action_can_still_stop_the_dispatcher(tmp_path, monkeypatch):
+    """A caller that timed out like ``asyncio.timeout`` / 3.12 ``wait_for`` stays registered as the handle,
+    and must not cancel or await itself when it later stops the dispatcher."""
+    dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
+    monkeypatch.setattr(dispatcher_module, "_COOPERATIVE_CANCEL_GRACE_SEC", 0)
+    outcome: dict = {}
+    errors: list[Exception] = []
+
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def execute(_ctx):
+            entered.set()
+            await release.wait()
+            return {"status": "ok"}
+
+        async def cancel_once_entered(target):
+            await entered.wait()
+            target.cancel()
+
+        dispatcher.sub.register_executor("shutdown_test", execute)
+        task = await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="abandoned-caller")
+
+        async def caller():
+            me = asyncio.current_task()
+            watcher = asyncio.create_task(cancel_once_entered(me))
+            with pytest.raises(asyncio.CancelledError):
+                await dispatcher.run_task_registered(task)
+            assert watcher.done()
+            if hasattr(me, "uncancel"):
+                me.uncancel()
+            return await dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+
+        stopper = asyncio.create_task(caller())
+        done, _pending = await asyncio.wait({stopper}, timeout=5)
+        outcome["finished"] = stopper in done
+        if stopper in done:
+            outcome["stopped_is_this_task"] = stopper.result() == [task.task_id]
+            outcome["state_at_stop"] = (await dispatcher.tasks.get(task.task_id)).state
+        release.set()
+        await asyncio.gather(*dispatcher._executions)
+        outcome["final_state"] = (await dispatcher.tasks.get(task.task_id)).state
+        outcome["registered"] = dict(dispatcher._inflight_actions)
+        await _close(dispatcher)
+
+    def target():
+        try:
+            asyncio.run(run())
+        except Exception as exc:  # noqa: BLE001 - surfaced on the test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(20)
+    assert not thread.is_alive(), "shutdown deadlocked waiting on the caller's own registration"
+    if errors:
+        raise errors[0]
+    assert outcome == {
+        "finished": True,
+        "stopped_is_this_task": True,
+        "state_at_stop": "running",
+        "final_state": "succeeded",
+        "registered": {},
+    }
+    dispatcher.db.close()
+
+
 def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypatch):
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
@@ -269,6 +340,51 @@ def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypa
         await _close(dispatcher)
         assert await dispatcher.locks.lane_holders()
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monkeypatch):
+    class RayError(Exception):
+        pass
+
+    killed = []
+    fake_ray = SimpleNamespace(
+        get=lambda ref, **_kwargs: ref,
+        kill=killed.append,
+        exceptions=SimpleNamespace(RayError=RayError),
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    dispatcher = _dispatcher(tmp_path)
+    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: False))
+    specialist_lease = ray_serving.GpuSpecialistLease(num_gpus=1)
+    specialist_lease._actor = actor
+    specialist_lease._start_ref = object()
+    gpu_lease = object()
+
+    async def run():
+        dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
+        task = await dispatcher.tasks.create(
+            kind="shutdown_test", params={}, idempotency_key="forced-actor-kill", requires_lanes=["research_lane"]
+        )
+        result = await dispatcher.run_task_registered(
+            task,
+            gpu_specialist_lease=specialist_lease,
+            gpu_lease=gpu_lease,
+        )
+        assert result.state == "succeeded"
+        assert killed == [actor]
+        assert specialist_lease._actor is None
+        assert specialist_lease._start_ref is None
+        dispatcher.gpu_specialist_pool.release.assert_awaited_once_with(gpu_lease)
+        assert await dispatcher.locks.lane_holders() == {}
+        assert (await dispatcher.tasks.get(task.task_id)).state == "succeeded"
+        assert dispatcher._executions == set()
+        assert dispatcher._inflight_actions == {}
 
     try:
         asyncio.run(run())
@@ -373,6 +489,51 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
         dispatcher.db.close()
 
 
+@pytest.mark.parametrize("named_tree", [True, False])
+def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, named_tree):
+    """The lead an operator gets for a retained lane: the group, as a number, not prose.
+
+    The lane stays held here on purpose, so the one thing that can ever release
+    it is an observation that nothing of the execution is left -- and this row
+    is the only durable place its process group survives the process that saw
+    it. A raise site with no local group to name records none, and that lane is
+    then held for good.
+    """
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, SubAgentResult
+
+    dispatcher = _dispatcher(tmp_path)
+
+    async def run():
+        task = await dispatcher.tasks.create(
+            kind="shutdown_test", params={}, idempotency_key="tree-root", requires_lanes=["research_lane"]
+        )
+        result = SubAgentResult(task.task_id, "failed", {}, "tree cleanup unconfirmed", "cleanup")
+        dispatcher.sub.register_executor(
+            "shutdown_test",
+            AsyncMock(
+                side_effect=ExecutionCleanupUnconfirmed(
+                    "specialist pid=4242: tree cleanup unconfirmed",
+                    result=result,
+                    tree_pgid=4242 if named_tree else None,
+                )
+            ),
+        )
+        lease = await dispatcher.locks.try_acquire_many(
+            ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action=task.kind, ttl_sec=60
+        )
+        with pytest.raises(ExecutionCleanupUnconfirmed):
+            await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=AsyncMock(return_value=True))
+        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        evidence = (await dispatcher.tasks.get(task.task_id)).history[-1]["evidence"]
+        assert evidence["cleanup_confirmed"] is False
+        assert evidence.get("cleanup_tree_pgid") == (4242 if named_tree else None)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
 @pytest.mark.parametrize("outcome", ["succeeded", "failed", "cancelled"])
 @pytest.mark.parametrize("callback_error", [RuntimeError("completion failed"), asyncio.CancelledError()])
 def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, outcome, callback_error):
@@ -411,9 +572,8 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
     dispatcher = _dispatcher(tmp_path)
     dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
     dispatcher._record_specialist_result = AsyncMock()
-    dispatcher._record_framework_agent_authoring_empty_outcome = lambda **_kwargs: None
-    dispatcher._ingest_candidate_discovery = lambda **_kwargs: None
     dispatcher._handle_unpromotable_result = AsyncMock()
+    dispatcher._coord.phase_framework = SimpleNamespace(on_specialist_settled=Mock())
 
     async def run():
         dispatcher.sub.register_executor("specialist", AsyncMock(side_effect=FuturesCancelledError("stop")))
@@ -429,6 +589,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert len(events) == 1 and events[0].payload["state"] == "cancelled"
         assert dispatcher._maybe_auto_retry_specialist.await_count == 0
         assert dispatcher._record_specialist_result.await_count == 1
+        assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
         assert dispatcher._promote_to_shared_state.await_count == 0
         assert dispatcher._fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions

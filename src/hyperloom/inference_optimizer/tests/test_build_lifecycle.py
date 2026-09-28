@@ -678,3 +678,49 @@ async def test_resume_no_pending_is_noop(resume_coord):
     resume_coord.shared_state.pending_targeted_build = {}
     report = await resume_coord._resume_consistency_pass()
     assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_build_records_the_group_not_the_dead_root(tmp_path, monkeypatch):
+    """The operator's lead has to outlive the process that failed.
+
+    ``spawn_build`` detaches the build with ``start_new_session`` and resolves
+    the group it leads onto the handle. ``proc.pid`` stops naming anything the
+    moment that root exits, which on this path it may well have; the group id
+    still names the group while any member of it runs.
+
+    Nothing probes it -- the lane is retained either way -- but it is printed to
+    whoever has to clear that lane by hand, and a number that named a dead root
+    would send them nowhere.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe
+    from hyperloom.orchestrator.enablement.runtime.targeted_build import BuildHandle
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, RunnerContext
+
+    action = _fake_action(attempt_root=str(tmp_path), build_budget_sec=30)
+    handle = BuildHandle(
+        action,
+        str(tmp_path),
+        str(tmp_path / "aiter_jit"),
+        str(tmp_path / "build.log"),
+        SimpleNamespace(pid=4242, poll=lambda: 0, wait=lambda **_kw: 0),
+        4242,
+        1717,
+    )
+    monkeypatch.setattr(tbe, "spawn_build", lambda *a, **kw: handle)
+    monkeypatch.setattr(tbe, "ensure_build_dead", lambda _build: False)
+    monkeypatch.setattr(tbe, "_resolve_budget_sec", lambda _action: 0.05)
+    monkeypatch.setattr(tbe.TargetedBuildExecutor, "_record_result", Mock())
+    ctx = RunnerContext(
+        task=SimpleNamespace(task_id="pgid-build", params=action.to_state()),
+        lease=None,
+        extra={"session_dir": str(tmp_path)},
+    )
+
+    with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
+        await tbe.TargetedBuildExecutor()(ctx)
+
+    assert caught.value.tree_pgid == 1717

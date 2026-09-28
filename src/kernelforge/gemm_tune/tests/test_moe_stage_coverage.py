@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.common.env import EnvValueError
+from kernelforge.gemm_tune import evidence as ev
 from kernelforge.gemm_tune.router import _detect_1stage_from_log, moe_stage_coverage
 
 _1STAGE = "[aiter] [fused_moe] using 1stage default for (304, {tok}, 4096, 1536, 256, 6)"
@@ -76,3 +80,22 @@ class TestDegradedInputs:
         # tune".
         path = _log(tmp_path, ["MoE kernel: using 1stage default (legacy format)"])
         assert _detect_1stage_from_log(path) is True
+
+
+class TestUnreadableParseBound:
+    """A bad cap is a configuration error; read as "this log has no MoE" it drops CK tuning from the plan."""
+
+    @pytest.mark.parametrize("bad", ["0", "lots"])
+    def test_a_bad_cap_reaches_the_operator_instead_of_emptying_the_coverage(self, tmp_path, monkeypatch, bad):
+        path = _log(tmp_path, [_2STAGE.format(tok=1), _1STAGE.format(tok=256)])
+        assert moe_stage_coverage(path)["stages_seen"]
+
+        monkeypatch.setenv(ev._MAX_LINES_ENV, bad)
+        with pytest.raises(EnvValueError, match=ev._MAX_LINES_ENV):
+            moe_stage_coverage(path)
+
+    def test_the_stage_decision_does_not_fall_back_to_the_substring_probe(self, tmp_path, monkeypatch):
+        path = _log(tmp_path, [_2STAGE.format(tok=1)])
+        monkeypatch.setenv(ev._MAX_KEYS_ENV, "0")
+        with pytest.raises(EnvValueError, match=ev._MAX_KEYS_ENV):
+            _detect_1stage_from_log(path)

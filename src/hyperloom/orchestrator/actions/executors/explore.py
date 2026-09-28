@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import os
@@ -20,14 +19,18 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
-    VERDICT_RECORDED,
     VERDICT_REVERT,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
+    stamp_output_per_gpu,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
     FAILURE_STAGE_DECISION,
@@ -39,7 +42,6 @@ from ...state.shared_state import (
     first_positive_tput,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
-    resolved_grading,
     stack_base_params,
 )
 from ..stop_attribution import (
@@ -53,15 +55,19 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import workload_signature
+from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._grid_base import (
+    TS_FAILED,
+    TS_KILLED_OVERTIME,
+    TS_SKIPPED_DEDUP,
+)
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
-    _kill_stale_servers,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -74,13 +80,14 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from ._grid_server_args import compose_server_args, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
 
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
 )
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -92,21 +99,6 @@ log = logging.getLogger(__name__)
 
 
 _now_iso = functools.partial(now_iso, "auto")
-
-
-def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger."""
-    return {
-        "schema_version": 1,
-        "tested": {},
-        "accepted": [],
-        "rejected": [],
-        "winners_history": [],
-        "domains_round_summary": [],
-        "name_index": {},
-        "cursor": 0,
-        "last_round": {},
-    }
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -206,9 +198,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
-        # Framework-rewrite lever this variant attributes to, and how.
-        gv.framework_lever = str(raw.get("framework_lever") or "")  # type: ignore[attr-defined]
-        gv.framework_lever_source = str(raw.get("framework_lever_source") or "")  # type: ignore[attr-defined]
         out.append(gv)
     return out
 
@@ -343,13 +332,7 @@ def _atom_default_grid(
     return variants
 
 
-def _xdit_default_grid(
-    *,
-    model_class: str,
-    conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
-) -> list[GridVariant]:
+def _xdit_default_grid(*, model_class: str) -> list[GridVariant]:
     """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
     variants: list[GridVariant] = []
 
@@ -430,12 +413,7 @@ def _default_grid_for_framework(
             osl=osl,
         )
     if fw == "xdit":
-        return _xdit_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
+        return _xdit_default_grid(model_class=model_class)
     return []
 
 
@@ -458,20 +436,6 @@ class ExploreExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
-        try:
-            return await self._run_explore(ctx)
-        finally:
-            if not os.environ.get("PYTEST_CURRENT_TEST"):
-                try:
-                    await asyncio.to_thread(_kill_stale_servers)
-                except Exception:  # noqa: BLE001 - best-effort safety net
-                    log.warning(
-                        "explore: post-run _kill_stale_servers failed",
-                        exc_info=True,
-                    )
-
-    async def _run_explore(self, ctx) -> dict[str, Any]:
-        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
@@ -525,6 +489,12 @@ class ExploreExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
             }
 
@@ -681,23 +651,6 @@ class ExploreExecutor:
                 "workspace": output_root.as_posix(),
             }
 
-        # ----- explore_search ledger (history seed) -------------------------
-        search = dict(params.get("explore_search") or _initial_explore_search_state())
-        # Defensive default fill (resume / first-run guards).
-        for key, default in (
-            ("schema_version", 1),
-            ("tested", {}),
-            ("rejected", []),
-            ("name_index", {}),
-            ("cursor", 0),
-            ("winners_history", []),
-            ("domains_round_summary", []),
-        ):
-            search.setdefault(key, default)
-
-        tested_dict = search.get("tested") or {}
-        inherited_name_index: dict[str, Any] = dict(search.get("name_index") or {})
-
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
@@ -727,16 +680,11 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
 
-        # Re-proposals are still benchmarked; the tested ledger already carries
-        # each prior outcome and is rendered in full, so this only counts them.
-        re_proposed = sum(1 for fp in unique_in_round if isinstance(tested_dict.get(fp), dict))
-
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
-            re_proposed,
         )
 
         # Multi-node grid shaping.
@@ -750,6 +698,14 @@ class ExploreExecutor:
                 runnable,
                 framework=framework,
                 model_path=resolved_model,
+                gpu_type=resolved_gpu or str(getattr(ss, "gpu_type", "") or ""),
+                stack_fingerprint=getattr(ss, "stack_fingerprint_meta", None),
+                base_server_args=compose_server_args(
+                    inherited_args=_effective_inherited_args,
+                    base_extra_args=base_extra_args,
+                    remove_args=base_remove_args,
+                    args_mode=base_args_mode,
+                ),
             )
             # Operator-supplied --skip-variants patterns.
             runnable, _skip_dropped = apply_user_skip_list(
@@ -769,18 +725,20 @@ class ExploreExecutor:
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
 
-        round_id_seed = int(search.get("cursor") or 0) + 1
+        # Seeded by the Coordinator from the durable cursor: this executor holds no
+        # history of its own, so it cannot count the rounds before this one.
+        round_id_seed = int(params.get("explore_search_cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
 
         # ----- Per-variant serial run loop ---------------------------------
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
-        # This round's own ledger writes, kept apart from the ledger it inherited and merged over it once the loop is
-        # done.
-        round_tested: dict[str, dict[str, Any]] = {}
-        round_name_index: dict[str, Any] = {}
-        rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
-        winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
+        # This round's ledger writes; ``apply_explore_search_update`` accumulates them
+        # over the durable ledger.
+        tested_update: dict[str, dict[str, Any]] = {}
+        name_index: dict[str, Any] = {}
+        rejected_update: list[dict[str, Any]] = []
+        winners_history_update: list[dict[str, Any]] = []
 
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running accumulation; after a KEEP they extend with
         # the KEEP'd variant.
@@ -970,14 +928,14 @@ class ExploreExecutor:
                                 gv.name,
                                 werr,
                             )
-                            round_tested[fp] = {
+                            tested_update[fp] = {
                                 "fingerprint": fp,
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
                                 "note": gv.note,
-                                "outcome": "FAILED",
+                                "outcome": TS_FAILED,
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
                                 "gain_pct": None,
@@ -1002,7 +960,7 @@ class ExploreExecutor:
                                 "measured_against": _measured_against(),
                             }
                             if gv.name:
-                                round_name_index[gv.name] = fp
+                                name_index[gv.name] = fp
                             rejected_update.append(
                                 {
                                     "fingerprint": fp,
@@ -1053,7 +1011,6 @@ class ExploreExecutor:
                         base_extra_envs=dict(stack_extra_envs),
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
-                        preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,
@@ -1078,7 +1035,11 @@ class ExploreExecutor:
                         "total_throughput": r.total_token_throughput,
                         GRADED_INTVTY: r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
+                        GRADED_INTVTY_P50: r.intvty_p50,
+                        GRADED_DURATION: r.duration_seconds,
+                        GRADED_ERROR_RATE: r.request_error_rate,
                     }
+                    stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
                         ss,
                         variant_meas,
@@ -1092,7 +1053,7 @@ class ExploreExecutor:
                         f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
                     )
                     gain: float | None
-                    outcome = "FAILED"
+                    outcome = TS_FAILED
                     reason: str = ""
                     # Each gate's verdict as it rules, in the order it ruled.
                     # Recorded here because this is where it is known: read off
@@ -1119,13 +1080,9 @@ class ExploreExecutor:
                         gain = None
                         outcome = "REVERT"
                         if _graded_on_intvty:
-                            reason = f"both_axes_regressed ({axes})"
+                            reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
-                    elif graded.verdict == VERDICT_RECORDED:
-                        gain = gain_pct(graded.candidate, graded.reference)
-                        outcome = "RECORDED"
-                        reason = f"neither_dominates ({axes})"
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if r.status == "succeeded":
@@ -1137,11 +1094,7 @@ class ExploreExecutor:
                                 "gate": "graded_axes"
                                 if (_graded_on_intvty or graded.degrade_reason)
                                 else "keep_threshold",
-                                "passed": (
-                                    False
-                                    if graded.degrade_reason
-                                    else graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED)
-                                ),
+                                "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
                                 # the tolerance does for accuracy.
@@ -1157,7 +1110,7 @@ class ExploreExecutor:
                     accuracy_value: float | None = None
                     accuracy_reference: float | None = None
                     accuracy_gated = False
-                    if outcome == "FAILED" and not reason:
+                    if outcome == TS_FAILED and not reason:
                         # Accuracy gate.
                         from hyperloom.inference_optimizer import framework_registry
 
@@ -1204,7 +1157,7 @@ class ExploreExecutor:
                             outcome = "KEEP"
 
                     decision_tput = r.output_throughput
-                    round_tested[fp] = {
+                    tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
@@ -1220,7 +1173,7 @@ class ExploreExecutor:
                         "e2e_norm_intvty_p90": r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
-                        "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
+                        "graded_objective": graded.objective,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1251,7 +1204,7 @@ class ExploreExecutor:
                         ),
                     }
                     if gv.name:
-                        round_name_index[gv.name] = fp
+                        name_index[gv.name] = fp
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
@@ -1316,7 +1269,7 @@ class ExploreExecutor:
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
-                            "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
+                            "graded_objective": graded.objective,
                             # The verdict this KEEP rests on. ``None`` means the variant was not gated (not
                             # high-risk, or no baseline) rather than that it scored nothing.
                             "accuracy": accuracy_value,
@@ -1413,11 +1366,7 @@ class ExploreExecutor:
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (per-fingerprint last-wins) ---------------- This round's writes over the ledger it
-        # inherited: a re-run fingerprint replaces its earlier row, which is what a fresh measurement means, and a
-        # variant this round rolled back leaves the earlier row standing.
-        tested_update: dict[str, dict[str, Any]] = {**tested_dict, **round_tested}
-        name_index: dict[str, Any] = {**inherited_name_index, **round_name_index}
+        # ----- Ledger compaction --------------------------------------------
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
@@ -1425,22 +1374,18 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook (this round's outcomes).
+        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook.
         reasons_by_fp: dict[str, str] = {
-            str(r.get("fingerprint") or ""): str(r.get("reason") or "")
-            for r in rejected_update
-            if r.get("round_id") == round_id
+            str(r.get("fingerprint") or ""): str(r.get("reason") or "") for r in rejected_update
         }
         per_variant_outcomes: list[dict[str, Any]] = []
         for fp_key, te in tested_update.items():
-            if te.get("round_id") != round_id:
-                continue
             outcome = str(te.get("outcome") or "")
             if outcome not in (
                 "KEEP",
                 "REVERT",
-                "FAILED",
-                "KILLED_OVERTIME",
+                TS_FAILED,
+                TS_KILLED_OVERTIME,
             ):
                 continue
             metrics: dict[str, Any] = {}
@@ -1510,7 +1455,7 @@ class ExploreExecutor:
             per_variant_outcomes.append(
                 {
                     "variant_name": str(sd.get("name") or ""),
-                    "outcome": "SKIPPED_DEDUP",
+                    "outcome": TS_SKIPPED_DEDUP,
                     "fingerprint": str(sd.get("fingerprint") or ""),
                     "provenance": "",
                     "metrics": {},
@@ -1531,9 +1476,7 @@ class ExploreExecutor:
 
         # ``last_round`` summary for the prompt / breakdown.
         killed_overtime_fps = [
-            str(te.get("fingerprint") or "")
-            for te in tested_update.values()
-            if te.get("round_id") == round_id and te.get("outcome") == "KILLED_OVERTIME"
+            str(te.get("fingerprint") or "") for te in tested_update.values() if te.get("outcome") == TS_KILLED_OVERTIME
         ]
         last_round_summary = {
             "round_id": round_id,
@@ -1551,9 +1494,8 @@ class ExploreExecutor:
             "tested": tested_update,
             "rejected": list(rejected_dedup.values()),
             "name_index": name_index,
-            "cursor": len(tested_update),
             "winners_history": winners_history_update,
-            "domains_round_summary": list(search.get("domains_round_summary") or []),
+            "domains_round_summary": [],
             "last_round": last_round_summary,
         }
 
@@ -1571,14 +1513,7 @@ class ExploreExecutor:
         # Successful = at least one bench produced a measurement or was reaped by the overtime gate (KILLED_OVERTIME
         # is a real signal).
         produced_measurement = any(
-            t.get("outcome")
-            in (
-                "KEEP",
-                "REVERT",
-                "KILLED_OVERTIME",
-            )
-            for t in tested_update.values()
-            if t.get("round_id") == round_id
+            t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
         status = "succeeded" if produced_measurement or winners else "failed"
         # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and

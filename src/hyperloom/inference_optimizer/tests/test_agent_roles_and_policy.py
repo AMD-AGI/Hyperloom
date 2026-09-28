@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from hyperloom.orchestrator.roles.agent_role import (
     BackendType,
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
     default_role_registry,
 )
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -37,14 +36,10 @@ from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 # agent_role
 def test_default_claude_model_is_opus_5():
-    """The default orchestration model must stay in sync with the allowlist head."""
-    from hyperloom.inference_optimizer.cli.credentials import (
-        _CLAUDE_ALLOWED_MODELS,
-        _CLAUDE_PREFERRED_MODEL,
-    )
+    """The allowlist ladder is headed by the default, and the older rungs are the fallback order."""
+    from hyperloom.inference_optimizer.cli.credentials import _CLAUDE_ALLOWED_MODELS
 
     assert DEFAULT_CLAUDE_MODEL == "claude-opus-5"
-    assert _CLAUDE_PREFERRED_MODEL == DEFAULT_CLAUDE_MODEL
     assert _CLAUDE_ALLOWED_MODELS == (
         "claude-opus-5",
         "claude-opus-4-8",

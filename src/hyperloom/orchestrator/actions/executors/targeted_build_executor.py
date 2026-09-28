@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from concurrent.futures import CancelledError
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
+from ...enablement.recipe.build_inputs import build_driver_for, build_input_record
 from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
 from ...enablement.runtime.stack_actions import FrameworkRuntime
 from ...enablement.runtime.targeted_build import (
@@ -103,17 +105,30 @@ class TargetedBuildExecutor:
                     confirmed_dead = ensure_build_dead(handle)
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise ExecutionCleanupUnconfirmed(
-                        f"task={task.task_id}: targeted build cleanup failed: {exc}", result=cleanup_result
+                        f"task={task.task_id}: targeted build cleanup failed: {exc}",
+                        result=cleanup_result,
+                        # ``BuildHandle`` already resolved the group the build
+                        # was detached into (``enablement/runtime/targeted_build``
+                        # spawns with ``start_new_session``); ``proc.pid`` stops
+                        # naming anything once the root exits.
+                        tree_pgid=handle.pgid,
                     ) from exc
                 if not confirmed_dead:
                     raise ExecutionCleanupUnconfirmed(
-                        f"task={task.task_id}: targeted build cleanup unconfirmed", result=cleanup_result
+                        f"task={task.task_id}: targeted build cleanup unconfirmed",
+                        result=cleanup_result,
+                        tree_pgid=handle.pgid,
                     )
                 if shared_state is not None:
                     shared_state.pending_targeted_build = {}
                     shared_state.save(session_dir)
 
-        self._record_result(result, shared_state, task_id=str(task.task_id or ""))
+        self._record_result(
+            result,
+            shared_state,
+            action=action,
+            task_id=str(task.task_id or ""),
+        )
         if result.failure_class == "cancelled":
             raise CancelledError(result.failure_summary)
         if not result.ok:
@@ -124,9 +139,28 @@ class TargetedBuildExecutor:
         return result.to_state()
 
     @staticmethod
-    def _record_result(result: Any, shared_state: Any, *, task_id: str = "") -> None:
-        """Append the build result to the manifest; record failure carrier."""
+    def _record_result(
+        result: Any,
+        shared_state: Any,
+        *,
+        action: Any = None,
+        task_id: str = "",
+    ) -> None:
+        """Append the build result to the manifest; record failure carrier.
+
+        The inputs are recorded here because this is the one point where the
+        action and the result are both in scope: the action's sentinel is
+        cleared on finish, so a succeeded build's own recipe is otherwise
+        unrecoverable from the row it leaves behind.
+        """
         entry = result.to_state()
+        if action is not None:
+            entry["build_driver"] = build_driver_for(action)
+            entry["build_inputs"] = build_input_record(
+                action,
+                installed_versions=getattr(result, "installed_versions", {}) or {},
+                ambient_env=os.environ,
+            )
         # Recorded on the timeline whether or not there is a SharedState to
         # append to: a build dispatched without one still ran, and the manifest
         # is only where the *lane* reads its own history from.

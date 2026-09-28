@@ -41,7 +41,7 @@ From the agent terminal in that workspace, install the published release wheel
 into the current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.1 --target .
+pip install hyperloom-inference-optimizer==1.1.2 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -178,9 +178,18 @@ run:
 - [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
 - [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run on the
   KernelForge kernel backend.
-- [`12h atom`](hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md) — the same run on the
-  ATOM serving framework; pins the KernelForge backend, because GEAK does not
-  drive kernel rewrites on ATOM.
+- [`12h atom`](hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md) — the same run on ATOM,
+  using the user's selected `docker` or `baremetal` mode from setup; if no mode is
+  selected, ask before continuing. `baremetal` uses the development machine's
+  existing ATOM/ROCm Python environment, even if that platform is a container
+  (no additional Docker). Setup uses `--install-framework none
+  --frameworks atom --require-frameworks`, first with `--check-only` and then
+  with approval if setup is needed. The KERNEL_AGENT phase runs GEAK, the same
+  backend the other frameworks get when none is named.
+- [`12h atom forge`](hyperloom-qwen3-14b-fp8-12h-atom-forge/SKILL.md) — the ATOM
+  run with `KERNEL_OPT_BACKEND_ORDER=forge`, so the KERNEL_AGENT phase is the
+  per-kernel KernelForge backend. Same workload, budget and phase split as
+  `12h atom`, so the two are directly comparable.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.

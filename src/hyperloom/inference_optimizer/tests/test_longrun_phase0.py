@@ -14,8 +14,9 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.bus import db_maintenance as dbm
-from hyperloom.orchestrator.state import shared_state as ss_mod
-from hyperloom.orchestrator.state.shared_state import SharedState, _cap_tested_ledger
+from hyperloom.orchestrator.state._shared_state import phase_state as ss_mod
+from hyperloom.orchestrator.state._shared_state.phase_state import _cap_tested_ledger
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.state.task_registry import TaskRegistry

@@ -144,14 +144,15 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     # both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     phase = _ps.PHASE_FRAMEWORK_AGENT
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = s.to_phase_status_summary(budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    out = _ps.phase_status_summary(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
@@ -163,15 +164,18 @@ def test_shared_state_phase_status_summary_renders_compact_block():
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
+    from hyperloom.orchestrator.phases import machine_state as _ps
+
     s = SharedState(max_minutes=0)
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1.0,
     )
-    out = s.to_phase_status_summary(now_unix=10.0)
+    out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
 
 
