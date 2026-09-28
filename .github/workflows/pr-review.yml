@@ -18,9 +18,6 @@ name: PR Review
 on:
   issue_comment:
     types: [created]
-  # TEMP: runs the workflow from its development branch; remove before merge.
-  pull_request:
-    types: [opened, synchronize, reopened]
 
 permissions: {}
 
@@ -28,17 +25,14 @@ permissions: {}
 concurrency:
   group: >-
     pr-review-${{
-      (github.event_name == 'pull_request' || startsWith(github.event.comment.body, '/review'))
-      && format('pr-{0}', github.event.issue.number || github.event.pull_request.number)
+      startsWith(github.event.comment.body, '/review')
+      && format('pr-{0}', github.event.issue.number)
       || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   gate:
-    if: >-
-      (github.event_name == 'pull_request' && github.head_ref == 'ci/pr-review-bot')
-      || (github.event_name == 'issue_comment' && github.event.issue.pull_request
-          && startsWith(github.event.comment.body, '/review'))
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -52,8 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          PR: ${{ github.event.issue.number }}
           BODY: ${{ github.event.comment.body }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
@@ -65,23 +58,19 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          if [ "$EVENT" = issue_comment ]; then
-            first_line=${BODY%%$'\n'*}
-            if ! [[ "$first_line" =~ ^/review[[:space:]]*$ ]]; then
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
+          first_line=${BODY%%$'\n'*}
+          if ! [[ "$first_line" =~ ^/review[[:space:]]*$ ]]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
           meta=$(gh pr view "$PR" --repo "$REPO" --json state,isCrossRepository,headRefOid,author \
             --jq '[.state, .isCrossRepository, .headRefOid, .author.login] | @tsv')
           IFS=$'\t' read -r state cross head author <<< "$meta"
-          if [ "$EVENT" = issue_comment ]; then
-            case "$ASSOCIATION" in
-              OWNER | MEMBER | COLLABORATOR) ;;
-              *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
-            esac
-          fi
+          case "$ASSOCIATION" in
+            OWNER | MEMBER | COLLABORATOR) ;;
+            *) [ "$COMMENTER" = "$author" ] || refuse "@${COMMENTER} is neither the PR author nor a repository member." ;;
+          esac
           [ "$state" = OPEN ] || refuse "the PR is ${state}."
           [ "$cross" = false ] || refuse "pull requests from forks are not supported."
           {
@@ -93,58 +82,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          PR: ${{ github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh pr comment "$PR" --repo "$REPO" --body "Automated review failed to start. Run: ${RUN_URL}"
 
-  # TEMP: exercises request-changes, dismissal and LGTM with fixed cards; remove before merge.
-  publish-selftest:
-    needs: gate
-    if: github.event_name == 'pull_request' && needs.gate.outputs.proceed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      PR: ${{ needs.gate.outputs.pr }}
-      REVIEWED_SHA: ${{ needs.gate.outputs.head }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      REVIEW_RESULT: success
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - run: |
-          set -euo pipefail
-          decision() {
-            gh pr view "$PR" --repo "$REPO" --json reviewDecision,mergeStateStatus \
-              --jq '"\(.reviewDecision) \(.mergeStateStatus)"'
-          }
-          export CARD="$RUNNER_TEMP/card.md"
-          printf '%s\n' "## PR #$PR -- publish self-test" "" "What it does: synthetic card." "" \
-            "Blocking issues: 1" "" "1. [free:selftest] Synthetic blocking finding [verified]" \
-            "   Problem: synthetic .github/scripts/pr-review-publish.sh:1" "   Impact: none" \
-            "   Action: none" "" "Checked: - | Ran: - | Base: - | Head: $REVIEWED_SHA" > "$CARD"
-          bash .github/scripts/pr-review-publish.sh
-          after_block=$(decision)
-          echo "after request-changes: $after_block"
-          printf '%s\n' "## PR #$PR -- publish self-test" "" "What it does: synthetic card." "" \
-            "Blocking issues: none" "" "Checked: - | Ran: - | Base: - | Head: $REVIEWED_SHA" > "$CARD"
-          bash .github/scripts/pr-review-publish.sh
-          after_clean=$(decision)
-          echo "after clean: $after_clean"
-          [[ "$after_block" == CHANGES_REQUESTED* ]] || { echo "::error::request-changes did not set CHANGES_REQUESTED"; exit 1; }
-          [[ "$after_clean" != CHANGES_REQUESTED* ]] || { echo "::error::dismissal did not clear CHANGES_REQUESTED"; exit 1; }
-
   review:
-    needs: [gate, publish-selftest]
-    if: >-
-      always() && needs.gate.outputs.proceed == 'true'
-      && (needs.publish-selftest.result == 'success' || needs.publish-selftest.result == 'skipped')
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 60
     permissions:
