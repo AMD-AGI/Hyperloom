@@ -109,11 +109,7 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _fake_self()
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    request = types.SimpleNamespace(
-        max_search_candidates=5,
-        framework="sglang",
-        work_dir="/tmp/enablement",
-    )
+    request = types.SimpleNamespace(max_search_candidates=5)
     plan = types.SimpleNamespace(
         repos=("https://github.com/sgl-project/sglang.git",),
         keywords=("scheduler",),
@@ -131,8 +127,6 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params is not None
     assert params["domain"] == "enablement_specialist"
     assert params["source_phase"] == "ENABLEMENT"
-    # Reuses FRAMEWORK authoring machinery + tags the objective.
-    assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
     # The pre-patch half of the gate travels as the persisted observation's
@@ -1219,7 +1213,7 @@ async def test_rearm_authored_lane_delegates_enablement(session_dir):
     coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    await coord._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res)
     assert len(called) == 1 and called[0] is res
 
 
@@ -1236,7 +1230,7 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
         "retry_feedback": [],
         "prior_patches": [],
     }
-    await coord._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res)
     attempts = getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
     assert attempts.get(cand_id) == 1
     # A pending retry context should be queued.
@@ -1266,7 +1260,7 @@ async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session
     # Clear any pending from prior.
     coord.shared_state.apply_fail_retry_pending = []
 
-    await coord._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res)
 
     progress = getattr(coord.shared_state, "framework_agent_phase_progress", [])
     cap_rows = [p for p in progress if p.get("status") == "apply_fail_cap"]
@@ -1289,7 +1283,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}
-    await coord._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res)
     assert len(rearm_called) == 1
     # apply_fail_reauthor_attempts not touched.
     assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})

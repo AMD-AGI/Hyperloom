@@ -17,13 +17,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
 from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -128,23 +129,6 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
         "advise",
     }
 )
-
-
-def patch_verdict_subject(params: Mapping[str, Any]) -> str:
-    """Return the id an ``integrate_patch``'s Critic verdict is filed under.
-
-    An authored patch is reviewed as the specialist that wrote it. An
-    upstream-PR candidate is pre-screened before any specialist exists, so the
-    candidate id is what the verdict names.
-
-    Args:
-        params: The action's params.
-
-    Returns:
-        The subject id, or ``""`` when the params name neither.
-    """
-    sid = str(params.get("specialist_task_id") or "").strip()
-    return sid or str(params.get("framework_agent_candidate_id") or "").strip()
 
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
@@ -1055,7 +1039,7 @@ class PolicyGate:
         # cancelled, so a successful from-source build never reaches KEEP.
         if params.get("enablement_launch_only"):
             return
-        sid = patch_verdict_subject(params)
+        sid = verdict_subject(params)
         if not sid:
             raise PolicyDenied(
                 "integrate_patch.params names no Critic review subject",
@@ -1812,7 +1796,6 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
-    "patch_verdict_subject",
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",

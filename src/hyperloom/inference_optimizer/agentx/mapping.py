@@ -110,6 +110,8 @@ def map_aiperf(
 
     # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
     intvty_p90 = pct(m, "e2e_output_token_throughput", "p10")
+    # The median needs no slow-tail inversion: a monotone 1/x maps P50 of the ratio onto P50 of the rate.
+    intvty_p50 = pct(m, "e2e_output_token_throughput", "p50")
 
     return {
         "request_throughput": stat(m, "request_throughput"),
@@ -122,6 +124,7 @@ def map_aiperf(
         "duration": stat(m, "benchmark_duration"),
         "mean_ttft_ms": stat(m, "time_to_first_token", "avg"),
         "median_ttft_ms": stat(m, "time_to_first_token", "p50"),
+        "p90_ttft_ms": stat(m, "time_to_first_token", "p90"),
         "p99_ttft_ms": stat(m, "time_to_first_token", "p99"),
         "std_ttft_ms": stat(m, "time_to_first_token", "std"),
         "mean_tpot_ms": stat(m, "inter_token_latency", "avg"),
@@ -130,6 +133,7 @@ def map_aiperf(
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
         "e2e_norm_intvty_p90": intvty_p90,
+        "e2e_norm_intvty_p50": intvty_p50,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),

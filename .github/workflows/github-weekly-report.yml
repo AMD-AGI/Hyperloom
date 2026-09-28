@@ -161,9 +161,6 @@ jobs:
             STATE="${EXISTING#* }"
             echo "Updating existing report issue #$NUM (state=$STATE)"
             gh issue edit "$NUM" --body-file /tmp/summary.md
-            if [ "$STATE" = "CLOSED" ]; then
-              gh issue reopen "$NUM"
-            fi
             echo "issue-url=$(gh issue view "$NUM" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Creating new report issue"

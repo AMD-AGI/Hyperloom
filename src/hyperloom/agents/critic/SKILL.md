@@ -121,8 +121,8 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
 - For **`patch_landing`** proposals (the strict class): prefer `advise`
   / `needs_review` over `approve` based on packet evidence alone, and
   mention the missing KB recall in `notes`.
-- For **`enablement_landing`** proposals (enablement / framework-agent
-  authoring `integrate_patch`): treat like `evidence_producer` — an absent
+- For **`enablement_landing`** proposals (enablement `integrate_patch`):
+  treat like `evidence_producer` — an absent
   KB prior is the default cold-start state, not a blocker. Do **not** block
   on a missing throughput before/after or a restated rollback plan: rollback
   is guaranteed by the enablement integrate executor + runnable-decision gate.
@@ -153,7 +153,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 | Class | Actions | Approve bar |
 |---|---|---|
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
-| `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
+| `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
 | `framework_op` | `baseline`, `target_analysis`, `report`, `session_breakdown`; plus an `integrate_patch` carrying `framework_agent_candidate_id` and no `patches` (the upstream-PR pre-screen) | None — approve by default; Critic is not a useful gatekeeper here. A pre-screen's landing is re-reviewed strictly as `integrate_patch`. |
 
@@ -211,7 +211,7 @@ Return `approve` only when all blocker risks are cleared:
 
 ### `enablement_landing` proposals — structural-only
 
-Enablement / framework-agent-authoring `integrate_patch` proposals whose
+Enablement `integrate_patch` proposals whose
 purpose is to make the model **run correctly** — boot-origin (boot at all)
 or eval-origin (boot but meet the accuracy floor). Review them with the
 `evidence_producer` structural bar, **not** the strict `patch_landing`

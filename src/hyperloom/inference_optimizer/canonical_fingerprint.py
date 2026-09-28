@@ -64,22 +64,6 @@ def _args_pairs(args_text: str) -> list[list[str]]:
     return sorted(last.values(), key=lambda pair: pair[0])
 
 
-def _canonical_runtime_override(value: Any) -> Any:
-    """Order-independent canonical form of a runtime_override payload."""
-    if not isinstance(value, dict) or not value:
-        return None
-    out: dict[str, Any] = {}
-    for k in sorted(value):
-        v = value[k]
-        if isinstance(v, (list, tuple)):
-            out[str(k)] = sorted(str(x) for x in v)
-        elif isinstance(v, dict):
-            out[str(k)] = {str(ik): str(iv) for ik, iv in sorted(v.items())}
-        else:
-            out[str(k)] = str(v)
-    return out
-
-
 def canonical_fingerprint(
     extra_args: str | None,
     extra_envs: dict[str, Any] | None,
@@ -87,7 +71,6 @@ def canonical_fingerprint(
     remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
     args_mode: str = "append",
-    runtime_override: dict[str, Any] | None = None,
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant."""
     args_pairs = _args_pairs(str(extra_args or ""))
@@ -97,8 +80,7 @@ def canonical_fingerprint(
         mode = "append"
     remove_list = sorted(_coerce_list(remove_args))
     unset_list = sorted(_coerce_list(unset_envs))
-    rt = _canonical_runtime_override(runtime_override)
-    if not remove_list and not unset_list and mode == "append" and rt is None:
+    if not remove_list and not unset_list and mode == "append":
         payload_obj: Any = [args_pairs, [list(p) for p in env_pairs]]
     else:
         payload_obj = [
@@ -108,10 +90,6 @@ def canonical_fingerprint(
             unset_list,
             mode,
         ]
-        # Append the runtime override only when present so variants with removal/ replacement controls but no override
-        # keep their historical fingerprint.
-        if rt is not None:
-            payload_obj.append(rt)
     payload = json.dumps(
         payload_obj,
         sort_keys=True,

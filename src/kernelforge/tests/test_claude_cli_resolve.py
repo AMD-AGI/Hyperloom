@@ -1,14 +1,17 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Tests for robust claude CLI resolution (RCA root cause 1): env override, PATH discovery, and graceful fallback when
-the binary is absent.
+the binary is absent, plus offline preflight validation of an explicitly configured CLI.
 """
 
 from __future__ import annotations
 
 import os
 import stat
+import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -51,9 +54,31 @@ def test_env_override_ignored_when_not_executable(tmp_path, monkeypatch):
     bad = str(tmp_path / "nope")
     monkeypatch.setenv("FORGE_AGENT_CLI", bad)
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     result = resolve_claude_cli()
     assert result != bad
     assert result == "claude" or (os.path.isfile(result) and os.access(result, os.X_OK))
+
+
+@pytest.mark.parametrize("invalid", ["missing", "directory", "not-executable"])
+def test_explicit_cli_pin_is_not_replaced_by_discovery(tmp_path, monkeypatch, invalid):
+    """Keep a bad explicit pin selected so validation can report it."""
+    good = _make_exe(tmp_path / "claude")
+    bad_path = tmp_path / "bad-pin"
+    if invalid == "directory":
+        bad_path.mkdir()
+    elif invalid == "not-executable":
+        _make_exe(bad_path)
+        real_access = os.access
+        monkeypatch.setattr(os, "access", lambda path, mode: str(path) != str(bad_path) and real_access(path, mode))
+    bad = str(bad_path)
+    monkeypatch.setenv("FORGE_AGENT_CLI", good)
+    which = Mock(return_value=good)
+    monkeypatch.setattr("kernelforge.agent_backends.claude.shutil.which", which)
+
+    assert resolve_claude_cli(bad) == bad
+    which.assert_not_called()
 
 
 def test_path_discovery(tmp_path, monkeypatch):
@@ -71,8 +96,160 @@ def test_resolve_returns_existing_or_bare(tmp_path, monkeypatch):
     monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     result = resolve_claude_cli()
     assert result == "claude" or (os.path.isfile(result) and os.access(result, os.X_OK))
+
+
+@pytest.fixture
+def preflight_backend(monkeypatch, tmp_path):
+    """Construct normally but forbid any SDK query or model probe."""
+    query = Mock(side_effect=AssertionError("preflight must not query the SDK"))
+    monkeypatch.setattr("kernelforge.agent_backends.claude._load_claude_sdk", lambda: (query, Mock()))
+    probe = Mock(side_effect=AssertionError("preflight must not probe a model"))
+    monkeypatch.setattr(ClaudeBackend, "probe", probe)
+    monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    backend = ClaudeBackend(AgentRuntimeConfig(provider="claude", model="claude-test"))
+    yield backend
+    query.assert_not_called()
+    probe.assert_not_called()
+
+
+def test_preflight_leaves_the_unpinned_cli_to_the_backend(tmp_path, monkeypatch, preflight_backend):
+    """Without an explicit executable there is nothing to validate, so nothing is launched."""
+    monkeypatch.setenv("FORGE_AGENT_CLI", _make_exe(tmp_path / "claude"))
+    run = Mock(side_effect=AssertionError("an unpinned CLI must not be launched"))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert preflight_backend.preflight() is None
+
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("output", [b"other tool 1.0", b""])
+def test_preflight_rejects_wrong_explicit_cli(tmp_path, monkeypatch, preflight_backend, output):
+    exe = _make_exe(tmp_path / "claude")
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=exe)
+    run = Mock(return_value=subprocess.CompletedProcess([exe, "--version"], 0, output, b""))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ClaudeUnavailableError, match="does not appear to be Claude") as exc:
+        preflight_backend.preflight()
+
+    assert exe in str(exc.value)
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
+
+
+def test_preflight_rejects_explicit_cli_timeout(tmp_path, monkeypatch, preflight_backend):
+    exe = _make_exe(tmp_path / "claude")
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=exe)
+    timeout = subprocess.TimeoutExpired([exe, "--version"], 10)
+    run = Mock(side_effect=timeout)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ClaudeUnavailableError, match="version check failed") as exc:
+        preflight_backend.preflight()
+
+    assert exc.value.__cause__ is timeout
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
+
+
+@pytest.mark.parametrize("selection", ["path", "command"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_preflight_accepts_only_the_explicit_cli_version(tmp_path, monkeypatch, preflight_backend, selection, stream):
+    exe = _make_exe(tmp_path / "selected-claude")
+    other = _make_exe(tmp_path / "other-claude")
+    pin = exe if selection == "path" else "selected-claude"
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=pin)
+    monkeypatch.setenv("FORGE_AGENT_CLI", other)
+    which = Mock(side_effect=lambda name: exe if name == "selected-claude" else other)
+    monkeypatch.setattr("kernelforge.agent_backends.claude.shutil.which", which)
+    output = {"stdout": b"", "stderr": b""}
+    output[stream] = b"2.1.0 (Claude Code)\n"
+    run = Mock(return_value=subprocess.CompletedProcess([exe, "--version"], 0, **output))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert preflight_backend.preflight() is None
+
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
+    if selection == "path":
+        which.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["missing", "directory", "not-executable"])
+def test_preflight_rejects_bad_explicit_pin_despite_working_default(tmp_path, monkeypatch, preflight_backend, invalid):
+    good = _make_exe(tmp_path / "claude")
+    bad_path = tmp_path / "bad-pin"
+    if invalid == "directory":
+        bad_path.mkdir()
+    elif invalid == "not-executable":
+        _make_exe(bad_path)
+        real_access = os.access
+        monkeypatch.setattr(os, "access", lambda path, mode: str(path) != str(bad_path) and real_access(path, mode))
+    bad = str(bad_path)
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=bad)
+    monkeypatch.setenv("FORGE_AGENT_CLI", good)
+    which = Mock(side_effect=lambda name: good if name == "claude" else None)
+    monkeypatch.setattr("kernelforge.agent_backends.claude.shutil.which", which)
+    run = Mock(side_effect=AssertionError("a bad pin must not launch a different CLI"))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ClaudeUnavailableError, match="Claude CLI is not executable") as exc:
+        preflight_backend.preflight()
+
+    assert bad in str(exc.value)
+    assert all(call.args[0] != "claude" for call in which.call_args_list)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, PermissionError, OSError])
+def test_preflight_wraps_native_launch_errors(tmp_path, monkeypatch, preflight_backend, error_type):
+    exe = _make_exe(tmp_path / "claude")
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=exe)
+    error = error_type("native launch failure")
+    run = Mock(side_effect=error)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ClaudeUnavailableError, match="version check failed: native launch failure") as exc:
+        preflight_backend.preflight()
+
+    assert exc.value.__cause__ is error
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
+
+
+def test_preflight_rejects_nonzero_version_even_if_it_mentions_claude(tmp_path, monkeypatch, preflight_backend):
+    exe = _make_exe(tmp_path / "claude")
+    preflight_backend.runtime = replace(preflight_backend.runtime, executable=exe)
+    run = Mock(return_value=subprocess.CompletedProcess([exe, "--version"], 7, b"Claude Code", b"loader failed"))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ClaudeUnavailableError, match="does not appear to be Claude") as exc:
+        preflight_backend.preflight()
+
+    assert "loader failed" in str(exc.value)
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
+
+
+def test_validate_runtime_needs_no_sdk_or_backend_instance(tmp_path, monkeypatch):
+    exe = _make_exe(tmp_path / "claude")
+    runtime = AgentRuntimeConfig(provider="claude", model="claude-test", executable=exe)
+    sdk = Mock(side_effect=AssertionError("CLI validation must not load the SDK"))
+    prepare = Mock(side_effect=AssertionError("CLI validation must not rewrite the environment"))
+    probe = Mock(side_effect=AssertionError("CLI validation must not probe a model"))
+    monkeypatch.setattr("kernelforge.agent_backends.claude._load_claude_sdk", sdk)
+    monkeypatch.setattr("kernelforge.agent_backends.claude._prepare_claude_environment", prepare)
+    monkeypatch.setattr(ClaudeBackend, "probe", probe)
+    run = Mock(return_value=subprocess.CompletedProcess([exe, "--version"], 0, b"Claude Code", b""))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert ClaudeBackend.validate_runtime(runtime) is None
+
+    sdk.assert_not_called()
+    prepare.assert_not_called()
+    probe.assert_not_called()
+    run.assert_called_once_with([exe, "--version"], capture_output=True, timeout=10, check=False)
 
 
 def test_claude_backend_maps_additional_directories(tmp_path):
