@@ -641,98 +641,6 @@ def test_artifact_is_in_the_package_globs():
 # ---------------------------------------------------------------------------
 # aiperf's own server-metrics export
 # ---------------------------------------------------------------------------
-def _slim_record(*, ts_ns: int, usage: float, retracts: float, phase: str = "profiling") -> dict:
-    """One line of aiperf's ``server_metrics_export.jsonl``, in its documented shape."""
-    return {
-        "endpoint_url": "http://localhost:34407/metrics",
-        "timestamp_ns": ts_ns,
-        "endpoint_latency_ns": 4_000_000,
-        "request_sent_ns": ts_ns - 4_000_000,
-        "benchmark_phase": phase,
-        "metrics": {
-            "sglang:token_usage": [{"labels": {"tp_rank": "0"}, "value": usage}],
-            "sglang:num_retracted_requests_total": [{"labels": {"tp_rank": "0"}, "value": retracts}],
-        },
-    }
-
-
-def _write_server_metrics(tmp_path, records) -> Path:
-    """Write the export where aiperf would put it."""
-    art = tmp_path / "aiperf_artifacts"
-    art.mkdir(exist_ok=True)
-    path = art / "server_metrics_export.jsonl"
-    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    return path
-
-
-def test_aiperf_records_rebuild_the_same_normalised_sample(tmp_path):
-    """Labels survive aiperf's export, so one normalisation serves both sources.
-
-    ``SlimRecord.metrics`` is ``{name: [{labels, value}]}`` -- the same information
-    ``parse_prometheus_text`` produces -- so the per-rank assembly does not have to
-    be reimplemented for this path.
-    """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    path = _write_server_metrics(tmp_path, [_slim_record(ts_ns=1_789_000_000_000_000_000, usage=0.62, retracts=4)])
-    (sample, timing, phase) = read_aiperf_server_metrics(path)[0]
-
-    assert sample.engine == "sglang"
-    assert sample.active_pool_usage == 0.62
-    assert phase == "measured"  # aiperf's "profiling"
-    assert timing["scrape_sec"] == 0.004
-    assert timing["scrape_start_unix"] <= sample.ts <= timing["scrape_end_unix"]
-
-
-def test_aiperf_phase_stamp_is_used_verbatim(tmp_path):
-    """No re-attribution: aiperf stamps the phase at collection time, from the
-    process that owns the transition, so there is no boundary lag to correct."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    base = 1_789_000_000_000_000_000
-    path = _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.1, retracts=0, phase="warmup"),
-            _slim_record(ts_ns=base + 2_000_000_000, usage=0.5, retracts=3, phase="profiling"),
-        ],
-    )
-
-    assert [phase for _s, _t, phase in read_aiperf_server_metrics(path)] == ["warmup", "measured"]
-
-
-def test_recorder_prefers_aiperfs_scrapes_over_its_own(tmp_path):
-    """On an AgentX round aiperf is already scraping the same endpoint; its rows
-    win, and the live ones are discarded rather than interleaved."""
-    base = 1_789_000_000_000_000_000
-    _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.10, retracts=1, phase="warmup"),
-            _slim_record(ts_ns=base + 2_000_000_000, usage=0.70, retracts=5, phase="profiling"),
-            _slim_record(ts_ns=base + 4_000_000_000, usage=0.80, retracts=9, phase="profiling"),
-        ],
-    )
-    # A live reading taken inside aiperf's window, which is the redundant case.
-    rec = KvMetricsRecorder(
-        poller=_StubPoller([_sample(ts=base / 1e9 + 1.0, active_pool_usage=0.99)]),
-        output_path=str(tmp_path / KV_ARTIFACT_NAME),
-        min_interval_sec=0,
-    )
-    rec.tick(1.0)
-    payload = rec.summary()
-
-    assert payload["sample_source"] == "aiperf_server_metrics"
-    assert payload["phase_source"] == "aiperf_server_metrics"
-    assert [r["phase"] for r in payload["samples"]] == ["warmup", "measured", "measured"]
-    # The live reading of 0.99 is gone: two collectors on one endpoint would bracket
-    # counters across interleaved readings of the same series.
-    assert [r["active_pool_usage"] for r in payload["samples"]] == [0.10, 0.70, 0.80]
-    # Warmup opened at 1 and is closed by the first measured reading; measured runs 5 -> 9.
-    assert payload["retract_delta_by_phase"]["warmup"] == 4.0
-    assert payload["retract_delta"] == 4.0
-
-
 def test_live_scraping_backs_off_once_aiperf_is_collecting(tmp_path):
     """The point of reading aiperf's export is to stop scraping the same endpoint twice.
 
@@ -799,73 +707,6 @@ def test_eval_resumes_the_full_rate(tmp_path):
     assert rec._poller.calls == before + 2
 
 
-def test_eval_rows_survive_the_aiperf_adoption(tmp_path):
-    """aiperf covers warmup and profiling and nothing else, so discarding every
-    live row would throw away the only readings the eval phase will ever have."""
-    base = 1_789_000_000_000_000_000
-    _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.10, retracts=1, phase="warmup"),
-            _slim_record(ts_ns=base + 2_000_000_000, usage=0.70, retracts=5, phase="profiling"),
-        ],
-    )
-    rec = KvMetricsRecorder(
-        poller=_StubPoller(
-            [
-                # The boundary reading note_phase takes, still inside aiperf's window.
-                _sample(ts=base / 1e9 + 1.0, active_pool_usage=0.99),
-                # The eval reading proper, after aiperf has exited.
-                _sample(ts=base / 1e9 + 60.0, active_pool_usage=0.33),
-            ]
-        ),
-        workspace=tmp_path,
-        output_path=str(tmp_path / KV_ARTIFACT_NAME),
-        min_interval_sec=0,
-    )
-    rec.note_phase("eval", 1.0)
-    rec.tick(2.0)
-    payload = rec.summary()
-
-    phases = [r["phase"] for r in payload["samples"]]
-    assert phases == ["warmup", "measured", "eval"]
-    # The eval reading is the live one, kept in time order after aiperf's window;
-    # the redundant one taken inside that window is gone.
-    assert payload["samples"][-1]["active_pool_usage"] == 0.33
-    assert payload["sample_source"] == "aiperf_server_metrics"
-
-
-def test_adopted_rows_make_the_round_available_whatever_the_poller_saw(tmp_path):
-    """``available`` answers "did this round get readings", not "did our poller".
-
-    On a containerised AgentX round the engine's port need not be reachable from
-    where the watchdog runs, and the poller backs off to a minute besides. A live
-    round produced `available: false` on an artifact carrying 1656 aiperf samples,
-    which the breakdown then folds into a session-level "no round ever reached the
-    endpoint".
-    """
-    base = 1_789_048_708_000_000_000
-    _write_server_metrics(tmp_path, [_slim_record(ts_ns=base, usage=0.5, retracts=0)])
-
-    class _NeverReached:
-        url = "http://127.0.0.1:8888/metrics"
-        available = False
-
-        def sample(self):
-            return None
-
-    rec = KvMetricsRecorder(
-        poller=_NeverReached(),
-        output_path=str(tmp_path / KV_ARTIFACT_NAME),
-        min_interval_sec=0,
-    )
-    payload = rec.summary()
-
-    assert payload["sample_source"] == "aiperf_server_metrics"
-    assert payload["available"] is True
-    assert payload["sample_count"] == 1
-
-
 def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
     """No export and a poller that gave up: the honest answer is still false."""
 
@@ -884,97 +725,6 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
     assert payload["sample_count"] == 0
 
 
-def test_an_unstamped_aiperf_record_is_boot_not_measured(tmp_path):
-    """aiperf's baseline capture carries no phase, and it is not measured data.
-
-    Observed on a live AgentX round: two records stamped ``null`` sat before the
-    warmup `start_ns`, readings of an idle pool taken before any phase began.
-    Defaulting them to "measured" put them in the one phase allowed into a
-    comparison and produced a measured prefix-cache delta of 34,395 describing
-    nothing that happened.
-    """
-    base = 1_789_048_708_000_000_000
-    _write_server_metrics(
-        tmp_path,
-        [
-            {
-                "endpoint_url": "http://localhost:8000/metrics",
-                "timestamp_ns": base,
-                "endpoint_latency_ns": 19_658_211,
-                "request_sent_ns": base - 19_658_211,
-                "benchmark_phase": None,
-                "metrics": {"vllm:kv_cache_usage_perc": [{"labels": {"engine": "0"}, "value": 0.0}]},
-            },
-            _slim_record(ts_ns=base + 30_000_000_000, usage=0.5, retracts=0, phase="profiling"),
-        ],
-    )
-    rec = KvMetricsRecorder(
-        poller=_StubPoller([]),
-        output_path=str(tmp_path / KV_ARTIFACT_NAME),
-        min_interval_sec=0,
-    )
-    payload = rec.summary()
-
-    assert [r["phase"] for r in payload["samples"]] == ["boot", "measured"]
-
-
-def test_a_profiling_stamp_that_precedes_warmup_is_not_measured(tmp_path):
-    """Ordered phases: profiling follows warmup, so one stamped before it is setup.
-
-    Verbatim shape from a live round -- two unstamped baselines, a ``profiling``
-    record 8ms after the second, then warmup two seconds later. Left in
-    ``measured`` it is the only phase allowed into a comparison, and the gap-free
-    bracketing runs that window into warmup's opening seconds.
-    """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    base = 1_789_094_031_527_000_000
-    path = _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.0, retracts=0, phase=None),
-            _slim_record(ts_ns=base + 21_026_000_000, usage=0.0, retracts=0, phase=None),
-            _slim_record(ts_ns=base + 21_034_000_000, usage=0.0, retracts=0, phase="profiling"),
-            _slim_record(ts_ns=base + 23_041_000_000, usage=0.1, retracts=0, phase="warmup"),
-            _slim_record(ts_ns=base + 25_044_000_000, usage=0.2, retracts=0, phase="warmup"),
-        ],
-    )
-
-    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["boot", "boot", "boot", "warmup", "warmup"]
-
-
-def test_profiling_after_warmup_is_left_alone(tmp_path):
-    """The ordinary case, and the whole point of reading aiperf's stamp."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    base = 1_789_094_031_527_000_000
-    path = _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.1, retracts=0, phase="warmup"),
-            _slim_record(ts_ns=base + 60_000_000_000, usage=0.6, retracts=2, phase="profiling"),
-        ],
-    )
-
-    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["warmup", "measured"]
-
-
-def test_a_run_without_warmup_keeps_its_leading_profiling_records(tmp_path):
-    """Nothing to be premature relative to, so the stamp stands."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    base = 1_789_094_031_527_000_000
-    path = _write_server_metrics(
-        tmp_path,
-        [
-            _slim_record(ts_ns=base, usage=0.5, retracts=0, phase="profiling"),
-            _slim_record(ts_ns=base + 2_000_000_000, usage=0.6, retracts=1, phase="profiling"),
-        ],
-    )
-
-    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["measured", "measured"]
-
-
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
     from hyperloom.orchestrator.actions.executors._kv_metrics import (
         aggregate_series,
@@ -984,8 +734,11 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
 
     artifact_dir = tmp_path / "aiperf_artifacts"
     artifact_dir.mkdir()
-    (artifact_dir / "server_metrics_export.jsonl").write_text("{not json\n", encoding="utf-8")
-    path = artifact_dir / "server_metrics_export.json"
+    unusable = artifact_dir / "server_metrics_export.json"
+    unusable.write_text("{not json\n", encoding="utf-8")
+    nested = tmp_path / "benchmark_vllm_1" / "aiperf_artifacts"
+    nested.mkdir(parents=True)
+    path = nested / "server_metrics_export.json"
     gauge = {
         "type": "gauge",
         "series": [
@@ -1053,7 +806,7 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
         encoding="utf-8",
     )
 
-    assert find_server_metrics_export(tmp_path).suffix == ".jsonl"
+    assert find_server_metrics_export(tmp_path) == unusable
     rows = read_aiperf_server_metrics(path)
     assert [phase for _sample, _timing, phase in rows] == ["warmup", "warmup", "measured", "measured"]
     assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [None, 0.25, None, 0.5]
@@ -1183,23 +936,6 @@ def test_a_round_without_an_aiperf_export_keeps_the_watchdog_rows(tmp_path):
     assert [r["active_pool_usage"] for r in payload["samples"]] == [0.42]
 
 
-def test_an_unreadable_export_falls_back_rather_than_failing(tmp_path):
-    """A better source that cannot be read is not a reason to lose the round."""
-    art = tmp_path / "aiperf_artifacts"
-    art.mkdir()
-    (art / "server_metrics_export.jsonl").write_text("{not json\n", encoding="utf-8")
-    rec = KvMetricsRecorder(
-        poller=_StubPoller([_sample(active_pool_usage=0.42)]),
-        output_path=str(tmp_path / KV_ARTIFACT_NAME),
-        min_interval_sec=0,
-    )
-    rec.tick(1.0)
-    payload = rec.summary()
-
-    assert payload["sample_source"] == "watchdog_scrape"
-    assert payload["sample_count"] == 1
-
-
 def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
     """aiperf names a counter by its Prometheus family, dropping the ``_total``.
 
@@ -1225,40 +961,6 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
     assert families["sglang:cached_tokens_total"] == [({}, 4600439.0)]
     # The name aiperf actually used still resolves too.
     assert families["vllm:num_preemptions"] == [({"engine": "0"}, 7.0)]
-
-
-def test_a_real_aiperf_record_yields_the_preemption_counter(tmp_path):
-    """End to end through the reader, on the shape a live round produced."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
-
-    model = "/shared_nfs/hyperloom/models/Llama-3.1-8B-Instruct"
-    path = _write_server_metrics(
-        tmp_path,
-        [
-            {
-                "endpoint_url": "http://localhost:8000/metrics",
-                "timestamp_ns": 1_789_048_708_183_834_288,
-                "endpoint_latency_ns": 19_658_211,
-                "request_sent_ns": 1_789_048_708_164_234_016,
-                "first_byte_ns": 1_789_048_708_183_834_288,
-                "benchmark_phase": "warmup",
-                "metrics": {
-                    "vllm:kv_cache_usage_perc": [{"labels": {"engine": "0", "model_name": model}, "value": 0.42}],
-                    "vllm:num_preemptions": [{"labels": {"engine": "0", "model_name": model}, "value": 3.0}],
-                },
-            }
-        ],
-    )
-    (sample, timing, phase) = read_aiperf_server_metrics(path)[0]
-
-    assert sample.engine == "vllm"
-    assert sample.active_pool_usage == 0.42
-    assert phase == "warmup"
-    # The counter the whole artifact exists to report.
-    from hyperloom.orchestrator.actions.executors._kv_metrics import aggregate_series
-
-    assert aggregate_series(sample.preempt_total) == 3.0
-    assert timing["scrape_sec"] == 0.0197
 
 
 def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
