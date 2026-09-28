@@ -849,11 +849,37 @@ ensure_torch_compatible_with_gpu() {
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
-  if ! rocm-smi --showid >/dev/null 2>&1; then
+  # Both probes below touch the GPU, so both hang forever on a wedged driver --
+  # and this gate runs before the session directory exists, so a hang here leaves
+  # no state.json, no breakdown and nothing for the caller to time out on: the
+  # workload just holds its nodes until the scheduler's wall clock kills it
+  # (observed: 14h on 8xMI355X, job 174683, only `PYTHON=` in the log).
+  #
+  # A timeout is fatal rather than a skip. It is the strongest "this node's GPU
+  # is wedged" signal install.sh gets, and the default path below this gate keeps
+  # touching the driver with no time-box of its own -- `import lpips` in
+  # ensure_scriptable_quality_deps, _torch_hip_version, and kernel-agent's
+  # ensure_ray_started, which calls torch.cuda.device_count() and so initialises
+  # the HIP runtime. Falling through would only move the same hang a minute or
+  # two later and point the next reader at Ray. Dying here releases the
+  # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
+  # slow, the same way it already covers this gate's other verdicts.
+  local smi_rc=0
+  timeout 60 rocm-smi --showid >/dev/null 2>&1 || smi_rc=$?
+  if [ "$smi_rc" -eq 124 ]; then
+    warn "rocm-smi --showid did not answer within 60s -- the GPU driver on this node looks wedged"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on a node whose GPU probe hangs (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging GPU probe"
     return 0
   fi
+  [ "$smi_rc" -eq 0 ] || return 0
+  # `local` stays on its own line: folding it into the assignment would mask the
+  # command's exit status behind `local`'s own.
   local probe
-  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+  local probe_rc=0
+  probe="$(timeout 180 "$PYTHON" - <<'PY' 2>/dev/null
 import json, sys
 out = {"rc": 0}
 try:
@@ -866,7 +892,15 @@ except Exception as exc:
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
 PY
-)"
+)" || probe_rc=$?
+  if [ "$probe_rc" -eq 124 ]; then
+    warn "import torch did not finish within 180s (PYTHON=${PYTHON}) -- a wedged GPU driver or a stalled shared mount"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: the torch probe hangs on this node (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging torch probe"
+    return 0
+  fi
   if [ -z "$probe" ]; then
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
