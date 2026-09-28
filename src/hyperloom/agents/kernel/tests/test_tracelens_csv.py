@@ -3445,8 +3445,6 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
         {
             "kernel_id": "k002",
@@ -3459,8 +3457,6 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "identification": "Prefill-shape Identification.",
             "reasoning_for_slowdown": "Prefill-shape Reasoning.",
             "resolution": "Prefill-shape Resolution.",
-            "impact_low_ms": 1.0,
-            "impact_high_ms": 3.0,
         },
         # Same P2 again — must dedupe (only one entry retained).
         {
@@ -3474,8 +3470,6 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "identification": "Decode-shape Identification.",
             "reasoning_for_slowdown": "Decode-shape Reasoning.",
             "resolution": "Decode-shape Resolution.",
-            "impact_low_ms": 5.0,
-            "impact_high_ms": 10.0,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)

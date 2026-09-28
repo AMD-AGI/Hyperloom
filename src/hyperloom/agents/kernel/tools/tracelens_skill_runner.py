@@ -1383,9 +1383,7 @@ def aggregate_by_source_function(
                     "identification": str(cand.get("identification") or "").strip(),
                     "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
                     "resolution": str(cand.get("resolution") or "").strip(),
-                    "impact_low_ms": _safe_float(cand.get("impact_low_ms")),
                     "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
-                    "impact_high_ms": _safe_float(cand.get("impact_high_ms")),
                     "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
                 }
             )
@@ -1431,8 +1429,6 @@ def aggregate_by_source_function(
             or e["identification"]
             or e["reasoning_for_slowdown"]
             or e["resolution"]
-            or e["impact_low_ms"]
-            or e["impact_high_ms"]
         ]
         # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
         group.pop("_pitem_prose_seen", None)
