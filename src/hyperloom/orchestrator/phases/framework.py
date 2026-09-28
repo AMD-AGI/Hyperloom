@@ -2073,7 +2073,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
 
     async def pump(self, *, caller: str) -> None:
-        """Best-effort FRAMEWORK pump wrapper shared by tick and run.
+        """Best-effort FRAMEWORK pump wrapper run once per Coordinator tick.
 
         A pump that raises must not take the tick down -- the phase is driven
         again on the next one -- but it is filed like any other coordinator-side

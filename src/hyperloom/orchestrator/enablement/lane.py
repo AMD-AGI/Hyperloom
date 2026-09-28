@@ -640,7 +640,7 @@ class EnablementLane(CoordinatorCollaborator):
         """ENABLEMENT phase pump — called every tick while in ENABLEMENT.
 
         Args:
-            caller: Label identifying the caller ("tick" / "run"), for logs.
+            caller: Label identifying the caller, for logs and the recorded stage.
         """
         if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
