@@ -280,10 +280,7 @@ def test_prefix_cache_counters_are_read():
 
 
 def test_prefix_cache_only_sample_is_not_discarded():
-    text = (
-        'vllm:prefix_cache_queries_total{engine="0"} 1000.0\n'
-        'vllm:prefix_cache_hits_total{engine="0"} 529.0\n'
-    )
+    text = 'vllm:prefix_cache_queries_total{engine="0"} 1000.0\nvllm:prefix_cache_hits_total{engine="0"} 529.0\n'
     sample = sample_from_families(parse_prometheus_text(text))
 
     assert sample.has_readings()
