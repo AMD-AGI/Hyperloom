@@ -76,6 +76,7 @@ from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_codex_jsonl_usage,
 )
 from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
+from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
 from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
 
 
@@ -1212,6 +1213,7 @@ class SpecialistSubprocessDispatcher:
             response = parse_claude_stream_json_response(process_log)
             tool_calls = parse_claude_stream_json_tool_calls(process_log)
             turn_usages = parse_claude_stream_json_turn_usages(process_log)
+            record_stream_json_requests(process_log)
             record_stream_json_tools(process_log)
             record_stream_json_compactions(process_log)
 
