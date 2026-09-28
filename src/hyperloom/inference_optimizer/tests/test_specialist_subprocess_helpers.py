@@ -246,6 +246,19 @@ def test_collect_patches_work_artifacts_only_produces_no_delivery(tmp_path: Path
         assert (wt / rel).read_bytes() == content
 
 
+def test_collect_patches_heartbeat_in_worktree_produces_no_delivery(tmp_path: Path) -> None:
+    """A heartbeat the agent writes at the worktree top is its liveness signal, not a change to the tree."""
+    base, wt = _make_harvest_worktree(tmp_path)
+    heartbeat = wt / "heartbeat.json"
+    heartbeat.write_text('{"ts": "2026-09-28T19:12:00Z", "status": "running"}\n', encoding="utf-8")
+
+    assert SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base) == ([], {})
+    assert not (wt / "patches" / "_worktree_diff.patch").exists()
+    subprocess.run(["git", "-C", str(wt), "add", "-N", "heartbeat.json"], check=True)
+    diff = subprocess.run(["git", "-C", str(wt), "diff", "HEAD"], check=True, capture_output=True, text=True).stdout
+    assert ps.patch_work_artifact_targets(diff) == ("heartbeat.json",)
+
+
 def test_collect_patches_annotation_only_produces_no_delivery(tmp_path: Path) -> None:
     base, wt = _make_harvest_worktree(tmp_path)
     (wt / "runtime.py").write_text("# Runtime selection, unchanged.\nBLOCK_SIZE = 64\n", encoding="utf-8")
