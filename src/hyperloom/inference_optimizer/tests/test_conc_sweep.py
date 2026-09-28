@@ -1391,8 +1391,8 @@ def test_run_conc_sweep_single_server_concs_descending(
     assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report /
-# _flush_partial_conc_sweep_report ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
