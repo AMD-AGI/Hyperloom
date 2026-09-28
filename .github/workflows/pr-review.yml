@@ -54,6 +54,7 @@ jobs:
           PR: ${{ github.event.issue.number }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           refuse() {
@@ -74,6 +75,9 @@ jobs:
           fi
           [ "$state" = OPEN ] || refuse "the PR is ${state}."
           [ "$cross" = false ] || refuse "pull requests from forks are not supported."
+          gh pr comment "$PR" --repo "$REPO" \
+            --body "Automated review started for head ${head}. Progress: ${RUN_URL}" >/dev/null \
+            || echo "::warning::could not post the start comment"
           {
             echo "proceed=true"
             echo "pr=$PR"
@@ -172,6 +176,10 @@ jobs:
           export ANTHROPIC_DEFAULT_HAIKU_MODEL="$PR_REVIEW_MODEL"
           export CLAUDE_CODE_SUBAGENT_MODEL="$PR_REVIEW_MODEL"
           export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1
+          # The per-tool-result <total_tokens> system message is hoisted to the front by the sglang
+          # backend, so every turn missed the prefix cache and re-prefilled the whole history.
+          export CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off
+          export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
           if [ "$INSECURE" = 1 ]; then
             export NODE_TLS_REJECT_UNAUTHORIZED=0
           fi
@@ -200,8 +208,24 @@ jobs:
             "Bash(bash .claude/skills/review-pr/fetch.sh *)" "Bash(gh *)" "Bash(git *)" "Bash(rg *)"
             "Bash(grep *)" "Bash(cat *)" "Bash(head *)" "Bash(tail *)" "Bash(wc *)" "Bash(ls *)"
             "Bash(sort *)" "Bash(uniq *)" "Bash(diff *)" "Bash(jq *)")
+          # shellcheck disable=SC2016  # $sub is a jq variable, not a shell one
+          progress='
+            def brief: (.file_path // .pattern // .command // .path // .description // "")
+              | tostring | gsub("\\s+"; " ") | .[0:200];
+            fromjson? |
+            if .type == "assistant" then
+              (.parent_tool_use_id != null) as $sub
+              | .message.content[]? | select(.type == "tool_use")
+              | "\(if $sub then "[sub] " else "" end)[tool] \(.name) \(.input | brief)"
+            elif .type == "system" and .subtype == "permission_denied" then "[denied] \(.tool_name)"
+            elif .type == "result" then
+              "[result] \(.subtype) is_error=\(.is_error) terminal_reason=\(.terminal_reason) turns=\(.num_turns) duration=\(.duration_ms / 6000 | round / 10)min input_tokens=\(.usage.input_tokens) cache_read_input_tokens=\(.usage.cache_read_input_tokens) output_tokens=\(.usage.output_tokens) denials=\(.permission_denials | length)",
+              (if .is_error then "[result] error \(.result | tostring | .[0:500])" else empty end),
+              ((.permission_denials // [])[] | "[result] denied \(.tool_name) \(.tool_input | brief)")
+            else empty end'
           claude -p "$prompt" --model "$PR_REVIEW_MODEL" --permission-mode dontAsk \
-            --allowedTools "${tools[@]}"
+            --output-format stream-json --verbose --allowedTools "${tools[@]}" \
+            | jq --unbuffered -rR "$progress"
 
       - uses: actions/upload-artifact@v7
         if: always()

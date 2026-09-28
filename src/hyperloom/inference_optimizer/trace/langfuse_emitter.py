@@ -25,6 +25,8 @@ from hyperloom.inference_optimizer.session.session_paths import (
     trace_ext_dir,
 )
 from . import langfuse_mapping as lfmap
+from . import trajectory_projection as trajmap
+from .trajectory_trace import load_shard as load_trajectory_shard, trajectory_shards
 from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
@@ -75,15 +77,16 @@ _FLUSH_STEP_NAMES: tuple[str, ...] = (
     "specialist_intel",
     "forge_steps",
     "gemm_tuning",
+    "trajectory",
     "decision_scores",
     "close_spans",
     "client_flush",
 )
 
 
-def _persisted_ext_cursors(session_dir: Path) -> dict[str, int]:
-    """Return how far each ext/ shard was drained by a previous process."""
-    persisted = (read_receipt(session_dir) or {}).get("ext_rows_sent")
+def _persisted_shard_cursors(session_dir: Path, key: str) -> dict[str, int]:
+    """Return how far each shard under receipt ``key`` was drained by a previous process."""
+    persisted = (read_receipt(session_dir) or {}).get(key)
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -347,6 +350,7 @@ class LangfuseEmitter:
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
             "forge_steps_read": 0,  # forge_steps.jsonl rows swept
             "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
+            "trajectory_spans_sent": 0,  # closed trajectory spans + point events projected
             "errors": 0,  # swallowed send failures
         }
         # Reconcile steps that already succeeded in *this* process, so a retry after a partial flush neither re-emits
@@ -354,7 +358,8 @@ class LangfuseEmitter:
         self._flush_steps_done: set[str] = set()
         self._flushed = False
         # How many rows of each ext/ shard have been sent, restored from the receipt.
-        self._ext_rows_sent: dict[str, int] = _persisted_ext_cursors(self.session_dir)
+        self._ext_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "ext_rows_sent")
+        self._trajectory_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "trajectory_rows_sent")
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
         # after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -590,7 +595,8 @@ class LangfuseEmitter:
             self._write_receipt()
             return
         if self._flushed:
-            log.debug("langfuse: flush_session already ran; skipping re-emit")
+            log.debug("langfuse: flush_session already ran; shipping only the trajectory tail")
+            self._flush_trajectory_tail()
             self._write_receipt()
             return
         # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
@@ -605,6 +611,7 @@ class LangfuseEmitter:
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
             **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
+            "trajectory": self._flush_trajectory,
             "decision_scores": self._flush_decision_scores,
             "close_spans": self._close_spans,
             "client_flush": self._flush_client,
@@ -859,6 +866,56 @@ class LangfuseEmitter:
             return lfmap.recipe_write_span(row)
         return lfmap.recipe_read_span(row)
 
+    def _flush_trajectory(self) -> None:
+        """Backfill closed trajectory spans and point events, resuming each shard at its receipt cursor."""
+        shard_rows = {shard.name: load_trajectory_shard(shard) for shard in trajectory_shards(self.session_dir)}
+        openings = trajmap.span_openings(row for rows in shard_rows.values() for row in rows)
+        for name, rows in shard_rows.items():
+            for index in range(self._trajectory_rows_sent.get(name, 0), len(rows)):
+                spec = trajmap.project_row(rows[index], openings)
+                if spec is not None:
+                    self._emit_trajectory_span(spec)
+                self._trajectory_rows_sent[name] = index + 1
+
+    def _flush_trajectory_tail(self) -> None:
+        """Ship the trajectory rows recorded after the full flush, ending any span opened to parent them.
+
+        The CLOSE phase flushes from inside the run, so the last close work and the session's own terminal row land on
+        the ledger after it; the per-shard cursors make a re-flush send only those rows.
+        """
+        agent_keys, phase_keys, had_root = set(self._agent_spans), set(self._phase_spans), self._root_span is not None
+        sent = self._counts["trajectory_spans_sent"]
+        try:
+            self._flush_trajectory()
+            for key, span in list(self._agent_spans.items()):
+                if key not in agent_keys:
+                    self._safe_end(span)
+            for phase, span in list(self._phase_spans.items()):
+                if phase not in phase_keys:
+                    self._safe_end(span)
+            if not had_root and self._root_span is not None:
+                self._safe_end(self._root_span)
+            if self._counts["trajectory_spans_sent"] != sent:
+                self._flush_client()
+        except Exception:  # trace must never break shutdown
+            self._counts["errors"] += 1
+            log.debug("langfuse: trajectory tail flush failed", exc_info=True)
+
+    def _emit_trajectory_span(self, spec: trajmap.TrajectorySpanSpec) -> None:
+        """Create and close one projected trajectory span under its (phase, agent) span."""
+        parent = self._ensure_agent_span(spec.phase, spec.agent, spec.start)
+        obs = _start_obs(
+            parent,
+            name=spec.name,
+            as_type="span",
+            start_time=spec.start,
+            level=spec.level,
+            status_message=spec.status_message,
+            metadata=spec.metadata,
+        )
+        _end_obs(obs, spec.end)
+        self._counts["trajectory_spans_sent"] += 1
+
     def _flush_decision_scores(self) -> None:
         """Convert each decision_trace row into Langfuse Score(s)."""
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
@@ -993,6 +1050,7 @@ class LangfuseEmitter:
             # instead of reading as final.
             "flush_steps_done": sorted(self._flush_steps_done),
             "ext_rows_sent": dict(self._ext_rows_sent),
+            "trajectory_rows_sent": dict(self._trajectory_rows_sent),
         }
 
     def _claim_one_shot(self, marker: str) -> bool:

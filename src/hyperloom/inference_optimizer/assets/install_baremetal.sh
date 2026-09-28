@@ -535,8 +535,21 @@ PY
         if ! "$probe_py" -B -c 'import atom'; then
           warn "framework atom: import failed (required)"; rc=1; continue
         fi
-        if ! "$probe_py" -B -m atom.entrypoints.openai_server --help >/dev/null; then
-          warn "framework atom: server --help failed (required)"; rc=1; continue
+        # Build the server's own parser instead of running --help: argparse
+        # renders help through %-formatting, so a release whose help text
+        # carries a literal % fails there while the engine itself runs.
+        if ! "$probe_py" -B -c 'import argparse
+try:
+    from atom.utils.arg_parser import FlexibleArgumentParser as parser_cls
+except ModuleNotFoundError as exc:
+    if exc.name not in ("atom.utils", "atom.utils.arg_parser"):
+        raise
+    parser_cls = argparse.ArgumentParser
+from atom.model_engine.arg_utils import EngineArgs
+parser = parser_cls()
+EngineArgs.add_cli_args(parser)
+parser.parse_args([])'; then
+          warn "framework atom: server argument parser failed (required)"; rc=1; continue
         fi
       fi
       if [ "$probe_py" != "$py" ]; then
