@@ -1171,23 +1171,38 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a source-target triple.
+    """Resolve a candidate's source location to a source-target triple.
 
-    The AST-derived definition line overrides the reported call-site line when
-    resolvable.
+    A row TraceLens resolved carries the verdict directly in ``source_file`` /
+    ``source_line``; that def line is authoritative and keys the group against
+    ``source_file``. Only a row with no resolved line falls back to parsing the
+    launcher string and recovering the def line from the Python AST.
 
     Args:
-        candidate: The candidate dict carrying launcher/source paths.
+        candidate: The candidate dict carrying resolved source / launcher paths.
         source_root: Optional root to resolve relative paths against.
 
     Returns:
         A ``(source_path, definition_line, function_name)`` dict, or ``None``
-        when the path is unparseable.
+        when neither a resolved location nor a parseable launcher path exists.
     """
-    # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
-    # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
+    source_line = candidate.get("source_line")
+    source_file = str(candidate.get("source_file") or "")
+    if source_file and isinstance(source_line, int) and source_line > 0:
+        source_path = Path(source_file)
+        if not source_path.is_absolute() and source_root is not None:
+            source_path = source_root / source_path
+        return {
+            "source_path": str(source_path),
+            "definition_line": source_line,
+            "function_name": str(candidate.get("source_function") or source_path.stem),
+            "reported_path": source_file,
+            "reported_line": source_line,
+            "reported_func": str(candidate.get("source_function") or "") or None,
+            "ast_resolved": False,
+        }
     kernel_path = str(
-        candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
+        candidate.get("kernel_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:

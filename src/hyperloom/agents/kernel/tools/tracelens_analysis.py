@@ -3826,33 +3826,6 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
     return entries
 
 
-#: Source-derived metadata fields; a re-resolve pass must restamp all of them atomically,
-#: because downstream readers (framework resolution, classify_patchability) each read different members.
-_SOURCE_DERIVED_METADATA = (
-    "kernel_sources",
-    "kernel_kind",
-    "prebuilt_binary",
-    "source_framework",
-    "runtime_backend",
-    "launcher_source_file",
-    "source_promoted_from_launcher",
-    "tracelens_launcher_path",
-    "kernel_path",
-    "vendor_dispatch_wrapper",
-    "runtime_generated_kernel",
-    "flydsl_source_from_fallback",
-    "source_resolution_confidence",
-    "op_to_source_status",
-    "op_to_source_kind",
-    "op_to_source_patchable",
-    "op_to_source_reason",
-    "op_to_source_matched_route",
-    "source_file_missing_on_disk",
-    # Restamped alongside source_file by _stamp_candidate_metadata; a stale value names a displaced path.
-    "source_file_superseded_by_playbook",
-)
-
-
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,

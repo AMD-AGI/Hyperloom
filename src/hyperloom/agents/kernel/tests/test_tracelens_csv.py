@@ -3208,7 +3208,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k002",
@@ -3216,7 +3216,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(2): rms_norm",
+            "kernel_launcher_path": f"{src}(2): rms_norm",
         },
         {
             "kernel_id": "k003",
@@ -3224,7 +3224,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
             "duration_us": 30.0,
             "call_count": 16,
             "gpu_pct": 1.5,
-            "tracelens_launcher_path": f"{src}(5): other_fn",
+            "kernel_launcher_path": f"{src}(5): other_fn",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3255,12 +3255,12 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
         "kernel_id": "k001",
         "name": "fused_operator",
         "duration_us": 100.0,
-        "tracelens_launcher_path": f"{src}(1): forward",
+        "kernel_launcher_path": f"{src}(1): forward",
     }
     first_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     src.write_text("\n\n\ndef forward(x):\n    return x\n", encoding="utf-8")
-    candidate["tracelens_launcher_path"] = f"{src}(4): forward"
+    candidate["kernel_launcher_path"] = f"{src}(4): forward"
     second_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     assert first_key == second_key
@@ -3292,7 +3292,7 @@ def test_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): forward",
+                "kernel_launcher_path": f"{src}(1): forward",
             }
         ]
     )[0]
@@ -3328,7 +3328,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
                 "duration_us": 100.0,
                 "call_count": 1,
                 "gpu_pct": 10.0,
-                "tracelens_launcher_path": f"{src}(1): fused_operator",
+                "kernel_launcher_path": f"{src}(1): fused_operator",
             }
         ]
     )[0]
@@ -3362,14 +3362,14 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 12704.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "vllm::rocm_aiter_triton_add_rmsnorm_pad",
             "duration_us": 9870.0,
             "call_count": 360,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         # Same op as k001 at a different shape MUST still merge with k001.
         {
@@ -3377,7 +3377,7 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
             "name": "vllm::rocm_unquantized_gemm",
             "duration_us": 1260.0,
             "call_count": 36,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3409,13 +3409,13 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
             "kernel_id": "k001",
             "name": "shared_operation",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): first",
+            "kernel_launcher_path": f"{src}(1): first",
         },
         {
             "kernel_id": "k002",
             "name": "shared_operation",
             "duration_us": 90.0,
-            "tracelens_launcher_path": f"{src}(4): second",
+            "kernel_launcher_path": f"{src}(4): second",
         },
     ]
 
@@ -3439,7 +3439,7 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 200.0,
             "call_count": 100,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
@@ -3453,7 +3453,7 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 80.0,
             "call_count": 40,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 5,
             "tracelens_pitem_title": "Compute-Bound at prefill shapes",
             "identification": "Prefill-shape Identification.",
@@ -3468,7 +3468,7 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
             "name": "aiter::rms_norm",
             "duration_us": 50.0,
             "call_count": 25,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
             "tracelens_pitem_rank": 2,
             "tracelens_pitem_title": "Memory-Bound at decode shapes",
             "identification": "Decode-shape Identification.",
@@ -3512,7 +3512,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 12704.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
@@ -3521,7 +3521,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 10992.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k003",
@@ -3530,7 +3530,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 9291.0,
             "call_count": 360,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k004",
@@ -3539,7 +3539,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
             "duration_us": 1260.0,
             "call_count": 36,
             "bound_type": "memory-bound",
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3574,7 +3574,7 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
             "kernel_id": "k001",
             "name": "aiter::rms_norm",
             "duration_us": 100.0,
-            "tracelens_launcher_path": f"{src}(1): rms_norm",
+            "kernel_launcher_path": f"{src}(1): rms_norm",
             # No P-item rank, no prose — raw-trace fallback shape.
         },
     ]
@@ -3586,16 +3586,16 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
     """Candidates with empty / em-dash Kernel Path (LLama70B fixture shape) produce zero groups — caller falls back to per-kernel."""
     cands = [
-        {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
-        {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
-        # No tracelens_launcher_path field AND no source_file: skipped.
+        {"kernel_id": "k001", "name": "x", "kernel_launcher_path": ""},
+        {"kernel_id": "k002", "name": "y", "kernel_launcher_path": "—"},
+        # No kernel_launcher_path field AND no source_file: skipped.
         {"kernel_id": "k003", "name": "z"},
     ]
     assert tlr.aggregate_by_source_function(cands) == []
 
 
 def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
-    """Candidates from raw-trace / csv fallback paths lack ``tracelens_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
+    """Candidates from raw-trace / csv fallback paths lack ``kernel_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
     cands = [
         {
             "kernel_id": "k001",
@@ -3608,6 +3608,36 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     groups = tlr.aggregate_by_source_function(cands)
     assert len(groups) == 1
     assert groups[0]["function_name"] == "rms_norm"
+
+
+def test_aggregate_keys_resolved_row_on_source_file_and_reports_resolved_line(tmp_path):
+    """A resolved row carries TraceLens' verdict in ``source_file`` / ``source_line``: the
+    group keys on the native ``source_file`` and reports the resolved ``source_line`` as
+    ``definition_line`` — the ``.py`` ``kernel_launcher_path`` neither re-keys the native
+    kernel onto its launcher nor drives the def line to the launcher's own line."""
+    native = tmp_path / "custom_all_reduce.cuh"
+    native.write_text("// native kernel\n", encoding="utf-8")
+    launcher = tmp_path / "aiter" / "rmsnorm.py"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "aiter::cross_device_reduce_2stage",
+            "duration_us": 100.0,
+            "call_count": 8,
+            "kernel_launcher_path": f"{launcher}(1): rms_norm",
+            "source_file": str(native),
+            "source_line": 42,
+            "source_function": "cross_device_reduce_2stage",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["source_path"].endswith("custom_all_reduce.cuh")
+    assert g["definition_line"] == 42
+    # The resolved __global__ symbol labels the group, not the .cuh file stem.
+    assert g["function_name"] == "cross_device_reduce_2stage"
+    assert g["ast_resolved"] is False
 
 
 # task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST def-line (TraceLens reports the
@@ -3699,7 +3729,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 100.0,
             "call_count": 64,
             "gpu_pct": 5.0,
-            "tracelens_launcher_path": f"{src}(120): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(120): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
@@ -3707,7 +3737,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
             "duration_us": 50.0,
             "call_count": 32,
             "gpu_pct": 2.5,
-            "tracelens_launcher_path": f"{src}(456): rmsnorm_kernel",
+            "kernel_launcher_path": f"{src}(456): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3734,21 +3764,21 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 300.0,
             "call_count": 30,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
             "kernel_id": "k006",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
             "duration_us": 200.0,
             "call_count": 20,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
         {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
             "kernel_id": "k007",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
             "duration_us": 100.0,
             "call_count": 10,
-            "tracelens_launcher_path": bare,
+            "kernel_launcher_path": bare,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3774,13 +3804,13 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
             "kernel_id": "k001",
             "name": "quantize_kernel",
             "duration_us": 100.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
         {
             "kernel_id": "k002",
             "name": "dequantize_kernel",
             "duration_us": 80.0,
-            "tracelens_launcher_path": str(src),
+            "kernel_launcher_path": str(src),
         },
     ]
 
@@ -3804,14 +3834,14 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
             "name": "fused_moe_kernel<bf16>",
             "duration_us": 70.0,
             "call_count": 7,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
         {
             "kernel_id": "k002",
             "name": "fused_moe_kernel<fp16>",
             "duration_us": 30.0,
             "call_count": 3,
-            "tracelens_launcher_path": launcher,
+            "kernel_launcher_path": launcher,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3827,14 +3857,14 @@ def test_aggregate_canonicalizes_native_source_path():
             "name": "rmsnorm_kernel",
             "duration_us": 40.0,
             "call_count": 4,
-            "tracelens_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
         },
         {
             "kernel_id": "k002",
             "name": "rmsnorm_kernel",
             "duration_us": 10.0,
             "call_count": 1,
-            "tracelens_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
+            "kernel_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
@@ -3851,7 +3881,7 @@ def test_build_task_groups_filters_non_reusable():
             "name": "rms_norm",
             "duration_us": 50.0,
             "call_count": 4,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": True,
         },
         {
@@ -3859,7 +3889,7 @@ def test_build_task_groups_filters_non_reusable():
             "name": "rocblas_sgemm",
             "duration_us": 80.0,
             "call_count": 2,
-            "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
+            "kernel_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": False,  # filtered out
         },
     ]
