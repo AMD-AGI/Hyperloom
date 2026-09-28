@@ -167,6 +167,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("throughput_unit", measurement.get("throughput_unit") or None),
                 ("accuracy", acc),
                 ("submission_valid", measurement.get("submission_valid")),
+                # Only ever non-empty on a round upstream refused, which is the round whose axes a reader is most
+                # likely to be puzzling over. ``md_kv_list`` drops the empty list, so an accepted round says nothing.
+                ("submission_invalid_reasons", measurement.get("submission_invalid_reasons") or None),
                 ("ttft_mean_ms", ttft),
                 ("e2el_mean_ms", e2el),
                 ("ttft_e2el_source", ttft_source or None),

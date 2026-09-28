@@ -670,6 +670,27 @@ def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
     assert "submission_valid" in md
 
 
+def test_a_refused_round_says_why_upstream_refused_it() -> None:
+    """``submission_valid: false`` alone leaves a reader with a rejected round and no reason for it."""
+    b = _agentx_breakdown()
+    measurement = b["timeline"][0]["ext"]["actions"][0]["measurement"]
+    measurement["submission_valid"] = False
+    measurement["submission_invalid_reasons"] = ["duration=120s(canonical 3600s)"]
+
+    md = render_session_report(b).markdown
+
+    assert "submission_invalid_reasons" in md
+    assert "duration=120s(canonical 3600s)" in md
+
+
+def test_an_accepted_round_carries_no_refusal_reasons() -> None:
+    """The reasons list is empty on every accepted round; rendering the key would be noise on all of them."""
+    md = render_session_report(_agentx_breakdown()).markdown
+
+    assert "submission_valid" in md
+    assert "submission_invalid_reasons" not in md
+
+
 def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
     """A synthetic session measures none of them, and eleven nulls would claim it was graded on them."""
     md = render_session_report(_fixture_breakdown()).markdown
