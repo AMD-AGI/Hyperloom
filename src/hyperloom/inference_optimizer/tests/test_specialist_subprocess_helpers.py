@@ -45,6 +45,27 @@ def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
     assert _pick_worktree_base(("/nonexistent", str(repo))) == repo
 
 
+def test_pick_worktree_base_prefers_the_checkout_holding_the_package(tmp_path: Path) -> None:
+    """The session names the framework's package dir; the worktree must come off the checkout around it."""
+    harness = tmp_path / "InferenceX"
+    (harness / ".git").mkdir(parents=True)
+    checkout = tmp_path / "sglang"
+    (checkout / ".git").mkdir(parents=True)
+    package = checkout / "python" / "sglang"
+    package.mkdir(parents=True)
+
+    assert _pick_worktree_base((str(harness), str(checkout)), preferred=str(package)) == checkout
+
+
+def test_pick_worktree_base_ignores_a_preferred_path_outside_any_checkout(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    pip_install = tmp_path / "site-packages" / "vllm"
+    pip_install.mkdir(parents=True)
+
+    assert _pick_worktree_base((str(repo),), preferred=str(pip_install)) == repo
+
+
 # -- _setup_worktree -------------------------------------------------------
 def test_setup_worktree_reuses_existing(tmp_path: Path) -> None:
     wt = tmp_path / "wt"

@@ -651,7 +651,7 @@ def _pick_worktree_base(
 ) -> Path | None:
     """Return the checkout to branch the specialist's worktree off.
 
-    ``preferred`` wins whenever it is a checkout. It names the framework the
+    ``preferred`` wins whenever it lies in a checkout. It names the framework the
     session is actually optimising, which ``roots`` cannot express: their order
     records only how they were discovered. Selecting by position worked while
     exactly one root happened to be a git checkout; when a pod started shipping
@@ -676,8 +676,19 @@ def _pick_worktree_base(
         # ``.git`` may be a file (worktree) or a dir (repo).
         return p if p.is_dir() and (p / ".git").exists() else None
 
+    def _enclosing_checkout(path: str) -> Path | None:
+        # The session names the framework's package dir (``<checkout>/python/sglang``), not the repo root, so the
+        # checkout is found by walking up from it.
+        p = Path(path)
+        if not p.is_dir():
+            return None
+        for candidate in (p, *p.parents):
+            if (candidate / ".git").exists():
+                return candidate
+        return None
+
     if preferred:
-        chosen = _is_checkout(preferred)
+        chosen = _enclosing_checkout(preferred)
         if chosen is not None:
             return chosen
     for r in roots:

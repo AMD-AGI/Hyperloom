@@ -85,10 +85,15 @@ def specialist_patch_preflight_error(
         )
         if path
     )
-    preferred = str(task_params.get("session_framework_tree") or "").strip() or resolve_framework_tree(
-        str(task_params.get("framework") or "")
-    )
+    preferred = _preferred_framework_tree(task_params)
     return "" if _pick_worktree_base(roots, preferred=preferred) is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
+
+
+def _preferred_framework_tree(params: dict[str, Any]) -> str:
+    """The tree the session optimises, as the preflight and the worktree base both must read it."""
+    return str(params.get("session_framework_tree") or "").strip() or resolve_framework_tree(
+        str(params.get("framework") or "")
+    )
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -1525,7 +1530,7 @@ class SpecialistRunner:
             return None, None, preflight_error
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
-            preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
+            preferred=_preferred_framework_tree(ctx.task.params or {}),
         )
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
