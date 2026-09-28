@@ -218,7 +218,8 @@ jobs:
               | "\(if $sub then "[sub] " else "" end)[tool] \(.name) \(.input | brief)"
             elif .type == "system" and .subtype == "permission_denied" then "[denied] \(.tool_name)"
             elif .type == "result" then
-              "[result] \(.subtype) turns=\(.num_turns) duration=\(.duration_ms / 6000 | round / 10)min input_tokens=\(.usage.input_tokens) cache_read_input_tokens=\(.usage.cache_read_input_tokens) output_tokens=\(.usage.output_tokens) denials=\(.permission_denials | length)",
+              "[result] \(.subtype) is_error=\(.is_error) terminal_reason=\(.terminal_reason) turns=\(.num_turns) duration=\(.duration_ms / 6000 | round / 10)min input_tokens=\(.usage.input_tokens) cache_read_input_tokens=\(.usage.cache_read_input_tokens) output_tokens=\(.usage.output_tokens) denials=\(.permission_denials | length)",
+              (if .is_error then "[result] error \(.result | tostring | .[0:500])" else empty end),
               ((.permission_denials // [])[] | "[result] denied \(.tool_name) \(.tool_input | brief)")
             else empty end'
           claude -p "$prompt" --model "$PR_REVIEW_MODEL" --permission-mode dontAsk \
