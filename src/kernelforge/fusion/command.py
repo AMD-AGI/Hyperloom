@@ -64,7 +64,7 @@ from .report import (
     write_anchor_report,
     write_manifest,
 )
-from .shapes import load_model_config, resolve_decode_shapes
+from .shapes import harness_group_dim_mismatch, load_model_config, resolve_decode_shapes
 from .validate import (
     DEFAULT_TARGET_SPEEDUP,
     KERNEL_KEEP_CHECKPOINT,
@@ -437,6 +437,25 @@ def _author_baseline_harness(
         if not published:
             return published, error
 
+        shape_why = harness_group_dim_mismatch(
+            Path(harness_path).read_text(encoding="utf-8", errors="replace"),
+            getattr(recipe, "shapes", {}) or {},
+        )
+        if shape_why:
+            log.warning(
+                "harness attempt %d/%d used the wrong group axis: %s",
+                attempt,
+                attempts,
+                shape_why,
+            )
+            feedback = (
+                "\n## FIX REQUIRED (group axis)\n"
+                f"{shape_why}\n"
+                "Rebuild the tensors from `n_local_groups` / `o_groups` in the "
+                "shapes block. Do not set G from gqa_groups or num_attention_heads.\n"
+            )
+            continue
+
         aligned, why, observed = _probe_eager_alignment(
             recipe,
             harness_path=harness_path,
@@ -458,6 +477,8 @@ def _author_baseline_harness(
         )
         feedback = _alignment_feedback(recipe, why, observed)
 
+    if feedback.startswith("\n## FIX REQUIRED (group axis)"):
+        return False, f"harness used the wrong group axis after {attempts} attempts"
     return False, f"harness eager arm never matched the traced kernels after {attempts} attempts"
 
 
@@ -692,6 +713,16 @@ def _verdict_override(
     help="Tensor-parallel size for the serving smoke (must match the session).",
 )
 @click.option(
+    "--attn-tp",
+    "attn_tp_size",
+    default=1,
+    type=int,
+    help=(
+        "Attention TP shard used to stamp n_local_heads / n_local_groups "
+        "(default 1; keep 1 under DP-attention even when --tp > 1)."
+    ),
+)
+@click.option(
     "--block-size",
     "block_size",
     default=0,
@@ -736,6 +767,7 @@ def run(
     server_extra: str,
     gpu_arch: str,
     tp: int,
+    attn_tp_size: int,
     block_size: int,
     max_model_len: int,
     verbose: bool,
@@ -837,7 +869,9 @@ def run(
         )
         for text in anchor_report.warnings:
             log.warning("anchor: %s", text)
-        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
+        shapes = resolve_decode_shapes(
+            model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size
+        )
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )
@@ -884,7 +918,9 @@ def run(
     elif discover_mode == "llm":
         # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
         # chains itself (not capped to templates).
-        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
+        shapes = resolve_decode_shapes(
+            model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size
+        )
         source_file, _source_note = resolve_framework_source_file(
             model_path, framework, framework_root=framework_root, model_type=model_type
         )

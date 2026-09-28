@@ -124,6 +124,66 @@ def test_shapes_gqa_groups_computed(tmp_path):
     assert s["gqa_groups"] == 4
 
 
+def test_shapes_dsv4_o_groups_not_confused_with_gqa(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "num_attention_heads": 128,
+                "num_key_value_heads": 1,
+                "o_groups": 16,
+                "head_dim": 512,
+                "qk_rope_head_dim": 64,
+                "o_lora_rank": 1024,
+                "hidden_size": 7168,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=1)
+    assert s["gqa_groups"] == 128
+    assert s["o_groups"] == 16
+    assert s["n_local_groups"] == 16
+    assert s["n_local_heads"] == 128
+    assert s["qk_rope_head_dim"] == 64
+    assert "n_local_groups" in s["group_axis_note"]
+
+
+def test_shapes_attn_tp_scales_local_dims(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "num_attention_heads": 128,
+                "o_groups": 16,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=8)
+    assert s["n_local_heads"] == 16
+    assert s["n_local_groups"] == 2
+
+
+def test_harness_group_dim_mismatch_catches_gqa_as_g(tmp_path):
+    from kernelforge.fusion.shapes import harness_group_dim_mismatch
+
+    shapes = {
+        "o_groups": 16,
+        "n_local_groups": 16,
+        "gqa_groups": 128,
+        "num_attention_heads": 128,
+        "n_local_heads": 128,
+    }
+    bad = "G = 128  # gqa_groups / n_local_groups\n"
+    why = harness_group_dim_mismatch(bad, shapes)
+    assert why and "n_local_groups=16" in why
+    assert harness_group_dim_mismatch("G = 16  # n_local_groups\n", shapes) == ""
+    assert "gqa_groups" in harness_group_dim_mismatch(
+        "G = shapes['gqa_groups']\n", shapes
+    )
+
+
 def test_shapes_missing_config_returns_minimal(tmp_path):
     s = resolve_decode_shapes(str(tmp_path))  # no config.json
     assert s["model_type"] == ""
