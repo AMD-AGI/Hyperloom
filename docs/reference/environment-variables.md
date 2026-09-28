@@ -207,6 +207,23 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
+## Kernel Trust Harness qualification
+
+Off by default. When enabled, every applied Controller patch must hold a
+validated KTH `Eligible` attestation before it is benchmarked; `Blocked`,
+`Inconclusive` and every provider or validation failure revert it. See
+[Kernel Trust Harness qualification](kth-qualification.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_KTH_ENABLE` | Unset (off) | Boolean. On gates Controller integration on KTH. A value that is not a boolean stops integration. |
+| `HYPERLOOM_KTH_QUALIFY_EXECUTABLE` | `kth-qualify` | The host-installed KTH subprocess. |
+| `HYPERLOOM_KTH_PLANS` | Unset (all adaptive) | JSON object mapping a publication `kernel_path` to a KTH host-owned plan ID. Mapped kernels send a reviewed-plan request; unmapped kernels send an adaptive candidate envelope. |
+| `HYPERLOOM_KTH_EXPECTED_SHA` | Unset | Full KTH revision every attestation must name. Unset still requires a full revision. |
+| `HYPERLOOM_KTH_TIMEOUT_S` | `300` | Seconds one qualification may take; a timeout reverts the candidate. |
+
+---
+
 ## Fusion lane
 
 The fusion lane is Coordinator-owned and forge-only: it runs at KERNEL entry on

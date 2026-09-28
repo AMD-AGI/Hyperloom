@@ -38,6 +38,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
     * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
+    * :doc:`Kernel Trust Harness qualification </reference/kth-qualification>`
     * :doc:`Operations and self-hosting </reference/operations>`
     * :doc:`Upgrade guide </reference/upgrade>`
     * :doc:`Session output schema </reference/session-breakdown>`

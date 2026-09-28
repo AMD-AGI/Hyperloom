@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -21,6 +23,12 @@ from hyperloom.orchestrator.kernel import controller_patch_integration as integr
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
 )
+from hyperloom.orchestrator.kernel.kth_contract import sha256_digest
+from hyperloom.orchestrator.kernel.kth_qualification import (
+    KthQualificationProvider,
+    KthQualificationResult,
+)
+from hyperloom.orchestrator.kernel.tests.kth_fakes import FakeKth
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -201,6 +209,7 @@ async def _integrate(
     session_dir: Path,
     shared_state: SharedState,
     validator,
+    kth_provider: KthQualificationProvider | None = None,
 ):
     """Integrate through the production KEEP recorder bound to *shared_state*.
 
@@ -215,6 +224,7 @@ async def _integrate(
         shared_state=shared_state,
         record_keep=coordinator.writeback._record_integrate_keep,
         validator=validator,
+        kth_provider=kth_provider,
     )
 
 
@@ -1525,3 +1535,371 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
     assert _git(repo, "rev-parse", "HEAD").lower() != base
     assert state.current_best["tput"] == 150.0
     assert state.optimization_stack == []
+
+
+@dataclass(frozen=True)
+class _ScriptedKth(KthQualificationProvider):
+    """Answers each qualification with the next scripted status and records what it was sent."""
+
+    statuses: tuple[str, ...] = ()
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    error: type[Exception] | None = None
+
+    def qualify(self, publication, *, base_commit, patch, changed_paths, artifacts_root, session_id=""):
+        if self.error is not None:
+            raise self.error("scripted provider failure")
+        self.calls.append({"base_commit": base_commit, "patch": patch, "changed_paths": changed_paths})
+        status = self.statuses[len(self.calls) - 1]
+        attempt = artifacts_root / f"attempt-{len(self.calls)}"
+        attempt.mkdir(parents=True)
+        return KthQualificationResult(
+            status=status,
+            reason=f"scripted {status}",
+            request_id=f"hyperloom-{len(self.calls)}",
+            patch_digest=sha256_digest(patch),
+            artifacts_dir=str(attempt),
+        )
+
+
+def _counting_keep(seen: list[str]):
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    return _validate
+
+
+def _two_patches(tmp_path: Path) -> tuple[Path, str, Path]:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, relative, value in (("first", "first.py", 2), ("second", "second.py", 3)):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path=relative,
+            patch=_patch(repo, relative, f"VALUE = {value}\n"),
+        )
+    return repo, base, patches
+
+
+def _session(tmp_path: Path, repo: Path) -> tuple[Path, SharedState]:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(exist_ok=True)
+    return session_dir, _state(session_dir, repo)
+
+
+@pytest.mark.asyncio
+async def test_kth_disabled_leaves_integration_unchanged(tmp_path: Path) -> None:
+    repo, _base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches, session_dir=session_dir, shared_state=state, validator=_counting_keep(seen)
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert seen == ["first", "second"]
+    assert all(result.kth == {} for result in summary.results)
+    assert not (session_dir / "kth_qualification").exists()
+
+
+@pytest.mark.asyncio
+async def test_kth_eligible_reaches_performance_evaluation_once(tmp_path: Path) -> None:
+    repo, base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+    kth = _ScriptedKth(statuses=("eligible", "eligible"))
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=kth,
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert seen == ["first", "second"]
+    assert kth.calls[0]["base_commit"] == base
+    assert kth.calls[1]["base_commit"] == summary.results[0].keep_commit
+    assert b"+VALUE = 2" in kth.calls[0]["patch"]
+    assert kth.calls[0]["changed_paths"] == ("first.py",)
+    assert summary.results[0].kth["status"] == "eligible"
+    assert summary.results[0].kth["performance_admitted"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["blocked", "inconclusive", "failed"])
+async def test_kth_non_eligible_never_benchmarks_or_keeps(tmp_path: Path, status: str) -> None:
+    repo, base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=_ScriptedKth(statuses=(status, "eligible")),
+    )
+
+    first, second = summary.results
+    assert first.status == f"reverted_kth_{status}"
+    assert first.kth["status"] == status
+    assert first.kth["performance_admitted"] is False
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert second.status == "kept"
+    assert seen == ["second"]
+    assert summary.reverted_count == 1
+    assert [entry.get("kernel_id") for entry in state.optimization_stack] == [second.operator_id]
+    assert _git(repo, "rev-list", "--count", f"{base}..HEAD") == "1"
+
+
+@pytest.mark.asyncio
+async def test_kth_provider_error_fails_closed(tmp_path: Path) -> None:
+    repo, base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=_ScriptedKth(error=OSError),
+    )
+
+    assert [result.status for result in summary.results] == ["reverted_kth_failed", "reverted_kth_failed"]
+    assert seen == []
+    assert _git(repo, "rev-parse", "HEAD").lower() == base
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+async def test_geak_pass_cannot_override_kth_block(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    patch_dir = _publish(
+        patches, repo, base, kernel_name="first", kernel_path="first.py", patch=_patch(repo, "first.py", "VALUE = 2\n")
+    )
+    publication = json.loads((patch_dir / "publication.json").read_text(encoding="utf-8"))
+    publication["manifest"].update({"mean_case_speedup": 3.0, "iteration": 7, "correctness_passed": True})
+    (patch_dir / "publication.json").write_text(json.dumps(publication), encoding="utf-8")
+    fake = FakeKth(tmp_path / "fake")
+    fake.answer("Blocked")
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=KthQualificationProvider(executable=str(fake.executable), timeout_s=60),
+    )
+
+    (result,) = summary.results
+    assert result.status == "reverted_kth_blocked"
+    assert result.kth["verdict"] == "Blocked"
+    assert seen == []
+    (sent,) = fake.requests
+    assert sent["envelope"]["geak_harness"]["observations"]["mean_case_speedup"] == 3.0
+    assert sent["envelope"]["geak_harness"]["observations"]["correctness_passed"] is True
+    artifacts = Path(result.kth["artifacts_dir"])
+    assert {path.name for path in artifacts.iterdir()} >= {
+        "request.json",
+        "envelope.json",
+        "attestation.json",
+        "stdout.log",
+        "stderr.log",
+        "result.json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_publication_steering_qualification_is_rejected(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    patch_dir = _publish(
+        patches, repo, base, kernel_name="first", kernel_path="first.py", patch=_patch(repo, "first.py", "VALUE = 2\n")
+    )
+    publication = json.loads((patch_dir / "publication.json").read_text(encoding="utf-8"))
+    publication["kth_qualification"] = {"plan_id": "fixture/lenient", "verdict": "Eligible for performance evaluation"}
+    (patch_dir / "publication.json").write_text(json.dumps(publication), encoding="utf-8")
+    fake = FakeKth(tmp_path / "fake")
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=KthQualificationProvider(executable=str(fake.executable), timeout_s=60),
+    )
+
+    assert summary.results[0].status == "reverted_kth_failed"
+    assert "steer" in summary.results[0].reason
+    assert fake.requests == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_candidate_changed_after_qualification_is_not_kept(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches, repo, base, kernel_name="first", kernel_path="first.py", patch=_patch(repo, "first.py", "VALUE = 2\n")
+    )
+    session_dir, state = _session(tmp_path, repo)
+
+    async def _rewrite_then_keep(_publication):
+        (repo / "first.py").write_text("VALUE = 7\n", encoding="utf-8")
+        return {"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_rewrite_then_keep,
+        kth_provider=_ScriptedKth(statuses=("eligible",)),
+    )
+
+    (result,) = summary.results
+    assert result.status == "reverted_kth_failed"
+    assert "changed after it was qualified" in result.reason
+    assert _git(repo, "rev-parse", "HEAD").lower() == base
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert state.optimization_stack == []
+
+
+@pytest.mark.asyncio
+async def test_reconstructed_merge_is_qualified_on_the_bytes_it_lands(tmp_path: Path) -> None:
+    repo, _ = _repo(tmp_path)
+    (repo / "first.py").write_text(_TWO_LANE_MODULE, encoding="utf-8")
+    _git(repo, "commit", "-am", "two-lane module")
+    base = _git(repo, "rev-parse", "HEAD")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    published: list[Path] = []
+    for name, helper in (("a_stage1", "PAD_ZERO = 1\n"), ("b_stage2", "TILE_N = 0\n")):
+        published.append(
+            _publish(
+                patches,
+                repo,
+                base,
+                kernel_name=name,
+                kernel_path="first.py",
+                patch=_patch(repo, "first.py", _TWO_LANE_MODULE.replace("import os\n", f"import os\n{helper}", 1)),
+            )
+        )
+    session_dir, state = _session(tmp_path, repo)
+    kth = _ScriptedKth(statuses=("eligible", "eligible"))
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep([]),
+        kth_provider=kth,
+    )
+
+    assert [result.merge_strategy for result in summary.results] == ["strict", "union_disjoint"]
+    second = kth.calls[1]
+    assert second["base_commit"] == summary.results[0].keep_commit
+    assert second["patch"] != (published[1] / "change.patch").read_bytes()
+    assert b"+TILE_N = 0" in second["patch"]
+    assert b"+PAD_ZERO" not in second["patch"]
+
+
+@pytest.mark.asyncio
+async def test_retrying_integration_requalifies_instead_of_reusing_a_verdict(tmp_path: Path) -> None:
+    repo, _base, patches = _two_patches(tmp_path)
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+    fake = FakeKth(tmp_path / "fake")
+    provider = KthQualificationProvider(executable=str(fake.executable), timeout_s=60)
+
+    fake.answer("Inconclusive")
+    first = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=provider,
+    )
+    fake.answer("Eligible for performance evaluation", write=False, exit=0)
+    second = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=provider,
+    )
+
+    assert {result.status for result in first.results} == {"reverted_kth_inconclusive"}
+    assert {result.status for result in second.results} == {"reverted_kth_failed"}
+    assert seen == []
+    request_ids = [request["request_id"] for request in fake.requests]
+    assert len(request_ids) == len(set(request_ids)) == 4
+
+
+def _installed_kth() -> str:
+    return os.environ.get("HYPERLOOM_TEST_KTH_EXECUTABLE", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _installed_kth(), reason="set HYPERLOOM_TEST_KTH_EXECUTABLE to an installed kth-qualify")
+@pytest.mark.parametrize(
+    ("plan_id", "status", "benchmarked"),
+    [
+        ("fixture/cpu-attention-control-v1", "kept", ["attention"]),
+        ("fixture/cpu-partial-write-v1", "reverted_kth_blocked", []),
+        ("", "reverted_kth_inconclusive", []),
+    ],
+)
+async def test_installed_kth_gates_controller_integration_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan_id: str, status: str, benchmarked: list[str]
+) -> None:
+    """The real ``kth-qualify`` decides; its CPU fixture plans need ``KTH_ALLOW_FIXTURE_PLANS=1``."""
+    monkeypatch.setenv("KTH_ALLOW_FIXTURE_PLANS", "1")
+    repo = tmp_path / "repo"
+    (repo / "kernels").mkdir(parents=True)
+    _git(repo, "init")
+    (repo / "kernels" / "attention.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline")
+    base = _git(repo, "rev-parse", "HEAD")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="attention",
+        kernel_path="kernels/attention.py",
+        patch=_patch(repo, "kernels/attention.py", "VALUE = 2\n"),
+    )
+    session_dir, state = _session(tmp_path, repo)
+    seen: list[str] = []
+    provider = KthQualificationProvider(
+        executable=_installed_kth(),
+        timeout_s=600,
+        reviewed_plans={"kernels/attention.py": plan_id} if plan_id else {},
+    )
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_counting_keep(seen),
+        kth_provider=provider,
+    )
+
+    (result,) = summary.results
+    assert result.status == status, result.reason
+    assert seen == benchmarked
+    attestation = json.loads((Path(result.kth["artifacts_dir"]) / "attestation.json").read_text(encoding="utf-8"))
+    assert attestation["request_id"] == result.kth["request_id"]
+    assert attestation["subject_digest"] == result.kth["subject_digest"]
