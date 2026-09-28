@@ -176,6 +176,14 @@ value.
    4. `atom`: install ATOM and its AITER dependency from source (shared with the
       host torch). The ATOM commit defaults to the one `rocm/atom-dev:v0.1.7-rc0`
       was built from.
+   - ATOM never shares a Python with SGLang or vLLM: ATOM registers vLLM and
+     SGLang plugins that both engines load by default, so a later SGLang or
+     vLLM run there would execute ATOM's platform, model and loader code. Setup
+     therefore refuses `atom` when SGLang or vLLM imports from the selected
+     Python (including a ROCm 10 vLLM venv built over it), and refuses `sglang`
+     or a shared/ROCm 10 `vllm` when ATOM imports there. The ROCm 7.2.x
+     `vllm (isolated)` venv is self-contained and unaffected. When the user wants
+     ATOM beside another engine, put ATOM in a separate container.
    - Do not mark any option as recommended. Present the four options in the exact
      order above without a default selection.
    - For an ATOM that is already installed, use `none` and explicitly

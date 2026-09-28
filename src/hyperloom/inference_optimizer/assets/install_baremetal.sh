@@ -233,6 +233,21 @@ framework_probe_python() {
   fi
 }
 
+# ATOM registers vllm.platform_plugins, vllm.general_plugins and sglang.srt.plugins
+# entry points, and both engines load every registered plugin unless told
+# otherwise, so a vLLM or SGLang that can import ATOM serves through ATOM's
+# platform, model classes and loader patches. Die before `incoming` would put
+# ATOM and either engine into the interpreter `py`.
+refuse_atom_beside_vllm_or_sglang() {
+  local py="$1" incoming="$2" engines="" fw
+  for fw in sglang vllm; do
+    if [ "$incoming" = "$fw" ] || _py_has "$py" "$fw"; then engines="${engines:+${engines}, }${fw}"; fi
+  done
+  [ -n "$engines" ] || return 0
+  [ "$incoming" = atom ] || _py_has "$py" atom || return 0
+  die "ATOM cannot share ${py} with ${engines}: those engines load ATOM's plugins by default, which replace their platform, model classes and loader code. Install ATOM in a separate container, or in a Python that imports neither vLLM nor SGLang (pin it with PYTHON and INFERENCE_OPTIMIZER_FORCE_PYTHON=1)."
+}
+
 # Print the serving framework to record for downstream skills, or nothing when
 # none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
 # — so an engine that passes preflight is always the one written to .env.
@@ -864,6 +879,7 @@ install_sglang_from_wheel() {
 install_sglang_framework() {
   local py deps_root aiter_root py_mm
   py="$(resolve_python)" || die "no usable Python found for SGLang install"
+  refuse_atom_beside_vllm_or_sglang "$py" sglang
   deps_root="$(framework_deps_root)"
   aiter_root="${AITER_ROOT:-${deps_root}/aiter}"
   py_mm="$("$py" - <<'PY'
@@ -992,6 +1008,10 @@ install_atom_framework() {
   py="$(resolve_python)" || die "no usable Python found for ATOM install"
   deps_root="$(framework_deps_root)"
   aiter_root="${AITER_ROOT:-${deps_root}/aiter}"
+  refuse_atom_beside_vllm_or_sglang "$py" atom
+  if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    refuse_atom_beside_vllm_or_sglang "${VLLM_VENV_ROOT}/bin/python" atom
+  fi
 
   log "Phase 2: installing ATOM framework layer"
   log "framework python: ${py}"
@@ -1383,6 +1403,10 @@ install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
   route_vllm_install_method "$base_py" || return $?
+  # The source overlay imports the base site-packages; only the wheel venv is self-contained.
+  if [ "$FRAMEWORK_ENV" = shared ] || [ "$VLLM_INSTALL_METHOD" = source ]; then
+    refuse_atom_beside_vllm_or_sglang "$base_py" vllm
+  fi
   if [ "$VLLM_INSTALL_METHOD" = source ]; then
     if [ "$FRAMEWORK_ENV" != isolated ]; then
       die "vLLM source install requires --framework-env isolated"

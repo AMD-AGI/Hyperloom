@@ -1393,6 +1393,7 @@ def _drive_atom_installer(tmp_path: Path, python: Path, body: str) -> subprocess
                 f'HYPERLOOM_CACHE_DIR="{tmp_path.as_posix()}/deps"',
                 "INSTALL_FRAMEWORK=atom",
                 "FRAMEWORK_ENV=shared",
+                f'VLLM_VENV_ROOT="{tmp_path.as_posix()}/absent"',
                 "DRY_RUN=0",
                 "CHECK_ONLY=0",
                 f'resolve_python() {{ printf "%s" "{python.as_posix()}"; }}',
@@ -1602,6 +1603,120 @@ def test_atom_install_rejects_an_isolated_framework_env(tmp_path: Path, monkeypa
 
     assert res.returncode != 0
     assert "isolated is currently supported for vLLM only" in res.stderr
+
+
+def _vllm_venv(tmp_path: Path, *, system_site_packages: bool) -> Path:
+    """A VLLM_VENV_ROOT whose python imports vllm; an overlay also sees the base site-packages."""
+    root = tmp_path / "vllm-venv"
+    (root / "bin").mkdir(parents=True)
+    _fake_python(root / "bin", {"vllm"}).rename(root / "bin" / "python")
+    (root / "pyvenv.cfg").write_text(
+        f"include-system-site-packages = {'true' if system_site_packages else 'false'}\n", encoding="utf-8"
+    )
+    return root
+
+
+_ATOM_INSTALL_STEPS = (
+    "ensure_aiter_for_python() { echo STEP aiter; }\ninstall_atom_from_source() { echo STEP atom-source; }\n"
+)
+
+
+@pytest.mark.parametrize("engine", ["sglang", "vllm"])
+def test_atom_install_refuses_a_python_that_serves_vllm_or_sglang(tmp_path: Path, engine: str):
+    """vLLM and SGLang load ATOM's entry-point plugins by default, so a shared Python would serve ATOM code."""
+    res = _drive_installer(
+        tmp_path,
+        importable={engine},
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f"DRY_RUN=1\n{_ATOM_INSTALL_STEPS}install_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "would install" not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {engine}" in res.stderr
+
+
+def test_atom_install_refuses_a_base_python_under_a_vllm_overlay(tmp_path: Path):
+    """The ROCm 10 vLLM overlay imports the base site-packages, and with them ATOM's plugins."""
+    overlay = _vllm_venv(tmp_path, system_site_packages=True)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{overlay.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode != 0
+    assert "STEP" not in res.stdout
+    assert f"ATOM cannot share {overlay.as_posix()}/bin/python with vllm" in res.stderr
+
+
+def test_atom_install_proceeds_beside_a_self_contained_vllm_venv(tmp_path: Path):
+    venv = _vllm_venv(tmp_path, system_site_packages=False)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{venv.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert [line for line in res.stdout.splitlines() if line.startswith("STEP ")] == ["STEP aiter", "STEP atom-source"]
+
+
+_VLLM_ROUTE_STUBS = "assert_vllm_glibc_compatible() { :; }\nensure_openmpi_runtime() { :; }\n"
+
+
+@pytest.mark.parametrize(
+    ("installer", "framework"),
+    [
+        pytest.param("install_sglang_framework", "sglang", id="sglang"),
+        pytest.param(
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-shared",
+        ),
+        pytest.param(
+            "FRAMEWORK_ENV=isolated\n"
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=source; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-source-overlay",
+        ),
+    ],
+)
+def test_engine_install_refuses_a_python_that_imports_atom(tmp_path: Path, installer: str, framework: str):
+    """ATOM installed first must not end up inside the interpreter a later vLLM/SGLang serves from."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework=framework,
+        body=f"DRY_RUN=1\n{installer}",
+    )
+
+    assert res.returncode != 0
+    assert "would " not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {framework}" in res.stderr
+
+
+def test_isolated_vllm_wheel_install_proceeds_on_an_atom_host(tmp_path: Path):
+    """The wheel venv is created without the system site-packages, so it never sees ATOM."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework="vllm",
+        body="DRY_RUN=1\nFRAMEWORK_ENV=isolated\n"
+        f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "would create/update isolated vLLM venv" in res.stdout
 
 
 def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
@@ -2596,6 +2711,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "warn() { :; }",
                 'die() { echo "$*" >&2; exit 99; }',
                 '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
+                "refuse_atom_beside_vllm_or_sglang() { :; }",
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
                 "sglang_rocm_extra_for_torch() { printf 'rocm724\\n'; }",

@@ -399,8 +399,11 @@ changes and obtain approval before running:
 
 If the check reports ATOM missing in a baremetal environment and the operator
 approves installing it, run setup with `atom` instead of `none`. It installs
-AITER and ATOM from source into the selected Python, keeping its ROCm torch. Do
-not do this in Docker mode, where ATOM comes from the image:
+AITER and ATOM from source into the selected Python, keeping its ROCm torch.
+Setup refuses when SGLang or vLLM also imports from that Python, because those
+engines would then load ATOM's plugins; report the refusal and propose a
+separate container for ATOM rather than removing the other engine. Do not do
+this in Docker mode, where ATOM comes from the image:
 
 ```bash
 "$PYTHON" -m hyperloom.inference_optimizer.setup -- \

@@ -193,7 +193,11 @@ a container; it does not start an additional Docker container. ATOM is either
 already installed there or installed by setup with ``--install-framework atom``,
 which builds AITER and then ATOM (default ``ATOM_REF``: the commit
 ``rocm/atom-dev:v0.1.7-rc0`` was built from) against the existing ROCm torch in
-that Python. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
+that Python. That Python must not also serve SGLang or vLLM: ATOM registers
+plugins that both engines load by default, so setup refuses to install ATOM
+where either imports (including a ROCm 10 vLLM venv built over that Python),
+and refuses to install SGLang, shared vLLM or ROCm 10 source vLLM where ATOM
+imports. Run ATOM in a separate container instead. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
 with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
