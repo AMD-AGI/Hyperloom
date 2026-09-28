@@ -64,7 +64,7 @@ def _notify(record: LLMRequestRecord) -> None:
     for observer in tuple(_OBSERVERS):
         try:
             observer(record)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("llm request observer %r failed", observer, exc_info=True)
 
 
