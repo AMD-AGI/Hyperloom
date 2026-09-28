@@ -13,6 +13,7 @@ name: PR Review
 # Secret:    PR_REVIEW_ANTHROPIC_API_KEY
 # Variables: PR_REVIEW_ANTHROPIC_BASE_URL, PR_REVIEW_MODEL, PR_REVIEW_CLAUDE_CLI_VERSION,
 #            PR_REVIEW_RUNNER_LABEL (optional, defaults to ubuntu-latest),
+#            PR_REVIEW_TIMEOUT_MIN (optional, review job timeout in minutes, defaults to 120),
 #            PR_REVIEW_INSECURE (optional, 1 skips TLS verification of the LLM proxy)
 
 on:
@@ -92,7 +93,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ fromJSON(vars.PR_REVIEW_TIMEOUT_MIN || '120') }}
     permissions:
       contents: read
       pull-requests: read
