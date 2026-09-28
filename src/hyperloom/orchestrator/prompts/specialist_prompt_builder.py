@@ -76,12 +76,6 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
         "A previous patch failed to apply against the live source tree."
         " Study the apply errors in the notes, produce a corrected patch."
     ),
-    "framework_config_generation": (
-        "Propose a GRID of runtime config variants (server flags and/or env vars)"
-        " that may raise throughput WITHOUT changing source. Return a"
-        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
-        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
-    ),
 }
 
 

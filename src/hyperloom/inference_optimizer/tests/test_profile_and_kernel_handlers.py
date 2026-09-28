@@ -24,6 +24,7 @@ from .conftest import seed_kernel_keep
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
+    BenchmarkRunExecutor,
     _default_baseline_config,
     _materialize_config_with_envs,
 )
@@ -1872,7 +1873,7 @@ async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path)
         called["parent"] = True
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    monkeypatch.setattr(BenchmarkRunExecutor, "__call__", _fake_parent)
 
     task = SimpleNamespace(params={}, task_id="t-atom-profile")
     ctx = SimpleNamespace(task=task, extra=None)
@@ -1892,7 +1893,7 @@ def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
         captured.update(ctx.task.params)
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    monkeypatch.setattr(BenchmarkRunExecutor, "__call__", _fake_parent)
 
     task = SimpleNamespace(
         params={
@@ -1920,7 +1921,7 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
         captured.update(ctx.task.params)
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    monkeypatch.setattr(BenchmarkRunExecutor, "__call__", _fake_parent)
 
     task = SimpleNamespace(
         params={
@@ -1950,7 +1951,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
         captured.update(ctx.task.params)
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    monkeypatch.setattr(BenchmarkRunExecutor, "__call__", _fake_parent)
     task = SimpleNamespace(
         params={
             "base_extra_envs": {
@@ -2136,7 +2137,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+    with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     workspace = output_dir / ws_name
@@ -2197,7 +2198,7 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         idempotency_key="prof-agentx-rank-zero",
     )
     sub.register_executor("profile", pe)
-    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+    with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     trace_dir = output_dir / "benchmark_sglang_agentx" / "torch_trace"
@@ -2255,7 +2256,7 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path, 
         idempotency_key="prof-capture-failed",
     )
     sub.register_executor("profile", pe)
-    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+    with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     assert res.result["status"] == "failed"
@@ -2295,7 +2296,7 @@ async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, 
         idempotency_key="prof-capture-status-missing",
     )
     sub.register_executor("profile", pe)
-    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+    with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     assert res.result["status"] == "failed"
@@ -2337,7 +2338,7 @@ async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_pat
         idempotency_key="prof-before-capture-failed",
     )
     sub.register_executor("profile", pe)
-    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+    with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
         res = await sub.run_task(task)
 
     assert res.result["status"] == "failed"

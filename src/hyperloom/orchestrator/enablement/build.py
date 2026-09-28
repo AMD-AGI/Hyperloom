@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root

@@ -271,8 +271,6 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK per-candidate executor — Coordinator-internal only.
-
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%
     # watermark crossing, so always registered.
     coordinator.sub.register_executor(

@@ -38,12 +38,21 @@ from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-#: The AgentX axes a measured round carries, on the keys grading itself reads them from.
+#: The AgentX axes a measured round carries, on the keys grading itself reads them from. ``duration_seconds`` and
+#: ``request_error_rate`` are members because the verdict is: a pair is refused outright on a window that drifted
+#: or a candidate that dropped more requests, so they are published with the axes they can veto.
 AGENTX_AXES: dict[str, Any] = {
     GRADED_INTVTY: 41.2,
+    "e2e_norm_intvty_p50": 78.9,
     "total_throughput": 25978.0,
+    "output_tput_per_gpu": 22.9,
     "input_throughput": 25795.0,
+    "ttft_p50_ms": 110.0,
+    "ttft_p90_ms": 240.0,
+    "tpot_p50_ms": 18.0,
     "tpot_p90_ms": 24.3,
+    "duration_seconds": 3600.0,
+    "request_error_rate": 0.0,
 }
 
 
@@ -356,7 +365,7 @@ def test_the_baseline_publishes_the_axes_the_session_was_anchored_on(tmp_path):
     assert baseline["throughput_tok_s_per_gpu"] == 183.0
 
 
-def test_a_synthetic_baseline_publishes_four_nulls(tmp_path):
+def test_a_synthetic_baseline_publishes_nulls_throughout(tmp_path):
     _record_baseline()
 
     assert all(value is None for value in _outcome(tmp_path)["baseline"]["perf"].values())

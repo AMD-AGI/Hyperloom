@@ -442,7 +442,7 @@ async def test_structured_environment_alone_dispatches_geak_rebench(coordinator)
     ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
     assert params["geak_fallback"] is True
     assert ran.extra_envs == {"SGLANG_USE_AITER": "1"}
-    assert params["expected_cfg_hash"] == ran.fingerprint
+    assert params["expected_cfg_hash"] == effective_fingerprint(ran.extra_server_args, ran.extra_envs)
 
 
 @pytest.mark.asyncio
@@ -655,12 +655,21 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     st = c.shared_state
     st.benchmark_mode = "agentx"
     st.baseline_tput = 100.0
-    st.baseline_perf = {"total_throughput": 1000.0, "e2e_norm_intvty_p90": 30.0}
+    st.baseline_perf = {
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
+    }
     st.current_best = {
         "action": "explore",
         "tput": 110.0,
         "total_throughput": 1100.0,
         "e2e_norm_intvty_p90": 33.0,
+        "e2e_norm_intvty_p50": 33.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "extra_server_args": "--same-config",
         "extra_envs": {"SGLANG_USE_AITER": "1"},
     }
@@ -690,6 +699,9 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
                 "output_throughput": 120.0,
                 "total_throughput": 1200.0,
                 "e2e_norm_intvty_p90": 36.0,
+                "e2e_norm_intvty_p50": 36.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
             "winners": [],
         },
