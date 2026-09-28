@@ -208,6 +208,8 @@ def _split_labels(raw: str) -> dict[str, str]:
 _SERVER_METRICS_RELPATHS = (
     "aiperf_artifacts/server_metrics_export.jsonl",
     "*/aiperf_artifacts/server_metrics_export.jsonl",
+    "aiperf_artifacts/server_metrics_export.json",
+    "*/aiperf_artifacts/server_metrics_export.json",
 )
 
 #: aiperf's ``CreditPhase`` values, mapped onto ours. It has no notion of the accuracy eval or of boot, which is why the
@@ -264,6 +266,89 @@ def find_server_metrics_export(workspace: Any) -> Path | None:
     return None
 
 
+def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Rebuild scrape-like samples from AIPerf 0.12 aggregate JSON timeslices."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.debug("kv_metrics: could not read %s (%s)", path, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    blocks: list[tuple[str, Any]] = []
+    warmup = payload.get("warmup_metrics")
+    if isinstance(warmup, dict):
+        blocks.append(("warmup", warmup))
+    measured = payload.get("metrics")
+    if isinstance(measured, dict):
+        phase = _CREDIT_PHASE_NAMES.get(str(payload.get("metrics_phase") or "").lower(), "measured")
+        blocks.append((phase, measured))
+
+    cumulative: dict[tuple[str, str], float] = {}
+    rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
+    for phase, metrics in blocks:
+        for name, metric in metrics.items():
+            if not isinstance(metric, dict):
+                continue
+            metric_type = str(metric.get("type") or "").lower()
+            for series in metric.get("series") or []:
+                if not isinstance(series, dict):
+                    continue
+                labels = series.get("labels")
+                label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+                series_key = (str(name), canonical_label_key(label_map))
+                running = cumulative.get(series_key, 0.0)
+                for timeslice in series.get("timeslices") or []:
+                    if not isinstance(timeslice, dict):
+                        continue
+                    start = int(_number(timeslice.get("start_ns")) or 0)
+                    end = int(_number(timeslice.get("end_ns")) or 0)
+                    if end <= 0:
+                        continue
+                    if metric_type == "counter":
+                        delta = _number(timeslice.get("total"))
+                        if delta is None:
+                            continue
+                        running += delta
+                        value = running
+                    else:
+                        value = _number(timeslice.get("avg"))
+                        if value is None:
+                            continue
+                    rows.append((start, end, phase, str(name), label_map, value))
+                cumulative[series_key] = running
+
+    grouped: dict[tuple[int, int, str], ParsedFamilies] = {}
+    for start, end, phase, name, labels, value in rows:
+        grouped.setdefault((start, end, phase), {}).setdefault(name, []).append((labels, value))
+
+    out: list[tuple[KvSample, dict[str, Any], str | None]] = []
+    for (start, end, phase), families in sorted(grouped.items()):
+        families = families_from_aiperf_record(
+            {
+                name: [{"labels": labels, "value": value} for labels, value in samples]
+                for name, samples in families.items()
+            }
+        )
+        ts = end / 1e9
+        sample = sample_from_families(families, ts=ts, mono=ts)
+        if not sample.has_readings():
+            continue
+        out.append(
+            (
+                sample,
+                {
+                    "scrape_start_unix": start / 1e9,
+                    "scrape_end_unix": end / 1e9,
+                    "scrape_sec": round(max(0, end - start) / 1e9, 4),
+                },
+                phase,
+            )
+        )
+    return out
+
+
 def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
     """Read aiperf's scrape records as ``(sample, timing, phase)``, oldest first.
 
@@ -272,6 +357,9 @@ def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any
     one is why this source is preferred where it exists -- aiperf stamps the phase at collection time, from the process
     that owns the transition, so there is no lag between the boundary and the label and nothing to re-attribute.
     """
+    if path.suffix == ".json":
+        return _demote_premature_measured(_read_aiperf_aggregate_json(path))
+
     out: list[tuple[KvSample, dict[str, Any], str | None]] = []
     try:
         with path.open(encoding="utf-8") as handle:

@@ -975,6 +975,90 @@ def test_a_run_without_warmup_keeps_its_leading_profiling_records(tmp_path):
     assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["measured", "measured"]
 
 
+def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
+    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+        aggregate_series,
+        find_server_metrics_export,
+        read_aiperf_server_metrics,
+    )
+
+    artifact_dir = tmp_path / "aiperf_artifacts"
+    artifact_dir.mkdir()
+    path = artifact_dir / "server_metrics_export.json"
+    gauge = {
+        "type": "gauge",
+        "series": [
+            {
+                "labels": {"engine": "0"},
+                "timeslices": [
+                    {"start_ns": 1_000_000_000, "end_ns": 2_000_000_000, "avg": 0.25},
+                ],
+            }
+        ],
+    }
+    counter = {
+        "type": "counter",
+        "series": [
+            {
+                "labels": {"engine": "0"},
+                "timeslices": [
+                    {"start_ns": 1_000_000_000, "end_ns": 2_000_000_000, "total": 10},
+                ],
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "metrics_phase": "profiling",
+                "warmup_metrics": {
+                    "vllm:kv_cache_usage_perc": gauge,
+                    "vllm:prefix_cache_hits": counter,
+                },
+                "metrics": {
+                    "vllm:kv_cache_usage_perc": {
+                        **gauge,
+                        "series": [
+                            {
+                                "labels": {"engine": "0"},
+                                "timeslices": [
+                                    {
+                                        "start_ns": 3_000_000_000,
+                                        "end_ns": 4_000_000_000,
+                                        "avg": 0.5,
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    "vllm:prefix_cache_hits": {
+                        **counter,
+                        "series": [
+                            {
+                                "labels": {"engine": "0"},
+                                "timeslices": [
+                                    {
+                                        "start_ns": 3_000_000_000,
+                                        "end_ns": 4_000_000_000,
+                                        "total": 20,
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert find_server_metrics_export(tmp_path) == path
+    rows = read_aiperf_server_metrics(path)
+    assert [phase for _sample, _timing, phase in rows] == ["warmup", "measured"]
+    assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [0.25, 0.5]
+    assert aggregate_series(rows[-1][0].prefix_cache_hits) == 30.0
+
+
 def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     """On an AgentX round nothing pins ``PORT`` and vLLM binds its own 8000.
 
