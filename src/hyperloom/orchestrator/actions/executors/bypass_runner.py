@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import signal
@@ -160,8 +161,30 @@ def run_benchmark(
     if profile_dir:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-    server_log = workspace / "server.log"
-    base_url = f"http://127.0.0.1:{port}"
+    # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle, default SERVER_READY_TIMEOUT_SEC /
+    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the server-boot budget for lifecycle rounds.
+    sl = bench.get("server_lifecycle") or {}
+    r = _Round(
+        framework=framework,
+        model=model,
+        tp=tp,
+        port=port,
+        max_model_len=max_model_len_i,
+        profile=profile,
+        profile_dir=profile_dir,
+        bench_envs=bench_envs,
+        server_log=workspace / "server.log",
+        base_url=f"http://127.0.0.1:{port}",
+        timeout_s=timeout_s,
+        server_ready_timeout_s=_as_float(sl.get("server_ready_timeout_s"), timeout_s),
+        inferencex_root=inferencex_root,
+        conc=conc,
+        isl=isl,
+        osl=osl,
+        rrr=rrr,
+        workspace=workspace,
+        output_dir=output_dir,
+    )
 
     # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+ MAGPIE_RUN_PHASE=client) so the benchmark
     # targets a head-pod server instead of launching one locally. bypass mirrors that: no local server, client (+eval)
@@ -169,440 +192,205 @@ def run_benchmark(
     remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
     if remote_base_url:
         start = time.time()
-        rc = _run_client_and_eval(
-            inferencex_root=inferencex_root,
-            model=model,
-            base_url=remote_base_url,
-            isl=isl,
-            osl=osl,
-            conc=conc,
-            rrr=rrr,
-            profile=profile,
-            bench_envs=bench_envs,
-            workspace=workspace,
-            timeout_s=timeout_s,
-        )
-        return _finalize_report(
-            workspace=workspace,
-            framework=framework,
-            model=model,
-            server_log=server_log,
-            bench_envs=bench_envs,
-            start=start,
-            rc=rc,
-            profile=profile,
-        )
-
-    # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle, default SERVER_READY_TIMEOUT_SEC /
-    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the server-boot budget for lifecycle rounds.
-    sl = bench.get("server_lifecycle") or {}
-    server_ready_timeout = _as_float(sl.get("server_ready_timeout_s"), timeout_s)
+        return r.finalize(start, dataclasses.replace(r, base_url=remote_base_url).run_client())
 
     if phase == "server":
         if not pid_dir:
             _emit_failure(output_dir, framework, model, "phase=server requires pid_dir", workspace=workspace)
             return 2
-        return _run_server_phase(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len_i,
-            profile=profile,
-            profile_dir=profile_dir,
-            bench_envs=bench_envs,
-            server_log=server_log,
-            base_url=base_url,
-            server_ready_timeout_s=server_ready_timeout,
-            pid_dir=pid_dir,
-            workspace=workspace,
-            output_dir=output_dir,
-        )
+        return _run_server_phase(r, pid_dir=pid_dir)
 
     if phase == "client":
-        return _run_client_phase(
-            framework=framework,
-            model=model,
-            port=port,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-            rrr=rrr,
-            profile=profile,
-            bench_envs=bench_envs,
-            inferencex_root=inferencex_root,
-            base_url=base_url,
-            server_log=server_log,
-            timeout_s=timeout_s,
-            workspace=workspace,
-            pid_dir=pid_dir,
-            cleanup=cleanup,
-            start=time.time(),
-        )
+        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
 
     # YAML-driven lifecycle: run_grid injects benchmark.server_lifecycle (cleanup/pid_dir/port) and drives
     # warmup(cleanup=false)+measure(cleanup= true) as two identical calls, delegating phase choice to us.
     if phase == "all" and bool(sl.get("enabled")):
         sl_cleanup = bool(sl.get("cleanup", True))
         sl_pid_dir = str(sl.get("pid_dir") or workspace)
-        verdict = _server_reusable(base_url, sl_pid_dir, framework, port)
+        verdict = _server_reusable(r.base_url, sl_pid_dir, framework, port)
         if verdict == _REUSE:
             # A persistent server from a prior round is up AND ours: reuse it.
-            return _run_client_phase(
-                framework=framework,
-                model=model,
-                port=port,
-                conc=conc,
-                isl=isl,
-                osl=osl,
-                rrr=rrr,
-                profile=profile,
-                bench_envs=bench_envs,
-                inferencex_root=inferencex_root,
-                base_url=base_url,
-                server_log=server_log,
-                timeout_s=timeout_s,
-                workspace=workspace,
-                pid_dir=sl_pid_dir,
-                cleanup=sl_cleanup,
-                start=time.time(),
-            )
+            return _run_client_phase(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time())
         if verdict == _FOREIGN:
             # Healthy port but no pid/meta: a server we did not launch holds it.
-            _write_report(
-                workspace,
-                framework,
-                model,
-                False,
-                time.time(),
-                [f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"],
-                profiling_enabled=profile,
-            )
+            r.report_failure(time.time(), f"port {port} in use by a non-bypass server (no lifecycle pid/meta)")
             return 1
         # verdict == _BOOT: no server yet.
-        return _run_lifecycle_all(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len_i,
-            profile=profile,
-            profile_dir=profile_dir,
-            bench_envs=bench_envs,
-            server_log=server_log,
-            base_url=base_url,
-            timeout_s=timeout_s,
-            server_ready_timeout_s=server_ready_timeout,
-            pid_dir=sl_pid_dir,
-            cleanup=sl_cleanup,
-            inferencex_root=inferencex_root,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-            rrr=rrr,
-            workspace=workspace,
-            output_dir=output_dir,
-        )
+        return _run_lifecycle_all(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup)
 
     # phase == "all": start server, run client, always teardown.
-    server_env = _server_env(profile, profile_dir, bench_envs)
-    extra_args = _tokenize_extra_args(bench_envs, framework)
-    try:
-        server_cmd = bypass_engine.build_server_command(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len_i,
-            extra_args=extra_args,
-            profile_dir=profile_dir,
-            python_exe=sys.executable,
-            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
-        )
-    except ValueError as exc:
-        _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
+    server_cmd = r.server_command()
+    if server_cmd is None:
         return 2
-
     start = time.time()
-    server_proc = _launch_server(server_cmd, server_env, server_log)
+    server_proc = _launch_server(server_cmd, r.server_env(), r.server_log)
     try:
-        if not bypass_engine.wait_for_server_ready(
-            base_url, timeout_s=server_ready_timeout, server_exited=lambda: server_proc.poll() is not None
-        ):
-            _write_report(
-                workspace,
-                framework,
-                model,
-                False,
-                start,
-                ["server did not become ready"],
-                profiling_enabled=profile,
-            )
+        if not r.wait_ready(server_proc):
+            r.report_failure(start, "server did not become ready")
             return 1
-        rc = _run_client_and_eval(
-            inferencex_root=inferencex_root,
-            model=model,
-            base_url=base_url,
-            isl=isl,
-            osl=osl,
-            conc=conc,
-            rrr=rrr,
-            profile=profile,
-            bench_envs=bench_envs,
-            workspace=workspace,
-            timeout_s=timeout_s,
-        )
+        rc = r.run_client()
     finally:
         _terminate_server(server_proc)
-
-    return _finalize_report(
-        workspace=workspace,
-        framework=framework,
-        model=model,
-        server_log=server_log,
-        bench_envs=bench_envs,
-        start=start,
-        rc=rc,
-        profile=profile,
-    )
+    return r.finalize(start, rc)
 
 
-def _run_server_phase(
-    *,
-    framework,
-    model,
-    tp,
-    port,
-    max_model_len,
-    profile,
-    profile_dir,
-    bench_envs,
-    server_log,
-    base_url,
-    server_ready_timeout_s,
-    pid_dir,
-    workspace,
-    output_dir,
-) -> int:
-    """Start a persistent server, write pid/meta, and exit without teardown."""
-    server_env = _server_env(profile, profile_dir, bench_envs)
-    extra_args = _tokenize_extra_args(bench_envs, framework)
-    try:
-        server_cmd = bypass_engine.build_server_command(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len,
-            extra_args=extra_args,
-            profile_dir=profile_dir,
-            python_exe=sys.executable,
-            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _Round:
+    """One benchmark round's launch recipe, client workload and report location, resolved once from the config."""
+
+    framework: str
+    model: str
+    tp: int
+    port: int
+    max_model_len: int | None
+    profile: bool
+    profile_dir: str | None
+    bench_envs: dict[str, Any]
+    server_log: Path
+    base_url: str
+    timeout_s: float
+    server_ready_timeout_s: float
+    inferencex_root: str
+    conc: int
+    isl: int
+    osl: int
+    rrr: float
+    workspace: Path
+    output_dir: Path
+
+    def server_env(self) -> dict[str, str]:
+        return _server_env(self.profile, self.profile_dir, self.bench_envs)
+
+    def server_command(self) -> list[str] | None:
+        """The server launch command, or ``None`` after reporting why it cannot be built."""
+        try:
+            return bypass_engine.build_server_command(
+                framework=self.framework,
+                model=self.model,
+                tp=self.tp,
+                port=self.port,
+                max_model_len=self.max_model_len,
+                extra_args=_tokenize_extra_args(self.bench_envs, self.framework),
+                profile_dir=self.profile_dir,
+                python_exe=sys.executable,
+                framework_python=str(self.bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
+            )
+        except ValueError as exc:
+            _emit_failure(self.output_dir, self.framework, self.model, str(exc), workspace=self.workspace)
+            return None
+
+    def wait_ready(self, proc: subprocess.Popen) -> bool:
+        return bypass_engine.wait_for_server_ready(
+            self.base_url, timeout_s=self.server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
         )
-    except ValueError as exc:
-        _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
-        return 2
-    proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(
-        base_url, timeout_s=server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
-    ):
-        _terminate_server(proc)
+
+    def record_lifecycle(self, proc: subprocess.Popen, pid_dir: str) -> None:
+        """Write the pid/meta files a later round needs to recognise and reuse this server."""
+        try:
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            pgid = proc.pid
+        bypass_engine.write_lifecycle_files(
+            pid_dir=pid_dir,
+            framework=self.framework,
+            port=self.port,
+            pid=proc.pid,
+            pgid=pgid,
+            model=self.model,
+        )
+
+    def run_client(self) -> int:
+        return _run_client_and_eval(
+            inferencex_root=self.inferencex_root,
+            model=self.model,
+            base_url=self.base_url,
+            isl=self.isl,
+            osl=self.osl,
+            conc=self.conc,
+            rrr=self.rrr,
+            profile=self.profile,
+            bench_envs=self.bench_envs,
+            workspace=self.workspace,
+            timeout_s=self.timeout_s,
+        )
+
+    def report_failure(self, start: float, reason: str) -> None:
         _write_report(
-            workspace,
-            framework,
-            model,
-            False,
-            time.time(),
-            ["server did not become ready"],
-            profiling_enabled=profile,
+            self.workspace, self.framework, self.model, False, start, [reason], profiling_enabled=self.profile
         )
+
+    def finalize(self, start: float, rc: int) -> int:
+        return _finalize_report(
+            workspace=self.workspace,
+            framework=self.framework,
+            model=self.model,
+            server_log=self.server_log,
+            bench_envs=self.bench_envs,
+            start=start,
+            rc=rc,
+            profile=self.profile,
+        )
+
+
+def _run_server_phase(r: _Round, *, pid_dir: str) -> int:
+    """Start a persistent server, write pid/meta, and exit without teardown."""
+    server_cmd = r.server_command()
+    if server_cmd is None:
+        return 2
+    proc = _launch_server(server_cmd, r.server_env(), r.server_log)
+    if not r.wait_ready(proc):
+        _terminate_server(proc)
+        r.report_failure(time.time(), "server did not become ready")
         return 1
-    try:
-        pgid = os.getpgid(proc.pid)
-    except OSError:
-        pgid = proc.pid
-    bypass_engine.write_lifecycle_files(
-        pid_dir=pid_dir,
-        framework=framework,
-        port=port,
-        pid=proc.pid,
-        pgid=pgid,
-        model=model,
-    )
+    r.record_lifecycle(proc, pid_dir)
     # Do NOT terminate: the server stays up for the reuse client phase.
     return 0
 
 
-def _run_client_phase(
-    *,
-    framework,
-    model,
-    port,
-    conc,
-    isl,
-    osl,
-    rrr,
-    profile,
-    bench_envs,
-    inferencex_root,
-    base_url,
-    server_log,
-    timeout_s,
-    workspace,
-    pid_dir,
-    cleanup,
-    start,
-) -> int:
+def _run_client_phase(r: _Round, *, pid_dir: str | None, cleanup: bool, start: float) -> int:
     """Reuse a running server; run client (+eval); teardown when cleanup."""
     if not pid_dir:
-        _write_report(
-            workspace,
-            framework,
-            model,
-            False,
-            start,
-            ["phase=client requires pid_dir"],
-            profiling_enabled=profile,
-        )
+        r.report_failure(start, "phase=client requires pid_dir")
         return 1
-    verdict = _server_reusable(base_url, pid_dir, framework, port)
+    verdict = _server_reusable(r.base_url, pid_dir, r.framework, r.port)
     if verdict != _REUSE:
-        reason = (
+        r.report_failure(
+            start,
             "no healthy server to reuse"
             if verdict == _BOOT
-            else f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"
+            else f"port {r.port} in use by a non-bypass server (no lifecycle pid/meta)",
         )
-        _write_report(workspace, framework, model, False, start, [reason], profiling_enabled=profile)
         return 1
     try:
-        rc = _run_client_and_eval(
-            inferencex_root=inferencex_root,
-            model=model,
-            base_url=base_url,
-            isl=isl,
-            osl=osl,
-            conc=conc,
-            rrr=rrr,
-            profile=profile,
-            bench_envs=bench_envs,
-            workspace=workspace,
-            timeout_s=timeout_s,
-        )
+        rc = r.run_client()
     finally:
         if cleanup and pid_dir:
             from ._server_lifecycle import teardown_lifecycle_server
 
-            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-    return _finalize_report(
-        workspace=workspace,
-        framework=framework,
-        model=model,
-        server_log=server_log,
-        bench_envs=bench_envs,
-        start=start,
-        rc=rc,
-        profile=profile,
-    )
+            teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
+    return r.finalize(start, rc)
 
 
-def _run_lifecycle_all(
-    *,
-    framework,
-    model,
-    tp,
-    port,
-    max_model_len,
-    profile,
-    profile_dir,
-    bench_envs,
-    server_log,
-    base_url,
-    timeout_s,
-    server_ready_timeout_s,
-    pid_dir,
-    cleanup,
-    inferencex_root,
-    conc,
-    isl,
-    osl,
-    rrr,
-    workspace,
-    output_dir,
-) -> int:
+def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
     """Start + persist a server, run this round's client, teardown iff cleanup."""
-    server_env = _server_env(profile, profile_dir, bench_envs)
-    extra_args = _tokenize_extra_args(bench_envs, framework)
-    try:
-        server_cmd = bypass_engine.build_server_command(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len,
-            extra_args=extra_args,
-            profile_dir=profile_dir,
-            python_exe=sys.executable,
-            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
-        )
-    except ValueError as exc:
-        _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
+    server_cmd = r.server_command()
+    if server_cmd is None:
         return 2
     start = time.time()
-    proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(
-        base_url, timeout_s=server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
-    ):
+    proc = _launch_server(server_cmd, r.server_env(), r.server_log)
+    if not r.wait_ready(proc):
         _terminate_server(proc)
-        _write_report(
-            workspace,
-            framework,
-            model,
-            False,
-            start,
-            ["server did not become ready"],
-            profiling_enabled=profile,
-        )
+        r.report_failure(start, "server did not become ready")
         return 1
-    try:
-        pgid = os.getpgid(proc.pid)
-    except OSError:
-        pgid = proc.pid
-    bypass_engine.write_lifecycle_files(
-        pid_dir=pid_dir,
-        framework=framework,
-        port=port,
-        pid=proc.pid,
-        pgid=pgid,
-        model=model,
-    )
-    rc = _run_client_and_eval(
-        inferencex_root=inferencex_root,
-        model=model,
-        base_url=base_url,
-        isl=isl,
-        osl=osl,
-        conc=conc,
-        rrr=rrr,
-        profile=profile,
-        bench_envs=bench_envs,
-        workspace=workspace,
-        timeout_s=timeout_s,
-    )
+    r.record_lifecycle(proc, pid_dir)
+    rc = r.run_client()
     if cleanup:
         _terminate_server(proc)
         from ._server_lifecycle import teardown_lifecycle_server
 
-        teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-    return _finalize_report(
-        workspace=workspace,
-        framework=framework,
-        model=model,
-        server_log=server_log,
-        bench_envs=bench_envs,
-        start=start,
-        rc=rc,
-        profile=profile,
-    )
+        teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
+    return r.finalize(start, rc)
 
 
 def _run_scriptable_benchmark(
