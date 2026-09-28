@@ -1,9 +1,9 @@
 ---
-name: hyperloom-qwen3-14b-fp8-12h-atom
-description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM in an existing development environment or Docker.
+name: hyperloom-qwen3-14b-fp8-12h-atom-forge
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM with the per-kernel KernelForge backend instead of GEAK. Use when the user wants the ATOM demo and has asked for the forge kernel backend.
 ---
 
-# Hyperloom Qwen3-14B-FP8 12h Run (ATOM Framework)
+# Hyperloom Qwen3-14B-FP8 12h Run (ATOM Framework, Forge Kernel Backend)
 
 Load `.env` with the execution-shell preamble below and resolve
 `HYPERLOOM_SKILL_PATH`. Follow `@${HYPERLOOM_SKILL_PATH}`; if unset, use
@@ -11,6 +11,11 @@ Load `.env` with the execution-shell preamble below and resolve
 `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This ATOM variant
 uses the same workload and phase budgets as the
 [12h SGLang/vLLM example](../hyperloom-qwen3-14b-fp8-12h/SKILL.md).
+
+This is the [12h ATOM example](../hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md) with
+**one** difference: the KERNEL_AGENT phase runs the per-kernel KernelForge
+backend instead of GEAK. The workload, budget, and phase split are identical on
+purpose, so the two runs stay directly comparable.
 
 ## Run Mode
 
@@ -46,6 +51,7 @@ fi
 . "${INSTALL_SH%/*}/runtime_env.sh"
 load_dotenv_no_clobber
 export FRAMEWORK=atom
+export KERNEL_OPT_BACKEND_ORDER=forge
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 ```
 
@@ -145,11 +151,20 @@ that transport variable. Keep the initial configuration untuned; do not copy
 another GPU's block/KV settings or the final settings of a previous optimization.
 Persist `FRAMEWORK=atom` in `.env` only when requested.
 
-The KERNEL_AGENT phase runs GEAK, the same backend every other framework gets
-when the operator names none. Preserve an explicit `KERNEL_OPT_BACKEND_ORDER`
-from the caller or `.env` rather than clearing it; for the per-kernel KernelForge
-backend use the [12h ATOM forge
-example](../hyperloom-qwen3-14b-fp8-12h-atom-forge/SKILL.md).
+### Kernel Backend
+
+`KERNEL_OPT_BACKEND_ORDER=forge` in the [execution-shell
+preamble](#execution-shell) is the only switch this example needs, and it is what
+separates this run from the [12h ATOM
+example](../hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md). The opt-in is an **exact**
+match on `forge`; every other value, including unset and `forge,geak`, leaves GEAK
+owning the whole kernel phase. There is no backend CLI flag, so leaving the export
+out silently produces a GEAK run that looks like this demo but is not — confirm the
+value is actually set in the launching shell and report it before launch.
+
+Forge is included in Hyperloom; do not clone it or set `FORGE_PATH`. Preserve the
+selected agent provider and `FORGE_AGENT_CLI`; the runtime installer prepares and
+checks that CLI unconditionally, because the backend is chosen per session.
 
 ### Selected Python and Setup
 
@@ -293,9 +308,10 @@ grep -o '"framework": *"[^"]*"' "$SESSION_DIR/state.json"
 grep -o '"kernel_optimizer": *"[^"]*"' "$SESSION_DIR/state.json"
 ```
 
-Expect `atom` and `geak`. Report mismatches without silently replacing the
-session. On requested checks report process state, phase, accepted
-throughput/gain and the latest business outcome, not just heartbeats.
+Expect `atom` and `forge`. A recorded `geak` means the export did not reach the
+launching shell: report the mismatch without silently replacing the session. On
+requested checks report process state, phase, accepted throughput/gain and the
+latest business outcome, not just heartbeats.
 
 At completion, report final throughput/gain and accuracy evidence, the final
 report path, stop reason, incomplete phases, and this session's process/GPU state.
