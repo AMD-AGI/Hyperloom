@@ -60,6 +60,7 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1
+    assert ps.replay_next_phase(evidence["predicate_inputs"]) == nxt
 
 
 def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():

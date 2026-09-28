@@ -33,6 +33,8 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
+    critic_review_target,
+    orchestration_runs_on_codex,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -367,9 +369,7 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
-    from hyperloom.common.env import forge_explicitly_enabled
-
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -384,33 +384,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    # The kernel phase runs on atom, but GEAK -- the backend everything else
-    # defaults to -- does not produce kernel candidates there: its extraction step
-    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
-    # default phase split gives the kernel phase half the session, defaulting to
-    # GEAK on atom means defaulting to half a session of nothing. forge is the
-    # backend that works here, so on atom it is the default rather than an opt-in
-    # the operator has to know about.
-    #
-    # Only an unset value is filled in. An operator who named a backend keeps it:
-    # running GEAK on atom on purpose, to measure exactly this, stays possible.
-    if not getattr(args, "no_kernel", False):
-        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
-            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
-            print(
-                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
-                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
-            )
-        elif not forge_explicitly_enabled():
-            print(
-                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
-                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
-                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
-                "a rewrite seam -- it has to resolve one from the live server, which "
-                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
-                "to skip the phase.",
-                file=sys.stderr,
-            )
     return auto_disabled
 
 
@@ -768,7 +741,7 @@ def _resolve_models_for_run(
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
-        _smoke_test_codex_model(args, resolved_urls, required=True)
+        _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
@@ -776,24 +749,80 @@ def _resolve_models_for_run(
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-    elif not claude_follows_codex:
-        # Codex smoke probes the OpenAI side independently (split entrypoints).
-        _smoke_test_codex_model(args, resolved_urls)
+
+    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+
+
+_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
+
+    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
+    fallback model: a review path that fails every call must stop the launch rather than run a session without a
+    critic.
+    """
+    if _resolve_critic_choice(args) != "agent":
+        return
+    try:
+        protocol, model = critic_review_target(
+            args.critic_protocol,
+            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    model=model,
+                    messages=messages,
+                    max_tokens=16,
+                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    component="critic",
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
+                    component="critic",
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            last_error = exc
+            continue
+        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
+        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
-    *,
-    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts."""
-    if not required:
-        if _codex_model_should_follow_claude():
-            return
-        if args.critic_backend != "agent":
-            return
+    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
+    Steps down the ladder before Coordinator starts.
+    """
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -832,8 +861,7 @@ def _smoke_test_codex_model(
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
         f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
-        f"avoid the Codex path entirely."
+        f"{list(_CODEX_FALLBACK_MODELS)})."
     )
 
 

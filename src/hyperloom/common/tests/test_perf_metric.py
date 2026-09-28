@@ -382,3 +382,25 @@ def test_graded_axes_publish_the_display_figures():
     assert (axes["tpot_p50_ms"], axes["tpot_p90_ms"]) == (18.0, 34.0)
     for key in (GRADED_OUTPUT_PER_GPU, "ttft_p50_ms", "ttft_p90_ms", "tpot_p50_ms", "tpot_p90_ms"):
         assert key in GRADED_AXIS_KEYS
+
+
+def test_the_comparability_inputs_are_published_axes():
+    """A verdict SBD cannot re-derive is a verdict nobody can audit.
+
+    ``rounds_are_comparable`` refuses a pair on these two, so publishing the objective and its guards while
+    omitting them leaves a reader unable to tell a REVERT on the objective from one on a drifted window.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_AXIS_KEYS,
+        GRADED_DURATION,
+        GRADED_ERROR_RATE,
+        graded_axes_of,
+    )
+
+    axes = graded_axes_of({**_BASELINE, GRADED_DURATION: 3600.0, GRADED_ERROR_RATE: 0.0})
+    assert GRADED_DURATION in GRADED_AXIS_KEYS
+    assert GRADED_ERROR_RATE in GRADED_AXIS_KEYS
+    assert axes[GRADED_DURATION] == 3600.0
+    # Zero errors is a measured fact, not a missing one: coalescing it away would publish the clean round and the
+    # unreported round as the same thing.
+    assert axes[GRADED_ERROR_RATE] == 0.0

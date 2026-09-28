@@ -332,13 +332,7 @@ def _atom_default_grid(
     return variants
 
 
-def _xdit_default_grid(
-    *,
-    model_class: str,
-    conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
-) -> list[GridVariant]:
+def _xdit_default_grid(*, model_class: str) -> list[GridVariant]:
     """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
     variants: list[GridVariant] = []
 
@@ -419,12 +413,7 @@ def _default_grid_for_framework(
             osl=osl,
         )
     if fw == "xdit":
-        return _xdit_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
+        return _xdit_default_grid(model_class=model_class)
     return []
 
 

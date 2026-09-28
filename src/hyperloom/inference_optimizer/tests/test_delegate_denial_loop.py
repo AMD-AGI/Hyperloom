@@ -52,6 +52,7 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
             kind="long_running",
             params={"x": 1},
             idempotency_key="dup-key-1",
+            dispatch_class="llm",
         )
         await c.tasks.transition(first.task_id, "running", evidence={})
         await c.tasks.transition(first.task_id, "succeeded", evidence={})
@@ -72,6 +73,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
             kind="long_running",
             params={"x": 1},
             idempotency_key="dup-key-run",
+            dispatch_class="llm",
         )
         before = len(await c.tasks.by_state("queued"))
         await c._handle_delegate("orchestration", _delegate(key="dup-key-run"))
@@ -128,6 +130,46 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
         )
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_records_target_proposal_message_id(session_dir):
+    from hyperloom.inference_optimizer.breakdown.exporter import build
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    coordinator = _silent_coordinator(session_dir)
+    coordinator.shared_state.phase = "PRELUDE"
+    coordinator.shared_state.macro_cycle = 0
+    try:
+        with session_scope(session_dir):
+            phase_event.record_entry(phase="PRELUDE", macro_cycle=0, sequence=1)
+            intent = Intent(
+                type=IntentType.DELEGATE,
+                payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
+            )
+            await coordinator._record_policy_denied(
+                "orchestration",
+                intent,
+                PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
+            )
+            phase_event.record_exit(
+                phase="PRELUDE",
+                macro_cycle=0,
+                to_phase="CLOSE",
+                reason="prelude_baseline_failed",
+                evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+            )
+        breakdown = build(session_dir)
+    finally:
+        await coordinator.stop()
+
+    event = next(row for row in breakdown["timeline"] if row["type"] == "phase")
+    denial = event["ext"]["denials"]["rows"][0]
+    assert denial["proposal_msg_id"] == "proposal-42"
+    assert denial["rule"] == "phase_action_not_allowed"
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,35 @@ class Recipe:
     compile_pass_note: str = ""
     # Which mechanism located ``source_file``.
     source_resolution_note: str = ""
+    # Further framework files this ONE fusion also has to edit. A chain is regularly
+    # split across a model file, the runtime it delegates to, and the selector that
+    # picks a kernel, and delivering only the call-site edit leaves it unwired. Only
+    # repo-scope discovery fills this in; every other path leaves it empty, so the
+    # single-file behaviour is unchanged by construction.
+    extra_files: list[str] = field(default_factory=list)
+    # The GPU kernels the trace actually recorded around the anchor, as
+    # ``{"anchor": str, "before": [...], "after": [...], "span": [...]}``. This is
+    # the only ground truth about WHICH framework code path runs: a source file can
+    # define several implementations of the same chain and export plausible names for
+    # all of them, so a reference picked by name is a guess until its launches are
+    # matched against these. Empty for non-anchored discovery, which has no single
+    # pinned neighbourhood to compare against.
+    trace_kernels: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def edit_files(self) -> list[str]:
+        """Every framework file this fusion edits, the call site first.
+
+        Downstream stages (snapshot, index, export, wiring check, cleanup) each used
+        to derive their own file set from ``source_file`` alone. They read this
+        instead so a multi-file fusion cannot be half-tracked by one of them and
+        fully tracked by another.
+        """
+        files = [self.source_file] if self.source_file else []
+        for path in self.extra_files:
+            if path and path not in files:
+                files.append(path)
+        return files
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +126,7 @@ class Recipe:
             "description": self.description,
             "env_flag": self.env_flag,
             "source_file": self.source_file,
+            "extra_files": list(self.extra_files),
             "source_hints": list(self.source_hints),
             "fusion_math": self.fusion_math,
             "eager_reference_hint": self.eager_reference_hint,
@@ -113,6 +143,7 @@ class Recipe:
             "compile_pass_flag": self.compile_pass_flag,
             "compile_pass_note": self.compile_pass_note,
             "source_resolution_note": self.source_resolution_note,
+            "trace_kernels": dict(self.trace_kernels),
         }
 
 
@@ -131,6 +162,11 @@ class ValidationResult:
     # Whether anything compared the fused path against eager. When this is False,
     # ``correctness_passed`` records an absence of evidence, not a parity failure.
     correctness_measured: bool = True
+    # GPU kernel launches per decode step on each arm, over the whole step rather
+    # than the replaced chain. ``None`` means the harness could not count them,
+    # which leaves the launch gate unverified rather than passed.
+    eager_launches: Optional[int] = None
+    fused_launches: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +179,8 @@ class ValidationResult:
             "kernel_speedup": self.kernel_speedup,
             "eager_us": self.eager_us,
             "fused_us": self.fused_us,
+            "eager_launches": self.eager_launches,
+            "fused_launches": self.fused_launches,
             "kept": self.kept,
             "note": self.note,
         }

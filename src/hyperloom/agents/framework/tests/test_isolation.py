@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.isolation (disk preflight + cleanup)."""
+"""Tests for hyperloom.agents.framework.isolation (disk preflight)."""
 
 from __future__ import annotations
 
@@ -12,110 +12,39 @@ import pytest
 
 from hyperloom.agents.framework.isolation import (
     DiskPreflightError,
-    WorkspacePaths,
-    cleanup_workspace,
     disk_preflight,
 )
 
 
 def test_disk_preflight_passes_when_enough_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A 1GB floor is easily satisfied by a normal scratch mount."""
-    monkeypatch.delenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", raising=False)
-    disk_preflight(tmp_path / "wd", n_candidates=2, min_free_gb=0.001)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "0.001")
+    disk_preflight(tmp_path / "wd", n_candidates=2)
 
 
 def test_disk_preflight_raises_when_short(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Floor higher than available free GB triggers DiskPreflightError."""
-    monkeypatch.delenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", raising=False)
     usage = shutil.disk_usage(str(tmp_path))
     impossible_gb = (usage.free / (1024**3)) + 10_000
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", str(impossible_gb))
     with pytest.raises(DiskPreflightError) as exc:
-        disk_preflight(tmp_path / "wd", n_candidates=1, min_free_gb=impossible_gb)
+        disk_preflight(tmp_path / "wd", n_candidates=1)
     assert "insufficient disk" in str(exc.value)
     assert "required" in str(exc.value)
 
 
 def test_disk_preflight_n_candidates_scales_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """required = max(floor, n * per_candidate) — large n breaches a low floor."""
-    monkeypatch.delenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", raising=False)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "0.001")
     usage = shutil.disk_usage(str(tmp_path))
     free_gb = usage.free / (1024**3)
     n = int(free_gb / 1.5) + 50
     with pytest.raises(DiskPreflightError):
-        disk_preflight(
-            tmp_path / "wd",
-            n_candidates=n,
-            min_free_gb=0.001,
-            per_candidate_gb=1.5,
-        )
+        disk_preflight(tmp_path / "wd", n_candidates=n, per_candidate_gb=1.5)
 
 
 def test_disk_preflight_env_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """FRAMEWORK_EXPLORER_DISK_MIN_GB is consulted when explicit is None."""
+    """FRAMEWORK_EXPLORER_DISK_MIN_GB sets the floor."""
     monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "999999")
     with pytest.raises(DiskPreflightError):
         disk_preflight(tmp_path / "wd", n_candidates=1)
-
-
-def test_cleanup_workspace_removes_loser(tmp_path: Path) -> None:
-    """Non-winner with keep_winner_only=True has worktree+venv removed."""
-    candidate_dir = tmp_path / "candidates" / "01_pr1"
-    worktree = candidate_dir / "worktree"
-    venv = candidate_dir / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    (candidate_dir / "pr.patches").write_text("placeholder")
-    (worktree / "src.py").write_text("x = 1")
-    ws = WorkspacePaths(candidate_dir, worktree, venv)
-    cleanup_workspace(ws, is_winner=False, keep_winner_only=True)
-    assert not worktree.exists()
-    assert not venv.exists()
-    assert (candidate_dir / "pr.patches").exists()
-
-
-def test_cleanup_workspace_keeps_winner(tmp_path: Path) -> None:
-    """Winner is preserved even with keep_winner_only=True."""
-    candidate_dir = tmp_path / "candidates" / "01_pr1"
-    worktree = candidate_dir / "worktree"
-    venv = candidate_dir / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    ws = WorkspacePaths(candidate_dir, worktree, venv)
-    cleanup_workspace(ws, is_winner=True, keep_winner_only=True)
-    assert worktree.exists()
-    assert venv.exists()
-
-
-def test_cleanup_workspace_noop_when_policy_off(tmp_path: Path) -> None:
-    """keep_winner_only=False is a no-op even for losers (legacy behaviour)."""
-    candidate_dir = tmp_path / "candidates" / "01_pr1"
-    worktree = candidate_dir / "worktree"
-    venv = candidate_dir / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    ws = WorkspacePaths(candidate_dir, worktree, venv)
-    cleanup_workspace(ws, is_winner=False, keep_winner_only=False)
-    assert worktree.exists()
-    assert venv.exists()
-
-
-def test_cleanup_workspace_swallows_oserror(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Cleanup is best-effort: shutil.rmtree failure is logged, not raised."""
-    candidate_dir = tmp_path / "candidates" / "01_pr1"
-    worktree = candidate_dir / "worktree"
-    venv = candidate_dir / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-
-    def boom(*a, **kw):
-        raise OSError("simulated disk error")
-
-    monkeypatch.setattr("hyperloom.agents.framework.isolation.shutil.rmtree", boom)
-    ws = WorkspacePaths(candidate_dir, worktree, venv)
-    cleanup_workspace(ws, is_winner=False, keep_winner_only=True)
-    # rmtree is stubbed, so dirs still exist and no exception escapes.
-    assert worktree.exists()

@@ -1350,6 +1350,19 @@ under Cursor, whose background shell can die on SSH disconnect. Reconcile the
 file afterwards all the same: `$!` may be a setsid wrapper that exits immediately,
 not the optimizer PID.
 
+**Docker.** Do **not** wrap this launch in `docker exec -d`. Detached exec
+discards stdout and stderr, so an optimizer that dies on startup looks like
+"backgrounding failed." Run one attached
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc` that runs
+this same launch block. Preflight loads `kernel-agent.env.sh`; do not source
+it. Under Claw, hand that attached exec to the bash tool with
+`run_in_background=true` and no `setsid`, `nohup`, or trailing `&`. Everywhere
+else, the command inside the exec is the `setsid nohup … > "$RUN_LOG" 2>&1 <
+/dev/null &` recipe (plus `--launch-info-file`). Confirm with
+`pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If launch-info has no
+`.session_dir`, read `$RUN_LOG` and fix that error; do not retry with a
+different backgrounding trick.
+
 **Why the difference is load-bearing under Claw.** `setsid nohup ... &` detaches
 the run from everything, including the platform. The sandbox is deleted once
 `lastActivity + 15m` passes, `lastActivity` only moves for traffic through the

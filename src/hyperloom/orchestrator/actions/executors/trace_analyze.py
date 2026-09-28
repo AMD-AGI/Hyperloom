@@ -23,6 +23,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from .._recorder_trace import trace_recording_skipped
+from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
 
@@ -401,6 +402,9 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
+        # The tool's SDK run books its model requests onto this session's trajectory ledger.
+        for key, value in inherited_scope_fields().items():
+            cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
     elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
         cmd += ["--require-single-rank"]
         try:

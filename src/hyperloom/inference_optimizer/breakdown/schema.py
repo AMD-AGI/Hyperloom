@@ -142,9 +142,14 @@ class V6MetadataLangfuse(TypedDict, total=False):
 class V6GradedAxes(TypedDict, total=False):
     """The axes an AgentX measurement is ranked and reported on.
 
-    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``, which is not a
-    member here -- the verdict reads it off the measurement, not off this block. ``output_tput_per_gpu`` is the
-    frontier's y axis and the latency percentiles are the detail view: reported, never graded.
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
+    member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
+    axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
+    never graded. ``total_throughput`` is reported for continuity and no longer enters any verdict.
+
+    ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
+    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
+    published without them cannot be re-derived from this record.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
@@ -161,6 +166,8 @@ class V6GradedAxes(TypedDict, total=False):
     ttft_p90_ms: float | None
     tpot_p50_ms: float | None
     tpot_p90_ms: float | None
+    duration_seconds: float | None
+    request_error_rate: float | None
 
 
 class V6GradingTputGuard(TypedDict, total=False):
@@ -192,6 +199,19 @@ class V6Grading(TypedDict, total=False):
     tput_guard: V6GradingTputGuard
 
 
+class V6WorkflowMetadata(TypedDict, total=False):
+    """Identity and frozen action surfaces for deterministic workflow replay."""
+
+    workflow_contract_version: str
+    contract_digest: str
+    run_flags: dict[str, Any]
+    phase_actions: dict[str, list[str]]
+    llm_proposable_actions: dict[str, list[str]]
+    coordinator_internal_actions: list[str]
+    coordinator_reserved_actions: dict[str, list[str]]
+    kernel_lane_task_kinds: list[str]
+
+
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint."""
 
@@ -201,6 +221,7 @@ class V6Metadata(TypedDict, total=False):
     task_config: V6TaskConfig
     grading: V6Grading
     langfuse: V6MetadataLangfuse
+    workflow: V6WorkflowMetadata
     warnings: list[str]
 
 
@@ -309,6 +330,10 @@ class V6TimelineEvent(TypedDict, total=False):
     type: str
     kind: str
     status: str
+    process_status: str
+    business_outcome: str | None
+    failure: dict[str, Any] | None
+    blocked_by: str | None
     start_time: str
     end_time: str
     id: str
@@ -1199,6 +1224,9 @@ class V6PhaseAction(TypedDict, total=False):
     phase: str
     macro_cycle: int
     tick: int
+    dispatch_class: Literal["llm", "coordinator", "inline"]
+    allowed: bool
+    denial_rule: str | None
     dispatched_at: str
     dispatched_unix: float | None
     status: str
@@ -1217,6 +1245,18 @@ class V6PhaseMarker(TypedDict, total=False):
     reason: str
     evidence: dict[str, Any]
     ts: str
+
+
+class V6PhaseDenial(TypedDict, total=False):
+    """One author-time PolicyGate refusal in the phase where it happened."""
+
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    phase: str
+    rule: str
+    hint: str
+    denied_at: str
 
 
 class V6PhaseProposalReview(TypedDict, total=False):
@@ -1301,6 +1341,7 @@ class V6PhaseExt(TypedDict, total=False):
     actions: dict[str, Any]
     markers: dict[str, Any]
     proposals: dict[str, Any]
+    denials: dict[str, Any]
 
 
 class V6StackAdoption(TypedDict, total=False):
@@ -2513,6 +2554,7 @@ class V6KernelExt(TypedDict, total=False):
     in_flight_stage: str | None
     duration_sec: float | None
     entry: V6KernelEntry
+    failure: dict[str, Any] | None
     attempts: list[V6KernelAttempt]
     rebench: list[V6KernelRebenchAttempt]
     integrate: list[V6KernelIntegrateRun]

@@ -36,7 +36,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 from ._xdit_patcher import verify_xdit_profiler_baked
-from .baseline import BaselineExecutor
+from .baseline import BenchmarkRunExecutor
 
 
 log = logging.getLogger(__name__)
@@ -803,10 +803,9 @@ def _default_profile_config() -> Path:
     return asset_root() / "assets" / "configs" / name
 
 
-class ProfileExecutor(BaselineExecutor):
-    """Subclass that swaps the default config + extracts trace_dir."""
+class ProfileExecutor(BenchmarkRunExecutor):
+    """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
-    benchmark_watchdog = False
     # The compatibility client is diagnostic evidence only. Baseline/grid
     # materialization keeps the default False and therefore cannot silently
     # downgrade a native AgentX measurement into this path.
@@ -839,12 +838,8 @@ class ProfileExecutor(BaselineExecutor):
         # checks ship alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
-    def _resolve_sink(self, ctx) -> Any:
-        """Decline the baseline event a profile run must never open."""
-        return None
-
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Pick the profile yaml for $FRAMEWORK."""
         return _default_profile_config()
 
     def _agentx_profile_compatibility_error(self, shared_state: Any) -> str:
@@ -1418,7 +1413,7 @@ class ProfileExecutor(BaselineExecutor):
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Stash so BaselineExecutor.__call__ picks it up via ctx.extra.
+            # Stash so the benchmark round picks it up via ctx.extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
                 extra = ctx.extra
@@ -1456,7 +1451,7 @@ class ProfileExecutor(BaselineExecutor):
         )
 
         # Multi-node only: pre-restart the server with this round's profiler dir, marking
-        # ``ctx.extra['mn_round_restarted']`` so BaselineExecutor skips a second restart.
+        # ``ctx.extra['mn_round_restarted']`` so the benchmark round skips a second restart.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
         if round_trace_root and agentx_session:
             return {

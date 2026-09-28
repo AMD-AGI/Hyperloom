@@ -184,9 +184,12 @@ run:
   existing ATOM/ROCm Python environment, even if that platform is a container
   (no additional Docker). Setup uses `--install-framework none
   --frameworks atom --require-frameworks`, first with `--check-only` and then
-  with approval if setup is needed. The CLI defaults to KernelForge when no
-  backend is selected; explicit choices are preserved, with a warning and
-  confirmation for GEAK's unproven ATOM rewrite-seam path.
+  with approval if setup is needed. The KERNEL_AGENT phase runs GEAK, the same
+  backend the other frameworks get when none is named.
+- [`12h atom forge`](hyperloom-qwen3-14b-fp8-12h-atom-forge/SKILL.md) — the ATOM
+  run with `KERNEL_OPT_BACKEND_ORDER=forge`, so the KERNEL_AGENT phase is the
+  per-kernel KernelForge backend. Same workload, budget and phase split as
+  `12h atom`, so the two are directly comparable.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.

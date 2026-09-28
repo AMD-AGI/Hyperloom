@@ -101,12 +101,25 @@ def forge_loop_prompts(monkeypatch):
 # says a fused time may be omitted only alongside "skipped": true, and that the
 # driver anchors the pristine run on the eager time instead of failing it.
 # Diffed line by line -- six added lines and one rewrapped, nothing else moved.
+# The launch-count gate moved fusion alone, in four places of the one rendering
+# (diffed line by line, nothing else changed): rule 3 gained the NET-count
+# requirement, the harness contract gained a counting step plus the two
+# `*_launches` JSON fields and the rule that gates on them, the baseline-run note
+# says the gate is exempt there, and the ATTEMPT template reports both counts.
+# The contract text reaches this prompt through prompt_utils, so a future edit to
+# harness_contract.py will move this hash without fusion/prompts.py changing.
+# The eager-arm provenance gate moved fusion alone again, all of it inside the
+# harness contract (diffed line by line): steps 1-3 now require the eager arm to be
+# traced from the real forward pass, proved against the recorded kernels with the
+# profiler, and the fused arm to be one call to the authored entry point; the JSON
+# object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
+# the remaining steps are the same text renumbered 6-8.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
     "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
-    "fusion": "b91533ecbee89effa8a97cc0491977cbe4ed3c0a5b1724b020793d85e66dc312",
+    "fusion": "ba64788affecf7a6ca101785425e5bba94250f72eb1150f35b6de518a6ba11bb",
     "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
     "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
     "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",

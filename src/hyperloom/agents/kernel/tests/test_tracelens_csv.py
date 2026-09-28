@@ -1132,9 +1132,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         _os.environ.update(env_backup)
 
     assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
-    assert all(
-        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p) for cmd in captured for p in cmd
-    ), f"splitter must not run on CPU-only trace; captured={captured}"
+    assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
+        f"splitter must not run on CPU-only trace; captured={captured}"
+    )
     assert all(
         "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
     ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
@@ -1191,6 +1191,192 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
     assert res.runner == "claude_agent_sdk"
+
+
+def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    @dataclass
+    class StreamEvent:
+        event: dict[str, Any]
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class ToolUseBlock:
+        id: str
+        name: str
+        input: dict[str, Any]
+
+    @dataclass
+    class ToolResultBlock:
+        tool_use_id: str
+        content: str
+        is_error: bool = False
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+        message_id: str
+        model: str = "claude-tl"
+        parent_tool_use_id: str | None = None
+
+    @dataclass
+    class UserMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+    session_dir = tmp_path / "session"
+    captured: dict[str, Any] = {}
+    usage = {"input_tokens": 12, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 0, "output_tokens": 7}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        start = {"id": "msg_1", "model": "claude-tl", "usage": {"input_tokens": 12, "cache_read_input_tokens": 300}}
+        yield StreamEvent({"type": "message_start", "message": start})
+        yield StreamEvent({"type": "content_block_delta"})
+        yield StreamEvent(
+            {"type": "message_delta", "usage": {"output_tokens": 7}, "delta": {"stop_reason": "tool_use"}}
+        )
+        yield StreamEvent({"type": "message_stop"})
+        yield AssistantMessage(content=[ToolUseBlock("tu1", "Bash", {"command": "ls"})], message_id="msg_1")
+        yield UserMessage(content=[ToolResultBlock("tu1", "ok")])
+        yield ResultMessage(usage=usage)
+
+    with tt.trajectory_scope(session_dir=session_dir, component="tracelens", task_id="t-tl", parent_span_id="t-tl"):
+        asyncio.run(
+            tlr.run_tracelens_skill(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+                budget_minutes=1,
+                model="claude-tl",
+                sdk_query_factory=_fake_query,
+                sdk_options_cls=_FakeOptions,
+            )
+        )
+
+    assert captured["options"]["include_partial_messages"] is True
+    rows = tt.load_events(session_dir)
+    calls = [row for row in rows if row["event_type"] == tt.EVENT_LLM_CALL]
+    assert [row["status"] for row in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"], call["parent_span_id"]) == (
+        "tracelens",
+        "tracelens",
+        "t-tl",
+        "t-tl",
+    )
+    assert call["call_id"]
+    assert {key: call["attributes"][key] for key in usage} == usage
+    assert call["attributes"]["model"] == "claude-tl"
+
+    (request,) = [row for row in rows if row["event_type"] == tt.EVENT_LLM_REQUEST]
+    assert request["parent_span_id"] == call["span_id"]
+    assert request["call_id"] == call["call_id"]
+    assert request["component"] == "tracelens"
+    assert request["attributes"]["output_tokens"] == 7
+    assert request["attributes"]["cache_read_input_tokens"] == 300
+
+    (tool,) = [row for row in rows if row["event_type"] == tt.EVENT_TOOL]
+    assert tool["attributes"]["name"] == "Bash"
+    assert tool["parent_span_id"] == request["span_id"]
+
+
+def test_trajectory_scope_restores_the_launchers_join_keys(tmp_path):
+    import argparse
+    import contextlib
+
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    unset = argparse.Namespace(
+        trajectory_session_dir="",
+        trajectory_phase="",
+        trajectory_tick=None,
+        trajectory_task_id="",
+        trajectory_parent_span_id="",
+    )
+    assert isinstance(tla._trajectory_scope(unset), contextlib.nullcontext)
+
+    launched = argparse.Namespace(
+        trajectory_session_dir=str(tmp_path),
+        trajectory_phase="roofline",
+        trajectory_tick=4,
+        trajectory_task_id="t-roof",
+        trajectory_parent_span_id="span-roof",
+    )
+    with tla._trajectory_scope(launched):
+        ctx = tt.current_context()
+    assert (ctx.session_dir, ctx.component, ctx.agent, ctx.phase, ctx.tick, ctx.task_id, ctx.parent_span_id) == (
+        tmp_path,
+        "tracelens",
+        "tracelens",
+        "roofline",
+        4,
+        "t-roof",
+        "span-roof",
+    )
+
+
+def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class ResultMessage:
+        usage: dict[str, Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield ResultMessage(usage={"input_tokens": 1, "output_tokens": 1})
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    assert res.report_path.exists()
+    assert "tracelens_agent_sdk_error" not in res.artifact_paths
+    assert not list(tmp_path.rglob("trajectory"))
 
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
@@ -1677,7 +1863,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# splitter CLI must match the real split_inference_trace_annotation interface (positional trace_path, -o,
+# splitter CLI must match the real TraceLens.TraceUtils.split_trace.main interface (positional trace_path, -o,
 # --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
@@ -1906,7 +2092,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
@@ -2039,7 +2225,7 @@ def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc
     assert len(probes) == 1
     assert probes[0][0] == sys.executable
     assert "import TraceLens" in probes[0][-1]
-    assert "split_inference_trace_annotation" in probes[0][-1]
+    assert "split_trace.main" in probes[0][-1]
     splitter = _find_splitter_cmd(captured)
     if dependency_rc:
         assert splitter is None
@@ -2053,7 +2239,7 @@ def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc
 
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
+        (c for c in captured if "TraceLens.TraceUtils.split_trace.main" in c),
         None,
     )
 

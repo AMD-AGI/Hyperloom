@@ -5643,7 +5643,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "9fc0dc6487bde554c6ed314a15b61022e5ec62ea"
+_TRACELENS_REF_DEFAULT = "e34b29496936dc8af27c1269138878f1d4b414b3"
 
 
 def _default_tracelens_root() -> Path:
@@ -6727,6 +6727,28 @@ def _default_workspace_path() -> str:
     return workspace_root()
 
 
+def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
+    """Scope the SDK run to the launching session's trajectory ledger, when the launcher named one.
+
+    ``asyncio.run`` copies the calling context into its main task, so the scope reaches the run's coroutine.
+    """
+    if not args.trajectory_session_dir:
+        return contextlib.nullcontext()
+    try:
+        from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
+    except ImportError:  # pragma: no cover - an installed hyperloom predating the ledger
+        return contextlib.nullcontext()
+    return trajectory_scope(
+        session_dir=Path(args.trajectory_session_dir),
+        component="tracelens",
+        agent="tracelens",
+        phase=args.trajectory_phase or None,
+        tick=args.trajectory_tick,
+        task_id=args.trajectory_task_id or None,
+        parent_span_id=args.trajectory_parent_span_id or None,
+    )
+
+
 def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
@@ -6849,6 +6871,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
+    # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
+    parser.add_argument("--trajectory-session-dir", default="")
+    parser.add_argument("--trajectory-phase", default="")
+    parser.add_argument("--trajectory-tick", type=int, default=None)
+    parser.add_argument("--trajectory-task-id", default="")
+    parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
     default_llm_orchestrator = os.environ.get(
         "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
@@ -6890,8 +6918,7 @@ def main() -> int:
         default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
         help=(
             "Number of steady-state iterations for the splitter to extract "
-            "(#127). Maps to --num-steps on TraceLens.TraceUtils."
-            "split_inference_trace_annotation."
+            "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
         ),
     )
     parser.add_argument(
@@ -6909,7 +6936,7 @@ def main() -> int:
         default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
         help=(
             "OSL window ratio R for the splitter (#194 §3). Maps to "
-            "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
+            "--R on TraceLens.TraceUtils.split_trace.main. "
             "Pairs with --CONC / --OSL so mixed-window selection uses the "
             "benchmark-contract PD ratio instead of an empirical default. "
             "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
@@ -7273,7 +7300,7 @@ def main() -> int:
                 [
                     sys.executable,
                     "-c",
-                    "import TraceLens; import TraceLens.TraceUtils.split_inference_trace_annotation",
+                    "import TraceLens; import TraceLens.TraceUtils.split_trace.main",
                 ],
                 cwd=tl_root,
                 log_path=log_path,
@@ -7424,7 +7451,7 @@ def main() -> int:
                 split_cmd = [
                     sys.executable,
                     "-m",
-                    "TraceLens.TraceUtils.split_inference_trace_annotation",
+                    "TraceLens.TraceUtils.split_trace.main",
                     str(split_input_path),
                     "-o",
                     str(split_dir),
@@ -7718,22 +7745,23 @@ def main() -> int:
                     started_at=started_at,
                 )
                 try:
-                    skill_result = asyncio.run(
-                        run_tracelens_skill(
-                            skill_path=skill,
-                            trace_path=cli_trace_path,
-                            output_dir=tracelens_dir,
-                            tracelens_root=tl_root,
-                            tracelens_internal_root=tl_internal_root,
-                            platform=args.target_platform,
-                            framework=args.framework,
-                            analysis_mode=args.analysis_mode,
-                            capture_folder=capture_folder,
-                            budget_minutes=args.budget_minutes,
-                            model=_resolve_tracelens_model(),
-                            log=lambda msg: append_log(log_path, msg),
+                    with _trajectory_scope(args):
+                        skill_result = asyncio.run(
+                            run_tracelens_skill(
+                                skill_path=skill,
+                                trace_path=cli_trace_path,
+                                output_dir=tracelens_dir,
+                                tracelens_root=tl_root,
+                                tracelens_internal_root=tl_internal_root,
+                                platform=args.target_platform,
+                                framework=args.framework,
+                                analysis_mode=args.analysis_mode,
+                                capture_folder=capture_folder,
+                                budget_minutes=args.budget_minutes,
+                                model=_resolve_tracelens_model(),
+                                log=lambda msg: append_log(log_path, msg),
+                            )
                         )
-                    )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = skill_result.runner

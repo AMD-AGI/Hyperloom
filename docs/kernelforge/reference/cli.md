@@ -236,6 +236,11 @@ authors one fused Triton kernel that survives CUDA-graph capture, A/B-validated
 against the framework's own eager op. Writes `fusion_manifest.json` and exits 3
 when no fusion is found.
 
+Which chain is fused is chosen from the trace by default. `--fuse-kernel` fixes it
+instead: name one GPU kernel and the fusion is built around that kernel and its
+trace neighbours. With `--dry-run` this resolves and writes `fusion_anchor.json`
+without reaching an agent, so the selection can be checked before anything is spent.
+
 ### Inputs
 
 | Option | Default | Meaning |
@@ -252,7 +257,9 @@ when no fusion is found.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--discover <mode>` | `patterns` | `patterns` (template library) or `llm` (the LLM reads trace and source, autonomous). |
+| `--discover <mode>` | `patterns` | `patterns` (template library), `llm` (the LLM reads trace and source, autonomous), or `anchored` (fuse around the kernel `--fuse-kernel` names). |
+| `--repo-scope` / `--no-repo-scope` | off | Give discovery and authoring the whole framework repository instead of one resolved file. Discovery embeds no source, explores the tree with its own read/search tools, and may return a fusion whose call sites span several files; authoring may edit all of them. Use when the chain is not in the arch-class model file and you do not want to name its location. Requires `--discover llm` or `--discover anchored`. |
+| `--fuse-kernel <name>` | `''` | Full GPU kernel name, exactly as the trace spells it. Fusion is then built around that kernel and whatever the trace shows running beside it, instead of a ranked guess. Implies `--discover anchored`. A name the trace does not contain is a usage error listing the closest ones; a fragment is not a name. |
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
