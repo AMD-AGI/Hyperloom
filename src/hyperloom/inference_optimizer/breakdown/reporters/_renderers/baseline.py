@@ -26,6 +26,7 @@ from ..base import (
     session_of,
     task_config_of,
 )
+from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
 
 #: Action statuses whose figure the session went on to use. ``degraded`` is a
@@ -149,6 +150,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     if e2el is not None:
         facts.append(f"Baseline e2el mean: {float(e2el):.1f} ms.")
+    # The axes an AgentX session is actually ranked on. ``throughput_tok_s_per_gpu`` above is the synthetic-workload
+    # figure, so on an agentic round it is the one number a reader must not read the verdict off.
+    perf = measurement.get("perf")
+    facts.extend(graded_axes_facts(perf, label="Baseline"))
     if fail_streak:
         warnings.append(f"baseline_failure_streak={fail_streak} — baseline retried after failure(s).")
     if attempts:
@@ -161,6 +166,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("throughput_tok_s_per_gpu", tput),
                 ("throughput_unit", measurement.get("throughput_unit") or None),
                 ("accuracy", acc),
+                ("submission_valid", measurement.get("submission_valid")),
+                # Only ever non-empty on a round upstream refused, which is the round whose axes a reader is most
+                # likely to be puzzling over. ``md_kv_list`` drops the empty list, so an accepted round says nothing.
+                ("submission_invalid_reasons", measurement.get("submission_invalid_reasons") or None),
                 ("ttft_mean_ms", ttft),
                 ("e2el_mean_ms", e2el),
                 ("ttft_e2el_source", ttft_source or None),
@@ -170,6 +179,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ]
         )
     )
+    graded_md = render_graded_axes(perf)
+    if graded_md:
+        md_parts.append("")
+        md_parts.append("**AgentX graded axes**:")
+        md_parts.append(graded_md)
     if attempts:
         rows = [
             [

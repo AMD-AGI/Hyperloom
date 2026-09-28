@@ -1,14 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``--framework atom`` defaults the kernel phase to the forge backend.
+"""``--framework atom`` takes the same kernel-backend default as every other framework.
 
-GEAK's extractor may not guess a rewrite seam on a quantized, non-vLLM backend --
-it has to resolve one from the live server, a path unproven on atom -- and the
-default phase split hands that phase half the session. forge needs no seam
-discovery at all, so it is the default rather than an opt-in the operator has to
-know about. A value the operator named is kept: running GEAK on atom on purpose
-stays possible.
+atom used to be filled in with ``forge`` when the operator named no backend, on
+the grounds that GEAK could not resolve a rewrite seam there. GEAK reaches atom
+now, so the framework carries no backend rule of its own: an unset
+``KERNEL_OPT_BACKEND_ORDER`` resolves through
+``_DEFAULT_KERNEL_PHASE_BACKEND_ORDER`` like sglang and vllm, and forge is the
+exact-match opt-in it is everywhere else.
+
+What survives from the retired default is the atom-only shape around it: the
+``--nodes>=2`` fail-fast guard (IR-8), and the requirement that every call site
+stays behind a framework test so no other framework reaches it.
 """
 
 from __future__ import annotations
@@ -28,90 +32,53 @@ def _args(**overrides: object) -> argparse.Namespace:
 
 
 _KEY = "KERNEL_OPT_BACKEND_ORDER"
-_WARNING = "so the kernel phase runs GEAK"
 
 
-def test_unset_backend_defaults_to_forge(monkeypatch, capsys):
+@pytest.fixture(autouse=True)
+def _restore_kernel_backend_order():
+    """Restore direct production writes that monkeypatch does not track."""
+    original = os.environ.get(_KEY)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(_KEY, None)
+        else:
+            os.environ[_KEY] = original
+
+
+def test_an_unset_backend_is_left_for_the_shared_default(monkeypatch):
+    """Writing anything here would make atom resolve differently from every other framework."""
     monkeypatch.delenv(_KEY, raising=False)
 
     _apply_atom_auto_tighten(_args())
 
-    assert os.environ[_KEY] == "forge"
-    out = capsys.readouterr()
-    assert "defaulted to 'forge'" in out.out
-    assert _WARNING not in out.err, "the default path must not emit a warning"
+    assert _KEY not in os.environ
 
 
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_a_blank_value_counts_as_unset(monkeypatch, capsys, blank):
-    """``.env`` files routinely carry an empty assignment; it is not a choice."""
-    monkeypatch.setenv(_KEY, blank)
-
-    _apply_atom_auto_tighten(_args())
-
-    assert os.environ[_KEY] == "forge"
-    assert _WARNING not in capsys.readouterr().err
-
-
-def test_an_explicit_forge_is_left_alone_and_not_warned_about(monkeypatch, capsys):
-    monkeypatch.setenv(_KEY, "forge")
-
-    _apply_atom_auto_tighten(_args())
-
-    assert os.environ[_KEY] == "forge"
-    assert _WARNING not in capsys.readouterr().err
-
-
-def test_forge_is_matched_case_insensitively(monkeypatch, capsys):
-    """``forge_explicitly_enabled`` lowercases, so a shouted value is still an opt-in."""
-    monkeypatch.setenv(_KEY, "FORGE")
-
-    _apply_atom_auto_tighten(_args())
-
-    assert os.environ[_KEY] == "FORGE"
-    assert _WARNING not in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("value", ["geak", "GEAK", "forge,geak"])
-def test_an_operator_named_backend_is_kept_and_warned_about(monkeypatch, capsys, value):
-    """The opt-in is an exact match on ``forge``; everything else means GEAK."""
+@pytest.mark.parametrize("value", ["", "   ", "geak", "GEAK", "forge", "FORGE", "forge,geak"])
+def test_a_named_backend_survives_verbatim(monkeypatch, value):
+    """Every spelling reaches the shared resolver unedited, including the blank ones."""
     monkeypatch.setenv(_KEY, value)
 
     _apply_atom_auto_tighten(_args())
 
-    assert os.environ[_KEY] == value, "a named backend must not be rewritten"
-    assert _WARNING in capsys.readouterr().err
+    assert os.environ[_KEY] == value
 
 
-def test_no_kernel_leaves_the_backend_alone(monkeypatch, capsys):
-    """Nothing runs the kernel phase, so the backend it would have used is moot."""
-    monkeypatch.delenv(_KEY, raising=False)
-
-    _apply_atom_auto_tighten(_args(no_kernel=True))
-
-    assert _KEY not in os.environ
-    out = capsys.readouterr()
-    assert _WARNING not in out.err
-    assert "defaulted to 'forge'" not in out.out
-
-
-def test_the_default_lands_before_the_session_records_it(monkeypatch):
-    """``_seed_shared_state`` reads the env to record ``kernel_optimizer``.
-
-    The call order in ``main`` puts this function first; assert the observable
-    half of that contract, so a session cannot record ``geak`` while running forge.
-    """
-    from hyperloom.common.env import forge_explicitly_enabled
+def test_the_shared_default_puts_atom_on_geak(monkeypatch):
+    """The observable end of removing the special case, read off the shared resolver."""
+    from hyperloom.orchestrator.kernel.request_handlers import _raw_kernel_backend_order
 
     monkeypatch.delenv(_KEY, raising=False)
 
     _apply_atom_auto_tighten(_args())
 
-    assert forge_explicitly_enabled() is True
+    assert _raw_kernel_backend_order() == ["geak"]
 
 
 def test_multi_node_still_fails_fast(monkeypatch):
-    """The pre-existing IR-8 guard is untouched, and fails before any defaulting."""
+    """IR-8: atom multi-node TP wiring is deferred, so ``--nodes>=2`` exits rather than launching."""
     monkeypatch.delenv(_KEY, raising=False)
 
     with pytest.raises(SystemExit) as exc:
@@ -142,11 +109,12 @@ def _calls_auto_tighten(ast, node) -> bool:
 
 
 def test_every_call_site_stays_behind_an_atom_guard():
-    """SGLang and vLLM must keep GEAK, and only the call sites enforce that.
+    """The IR-8 exit is atom-only, and only the call sites enforce that.
 
-    Every behavioural test above calls this function directly, so none of them
+    The behavioural tests above call this function directly, so none of them
     would notice a guard being widened or dropped. Read it out of the source
-    instead: each call has to sit under a test that the framework is atom.
+    instead: each call has to sit under a test that the framework is atom, or a
+    multi-node sglang/vllm launch would exit 2.
     """
     ast, tree = _cli_source_tree()
 
@@ -179,14 +147,12 @@ def test_every_call_site_stays_behind_an_atom_guard():
     )
 
 
-def test_resume_applies_the_default_too():
-    """A resumed atom session must not silently fall back to GEAK.
+def test_resume_reaches_the_guard_too():
+    """A resumed atom session gets the same IR-8 check the launch did.
 
-    ``KERNEL_OPT_BACKEND_ORDER`` lives in the process environment, not in the
-    session, so it is gone in the new process. The example documents
-    ``--resume-from`` as the crash-recovery path and tells the operator to leave
-    the variable unset, so a resume that skips the default hands them GEAK --
-    without even the warning, which lives in the same skipped function.
+    ``--resume-from`` is the documented crash-recovery path, and it re-reads the
+    CLI arguments in a fresh process. A resume that skips this function would let
+    a ``--nodes>=2`` atom session start the very configuration the launch refused.
     """
     ast, tree = _cli_source_tree()
 
@@ -207,5 +173,5 @@ def test_resume_applies_the_default_too():
     ]
     assert reached, (
         "_apply_atom_auto_tighten is applied on only one side of `if args.resume_from:`; "
-        "a resumed atom session would use a different kernel backend than the launch did"
+        "a resumed atom session would skip the IR-8 multi-node guard"
     )

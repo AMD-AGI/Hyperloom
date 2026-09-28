@@ -188,6 +188,47 @@ async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     assert (await c.tasks.get(task.task_id)).state == "succeeded"
 
 
+@pytest.mark.asyncio
+async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contract(coord):
+    from jsonschema import validate
+
+    from hyperloom.inference_optimizer.breakdown.exporter import build
+    from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
+    from hyperloom.inference_optimizer.session.manifest import write_manifest
+
+    c = coord
+    _arm_kernel_phase(c.shared_state)
+    c.shared_state.macro_cycle = 3
+    c.shared_state.tick = 11
+    c.sub.register_executor("kernel_agent", lambda _ctx: asyncio.sleep(0, result={"status": "ok"}))
+    write_manifest(c.session_dir, session_id="kernel-dispatch-contract")
+
+    await c._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
+    c.shared_state.phase = ps.PHASE_SWEEP
+    c.shared_state.macro_cycle = 4
+    c.shared_state.tick = 99
+
+    await c.dispatcher._pump_dispatcher_once()
+    await _settle(c, task.task_id)
+
+    fixture = build(c.session_dir)
+    validate(instance=fixture, schema=workflow_schema())
+    row = next(
+        row
+        for event in fixture["timeline"]
+        if event["type"] == "phase"
+        for row in event["ext"]["actions"]["rows"]
+        if row["task_id"] == task.task_id
+    )
+    assert (row["action"], row["phase"], row["macro_cycle"], row["tick"]) == (
+        "kernel_agent",
+        ps.PHASE_KERNEL_AGENT,
+        3,
+        11,
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "arm", "reason"),
     [
@@ -227,6 +268,11 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     assert exit_now is not None and exit_now[0] == reason, label
     assert ps.exit_normal_kernel(st, kernel_work_in_flight=True) is None, label
 
+    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    assert inputs["pending_work"]["kernel_agent_in_flight"] is True
+    assert ps.compute_next_phase(st, kernel_work_in_flight=True) is None, label
+    assert ps.replay_next_phase(inputs) is None, label
+
 
 def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     st = SharedState(session_id="s")
@@ -235,9 +281,13 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
     exit_now = ps.exit_normal_kernel(st, kernel_work_in_flight=True)
+    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
 
     assert exit_now is not None
     assert exit_now[0] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
+    assert transition is not None
+    assert transition[1] == exit_now[0]
+    assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 
 @pytest.mark.asyncio

@@ -5,17 +5,27 @@
 
 from __future__ import annotations
 
-import types
-
 import pytest
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 
 
-def _ctx(task_id: str = "t-1"):
-    task = types.SimpleNamespace(task_id=task_id, params={})
-    return types.SimpleNamespace(task=task, extra={})
+def _attempt(task_id: str = "t-1"):
+    return ip.IntegrateAttempt(task_id=task_id)
+
+
+@pytest.fixture(autouse=True)
+def _stub_external_operations(monkeypatch):
+    from hyperloom.agents.framework.sources import github
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("localization fetches must be stubbed by the test")
+
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(github, "pr_patches", forbidden)
+    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
 
 
 @pytest.fixture()
@@ -49,20 +59,20 @@ _CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ 
 
 
 async def test_no_candidate_is_noop(_executor):
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, {}, "t-1")
     assert out is None
-    assert ctx._ip_localization_patches == []
+    assert attempt.localization_patches == []
 
 
 async def test_multi_node_skips(_executor, monkeypatch):
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
 
     monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is None
-    assert ctx._ip_localization_patches == []
+    assert attempt.localization_patches == []
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +84,14 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is None, out
-    assert len(ctx._ip_localization_patches) == 1
-    patch = ctx._ip_localization_patches[0]
+    assert len(attempt.localization_patches) == 1
+    patch = attempt.localization_patches[0]
     assert patch.exists()
     assert "deepseek_v4.py" in patch.read_text()
-    assert ctx._ip_localization_touched == ["vllm/model/deepseek_v4.py"]
+    assert attempt.localization_touched == ["vllm/model/deepseek_v4.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -93,20 +103,20 @@ async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _CUDA_DIFF)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "localization_rung5_deferred"
-    assert ctx._ip_localization_patches == []
+    assert attempt.localization_patches == []
 
 
 async def test_fetch_failure_reverts(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: "")
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "localization_fetch_failed"

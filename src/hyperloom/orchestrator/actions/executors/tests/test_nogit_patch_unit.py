@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +19,7 @@ from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 
-# Public surface re-exported via integrate_patch (backward-compat guard)
+# Non-git helpers used by integrate_patch.
 
 
 def test_reexport_from_integrate_patch():
@@ -25,7 +28,6 @@ def test_reexport_from_integrate_patch():
     assert ip._is_within is ng._is_within
     assert ip._is_git_tree is ng._is_git_tree
     assert ip._apply_patch_no_git is ng._apply_patch_no_git
-    assert ip._revert_patches_no_git is ng._revert_patches_no_git
 
 
 def test_reexport_from_patch_snapshot():
@@ -135,6 +137,170 @@ def test_apply_and_revert_roundtrip(tmp_path):
 
     ng._revert_patches_no_git(backups)
     assert target.read_text() == "original\n"
+
+
+def test_non_git_prepare_is_durable_before_a_partially_applied_patch_raises(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.delivery import ledger
+
+    target = tmp_path / "target.py"
+    target.write_text("original\n")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF)
+    backup_root = tmp_path / "backups"
+
+    def interrupted(cmd, **kwargs):
+        if "--dry-run" in cmd:
+            return _CP()
+        assert len(ledger.load_prepared_records(backup_root)) == 1
+        target.write_text("partial\n")
+        raise RuntimeError("process lost before apply returned")
+
+    monkeypatch.setattr(ng.subprocess, "run", interrupted)
+    with pytest.raises(RuntimeError, match="process lost"):
+        ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    rows = ledger.load_prepared_records(backup_root)
+    assert len(rows) == 1
+    assert ledger.load_records(backup_root) == rows
+    assert ledger.merge_records([], backup_root) == rows
+    restored, errors = ledger.restore_records(rows)
+    assert errors == []
+    assert restored == [str(target)]
+    assert target.read_text() == "original\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX read-only file permissions")
+def test_prepare_readonly_copy_preserves_target_and_backup_modes(tmp_path):
+    from hyperloom.orchestrator.delivery import ledger
+
+    target = tmp_path / "target.py"
+    target.write_bytes(b"original\n")
+    target.chmod(0o444)
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    backup = backup_root / "target.bak"
+    shutil.copy2(target, backup)
+    record = {
+        "target": str(target),
+        "existed": True,
+        "backup_path": str(backup),
+        "pre_image_sha256": ledger.file_digest(backup),
+        "revert_action": "restore",
+        "mode": 0o444,
+    }
+    assert ledger.append_record(backup_root, record)
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(backup.stat().st_mode) == 0o444
+
+    assert ledger.mark_prepared(backup_root)
+
+    assert ledger.load_prepared_records(backup_root) == [record]
+    assert target.read_bytes() == backup.read_bytes() == b"original\n"
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(backup.stat().st_mode) == 0o444
+
+
+@pytest.mark.parametrize("platform,expected_mode", [("posix", "rb"), ("nt", "rb+")])
+def test_prepare_uses_platform_fsync_access_mode(tmp_path, monkeypatch, platform, expected_mode):
+    from hyperloom.orchestrator.delivery import ledger
+
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    backup = backup_root / "target.bak"
+    backup.write_bytes(b"original\n")
+    assert ledger.append_record(backup_root, {"backup_path": str(backup)})
+    opened = []
+    synced = []
+    real_open = Path.open
+
+    def record_open(path, mode="r", *args, **kwargs):
+        if path == backup:
+            opened.append(mode)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", record_open)
+    monkeypatch.setattr(ledger, "os", SimpleNamespace(name=platform, fsync=synced.append))
+
+    assert ledger.mark_prepared(backup_root)
+    assert opened == [expected_mode]
+    assert len(synced) == 1
+    assert backup.read_bytes() == b"original\n"
+
+
+def test_non_git_prepare_failure_never_invokes_real_patch(tmp_path, monkeypatch):
+    target = tmp_path / "target.py"
+    target.write_text("original\n")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF)
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        assert "--dry-run" in cmd
+        return _CP()
+
+    monkeypatch.setattr(ng.subprocess, "run", run)
+    monkeypatch.setattr(ng, "mark_prepared", lambda *_args, **_kwargs: False)
+    ok, error, _records, _feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "backups")
+    assert not ok
+    assert "prepare" in error
+    assert len(calls) == 1
+    assert target.read_text() == "original\n"
+
+
+@pytest.mark.parametrize("prior_prepared", [False, True])
+@pytest.mark.parametrize("prepare_succeeds", [False, True])
+def test_already_applied_noop_requires_durable_prepare(tmp_path, monkeypatch, prior_prepared, prepare_succeeds):
+    from hyperloom.orchestrator.delivery import ledger
+
+    target = tmp_path / "target.py"
+    target.write_text("patched\n", encoding="utf-8")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
+    backup_root = tmp_path / "backups"
+    prior_records = []
+    if prior_prepared:
+        backup_root.mkdir()
+        backup = backup_root / "earlier.bak"
+        backup.write_text("original\n", encoding="utf-8")
+        prior_records.append(
+            {
+                "target": str(target),
+                "existed": True,
+                "backup_path": str(backup),
+                "pre_image_sha256": ledger.file_digest(backup),
+                "revert_action": "restore",
+            }
+        )
+        assert ledger.append_record(backup_root, prior_records[0])
+        assert ledger.mark_prepared(backup_root)
+    if not prepare_succeeds:
+        monkeypatch.setattr(ng, "mark_prepared", lambda _root: False)
+    calls = []
+
+    def dry_run(cmd, **kwargs):
+        calls.append(cmd)
+        assert "--dry-run" in cmd, "an already-applied patch must never mutate the target"
+        if "-R" in cmd:
+            assert "--fuzz=0" in cmd
+            return _CP()
+        return _CP(1, "", "previously applied patch")
+
+    monkeypatch.setattr(ng.subprocess, "run", dry_run)
+    ok, error, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+
+    assert ok is prepare_succeeds
+    assert target.read_text(encoding="utf-8") == "patched\n"
+    assert backups == []
+    assert len(calls) == len(ng._P_LEVELS) + 1
+    if prepare_succeeds:
+        assert error == ""
+        assert feedback is None
+        assert ledger.load_prepared_records(backup_root) == prior_records
+    else:
+        assert "prepare" in error
+        assert isinstance(feedback, af.ApplyFeedback)
+        assert feedback.stderr == error
+    if prior_prepared:
+        assert ledger.load_prepared_records(backup_root) == prior_records
+        assert backup.read_text(encoding="utf-8") == "original\n"
 
 
 def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):

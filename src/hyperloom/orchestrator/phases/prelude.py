@@ -42,7 +42,7 @@ from ..loop.coordinator_helpers import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
@@ -172,7 +172,7 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-class PreludePhase(PhaseHandler):
+class PreludePhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _internal_analysis_kind(self) -> str:
@@ -1463,6 +1463,7 @@ class PreludePhase(PhaseHandler):
                 idempotency_key="warm-replay-prelude",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             )
         except Exception as exc:
             rollback = revert_warm_kernel_patches(
@@ -2617,6 +2618,7 @@ class PreludePhase(PhaseHandler):
             ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         if was_existing:
             log.info(

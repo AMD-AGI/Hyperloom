@@ -11,12 +11,26 @@ the env var literally or, when it is unset, merges the model overlays on top of 
 shipped default.
 """
 
+import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+
+@pytest.fixture(autouse=True)
+def _isolate_serving_package(tmp_path, monkeypatch):
+    package = tmp_path / "aiter"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
 
 
 def _configs(tmp_path: Path) -> Path:
@@ -83,8 +97,7 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
-    monkeypatch.setattr(_aiter_jit, "_invalidate_jit_build", lambda d, dest: {"status": "clean"})
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_FMOE": "/tuned/fmoe.csv"},
@@ -94,6 +107,68 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
     assert outcome["action"] == "invalidate"
     assert [Path(p).name for p in outcome["removed"]] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
     assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+    record = outcome["jit_build"]
+    assert record["status"] == "ok"
+    assert record["module_names"] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert (Path(record["modules_backup_path"]) / record["module_names"][0]).read_bytes() == (
+        b"\x7fELF" + b"a8w8_blockscale_bpreshuffle_something_else"
+    )
+
+
+@pytest.mark.parametrize("cache_location", ["runtime-env", "home", "wrapper-override"])
+@pytest.mark.parametrize("overlay", [False, True], ids=["shipped", "overlay"])
+def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch, cache_location, overlay):
+    package_jit = _aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_old",
+        overlay=overlay,
+    )
+    if not overlay:
+        shipped = package_jit.parent / "configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+        shipped.write_text("kernelName,libtype\na8w8_blockscale_bpreshuffle_missing,ck\n", encoding="utf-8")
+    home = tmp_path / "home"
+    jit = home / ".aiter" / "jit" if cache_location == "home" else tmp_path / "runtime" / "jit"
+    (jit / "build").mkdir(parents=True)
+    (jit / "build" / "stamp").write_bytes(b"runtime build")
+    name = "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    (jit / name).write_bytes(b"a8w8_blockscale_bpreshuffle_old")
+    (jit / "module_attention.so").write_bytes(b"unrelated")
+    decoy_configs = jit.parent / "configs"
+    decoy_configs.mkdir()
+    (decoy_configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
+        "kernelName,libtype\na8w8_blockscale_bpreshuffle_old,ck\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
+    assert list(importlib.util.find_spec("aiter").submodule_search_locations) == [str(package_jit.parent)]
+    if cache_location == "home":
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(_aiter_jit.os, "access", lambda *_: False)
+    else:
+        env = "AITER_JIT_DIR" if cache_location == "runtime-env" else "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
+        monkeypatch.setenv(env, str(jit))
+
+    outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
+
+    assert "aiter" not in sys.modules
+    if cache_location == "wrapper-override":
+        assert outcome == {"action": "skip", "jit_dir": str(jit)}
+        assert (jit / name).read_bytes() == b"a8w8_blockscale_bpreshuffle_old"
+        assert (jit / "build" / "stamp").read_bytes() == b"runtime build"
+        assert (jit / "module_attention.so").read_bytes() == b"unrelated"
+        assert (package_jit / name).read_bytes() == b"\x7fELF" + b"a8w8_blockscale_bpreshuffle_old"
+        return
+    assert outcome["action"] == "invalidate"
+    assert outcome["jit_dir"] == str(jit)
+    assert outcome["removed"] == [str(jit / name)]
+    assert not (jit / name).exists()
+    assert not (jit / "build").exists()
+    assert (jit / "module_attention.so").read_bytes() == b"unrelated"
+    assert (package_jit / name).read_bytes() == b"\x7fELF" + b"a8w8_blockscale_bpreshuffle_old"
+    record = outcome["jit_build"]
+    assert (Path(record["modules_backup_path"]) / name).read_bytes() == b"a8w8_blockscale_bpreshuffle_old"
+    assert (Path(record["backup_path"]) / "stamp").read_bytes() == b"runtime build"
 
 
 def test_a_consistent_install_costs_nothing(tmp_path, monkeypatch):
@@ -104,7 +179,7 @@ def test_a_consistent_install_costs_nothing(tmp_path, monkeypatch):
         so_contains=b"a8w8_blockscale_bpreshuffle_built",
         overlay=True,
     )
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
 
@@ -120,9 +195,10 @@ def test_a_pinned_env_does_not_rebuild_for_a_table_it_turns_off(tmp_path, monkey
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )
-    pinned = tmp_path / "pinned.csv"
+    monkeypatch.chdir(tmp_path)
+    pinned = Path("pinned.csv")
     pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_something_else,ck\n", "utf-8")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(pinned)},
@@ -138,7 +214,7 @@ def test_a_shipped_table_this_cannot_decode_does_not_skip_the_check(tmp_path, mo
     jit = _aiter_tree(tmp_path, csv_rows="", so_contains=b"built", overlay=False)
     bad = tmp_path / "aiter" / "configs" / "model_configs" / "dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
     bad.write_bytes(b"\xff\xfeM,N,K,kernelName,libtype\n")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
 
@@ -150,10 +226,10 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
     jit = tmp_path / "jit"
     jit.mkdir()
     (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"\x7fELFbuilt")
-    pinned = tmp_path / "pinned.csv"
+    monkeypatch.chdir(tmp_path)
+    pinned = Path("pinned.csv")
     pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n", "utf-8")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
-    monkeypatch.setattr(_aiter_jit, "_invalidate_jit_build", lambda d, dest: {"status": "clean"})
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
         {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(pinned)},
@@ -161,6 +237,12 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
     )
 
     assert outcome["action"] == "invalidate"
+    assert outcome["removed"] == [str(jit / "module_gemm_a8w8_blockscale_bpreshuffle.so")]
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+    record = outcome["jit_build"]
+    assert record["status"] == "ok"
+    assert record["module_names"] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert (Path(record["modules_backup_path"]) / record["module_names"][0]).read_bytes() == b"\x7fELFbuilt"
 
 
 @pytest.mark.asyncio
@@ -280,9 +362,9 @@ def test_named_modules_are_unlinked_on_top_of_the_env_s_own(tmp_path, monkeypatc
 
     jit = tmp_path / "jit"
     jit.mkdir()
-    for stem in ("module_gemm_a8w8", "module_gemm_a8w8_blockscale_bpreshuffle"):
+    for stem in ("module_gemm_a8w8", "module_gemm_a8w8_blockscale_bpreshuffle", "module_attention"):
         (jit / f"{stem}.so").write_bytes(b"\x7fELF")
-    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.drop_serving_so_for_envs(
         {"AITER_CONFIG_GEMM_A8W8": "/tuned/a8w8.csv"},
@@ -293,6 +375,14 @@ def test_named_modules_are_unlinked_on_top_of_the_env_s_own(tmp_path, monkeypatc
     assert not (jit / "module_gemm_a8w8.so").exists()
     assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
     assert outcome["action"] == "invalidate"
+    assert (jit / "module_attention.so").read_bytes() == b"\x7fELF"
+    record = outcome["jit_build"]
+    assert record["status"] == "ok"
+    assert record["module_scope"] == ["module_gemm_a8w8", "module_gemm_a8w8_blockscale_bpreshuffle"]
+    assert record["module_names"] == ["module_gemm_a8w8.so", "module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert outcome["removed"] == [str(jit / name) for name in record["module_names"]]
+    for name in record["module_names"]:
+        assert (Path(record["modules_backup_path"]) / name).read_bytes() == b"\x7fELF"
 
 
 def _fake_aiter_tree(root, *, csv_rows: str, so_contains: bytes) -> object:
