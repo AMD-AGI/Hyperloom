@@ -457,13 +457,13 @@ def apply_escalate_budget_bump(
 
 
 def normalize_budget_pct(
-    budget: dict[str, float] | None,
+    budget_pct: dict[str, float] | None,
 ) -> dict[str, float]:
     """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0)."""
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
-    if not budget:
+    if not budget_pct:
         return out
-    for phase, val in budget.items():
+    for phase, val in budget_pct.items():
         canon = (phase or "").strip().upper()
         if canon not in PHASE_NAMES:
             # An unknown key silently reverts that share to its default, which reads downstream as a choice nobody
@@ -1469,11 +1469,11 @@ def exit_normal_sweep(
                 evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
                 evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
                 summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
-                spent_budget_without_pair = bool(last_conc.get("budget_exhausted")) or (
+                exhausted_without_pair = bool(last_conc.get("budget_exhausted")) or (
                     str(last_conc.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
                 )
                 ran_but_reported_no_pair = bool(summary) and int(summary.get("successful_pairs") or 0) <= 0
-                if spent_budget_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
+                if exhausted_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
                     return "sweep_failed", evidence
             return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(

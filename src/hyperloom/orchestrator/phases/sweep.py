@@ -115,7 +115,7 @@ class SweepPhase(CoordinatorCollaborator):
     ) -> Task | None:
         """Build + enqueue a Coordinator-internal ``conc_sweep`` task."""
         state = self.shared_state
-        configured_budget = int(state.conc_sweep_total_budget_sec or 0)
+        configured_budget = int(state.conc_sweep_total_budget_sec)
         # Clamp total_budget_sec to the remaining session wall-clock budget so a long conc_sweep cannot outlive
         # --max-hours.
         _CLOSE_RESERVE_SEC = 120
