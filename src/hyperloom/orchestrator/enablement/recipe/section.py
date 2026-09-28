@@ -381,9 +381,9 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     kept_patches_raw = _eg(state, "kept_patches")
     if isinstance(kept_patches_raw, list) and kept_patches_raw:
         # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so the ``or`` that used
-        # to stand here never fired and a patch outside the session travelled as
-        # an authoring-host absolute path. Left alone it would also put the same
+        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
+        # never fall through and a patch outside the session would travel as an
+        # authoring-host absolute path. It would also put the same
         # patch in the recipe twice under two different names -- one of them
         # naming a directory the consumer does not have.
         out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
