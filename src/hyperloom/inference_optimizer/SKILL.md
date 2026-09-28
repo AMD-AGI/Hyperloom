@@ -891,7 +891,7 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX).
+Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX). Under AgentX the sweep is off unless `--enable-conc-sweep` is passed, since every rung is a 3600 s window.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may
