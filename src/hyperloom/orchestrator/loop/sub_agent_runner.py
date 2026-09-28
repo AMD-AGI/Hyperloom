@@ -87,20 +87,15 @@ class SubAgentResult:
               ``"policy_path_outside_session_dir"``): a
               ``PolicyDenied`` dispatch rejection, keyed on
               :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
-              Falls through any exact-match bucket below by design — a
-              policy denial isn't a runtime crash/oom/hang, so
-              :meth:`writeback._pitfall_severity_for` correctly excludes it
-              from ``SEVERITY_CRASH``. Still lands in the gap ledger as its
-              own ``(action, error_class)`` key
-              (:meth:`explore._extract_gaps_from_attempts`), which is enough
-              to group repeat denials without a dedicated bucket.
+              The task never ran, so the result is ``cancelled`` and the
+              failure ledgers never see it; the rule stays readable on the
+              task row's terminal evidence.
             * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
               exact-matched by :meth:`writeback._pitfall_severity_for` to
               classify a failure as crash-severity for the KB.
             * ``"no_executor"``: no runner registered for the task's
-              ``kind`` — set directly on this dataclass, same site as
-              ``policy_{rule}``, so this exit no longer collapses into
-              ``"unknown_error"`` either.
+              ``kind`` — set directly on this dataclass so the gap ledger
+              does not bucket it as ``"unknown_error"``.
             * The raised exception's ``__class__.__name__`` (e.g.
               ``"TimeoutError"``): an executor raised instead of returning a
               result. Same reasoning — a real class beats the generic
@@ -310,7 +305,7 @@ class SubAgentRunner:
                     rule = denied.rule or "denied"
                     outcome = SubAgentResult(
                         task_id=task.task_id,
-                        state="failed",
+                        state="cancelled",
                         result={},
                         error=str(denied),
                         error_class=f"policy_{rule}",

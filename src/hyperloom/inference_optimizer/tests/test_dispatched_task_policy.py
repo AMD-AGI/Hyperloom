@@ -13,10 +13,12 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -115,8 +117,8 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
 
 
 @pytest.mark.asyncio
-async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path, monkeypatch):
-    """Forged queued integrate_patch rows must fail dispatch policy replay."""
+async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tmp_path, monkeypatch):
+    """Forged queued integrate_patch rows are cancelled by dispatch policy replay, never run."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     executed = {"ran": False}
 
@@ -134,11 +136,43 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
         idempotency_key="forged-integrate",
     )
     res = await sub.run_task(task)
-    assert res.state == "failed"
+    assert res.state == "cancelled"
+    assert res.error_class == "policy_integrate_patch_requires_critic_verdict"
     assert "no Critic verdict on record" in (res.error or "")
     assert executed["ran"] is False
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
+    terminal = updated.history[-1]["evidence"]
+    assert terminal["rule"] == "integrate_patch_requires_critic_verdict"
+    assert terminal["outcome"]["error_class"] == "policy_integrate_patch_requires_critic_verdict"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(session_dir, monkeypatch):
+    """A baseline refused at dispatch measured nothing, so repeated refusals cannot stop the run as baseline_failed."""
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    coord = Coordinator(session_dir, backends={n: MockBackend(silent, name=n) for n in ("orchestration", "critic")})
+    coord.shared_state.phase = "PRELUDE"
+
+    def _deny(kind, params, *, task_id=""):
+        raise PolicyDenied("bring-up round holds the machine", rule="enablement_round_in_flight")
+
+    monkeypatch.setattr(coord.policy, "validate_dispatched_task", _deny)
+    for i in range(3):
+        task = await coord.tasks.create(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
+        result = await coord.sub.run_task(task)
+        await coord.dispatcher._reap_dispatched_task(task, result, None)
+        assert result.state == "cancelled"
+        assert result.error_class == "policy_enablement_round_in_flight"
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+
+    state = coord.shared_state
+    assert state.baseline_failure_streak == 0
+    assert state.baseline_total_failures == 0
+    assert state.stop_reason == ""
+    assert not state.last_action_failures
 
 
 @pytest.mark.asyncio
@@ -546,7 +580,7 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
         idempotency_key="approved-prop-reconcile",
     )
     res = await sub.run_task(task)
-    assert res.state == "failed"
+    assert res.state == "cancelled"
     cancelled = await sub.tasks.get(task.task_id)
     assert cancelled.state == "cancelled"
 
