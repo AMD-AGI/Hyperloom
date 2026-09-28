@@ -113,14 +113,15 @@ def test_checkout_rejects_unsafe_existing_tree(tmp_path: Path, case: str) -> Non
     body = f"""
 die() {{ echo "$*" >&2; exit 1; }}
 VLLM_REPO="{repo}"; VLLM_SOURCE_REF={_REF}
-ensure_vllm_checkout "{root}"
+ensure_vllm_checkout "{root}" /usr/bin/python3
 """
     result = _bash(("vllm_checkout_state", "ensure_vllm_checkout"), body)
     assert result.returncode != 0
     assert case in result.stderr.lower()
 
 
-def _source_stubs(tmp_path: Path, checkout: str) -> str:
+def _source_stubs(tmp_path: Path, checkout: str | None) -> str:
+    """Stub the source-build helpers; ``checkout=None`` keeps the real checkout and mooncake check."""
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     fake_py = venv / "bin" / "python"
@@ -132,14 +133,18 @@ def _source_stubs(tmp_path: Path, checkout: str) -> str:
     )
     fake_py.chmod(0o755)
     (venv / "pyvenv.cfg").write_text("include-system-site-packages = true\n")
+    checkout_stubs = (
+        f'ensure_vllm_checkout() {{ mkdir -p "$1"; echo {checkout}; }}\n'
+        'check_vllm_mooncake_at_ref() { echo MOONCAKE >> "$CALLS"; }\n'
+        if checkout
+        else ""
+    )
     return f"""
 log() {{ echo "$*"; }}; warn() {{ echo "$*" >&2; }}; die() {{ echo "$*" >&2; return 1; }}
-ensure_vllm_checkout() {{ echo {checkout}; }}
-vllm_overlay_is_valid() {{ return 0; }}
+{checkout_stubs}vllm_overlay_is_valid() {{ return 0; }}
 verify_vllm_source() {{ return 0; }}
 check_vllm_source_prereqs() {{ echo PREREQS >> "$CALLS"; }}
 check_vllm_source_python() {{ :; }}
-check_vllm_mooncake_installable() {{ echo MOONCAKE >> "$CALLS"; }}
 rocm_devel_headers_present() {{ return 0; }}
 ensure_rocm_devel_headers() {{ echo HEADERS >> "$CALLS"; }}
 detect_rocm_gfx_arch() {{ echo gfx950; }}
@@ -152,7 +157,6 @@ export CALLS="{tmp_path}/calls"; DRY_RUN=0; CHECK_ONLY=0; VLLM_SOURCE_REF={_REF}
 VLLM_ROOT="{tmp_path}/src"; VLLM_VENV_ROOT="{venv}"; VLLM_REPO=https://example.invalid/vllm.git
 ROCM_SDK_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next
 VLLM_PRETEND_VERSION=0.29.0
-mkdir -p "$VLLM_ROOT/requirements"; : > "$VLLM_ROOT/requirements/rocm.txt"
 """
 
 
@@ -174,7 +178,7 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls").read_text()
-    assert calls.index("MOONCAKE") < calls.index("HEADERS") < calls.index("pip install")
+    assert calls.index("HEADERS") < calls.index("pip install")
     assert calls.index("BASE_SITE") < calls.index("pip install")
     assert "pip install --no-build-isolation --constraint" in calls
     assert "--extra-index-url https://stable.repo.amd.com/rocm/whl-next" in calls
@@ -188,7 +192,12 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     assert f"AITER:{tmp_path}/deps/aiter" in calls
 
 
-_MOONCAKE_FUNCS = ("vllm_mooncake_requirement", "check_vllm_mooncake_installable", "check_vllm_mooncake_if_checked_out")
+_MOONCAKE_FUNCS = (
+    "vllm_mooncake_requirement",
+    "check_vllm_mooncake_installable",
+    "check_vllm_mooncake_at_ref",
+    "check_vllm_mooncake_if_fetched",
+)
 
 
 def _pip_python(tmp_path: Path, pip_ok: bool) -> Path:
@@ -344,52 +353,93 @@ check_vllm_mooncake_installable "{py}" "{req}"
     assert not (tmp_path / "calls").exists()
 
 
-def test_source_build_rejects_unavailable_mooncake_before_mutation(tmp_path: Path) -> None:
-    body = _source_stubs(tmp_path, "updated") + (
-        'printf "mooncake-transfer-engine-rocm >= 0.3.13\\n" > "$VLLM_ROOT/requirements/rocm.txt"\n'
-        f'check_vllm_mooncake_installable() {{ die "mooncake unavailable"; }}\n'
-        f'install_vllm_from_source "{tmp_path}/venv/bin/python"\n'
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _vllm_origin(tmp_path: Path) -> tuple[str, str, str]:
+    """A local vLLM origin whose v0.30.0 commit adds the mooncake line to requirements/rocm.txt."""
+    origin = tmp_path / "origin"
+    (origin / "requirements").mkdir(parents=True)
+    _git("init", "-q", str(origin))
+    rocm_txt = origin / "requirements" / "rocm.txt"
+    shas = []
+    for tag, lines in (
+        ("v0.29.0", "numba==0.65.0\n"),
+        ("v0.30.0", "numba==0.65.0\nmooncake-transfer-engine-rocm>=0.3.13\n"),
+    ):
+        rocm_txt.write_text(lines)
+        _git("-C", str(origin), "add", ".")
+        _git("-C", str(origin), "commit", "-qm", tag)
+        _git("-C", str(origin), "tag", tag)
+        shas.append(_git("-C", str(origin), "rev-parse", "HEAD"))
+    return f"file://{origin}", shas[0], shas[1]
+
+
+@pytest.mark.parametrize("state", ["update", "new", "exact"])
+def test_source_build_rejects_unavailable_mooncake_before_mutation(tmp_path: Path, state: str) -> None:
+    repo, old, new = _vllm_origin(tmp_path)
+    root = tmp_path / "src"
+    if state != "new":
+        _git("clone", "-q", repo, str(root))
+        _git("-C", str(root), "checkout", "-q", "--detach", old if state == "update" else new)
+    py = _pip_python(tmp_path, pip_ok=False)
+    body = _source_stubs(tmp_path, None) + (
+        f'verify_vllm_source() {{ return 1; }}\nVLLM_REPO="{repo}"; VLLM_SOURCE_REF={new}; VLLM_VERSION=0.30.0\n'
+        f'install_vllm_from_source "{py}"\n'
     )
-    result = _bash(("install_vllm_from_source",), body, env={**os.environ})
+    result = _bash(
+        ("install_vllm_from_source", "vllm_checkout_state", "ensure_vllm_checkout", *_MOONCAKE_FUNCS),
+        body,
+        env={**os.environ},
+    )
     assert result.returncode != 0
-    assert "mooncake unavailable" in result.stderr
-    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    assert "mooncake-transfer-engine-rocm>=0.3.13" in result.stderr
+    assert "Python 3.14" in result.stderr
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"], capture_output=True, text=True
+    )
+    if state == "new":
+        assert head.returncode != 0
+        assert not (root / "requirements").exists()
+    else:
+        assert head.stdout.strip() == (old if state == "update" else new)
+    calls = (tmp_path / "calls").read_text()
     assert "HEADERS" not in calls
     assert "pip install" not in calls
     assert "setup.py" not in calls
 
 
 @pytest.mark.parametrize("mode", ["dry", "check"])
-def test_non_mutating_modes_check_mooncake_on_pinned_checkout(tmp_path: Path, mode: str) -> None:
+def test_non_mutating_modes_check_mooncake_on_pinned_ref_object(tmp_path: Path, mode: str) -> None:
     dry, check = (1, 0) if mode == "dry" else (0, 1)
+    repo, old, new = _vllm_origin(tmp_path)
     root = tmp_path / "src"
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
-    (root / "requirements").mkdir()
-    (root / "requirements" / "rocm.txt").write_text("mooncake-transfer-engine-rocm >= 0.3.13\n")
-    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+    _git("clone", "-q", repo, str(root))
+    _git("-C", str(root), "checkout", "-q", "--detach", old)
     py = _pip_python(tmp_path, pip_ok=False)
     body = f"""
 log() {{ echo "$*"; }}; warn() {{ echo "$*" >&2; }}; die() {{ echo "$*" >&2; return 1; }}
 rocm_devel_headers_present() {{ return 0; }}
 verify_vllm_source() {{ return 1; }}
 export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
-DRY_RUN={dry}; CHECK_ONLY={check}; VLLM_SOURCE_REF={head}
+DRY_RUN={dry}; CHECK_ONLY={check}; VLLM_SOURCE_REF={new}
 VLLM_ROOT="{root}"; VLLM_VENV_ROOT="{tmp_path}/venv"
 install_vllm_from_source "{py}"
 """
     result = _bash(("install_vllm_from_source", *_MOONCAKE_FUNCS), body)
     assert result.returncode != 0
     assert "mooncake-transfer-engine-rocm>=0.3.13" in result.stderr
+    assert _git("-C", str(root), "rev-parse", "HEAD") == old
 
 
 @pytest.mark.parametrize("mode", ["dry", "check"])
-def test_non_mutating_modes_warn_when_source_not_checked_out(tmp_path: Path, mode: str) -> None:
+def test_non_mutating_modes_warn_when_source_not_fetched(tmp_path: Path, mode: str) -> None:
     dry, check = (1, 0) if mode == "dry" else (0, 1)
     py = _pip_python(tmp_path, pip_ok=False)
     body = f"""

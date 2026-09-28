@@ -1178,14 +1178,23 @@ check_vllm_mooncake_installable() {
     "$(printf '%s\n' "$out" | grep -m1 -i 'error' || printf '%s\n' "$out" | tail -n1).${hint}"
 }
 
-check_vllm_mooncake_if_checked_out() {
-  local req_file="${VLLM_ROOT}/requirements/rocm.txt"
-  if [ -f "$req_file" ] &&
-     [ "$(git -C "$VLLM_ROOT" rev-parse HEAD 2>/dev/null || true)" = "$VLLM_SOURCE_REF" ]; then
-    check_vllm_mooncake_installable "$1" "$req_file"
+# Reads requirements/rocm.txt from the pinned commit object, not the working tree, so
+# the check can run between fetch and checkout: an existing overlay is a
+# `setup.py develop` install of that tree, and moving its sources before a failed
+# check would leave new Python sources over the old compiled extension.
+check_vllm_mooncake_at_ref() {
+  local py="$1" root="$2" blob="${VLLM_SOURCE_REF}:requirements/rocm.txt"
+  git -C "$root" cat-file -e "$blob" 2>/dev/null ||
+    die "vLLM source ${VLLM_SOURCE_REF} has no requirements/rocm.txt"
+  check_vllm_mooncake_installable "$py" <(git -C "$root" show "$blob")
+}
+
+check_vllm_mooncake_if_fetched() {
+  if git -C "$VLLM_ROOT" cat-file -e "${VLLM_SOURCE_REF}^{commit}" 2>/dev/null; then
+    check_vllm_mooncake_at_ref "$1" "$VLLM_ROOT"
     return $?
   fi
-  warn "vLLM source ${VLLM_SOURCE_REF} is not checked out at ${VLLM_ROOT}; mooncake-transfer-engine-rocm availability not checked"
+  warn "vLLM source ${VLLM_SOURCE_REF} is not fetched at ${VLLM_ROOT}; mooncake-transfer-engine-rocm availability not checked"
 }
 
 check_vllm_source_prereqs() {
@@ -1243,7 +1252,7 @@ vllm_checkout_state() {
 }
 
 ensure_vllm_checkout() {
-  local root="$1" state
+  local root="$1" base_py="$2" state
   state="$(vllm_checkout_state "$root")" || return $?
   [ "$state" = exact ] && { echo exact; return 0; }
   check_vllm_source_prereqs
@@ -1254,6 +1263,7 @@ ensure_vllm_checkout() {
   fi
   git -C "$root" fetch --quiet --depth 1 origin "$VLLM_SOURCE_REF" ||
     die "failed to fetch vLLM source ref ${VLLM_SOURCE_REF}"
+  check_vllm_mooncake_at_ref "$base_py" "$root" || return $?
   git -C "$root" checkout --quiet --detach FETCH_HEAD
   [ "$(git -C "$root" rev-parse HEAD)" = "$VLLM_SOURCE_REF" ] ||
     die "vLLM checkout did not reach ${VLLM_SOURCE_REF}"
@@ -1292,12 +1302,12 @@ install_vllm_from_source() {
       verify_vllm_source "$base_py" "$py" || die "installed vLLM source overlay failed runtime verification"
     else
       warn "vLLM source overlay is not installed (check-only)"
-      check_vllm_mooncake_if_checked_out "$base_py" || return $?
+      check_vllm_mooncake_if_fetched "$base_py" || return $?
     fi
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    check_vllm_mooncake_if_checked_out "$base_py" || return $?
+    check_vllm_mooncake_if_fetched "$base_py" || return $?
     rocm_devel_headers_present "$base_py" ||
       log "would ensure ROCm devel headers before the vLLM source build"
     log "would prepare ${VLLM_ROOT} at ${VLLM_SOURCE_REF} and build into ${VLLM_VENV_ROOT}"
@@ -1307,7 +1317,7 @@ install_vllm_from_source() {
     die "existing VLLM_VENV_ROOT is not a system-site-packages venv: ${VLLM_VENV_ROOT}"
   fi
   aiter_root="${AITER_ROOT:-$(framework_deps_root)/aiter}"
-  state="$(ensure_vllm_checkout "$VLLM_ROOT")" || return $?
+  state="$(ensure_vllm_checkout "$VLLM_ROOT" "$base_py")" || return $?
   if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
     inherit_vllm_base_site_packages "$base_py" "$py"
   fi
@@ -1319,7 +1329,7 @@ install_vllm_from_source() {
     log "reusing verified vLLM source overlay"
     return 0
   fi
-  check_vllm_mooncake_installable "$base_py" "$VLLM_ROOT/requirements/rocm.txt" || return $?
+  [ "$state" != exact ] || check_vllm_mooncake_at_ref "$base_py" "$VLLM_ROOT" || return $?
   [ "$state" != exact ] || check_vllm_source_prereqs
   ensure_rocm_devel_headers "$base_py"
   rocm_devel_headers_present "$base_py" || die "ROCm devel headers are required for vLLM source install"
@@ -1329,7 +1339,6 @@ install_vllm_from_source() {
     "$base_py" -m venv --system-site-packages "$VLLM_VENV_ROOT"
   fi
   inherit_vllm_base_site_packages "$base_py" "$py"
-  [ -f "$VLLM_ROOT/requirements/rocm.txt" ] || die "vLLM requirements/rocm.txt is missing"
   constraint_file="$(mktemp)"
   write_rocm_torch_constraints "$base_py" "$constraint_file"
   "$py" -m pip install --no-build-isolation --constraint "$constraint_file" \

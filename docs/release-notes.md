@@ -45,8 +45,9 @@ it.
   vLLM 0.30.0 adds `mooncake-transfer-engine-rocm` to its ROCm requirements,
   which publishes wheels for Python 3.10 to 3.13 only, so a ROCm 10 source
   build on Python 3.14 cannot install it. The installer resolves that
-  requirement before creating the venv and stops with guidance: use `docker`
-  mode, or pin `VLLM_VERSION=0.29.0` with
+  requirement from the pinned commit before checking it out or creating the
+  venv, so an existing checkout and overlay are left untouched, and stops with
+  guidance: use `docker` mode, or pin `VLLM_VERSION=0.29.0` with
   `VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206`.
 
 ### Fixed
