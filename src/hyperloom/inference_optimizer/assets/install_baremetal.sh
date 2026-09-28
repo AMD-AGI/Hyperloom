@@ -55,7 +55,7 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
 # ROCm torch constraint as the version pip solves for.
-# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index. The rocm723
+# vLLM installs 0.30.0+rocm723 from the wheels.vllm.ai pip index. The rocm723
 # variant puts the vLLM ROCm layer at 7.2.3; the docker route instead uses the
 # ROCm 10.0 rocm/vllm image, so the two paths no longer share a patch level. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
@@ -72,12 +72,12 @@ SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-}"
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.30.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
-VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
+VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-ced6857afa0ea7b2e3f0846a62e1394e90f15607}"
 # The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
 # setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
 VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"

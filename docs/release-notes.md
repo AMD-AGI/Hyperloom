@@ -34,6 +34,15 @@ it.
   `anchor_resolved` verdict. The manifest gains an `anchor` key (`null` when
   unused).
 
+### Changed
+
+- **The bare-metal `vllm` default is `0.30.0+rocm723`, up from `0.29.0`.**
+  ROCm 10 source builds pin `VLLM_SOURCE_REF` to the `v0.30.0` release commit
+  `ced6857afa0e`. The pinned TraceLens ref ships the matching
+  `config_vllm_v0.30.0.patch`. `VLLM_VERSION`, `VLLM_ROCM_VARIANT` and
+  `VLLM_SOURCE_REF` override it as before; the recommended `docker` image is
+  unchanged.
+
 ### Fixed
 
 - **Fusion discovery no longer proposes folding work into a tuned library GEMM's
