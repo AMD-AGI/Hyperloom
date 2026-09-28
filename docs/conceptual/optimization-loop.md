@@ -88,6 +88,11 @@ actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing might be enqueued internally even
 when the LLM is not allowed to propose them.
 
+Every phase transition is a GPU barrier: the Coordinator stops every running
+action and drops queued work the next phase does not allow, and commits the
+transition only once no task is left running. Each phase therefore starts on
+quiet GPUs, and its entry hook runs on the transition itself.
+
 ## PRELUDE
 
 PRELUDE establishes the session baseline:
@@ -251,17 +256,17 @@ gates.
 What the phase actually does depends on the kernel backend, and the branches
 look very different from Orchestration's side:
 
-- **Default (`geak`)**: entering the phase hands it to a single
-  Coordinator-owned whole-pipeline GEAK e2e run, which then sets the
+- **Default (`geak`)**: entering the phase enqueues one Coordinator-owned
+  `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
+  `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
+  whole-pipeline GEAK e2e run, which then sets the
   `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
   honours the hint immediately and the phase closes without Orchestration ever
   taking a turn in it.
-- **On a GEAK win**, the Coordinator enqueues a same-harness revalidation
-  rebench and marks `geak_pending.status = "awaiting_rebench"` with the task id.
-  `kernel_work_pending` then reports `True`, and `exit_normal_kernel` refuses the
-  `skip_to_sweep` handoff while work is pending — so KERNEL stays open, and
-  Orchestration does tick until the rebench lands (or the revalidation turns out
-  to be unavailable, which drops the pending slot and lets the exit through).
+- **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
+  the orchestrator's own harness under the lanes it already holds, and writes
+  the headline from that measurement before it returns. KERNEL leaves once the
+  task settles, or when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
@@ -273,15 +278,13 @@ entry-hook branch order.
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
-- `kernel_opt`
 - `integrate`
-- `gemm_tuning`
-- `specialist`
 - `roofline`
 - `profile`
+- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
 
 Within the kernel-agent request channel, the handler dispatches request kinds
-such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
+such as `trace_analyze` and `integrate`
 (`request_handlers.py`); these are handler kinds, not phase actions.
 
 Kernel-owned results are recorded separately from non-kernel action

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,7 +16,6 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 
-SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
 TASK_STATES = (
     "queued",
@@ -32,6 +31,7 @@ _TRANSITIONS = TRANSITIONS
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
+_DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 
 
 @dataclass
@@ -68,6 +68,82 @@ class Task:
         )
 
 
+def _validate_dispatch_class(dispatch_class: str | None) -> None:
+    if dispatch_class is not None and dispatch_class not in _DISPATCH_CLASSES:
+        raise ValueError(f"unknown dispatch_class: {dispatch_class!r}")
+
+
+def task_dispatch_record(task: Task) -> dict[str, Any] | None:
+    """Return complete author-time dispatch evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        phase = str(entry.get("phase") or "").strip().upper()
+        if not phase or "macro_cycle" not in entry or "tick" not in entry:
+            return None
+        return {
+            "dispatch_class": value,
+            "allowed": bool(entry.get("allowed")),
+            "denial_rule": str(entry.get("denial_rule") or "") or None,
+            "phase": phase,
+            "macro_cycle": int(entry["macro_cycle"]),
+            "tick": int(entry["tick"]),
+        }
+    return None
+
+
+def task_dispatch_evidence(task: Task) -> tuple[str, bool, str | None] | None:
+    """Return persisted dispatch admission evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        return value, bool(entry.get("allowed")), str(entry.get("denial_rule") or "") or None
+    return None
+
+
+def task_dispatch_origin(state: Any) -> dict[str, Any]:
+    """Freeze the phase coordinates that own a task when its row is created."""
+    return {
+        "phase": str(getattr(state, "phase", "") or "").strip().upper(),
+        "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        "tick": int(getattr(state, "tick", 0) or 0),
+    }
+
+
+def _validated_dispatch_origin(origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    if origin is None:
+        raise ValueError("dispatch_origin is required when dispatch_class is set")
+    phase = str(origin.get("phase") or "").strip().upper()
+    macro_cycle = int(origin.get("macro_cycle", 0) or 0)
+    tick = int(origin.get("tick", 0) or 0)
+    if not phase:
+        raise ValueError("dispatch_origin.phase is required")
+    if macro_cycle < 0 or tick < 0:
+        raise ValueError("dispatch_origin macro_cycle and tick must be non-negative")
+    return {"phase": phase, "macro_cycle": macro_cycle, "tick": tick}
+
+
+def task_dispatch_class(task: Task) -> str | None:
+    """Return explicit dispatch provenance, never a guess for legacy rows."""
+    evidence = task_dispatch_evidence(task)
+    return evidence[0] if evidence is not None else None
+
+
+def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
+    _validate_dispatch_class(requested)
+    if requested is None:
+        return
+    existing = task_dispatch_class(task)
+    if existing is None:
+        return
+    if existing != requested:
+        raise ValueError(f"idempotent task dispatch_class mismatch: existing={existing!r}, requested={requested!r}")
+
+
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
@@ -94,6 +170,8 @@ def _insert_queued_task(
     side_effects: list[str] | None,
     lease_ttl_sec: int,
     task_id: str | None,
+    dispatch_class: str | None,
+    dispatch_origin: Mapping[str, Any] | None,
 ) -> Task:
     """INSERT one ``queued`` row on ``cur`` and return the task it holds.
 
@@ -102,6 +180,18 @@ def _insert_queued_task(
     ``cur`` belongs to the caller's write transaction.
     """
     now = now_iso()
+    _validate_dispatch_class(dispatch_class)
+    initial_history: list[dict[str, Any]] = []
+    if dispatch_class:
+        initial_history.append(
+            {
+                "dispatch_class": dispatch_class,
+                "allowed": True,
+                "denial_rule": None,
+                **_validated_dispatch_origin(dispatch_origin),
+                "ts": now,
+            }
+        )
     task = Task(
         task_id=task_id or uuid.uuid4().hex,
         kind=kind,
@@ -111,7 +201,7 @@ def _insert_queued_task(
         requires_lanes=[] if requires_lanes is None else list(requires_lanes),
         side_effects=[] if side_effects is None else list(side_effects),
         lease_ttl_sec=lease_ttl_sec,
-        history=[],
+        history=initial_history,
         created_at=now,
         updated_at=now,
     )
@@ -129,7 +219,7 @@ def _insert_queued_task(
             json.dumps(task.requires_lanes),
             json.dumps(task.side_effects),
             task.lease_ttl_sec,
-            "[]",
+            json.dumps(task.history),
             task.created_at,
             task.updated_at,
         ),
@@ -147,6 +237,8 @@ def create_in_cursor(
     side_effects: list[str] | None = None,
     lease_ttl_sec: int = 0,
     task_id: str | None = None,
+    dispatch_class: str | None = None,
+    dispatch_origin: Mapping[str, Any] | None = None,
 ) -> tuple[Task, bool]:
     """Create (or adopt) a task row on a cursor the caller already owns.
 
@@ -170,10 +262,12 @@ def create_in_cursor(
         TerminalTaskReuse: When the key already names a task in a terminal
             state.
     """
+    _validate_dispatch_class(dispatch_class)
     cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
         task = Task.from_row(existing)
+        _validate_dispatch_reuse(task, dispatch_class)
         if task.state in TERMINAL_STATES:
             raise TerminalTaskReuse(f"idempotency key {idempotency_key!r} already names a {task.state} task")
         return task, True
@@ -188,6 +282,8 @@ def create_in_cursor(
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         ),
         False,
     )
@@ -215,9 +311,21 @@ def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks."""
 
-    def __init__(self, db: SqliteConnection):
-        """Initialise the registry."""
+    def __init__(
+        self,
+        db: SqliteConnection,
+        *,
+        dispatch_origin_provider: Callable[[], Mapping[str, Any]] | None = None,
+    ):
+        """Initialise the registry.
+
+        A registry without an origin provider retains the legacy task shape
+        unless a caller supplies ``dispatch_origin`` explicitly. Production
+        coordinators install the provider so every fresh dispatched task gets
+        complete author-time evidence.
+        """
         self.db = db
+        self._dispatch_origin_provider = dispatch_origin_provider
 
     async def create_or_return_existing(
         self,
@@ -229,12 +337,22 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
+        _validate_dispatch_class(dispatch_class)
         existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
         if existing is not None:
-            return Task.from_row(existing), True
+            task = Task.from_row(existing)
+            _validate_dispatch_reuse(task, dispatch_class)
+            return task, True
 
+        if dispatch_class is not None and dispatch_origin is None:
+            if self._dispatch_origin_provider is None:
+                dispatch_class = None
+            else:
+                dispatch_origin = self._dispatch_origin_provider()
         async with self.db.transaction() as cur:
             task = _insert_queued_task(
                 cur,
@@ -245,6 +363,8 @@ class TaskRegistry:
                 side_effects=side_effects,
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=task_id,
+                dispatch_class=dispatch_class,
+                dispatch_origin=dispatch_origin,
             )
         return task, False
 
@@ -258,6 +378,8 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> Task:
         """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
         task, _was_existing = await self.create_or_return_existing(
@@ -268,6 +390,8 @@ class TaskRegistry:
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         )
         return task
 
@@ -331,6 +455,31 @@ class TaskRegistry:
                 (json.dumps(history), task_id),
             )
 
+    async def append_completion_evidence(self, task_id: str, evidence: dict[str, Any] | None = None) -> None:
+        """Append durable completion evidence without changing state or updated_at.
+
+        This is not progress and must survive progress-history pruning. A
+        repeated completion appends again; a missing row remains an error.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            history = json.loads(cur.fetchone()["history"])
+            history.append({"ts": now_iso(), "evidence": evidence or {}})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+
+    async def integrate_reconcile_child_exists(self, base_key: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether an integrate-patch reconcile child exists in these states."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
+            (prefix, *states),
+        )
+        return row is not None
+
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
         """Return the task registered under ``idempotency_key``, or None."""
         row = await self.db.fetchone(
@@ -348,6 +497,43 @@ class TaskRegistry:
         """Return all running tasks ordered least-recently-updated-first."""
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
+
+    def running_context_sync(self) -> list[tuple[Task, list[str], str, list[int]]]:
+        """Read running tasks with the lanes, soonest lease expiry and GPUs each holds.
+
+        The three statements are separate reads, not one transactional snapshot.
+        """
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+            (),
+        )
+        if not rows:
+            return []
+        lanes_by_task: dict[str, list[str]] = {}
+        # Soonest lane expiry: the first one to lapse is when reclaim starts.
+        expiry_by_task: dict[str, str] = {}
+        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+            tid = str(row["task_id"])
+            lanes_by_task.setdefault(tid, []).append(str(row["lane"]))
+            expires = str(row["expires_at"])
+            prev = expiry_by_task.get(tid)
+            if prev is None or expires < prev:
+                expiry_by_task[tid] = expires
+        gpus_by_task: dict[str, list[int]] = {}
+        for row in self.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+            gpus_by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
+        projected: list[tuple[Task, list[str], str, list[int]]] = []
+        for row in rows:
+            task = Task.from_row(row)
+            projected.append(
+                (
+                    task,
+                    lanes_by_task.get(task.task_id, []),
+                    expiry_by_task.get(task.task_id, ""),
+                    gpus_by_task.get(task.task_id, []),
+                )
+            )
+        return projected
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
@@ -449,34 +635,21 @@ class TaskRegistry:
                 cancelled.append(task_id)
         return cancelled
 
-    async def cancel_queued_not_allowed(
+    async def cancel_queued(
         self,
         *,
         allowed_kinds: set[str] | frozenset[str],
         reason: str,
-        spare_queued: SpareQueuedFn | None = None,
     ) -> list[str]:
-        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary."""
+        """Bulk-cancel queued tasks whose kind is not in ``allowed_kinds``."""
         allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
         cancelled: list[str] = []
         async with self.db.transaction() as cur:
-            cur.execute("SELECT task_id, kind, params, history FROM tasks WHERE state='queued'")
-            rows = [(r["task_id"], r["kind"], r["params"], r["history"]) for r in cur.fetchall()]
+            cur.execute("SELECT task_id, kind, history FROM tasks WHERE state='queued'")
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
             now = now_iso()
-            for task_id, kind, params_json, history_json in rows:
+            for task_id, kind, history_json in rows:
                 if str(kind or "").strip() in allowed:
-                    continue
-                try:
-                    params = json.loads(params_json) if params_json else {}
-                except json.JSONDecodeError:
-                    params = {}
-                if not isinstance(params, dict):
-                    params = {}
-                if spare_queued is not None and spare_queued(
-                    str(task_id or "").strip(),
-                    str(kind or "").strip(),
-                    params,
-                ):
                     continue
                 history = json.loads(history_json)
                 history.append(

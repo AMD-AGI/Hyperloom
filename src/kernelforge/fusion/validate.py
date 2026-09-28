@@ -495,26 +495,6 @@ def _installed_package_dir(pkg: str) -> str:
     return str(Path(spec.origin).parent)
 
 
-# The engine runs in a child process whose name does not contain the launcher's
-# command line, so a pkill written against the launcher leaves it holding the
-# card. Observed on this hardware: 283 of 288 GiB still allocated after the
-# server was "killed".
-_ENGINE_CHILD_PATTERNS = ("VLLM::EngineCore", "EngineCore_", "sglang::scheduler")
-
-
-def _pkill(pattern: str) -> None:
-    """Kill our own processes matching ``pattern``, and no one else's.
-
-    These patterns name an engine, not a run: ``VLLM::EngineCore`` matches every
-    such process on the box. Validation hosts are shared, so an unrestricted
-    pkill here reaps a colleague's serving run as readily as the one this smoke
-    just started. Scope it to the calling user; ``getuid`` is absent off POSIX,
-    where ``pkill`` is not there to be called either.
-    """
-    scope = f"-u {os.getuid()} " if hasattr(os, "getuid") else ""
-    subprocess.run(f"pkill -9 {scope}-f '{pattern}'", shell=True, capture_output=True)
-
-
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
     run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
@@ -658,12 +638,6 @@ def serving_smoke_verdict(
     server = None
     fh: object = None
     try:
-        _pkill(f"vllm serve.*{port}" if is_vllm else f"sglang.launch_server.*port={port}")
-        # The launcher's children do not carry its command line, so the pattern
-        # above misses them and they keep the card allocated.
-        for child in _ENGINE_CHILD_PATTERNS:
-            _pkill(child)
-        _time.sleep(2)
         try:
             fh = open(slog, "w")
         except OSError:

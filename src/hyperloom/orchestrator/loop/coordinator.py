@@ -57,7 +57,7 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec, timed
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
-from ..state.task_registry import TaskRegistry
+from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
@@ -186,7 +186,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         self.bus = bus_class(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
-        self.tasks = TaskRegistry(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
         self.cursors = CursorStore(self.db)
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks,
@@ -279,9 +282,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Medium-intensity soft restart at each macro-cycle boundary.
         self._cycle_soft_restart: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART")
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = not env_bool("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART")
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
@@ -363,7 +363,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kernel_enabled": "phase_machine",
         "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
-        "_await_kernel_entry_task": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
@@ -376,6 +375,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
         "_enqueue_internal_analysis_task": "phase_prelude",
+        "_internal_analysis_params": "phase_prelude",
         "_on_enter_sweep": "phase_sweep",
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_record_session_budget_conc_sweep_skip": "phase_sweep",
@@ -384,7 +384,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
         "_revalidate_stack_for_close": "phase_close",
-        "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
         "_enqueue_internal_report_task": "phase_close",
@@ -418,6 +417,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
+        "_run_kernel_agent": "phase_kernel",
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
         "_kernel_timeline": "phase_kernel",
@@ -449,7 +449,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_cycle_strategy_block": "phase_macro_cycle",
         "_apply_macro_cycle_reloop": "phase_macro_cycle",
         "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_restart_inference_servers": "phase_macro_cycle",
         "_on_cycle_start_reprofile": "phase_macro_cycle",
         "_capture_cycle_memory": "cycle_memory",
         "_cycle_directive_fallback": "cycle_memory",
@@ -467,20 +466,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_framework_authoring_domain": "gap_refresh",
         "_gap_layer_for_action": "gap_refresh",
         "_seed_gaps_from_research_hints": "gap_refresh",
-        "_record_explore_round_gaps": "phase_framework",
-        "_record_explore_variant_failures": "phase_framework",
+        "_record_explore_round_gaps": "gap_refresh",
+        "_record_explore_variant_failures": "gap_refresh",
         "_maybe_materialize_mn_explore": "phase_framework",
         "_maybe_autosubmit_specialist_patches": "phase_framework",
         "_maybe_autosubmit_framework_config": "phase_framework",
-        "_config_lever_known_bad": "phase_framework",
         "_on_enter_framework": "phase_framework",
-        "_open_framework_timeline": "phase_framework",
         "_close_framework_timeline": "phase_framework",
-        "_framework_timeline": "phase_framework",
-        "_framework_policy_fields": "phase_framework",
-        "_pump_framework_agent_phase": "phase_framework",
-        "_framework_agent_authoring_inflight": "phase_framework",
-        "_enqueue_framework_agent_authoring_specialist": "phase_framework",
         "_framework_gpu_params": "gpu_lanes",
         "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
@@ -506,39 +498,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_note_build_routed": "enablement_build",
         "_build_probe_was_cancelled": "enablement_build",
         "_enqueue_build_launch_probe": "enablement_build",
-        "_maybe_rearm_authored_lane": "phase_framework",
-        "_enqueue_author_specialist": "phase_framework",
-        "_drain_apply_fail_retry_pending": "phase_framework",
-        "_framework_candidate_key": "phase_framework",
-        "_framework_processed_candidate_keys": "phase_framework",
-        "_unprocessed_framework_agent_candidates": "phase_framework",
-        "_select_next_framework_agent_candidate": "phase_framework",
-        "_framework_known_candidate_ids": "phase_framework",
-        "_framework_tried_refs": "phase_framework",
-        "_build_framework_working_memory": "phase_framework",
-        "_framework_agent_discover_repo_urls": "phase_framework",
-        "_record_framework_agent_phase_done": "phase_framework",
-        "_enqueue_framework_agent_task": "phase_framework",
-        "_collect_framework_agent_candidate_priors": "phase_framework",
-        "_submit_framework_agent_candidate_for_review": "phase_framework",
-        "_materialize_framework_agent_candidate": "phase_framework",
-        "_stamp_framework_progress": "phase_framework",
-        "_record_framework_agent_critic_denied": "phase_framework",
-        "_maybe_reauthor_from_critic_feedback": "phase_framework",
-        "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "enablement_lane",
         "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
         "_open_revalidation_row": "enablement_revalidation",
         "_open_round_past_spent_generations": "enablement_revalidation",
         "_open_row_past_spent_generations": "enablement_revalidation",
-        "_record_framework_agent_authored_outcome": "phase_framework",
-        "_recover_framework_agent_authoring_outcome": "phase_framework",
-        "_record_framework_agent_authoring_empty_outcome": "phase_framework",
-        "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_maybe_enqueue_candidate_discovery": "phase_framework",
-        "_candidate_discovery_inflight": "phase_framework",
-        "_ingest_candidate_discovery": "phase_framework",
-        "_candidates_from_discovery_proposals": "phase_framework",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -626,6 +590,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resume_rollback_pending_integrate": "writeback",
         "_resume_recover_pending_integrate": "writeback",
         "_resume_recover_orphaned_keeps": "writeback",
+        "_geak_rebench_params": "writeback",
         "_enqueue_internal_stack_rebench": "writeback",
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
@@ -990,21 +955,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
-    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
-
-    # Max tried-candidate rows fed into the ranker/discovery working memory.
-    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
-
-    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
     # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
     # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it.
-    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
     # run.
@@ -1043,7 +996,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 )
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self._pump_framework_agent_phase_safely(caller="tick")
+            await self.phase_framework.pump(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
@@ -1094,7 +1047,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
 
-        for recorder in (active_kernel_recorder(), self._framework_timeline()):
+        for recorder in (active_kernel_recorder(), self.phase_framework.timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
@@ -1265,7 +1218,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        await self._pump_framework_agent_phase_safely(caller="run")
+                        await self.phase_framework.pump(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
@@ -1357,10 +1310,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
-            try:
-                await self._await_kernel_entry_task()
-            except (asyncio.CancelledError, Exception):
-                log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
                 final_signals = self._signals.close()
@@ -1594,9 +1543,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     ),
                 },
             )
-
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP = 6
 
     # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})

@@ -92,6 +92,7 @@ test = [
     "hyperloom-inference_optimizer[ci]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "jsonschema>=4.18",
     # Property-based tests over the bring-up ladder.
     "hypothesis>=6.0",
     "respx>=0.21",
@@ -136,10 +137,6 @@ dev = [
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 hyperloom = "hyperloom.inference_optimizer.setup:main"
-# Console scripts for interactive / manual use; the orchestrator invokes the
-# ``python -m hyperloom.agents.*`` module paths directly instead.
-framework-agent = "hyperloom.agents.framework.runtime.cli:main"
-fa = "hyperloom.agents.framework.runtime.cli:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
@@ -259,12 +256,6 @@ hyperloom = [
     "actions/*.md",
     "references/*.md",
 ]
-"hyperloom.agents.framework" = [
-    "SKILL.md",
-    "README.md",
-    "examples/*.json",
-    "examples/*.py",
-]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
     "README.md",
@@ -287,6 +278,7 @@ hyperloom = [
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
     "*.md",
+    "contracts/*.json",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",

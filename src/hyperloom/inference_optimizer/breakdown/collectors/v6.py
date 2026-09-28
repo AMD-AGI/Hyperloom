@@ -352,17 +352,17 @@ _ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 
 def _graded_axes(recorded: Any) -> dict[str, Any]:
-    """Publish the four graded axes a recorder projected, absent ones as explicit nulls.
+    """Publish the graded axes a recorder projected, absent ones as explicit nulls.
 
-    The recorder already filled all four, so this only has to hold the shape for a session recorded before it did.
-    All four are always present because absent would be indistinguishable from an axis the framework failed to
+    The recorder already filled them, so this only has to hold the shape for a session recorded before it did.
+    Every axis is always present because absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero".
 
     Args:
         recorded (Any): The recorded ``perf`` block, or ``None`` on a session that has none.
 
     Returns:
-        dict[str, Any]: The four axes, each ``None`` where nothing measured it.
+        dict[str, Any]: Every axis in ``GRADED_AXIS_KEYS``, each ``None`` where nothing measured it.
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
 

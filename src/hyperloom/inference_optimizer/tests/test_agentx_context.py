@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.perf_metric import AGENTX_KEEP_THRESHOLD_FLOOR_PCT
+from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
 from hyperloom.orchestrator.prompts.agentx_context import corpus_lines, grading_lines
 
 _SHAPE = {
@@ -98,14 +98,15 @@ def test_a_zero_is_treated_as_absent_not_as_a_measurement(field, absent):
     assert absent not in "\n".join(corpus_lines({**_SHAPE, field: 0}))
 
 
-def test_the_grading_block_names_the_axis_and_the_three_verdicts():
+def test_the_grading_block_names_the_axis_and_both_verdicts():
     body = "\n".join(grading_lines())
-    assert "E2E normalised interactivity P90" in body
-    assert "SLOW tail" in body
-    assert "REVERT" in body and "RECORDED" in body
+    assert "E2E normalised interactivity P50" in body
+    assert "slow tail (P90)" in body
+    assert "REVERT" in body
+    assert "RECORDED" not in body
     assert "not the objective" in body
 
 
 def test_the_grading_block_takes_the_threshold_from_the_one_constant():
-    """A literal here would drift from the floor the resolver actually applies."""
-    assert f">={AGENTX_KEEP_THRESHOLD_FLOOR_PCT:.0f}%" in "\n".join(grading_lines())
+    """A literal here would drift from the threshold the resolver actually applies."""
+    assert f">=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}%" in "\n".join(grading_lines())

@@ -13,13 +13,15 @@ from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
-from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+    is_valid_stop_reason,
+)
 
-from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -51,6 +53,9 @@ _NO_REVALIDATION_STOP_REASONS: frozenset[str] = frozenset(
         "supervisor_coordinator_died",
         "supervisor_tick_stalled",
         "unknown",
+        # The run stopped because the framework tree still holds patches nothing
+        # measured against. Re-benching the stack here would measure that tree.
+        PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
     }
 )
 
@@ -62,7 +67,7 @@ def _task_is_dead(task: Task | None) -> bool:
     return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
 
 
-class ClosePhase(PhaseHandler):
+class ClosePhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _derive_close_stop_reason(self) -> str:
@@ -106,6 +111,11 @@ class ClosePhase(PhaseHandler):
         # only run on a normal converged close.
         if bool(getattr(self.shared_state, "closing_phase", False)):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
+            return
+        if str(getattr(self.shared_state, "stop_reason", "") or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
+            # Profiling the tree the run just refused to trust would attribute
+            # the reading to a baseline that is not on disk.
+            log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
             return
         if self._internal_analysis_kind() != "roofline":
             # Roofline disabled for this run; nothing to profile.
@@ -208,7 +218,6 @@ class ClosePhase(PhaseHandler):
         summary = await self._enqueue_internal_stack_rebench(
             reason="close_unvalidated_stack",
             idempotency_key=f"close-stack-revalidate-g{generation}",
-            include_geak=False,
         )
         task_id = str(summary.get("task_id") or "")
         if not task_id:
@@ -329,52 +338,6 @@ class ClosePhase(PhaseHandler):
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
-    async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
-        """Stop any GEAK 2b rebench and close its pending slot as the run winds down."""
-        try:
-            dropped = await _geak_rebench.cancel_geak_rebench_tasks(
-                self.tasks,
-                reason=reason,
-                include_running=True,
-            )
-            if dropped:
-                log.info(
-                    "%s: cancelled %d in-flight GEAK rebench task(s)",
-                    reason,
-                    len(dropped),
-                )
-            settled = await _geak_rebench.settle_dangling_geak_pending(
-                self.tasks,
-                self.shared_state,
-                reason=reason,
-            )
-            self._record_close_geak_candidate()
-            if not (dropped or settled):
-                return
-            if settled:
-                log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("%s: geak_pending settle save failed", reason)
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "geak_rebench_close_drain",
-                    "reason": reason,
-                    "cancelled_task_ids": dropped,
-                    "pending_settled": bool(settled),
-                },
-            )
-        except Exception:
-            log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
-            await self._record_close_step(
-                "geak_rebench_drain",
-                status="failed",
-                detail="see log; geak_pending may remain awaiting_rebench",
-            )
-
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
@@ -382,7 +345,6 @@ class ClosePhase(PhaseHandler):
         # ``running`` until the verdict below, so a session killed mid-sequence
         # is reported as interrupted rather than judged on the steps it reached.
         _close_out.record_close_opened(self.session_dir)
-        await self._drain_geak_rebench_for_close()
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
@@ -690,6 +652,7 @@ class ClosePhase(PhaseHandler):
                 requires_lanes=[],
                 side_effects=["writes_results"],
                 lease_ttl_sec=120,
+                dispatch_class="coordinator",
             )
             if not was_existing:
                 return task
@@ -708,6 +671,11 @@ class ClosePhase(PhaseHandler):
                 task.state,
             )
         return task  # type: ignore[return-value]  # loop body always binds it
+
+    def _close_leg_idem_suffix(self) -> str:
+        """Idempotency-key suffix scoping a close-step task to the current run leg; empty before any resume."""
+        resumed_ts = str(getattr(self.shared_state, "resumed_ts", "") or "").strip()
+        return f"-leg-{resumed_ts}" if resumed_ts else ""
 
     async def _enqueue_internal_report_task(
         self,
@@ -749,7 +717,7 @@ class ClosePhase(PhaseHandler):
         task = await self._enqueue_runnable_internal_task(
             kind="report",
             params=params,
-            idempotency_key=f"internal-report-{reason}",
+            idempotency_key=f"internal-report-{reason}{self._close_leg_idem_suffix()}",
         )
         # Mirror onto closing_report_task_id.
         if not self.shared_state.closing_report_task_id:
@@ -774,7 +742,7 @@ class ClosePhase(PhaseHandler):
         return await self._enqueue_runnable_internal_task(
             kind="session_breakdown",
             params=params,
-            idempotency_key=f"internal-session_breakdown-{reason}",
+            idempotency_key=f"internal-session_breakdown-{reason}{self._close_leg_idem_suffix()}",
         )
 
     def _close_step_wait_sec(self, task: Task) -> float:
@@ -951,11 +919,6 @@ class ClosePhase(PhaseHandler):
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
 
-        # The wall-clock path never reaches ``_on_enter_close``, so it owns the same wind-down: a rebench left running
-        # would keep writing back during the grace window, and an unsettled slot makes the report promise a rebench
-        # whose task the loop above has already cancelled.
-        await self._drain_geak_rebench_for_close(reason="closing_phase")
-
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
         task, _existing = await self.tasks.create_or_return_existing(
@@ -968,6 +931,7 @@ class ClosePhase(PhaseHandler):
             requires_lanes=[],
             side_effects=["writes_results"],
             lease_ttl_sec=120,
+            dispatch_class="coordinator",
         )
         task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id

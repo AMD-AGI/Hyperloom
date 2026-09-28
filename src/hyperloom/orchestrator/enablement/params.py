@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator
@@ -78,7 +77,6 @@ def _maybe_build_localization_candidate(
     capability_gap: Any,
     *,
     framework: str,
-    model: str,
     repo_url: str,
     candidate_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
@@ -101,9 +99,7 @@ def _maybe_build_localization_candidate(
         from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
-        action = adapter.build_localization_action(
-            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
-        )
+        action = adapter.build_localization_action(capability_gap, candidate_ref=ref, repo_url=repo_url)
         if action is None:
             return None
         return action.to_state()
@@ -140,8 +136,7 @@ class EnablementParams(CoordinatorCollaborator):
                 so a progressing bring-up is never told to change approach.
 
         Returns:
-            dict | None: Specialist task params (tagged ``enablement`` +
-            ``framework_agent_authoring``) or ``None``.
+            dict | None: Specialist task params (tagged ``enablement``) or ``None``.
         """
         text = (launch_log or "").strip()
         if not text:
@@ -291,7 +286,6 @@ class EnablementParams(CoordinatorCollaborator):
         localization_candidate = _maybe_build_localization_candidate(
             capability_gap,
             framework=framework,
-            model=model,
             repo_url=repo_url,
             candidate_refs=tuple(candidate_refs),
         )
@@ -304,8 +298,6 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            # Enablement tag routes the integrate gate to runnable_decision.
-            "framework_agent_authoring": True,
             "enablement": True,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
@@ -530,7 +522,7 @@ class EnablementParams(CoordinatorCollaborator):
 
         Enumerates candidate PRs across every repo in ``plan.repos`` (framework
         + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
-        ranks each :class:`framework_agent.models.Candidate` with
+        ranks each :class:`hyperloom.agents.framework.models.Candidate` with
         ``score_enablement_title`` (per-Candidate so the ref/html_url is
         preserved) and returns the top ``req.max_search_candidates`` refs
         (``html_url`` preferred).
@@ -543,15 +535,15 @@ class EnablementParams(CoordinatorCollaborator):
         between repos and ranks whatever was collected.
 
         Args:
-            req: The :class:`framework_agent.enablement.EnablementRequest`.
-            plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
+            req: The :class:`hyperloom.common.failure_signature.EnablementRequest`.
+            plan: The :class:`hyperloom.orchestrator.enablement.mandate.EnablementSearchPlan`.
             deadline: When to stop enumerating further repos.
 
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
         from .mandate import score_enablement_title
-        from hyperloom.agents.framework.models import Candidate, ExploreRequest
+        from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
         from hyperloom.agents.framework.sources import enumerate_candidates
         from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
@@ -560,12 +552,8 @@ class EnablementParams(CoordinatorCollaborator):
         plane = getattr(self, "knowledge_plane", None)
         pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
         pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
-        if pr_monitor_url:
-            search_modes = ["pr_monitor", "github"]
-            pr_monitor_block: dict[str, Any] = {"pr_monitor": {"base_url": pr_monitor_url}}
-        else:
-            search_modes = ["github"]
-            pr_monitor_block = {}
+        pr_monitor = PRMonitorConfig(base_url=pr_monitor_url) if pr_monitor_url else None
+        search_modes = ("pr_monitor", "github") if pr_monitor else ("github",)
 
         collected: list[Candidate] = []
         for repo in plan.repos:
@@ -576,23 +564,15 @@ class EnablementParams(CoordinatorCollaborator):
                 )
                 break
             try:
-                explore_req = ExploreRequest.from_dict(
-                    {
-                        "framework": getattr(req, "framework", "") or "sglang",
-                        "repo_url": repo,
-                        "work_dir": str(
-                            getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")
-                        ),
-                        "baseline": {"throughput": 1.0},
-                        "search_perf_prs": True,
-                        "search_modes": search_modes,
-                        "keywords": list(plan.keywords),
-                        "pr_states": ["all"],
-                        "max_search_candidates": max_candidates,
-                        **pr_monitor_block,
-                    }
+                search = CandidateSearchRequest(
+                    repo_url=repo,
+                    search_modes=search_modes,
+                    keywords=tuple(plan.keywords),
+                    pr_states=("all",),
+                    max_search_candidates=max_candidates,
+                    pr_monitor=pr_monitor,
                 )
-                collected.extend(enumerate_candidates(explore_req))
+                collected.extend(enumerate_candidates(search))
             except Exception:
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",

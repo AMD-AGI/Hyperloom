@@ -351,6 +351,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             idempotency_key=retry_key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
         )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
