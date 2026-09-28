@@ -1304,12 +1304,8 @@ class DispatcherCollaborator:
                 )
             elif task.task_id not in self._dead_holder_accounted:
                 unpromotable_result = dict(result.result or {})
-                # Surface a PolicyGate dispatch rejection's specific rule
-                # (e.g. "policy_path_outside_session_dir") into
-                # the gap ledger instead of letting it default to
-                # "unknown_error" — result.result is {} for these
-                # (rejected before the executor ever ran), so error_class
-                # would otherwise be silently dropped here.
+                # Runner-level failures (no executor, executor raised) carry
+                # their class on the result, not in the empty payload.
                 if result.error_class and not unpromotable_result.get("error_class"):
                     unpromotable_result["error_class"] = result.error_class
                 await self._handle_unpromotable_result(task, unpromotable_result)
