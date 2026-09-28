@@ -310,6 +310,27 @@ check_vllm_mooncake_installable "{py}" "{req}"
     assert "publishes wheels" not in result.stderr
 
 
+def test_mooncake_no_match_quotes_pip_and_hedges_cause(tmp_path: Path) -> None:
+    # An index answering 403/429/503 yields exactly these two lines, indistinguishable from a missing wheel.
+    py = _script_python(
+        tmp_path,
+        'echo "ERROR: Could not find a version that satisfies the requirement $last (from versions: none)" >&2\n'
+        'echo "ERROR: No matching distribution found for $last" >&2\n'
+        "exit 1",
+    )
+    req = _requirements(tmp_path, "mooncake-transfer-engine-rocm >= 0.3.13\n")
+    body = f"""
+die() {{ echo "$*" >&2; exit 1; }}
+export CALLS="{tmp_path}/calls"; VLLM_VERSION=0.30.0; ROCM_SDK_INDEX_URL=https://example.invalid
+check_vllm_mooncake_installable "{py}" "{req}"
+"""
+    result = _bash(_MOONCAKE_FUNCS, body)
+    assert result.returncode != 0
+    assert "(from versions: none)" in result.stderr
+    assert "likely" in result.stderr
+    assert "publishes no wheel for Python" not in result.stderr
+
+
 def test_requirements_without_mooncake_skip_pip(tmp_path: Path) -> None:
     py = _pip_python(tmp_path, pip_ok=False)
     req = _requirements(tmp_path, "numba==0.65.0\n")

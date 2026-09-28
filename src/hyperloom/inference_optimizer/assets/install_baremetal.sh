@@ -1163,15 +1163,19 @@ check_vllm_mooncake_installable() {
     --extra-index-url "$ROCM_SDK_INDEX_URL" "$req" 2>&1)" || rc=$?
   rm -rf "$dl_dir"
   [ "$rc" -eq 0 ] && return 0
+  local hint=""
+  # An index answering 403/429/503 also ends in "No matching distribution found",
+  # so the interpreter can only be named as the likely cause, next to pip's own line.
   if printf '%s\n' "$out" | grep -q 'No matching distribution found' &&
      ! printf '%s\n' "$out" | grep -Eqi 'retrying|connection|timed out|proxy'; then
     pyver="$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
-    die "vLLM ${VLLM_VERSION} source build requires ${req}, which publishes no wheel for Python ${pyver}." \
-      "Use a Python version that package publishes wheels for, docker mode, or an earlier vLLM" \
-      "(for example VLLM_VERSION=0.29.0 VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206)."
+    hint=" If the package index is reachable, the likely cause is that ${req%%[<>=!~ ]*} publishes no wheel"
+    hint+=" matching this interpreter (Python ${pyver}) or platform: use a Python version it publishes wheels for,"
+    hint+=" docker mode, or an earlier vLLM"
+    hint+=" (for example VLLM_VERSION=0.29.0 VLLM_SOURCE_REF=98dff2a81d747d1dba01a47f939f48c3526d4206)."
   fi
-  die "cannot check ${req} required by the vLLM ${VLLM_VERSION} source build:" \
-    "$(printf '%s\n' "$out" | grep -m1 -i 'error' || printf '%s\n' "$out" | tail -n1)"
+  die "cannot fetch ${req} required by the vLLM ${VLLM_VERSION} source build:" \
+    "$(printf '%s\n' "$out" | grep -m1 -i 'error' || printf '%s\n' "$out" | tail -n1).${hint}"
 }
 
 check_vllm_mooncake_if_checked_out() {
