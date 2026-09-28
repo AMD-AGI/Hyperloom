@@ -101,13 +101,11 @@ jobs:
         with:
           command: routing
           skills: examples/skills/hyperloom-workload-optimizer
-          # `--min-accuracy 0` reports the score without gating on it. One
-          # skill alone in the room is a different measurement from the
-          # catalog's full room, so the bar here is raised once runs on this
-          # runner have established what it should be.
+          # One wrong routing decision fails the job, the same bar amd/skills
+          # grades this skill against.
           args: >-
             --routing-room hyperloom-workload-optimizer
-            --min-accuracy 0
+            --min-accuracy 1
             --output routing-report.json
             --keep-logs routing-logs
           install-claude: "true"
