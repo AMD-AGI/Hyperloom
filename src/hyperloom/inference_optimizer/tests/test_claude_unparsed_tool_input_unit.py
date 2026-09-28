@@ -232,9 +232,71 @@ async def test_handler_reports_malformed_wrapped_raw() -> None:
     assert "__unparsedToolInput.raw is not valid JSON" in result["content"][0]["text"]
 
 
-def test_registered_schema_offers_both_shapes() -> None:
-    """The declared schema is what the model reads, so the wrapper alternative has to survive into it and say it is internal."""
+def test_registered_schema_is_provider_compatible_and_keeps_parser_wrapper() -> None:
+    """Claude Code omits tools whose schemas contain a top-level union."""
     schema = _registered_emit_intent_tool().input_schema
-    assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
-    assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]
+    assert schema["type"] == "object"
+    assert not {"anyOf", "oneOf", "allOf"} & schema.keys()
+    assert set(schema["properties"]) == {"intent_type", "payload", "__unparsedToolInput"}
+    assert schema["additionalProperties"] is False
     assert "Never emit this deliberately" in schema["properties"]["__unparsedToolInput"]["description"]
+
+
+@pytest.mark.parametrize(
+    "arguments,accepted",
+    [
+        (_NATIVE_EMIT, True),
+        (_WRAPPER_EMIT, True),
+        (_MIXED_EMIT, True),
+        ({"intent_type": "delegate", "payload": {"action_name": "baseline"}}, True),
+        ({}, False),
+        ({"intent_type": "delegate"}, False),
+        ({"payload": {"action_name": "baseline"}}, False),
+        ({"intent_type": "unknown", "payload": {}}, False),
+        ({"intent_type": "delegate", "payload": {}}, False),
+        ({"intent_type": "delegate", "payload": []}, False),
+        ({"__unparsedToolInput": {}}, False),
+        ({"__unparsedToolInput": {"raw": "{not-json"}}, False),
+        ({"__unparsedToolInput": {"raw": "[]"}}, False),
+        ({"__unparsedToolInput": {"raw": '{"intent_type":"unknown","payload":{}}'}}, False),
+        ({"__unparsedToolInput": {"raw": '{"intent_type":"delegate","payload":{}}'}}, False),
+        (_WRAPPER_WITH_JUNK, False),
+    ],
+    ids=[
+        "native",
+        "wrapper",
+        "native-with-wrapper",
+        "baseline-delegate",
+        "empty",
+        "missing-payload",
+        "missing-intent-type",
+        "unknown-intent",
+        "missing-action",
+        "nonobject-payload",
+        "empty-wrapper",
+        "malformed-wrapper",
+        "nonobject-wrapper",
+        "unknown-wrapped-intent",
+        "missing-wrapped-action",
+        "wrapper-with-junk",
+    ],
+)
+async def test_sdk_emitter_preserves_strict_validation(arguments: dict[str, Any], accepted: bool) -> None:
+    """Required-field alternatives remain enforced through the actual MCP server."""
+    sdk = pytest.importorskip("claude_agent_sdk")
+    from mcp import types
+
+    server = build_emit_intent_server(sdk_module=sdk)["instance"]
+    request = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(name=EMIT_INTENT_TOOL_NAME, arguments=arguments),
+    )
+    if hasattr(server, "get_request_handler"):
+        entry = server.get_request_handler(request.method)
+        params = entry.params_type.model_validate(request.params.model_dump())
+        result = await entry.handler(None, params)
+    else:
+        result = (await server.request_handlers[type(request)](request)).root
+    assert result.model_dump(by_alias=True)["isError"] is not accepted
+    if accepted:
+        assert result.content[0].text == "ok"

@@ -209,6 +209,7 @@ class ConversationCollaborator:
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._coord.dispatcher._run_action_now_wait,
+                inline_action_names=self._coord.dispatcher._inline_action_whitelist,
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)

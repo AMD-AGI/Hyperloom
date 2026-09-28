@@ -38,6 +38,11 @@ Consult these SharedState surfaces in order before re-proposing:
    Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`
    and the run terminates; recover BEFORE the third failure.
 
+An inline-eligibility rejection from `run_action_now` did not start a
+baseline attempt. Check the inbox for queued tasks, `get_running_tasks`,
+and `get_recent_outcomes` before resubmitting through `emit_intent`.
+Keep the benchmark parameters unchanged when correcting only the tool route.
+
 ## Baseline fingerprint (PRELUDE)
 
 The `baseline` fingerprint is exactly eight params fields:
@@ -88,8 +93,17 @@ measurement, NOT a failure — do not retry it.
 
 ## Example (PRELUDE — baseline failed twice with `error_class='no_report'`)
 
-    propose_action{action_name='baseline',
-        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},
-        predicted_gain_pct: 0,
-        notes: 'recover from no_report streak by redirecting RESULT_DIR
-                to the observed leak location'}
+Call `emit_intent` with this envelope, then end the turn so the Critic can
+review the proposal and the Coordinator can dispatch the approved baseline:
+
+```json
+{
+  "intent_type": "propose_action",
+  "payload": {
+    "action_name": "baseline",
+    "params": {"result_dir": "<session_dir>/runs/baseline/<task>/leak"},
+    "predicted_gain_pct": 0,
+    "notes": "Recover from no_report by redirecting RESULT_DIR to the observed leak location"
+  }
+}
+```

@@ -104,6 +104,7 @@ def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[
 
 EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": "Provide both intent_type and payload. Only the streaming parser may supply __unparsedToolInput.",
     "properties": {
         "intent_type": {
             "type": "string",
@@ -124,15 +125,11 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "anyOf": [
-        {"required": ["intent_type", "payload"]},
-        {"required": ["__unparsedToolInput"]},
-    ],
     "additionalProperties": False,
 }
 
-# The fallback branch lets the MCP handler acknowledge parser-generated wrappers instead of returning an error the
-# model cannot repair.
+# Claude Code drops tools with a top-level union from the provider's tool list.
+# validate_emit_intent_input enforces the required fields for both supported forms.
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "

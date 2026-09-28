@@ -92,6 +92,9 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
         sub = _StubSub()
         shared_state = object()  # RooflineExecutor refuses None; any truthy ref works.
 
+        def _attach_orchestration_context_tools(self):
+            pass
+
     coord = _StubCoord()
     args = _build_args(research_lane_capacity=1)
     plane = _FakeKnowledgePlane()
@@ -128,6 +131,9 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     class _StubCoord:
         sub = _StubSub()
         shared_state = object()  # RooflineExecutor refuses None; any truthy ref works.
+
+        def _attach_orchestration_context_tools(self):
+            pass
 
     coord = _StubCoord()
     # specialist_executor=None mirrors cli's gating when capacity == 0.
