@@ -684,7 +684,6 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         if entry.get("kernel_id") in {"k001", "k004"}
     ]
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
-    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {expected_display_id}
 
     # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
@@ -1576,28 +1575,24 @@ async def test_conc_sweep_task_carries_catalogue_lanes(coord):
     [
         {},
         {"stack_kernel_ids": "a+b"},
-        {"stack_kernel_ids": None},
         {"stack_kernel_ids": []},
         {"stack_kernel_ids": ["a"]},
         {"stack_kernel_ids": ["a", "a"]},
         {"stack_kernel_ids": ["a", "b", "missing"]},
         {"stack_kernel_ids": ["a", None]},
-        {"stack_kernel_ids": {"a": True, "b": True}},
     ],
     ids=[
         "legacy_ambiguous",
         "string",
-        "null",
         "empty",
         "short",
         "duplicate",
         "missing_member",
         "non_string",
-        "mapping",
     ],
 )
 async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_path, monkeypatch, members):
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kat
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
@@ -1610,8 +1605,6 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
             "patch_path": str(tmp_path / f"{kid}.patch"),
             "target_file": str(tmp_path / f"{kid}.py"),
             "stack_validation_in_progress": True,
-            "stack_validation_kernel_id": "a+b",
-            "stack_validation_started_at": "2026-01-01T00:00:00+00:00",
         }
     c.shared_state.pending_stack_validation_result = {
         "status": "ok",
@@ -1621,6 +1614,14 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
         "target_file": "display-only-targets",
         "new_tput": 110.0,
         "stack_validation": True,
+        "stack_member_identities": [
+            {
+                "kernel_id": kid,
+                "patch_path": str(tmp_path / f"{kid}.patch"),
+                "target_file": str(tmp_path / f"{kid}.py"),
+            }
+            for kid in ("a", "b")
+        ],
         **members,
     }
     manifest = tmp_path / "manifest.json"
@@ -1632,7 +1633,7 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
     original = state_path.read_bytes()
     original_manifest = manifest.read_bytes()
     revert = Mock(return_value={"status": "ok"})
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(kat, "_maybe_revert_kernel_patch", revert)
     c._maybe_enqueue_watermark_roofline = AsyncMock()
 
     with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
@@ -1723,20 +1724,14 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
 
     c = historical_stack_coord
     selected = c._positive_needs_review_integrates()
-    started = "2026-01-01T00:00:00+00:00"
     for entry in selected:
-        entry.update(
-            stack_validation_in_progress=True,
-            stack_validation_kernel_id="a+b",
-            stack_validation_started_at=started,
-        )
+        entry["stack_validation_in_progress"] = True
     c.shared_state.pending_stack_validation_result = {
         "status": "ok",
         "decision": "KEEP",
         "new_tput": 110.0,
         "kernel_id": "a+b",
         "stack_validation": True,
-        "stack_validation_started_at": started,
         "stack_kernel_ids": [entry["kernel_id"] for entry in selected],
         "stack_member_identities": [
             {key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in selected
@@ -1776,7 +1771,7 @@ def test_stack_members_same_selected_identity_is_still_ambiguous(historical_stac
 
 
 @pytest.mark.asyncio
-async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_validation_stamp(tmp_path, monkeypatch):
+async def test_stack_members_recovery_rejects_changed_patch(tmp_path, monkeypatch):
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
@@ -1994,48 +1989,139 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
     assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
 
 
-def _age_checkpoint_to_the_previous_release(session_dir: Path) -> None:
-    """Rewrite the persisted checkpoint in the shape the current release writes.
-
-    That shape names its members and stamps every ledger row it marked, but
-    carries neither a stamp of its own nor the member identity list.
-    """
+def _drop_attempt_evidence(session_dir: Path) -> None:
+    """Strip the member identities that bind the checkpoint to its ledger rows, keeping the apply rows."""
     state = SharedState.load_or_init(session_dir)
-    state.pending_stack_validation_result = {
-        key: value
-        for key, value in state.pending_stack_validation_result.items()
-        if key not in ("stack_member_identities", "stack_validation_started_at")
-    }
-    state.pending_stack_validation_apply_results = [
-        {key: value for key, value in applied.items() if key != "stack_validation_started_at"}
-        for applied in state.pending_stack_validation_apply_results
-    ]
+    state.pending_stack_validation_result.pop("stack_member_identities")
     state.save(session_dir)
 
 
-@pytest.mark.asyncio
-async def test_a_checkpoint_written_before_this_build_still_unwinds(tmp_path: Path, monkeypatch):
-    """A session interrupted on the current release has no identities on its record.
-
-    Its members are still named explicitly and every row it marked carries the
-    attempt's stamp, so the unwind binds on those rather than refusing evidence
-    it wrote itself one release earlier.
-    """
+async def _halt_a_stack_keep(tmp_path: Path, monkeypatch) -> list[Path]:
+    """Decide KEEP, then die on the way to the stack; return the members' target files."""
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
-    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
-    _age_checkpoint_to_the_previous_release(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    _stub_python_cache_clear(monkeypatch)
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _materialize_stack_sources(tmp_path, stack)
+    with monkeypatch.context() as mp:
+        # Well clear of the 110 current_best, so the stack decides KEEP.
+        _stub_stack_benchmark(mp, new_tput=140.0)
+        c.phase_kernel_stack._record_integrate_keep = AsyncMock(side_effect=RuntimeError("crashed before promoting"))
+        with session_scope(tmp_path), pytest.raises(RuntimeError, match="crashed before promoting"):
+            await c._maybe_validate_positive_needs_review_stack()
+    return [Path(entry["target_file"]) for entry in stack]
+
+
+_APPLY_KERNEL_PATCH_FIELDS = (
+    "status",
+    "manifest_path",
+    "target_file",
+    "backup_dir",
+    "compiled",
+    "artifact_count",
+    "cache_clear",
+    "rebuild",
+    "jit_build_backup",
+    "cpp_itfs_cache_backup",
+)
+
+
+async def _crash_after_a_stack_revert(tmp_path: Path, monkeypatch) -> None:
+    """Decide REVERT and finish the revert, then die before the checkpoint is cleared."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    _stub_python_cache_clear(monkeypatch)
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _materialize_stack_sources(tmp_path, stack)
+    with monkeypatch.context() as mp:
+        # 105 clears the 100 baseline but not the 110 current_best, so the stack decides REVERT.
+        _stub_stack_benchmark(mp, new_tput=105.0)
+        c.phase_kernel_stack._finalize_stack_validation_outcome = AsyncMock(side_effect=RuntimeError("crashed"))
+        with session_scope(tmp_path), pytest.raises(RuntimeError, match="crashed"):
+            await c._maybe_validate_positive_needs_review_stack()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_revert_that_names_no_members_still_recovers(tmp_path: Path, monkeypatch):
+    """A finished REVERT promotes nothing and left the tree clean, so it is settled without binding members."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    await _crash_after_a_stack_revert(tmp_path, monkeypatch)
+    _drop_attempt_evidence(tmp_path)
     c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
 
     with session_scope(tmp_path):
-        assert await c._recover_interrupted_stack_validation() is True
+        await c.writeback._resume_recover_interrupted_stack(report)
 
-    assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
-    assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert c.shared_state.stop_reason == ""
+    assert [f["kind"] for f in report["fixes"]] == ["interrupted_stack_validation_recovered"]
+    assert all(
+        (tmp_path / f"{kid}.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE for kid in ("k001", "k004")
+    )
     reloaded = SharedState.load_or_init(tmp_path)
     assert not reloaded.pending_stack_validation_result
     assert not reloaded.pending_stack_validation_apply_results
     assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
+
+
+@pytest.mark.asyncio
+async def test_a_record_only_checkpoint_unwinds_instead_of_halting(tmp_path: Path, monkeypatch):
+    """Apply rows with no record still say what reached the tree, and that is enough to undo it."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
+    state = SharedState.load_or_init(tmp_path)
+    state.pending_stack_validation_result = {}
+    # Only what apply_kernel_patch itself returns: the unwind must not lean on anything the stack layer adds.
+    state.pending_stack_validation_apply_results = [
+        {key: row[key] for key in _APPLY_KERNEL_PATCH_FIELDS if key in row}
+        for row in state.pending_stack_validation_apply_results
+    ]
+    state.save(tmp_path)
+    c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
+
+    with session_scope(tmp_path):
+        await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
+    assert c.shared_state.stop_reason == ""
+    assert [f["kind"] for f in report["fixes"]] == ["interrupted_stack_validation_recovered"]
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert not reloaded.pending_stack_validation_apply_results
+    assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
+
+
+@pytest.mark.asyncio
+async def test_a_keep_that_names_no_attempt_halts_instead_of_raising(tmp_path: Path, monkeypatch):
+    """A KEEP has already finalized its patches, so an unattributable one halts with nothing promoted or resolved."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    targets = await _halt_a_stack_keep(tmp_path, monkeypatch)
+    assert all(path.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE for path in targets)
+    _drop_attempt_evidence(tmp_path)
+    c = _resumed_stack_coordinator(tmp_path)
+    c.shared_state.set_stop_reason("")
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
+
+    with session_scope(tmp_path):
+        await c.writeback._resume_recover_interrupted_stack(report)
+
+    assert c.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert [w["kind"] for w in report["warnings"]] == ["interrupted_stack_validation_unbindable"]
+    assert report["fixes"] == []
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert not any(item.get("stack_validation") for item in reloaded.optimization_stack)
+    assert reloaded.pending_stack_validation_result["decision"] == "KEEP"
+    assert not any(entry.get("stack_resolved") for entry in reloaded.kernel_integrate_attempts.values())
 
 
 @pytest.mark.asyncio
@@ -2048,16 +2134,15 @@ async def test_an_unbindable_checkpoint_halts_the_resume_rather_than_ending_it(t
     from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
-    stuck = await _halt_a_stack_revert(tmp_path, monkeypatch)
-    _age_checkpoint_to_the_previous_release(tmp_path)
+    targets = await _halt_a_stack_keep(tmp_path, monkeypatch)
     c = _resumed_stack_coordinator(tmp_path)
     c.shared_state.set_stop_reason("")
-    # A second row claims the same member under the same stack, which is the
-    # ambiguity the record's identity list used to settle.
+    # A second row carries the same identity triple under the same stack, so the
+    # record's identity list no longer singles its member's row out.
     entries = c.shared_state.kernel_integrate_attempts
     original = next(entry for entry in entries.values() if entry.get("kernel_id") == "k001")
-    entries["k001-second-attempt"] = {**original, "patch_path": str(tmp_path / "k001_other.py")}
-    report = {"fixes": [], "warnings": []}
+    entries["k001-second-attempt"] = deepcopy(original)
+    report: dict[str, Any] = {"fixes": [], "warnings": []}
 
     with session_scope(tmp_path):
         await c.writeback._resume_recover_interrupted_stack(report)
@@ -2066,7 +2151,7 @@ async def test_an_unbindable_checkpoint_halts_the_resume_rather_than_ending_it(t
     assert [w["kind"] for w in report["warnings"]] == ["interrupted_stack_validation_unbindable"]
     assert report["fixes"] == []
     # The checkpoints and the patched tree are both left for a human to settle.
-    assert stuck.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE
+    assert all(path.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE for path in targets)
     assert SharedState.load_or_init(tmp_path).pending_stack_validation_result
 
 
