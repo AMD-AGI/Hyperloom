@@ -654,7 +654,7 @@ def _phase_budget_total_seconds(
     now_unix: float | None = None,
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase."""
-    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
+    budget = normalize_budget_pct(state.phase_budget_pct)
     phase = (getattr(state, "phase", "") or "").strip().upper()
     if phase not in budget:
         return None
@@ -711,7 +711,7 @@ def effective_max_minutes(state: Any) -> float:
 
 def phase_cap_seconds(state: Any) -> float | None:
     """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = normalize_budget_pct(getattr(state, "phase_budget_pct", None))
+    budget = normalize_budget_pct(state.phase_budget_pct)
     phase = (getattr(state, "phase", "") or "").upper()
     if phase not in budget:
         return None
@@ -1704,7 +1704,7 @@ def _base_workflow_predicate_inputs(
             "enablement_enabled": bool(enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": normalize_budget_pct(getattr(state, "phase_budget_pct", None)),
+        "phase_budget_pct": normalize_budget_pct(state.phase_budget_pct),
     }
 
 
