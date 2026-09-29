@@ -711,6 +711,13 @@ async def run_tracelens_skill(
             operation="analyze_trace",
         )
     )
+    idle_timeout = _resolve_stream_idle_timeout_sec()
+    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
+    # In print mode the CLI terminates background sub-agents still running 600s
+    # after the main turn goes quiet, before the in-flight bound below applies.
+    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(tool_idle_timeout * 1000))
+    )
 
     try:
         options = sdk_options_cls(**kwargs)
@@ -725,8 +732,6 @@ async def run_tracelens_skill(
     # Drive the SDK stream manually so each next message is bounded by a
     # per-message idle timeout (inactivity, not a total budget); the in-process
     # SDK has no client-side read timeout and would otherwise block on a stall.
-    idle_timeout = _resolve_stream_idle_timeout_sec()
-    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
     in_flight = _InFlight()
     stream = sdk_query_factory(prompt=prompt, options=options)
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
