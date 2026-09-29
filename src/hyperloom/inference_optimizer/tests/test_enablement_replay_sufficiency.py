@@ -903,6 +903,8 @@ def test_credential_classes_over_the_admitted_grammar():
         ("pip install -ihttps://user:token@host/simple foo", "index_url"),
         ("pip install -fhttps://user:token@host/links foo", "find_links"),
         ("conda install -chttps://user:token@host/channel foo", "channel"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "index_url"),
+        ("conda install -chttps://user:token@host/channel?k=v foo", "channel"),
     ],
 )
 def test_compact_short_options_are_classified_and_sanitized(command, credential_class):
@@ -921,6 +923,8 @@ def test_compact_short_options_are_classified_and_sanitized(command, credential_
             "pip install -rrequirements.txt -c constraints.txt foo",
         ),
         ("pip install -ihttps://user:token@host/simple foo", "pip install -i<index_url> foo"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "pip install -i<index_url> foo"),
+        ("pip install -i=https://user:token@host/simple?k=v foo", "pip install -i=<index_url> foo"),
         ("pip install --index-url=https://user:token@host/simple foo", "pip install --index-url=<index_url> foo"),
         ("pip install --index-url https://user:token@host/simple foo", "pip install --index-url <index_url> foo"),
     ],

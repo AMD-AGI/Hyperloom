@@ -148,17 +148,18 @@ def option_operands(tokens: Iterable[str]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     pending = ""
     for token in tokens:
-        if token.startswith("-") and "=" in token:
-            option, _, operand = token.partition("=")
-            pairs.append((option, operand))
-            pending = ""
-            continue
+        # Before the ``=`` split: an attached operand such as ``-iURL?k=v`` may itself contain ``=``.
         attached = next(
             (option for option in _ATTACHED_SHORT_VALUE_OPTIONS if token.startswith(option) and token != option),
             "",
         )
         if attached:
             pairs.append((attached, token[len(attached) :].removeprefix("=")))
+            pending = ""
+            continue
+        if token.startswith("-") and "=" in token:
+            option, _, operand = token.partition("=")
+            pairs.append((option, operand))
             pending = ""
             continue
         if token.startswith("-"):
