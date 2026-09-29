@@ -148,6 +148,7 @@ class _ReapStub:
         self.unpromotable: list[str] = []
         self.gpu_specialist_pool = SimpleNamespace(release=self._noop_async)
         self.bus = SimpleNamespace(append_and_seq=self._noop_async)
+        self.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
 
     async def _noop_async(self, *_args: Any, **_kwargs: Any) -> None:
         return None
@@ -172,9 +173,9 @@ async def test_reap_skips_failure_accounting_already_charged():
     task = SimpleNamespace(task_id="t-dead", kind="baseline", params={})
     result = SubAgentResult(task_id=task.task_id, state="failed", result={"status": "failed"})
 
-    await disp._reap_dispatched_task(task, result, None)
+    await disp._reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]
 
     disp._dead_holder_accounted.add(task.task_id)
-    await disp._reap_dispatched_task(task, result, None)
+    await disp._reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]

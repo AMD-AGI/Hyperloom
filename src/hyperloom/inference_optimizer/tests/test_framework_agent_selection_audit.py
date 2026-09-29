@@ -428,11 +428,13 @@ def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
+        adopted=False,
     )
     # empty status -> no-op.
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
+        adopted=False,
     )
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
@@ -458,7 +460,7 @@ def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> Non
             "accuracy_pass": True,
         }
     )
-    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=True)
     rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
@@ -474,7 +476,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
         params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
     )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=False)
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"

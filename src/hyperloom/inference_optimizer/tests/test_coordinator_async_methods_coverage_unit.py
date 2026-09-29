@@ -15,6 +15,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
 from hyperloom.orchestrator.state.task_registry import Task
@@ -209,11 +210,6 @@ class TestAHotPassCorrectsAColdAnchor:
         )
 
         assert coord.shared_state.baseline_tput == 1000.0
-
-
-@pytest.mark.asyncio
-async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
-    await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -701,18 +697,20 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
         task=task,
         source_session_id="sess-a",
         result_dict={"gain_pct": 5.0, "output_throughput": 900.0},
-        kept=True,
+        verdict=Verdict.ADOPTED,
     )
     coord._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
         result_dict={"error_class": "boom", "reason": "bad"},
-        kept=False,
+        verdict=Verdict.FAILED,
     )
+    outcomes = [entry.outcome for entry in coord._ensure_journal().entries[-2:]]
+    assert outcomes == ["KEEP", "no_promote"]
 
 
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
-    """A reverted integrate_patch reaches the fact hook with kept=True (``status != failed`` is promotable), yet the journal must record REVERT with the REAL measured delta (from delta_pct)."""
+    """A reverted integrate_patch settles REVERTED and journals REVERT with the REAL measured delta (from delta_pct)."""
     from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_REVERT,
     )
@@ -735,7 +733,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
             "output_throughput": 0.440529,
             "reason": "throughput delta -0.44% < keep_threshold 1.00%",
         },
-        kept=True,
+        verdict=Verdict.REVERTED,
     )
     entry = coord._ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_REVERT
@@ -758,11 +756,32 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
         task=task,
         source_session_id="sess-a",
         result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
-        kept=True,
+        verdict=Verdict.ADOPTED,
     )
     entry = coord._ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_KEEP
     assert entry.gain_pct == 6.2
+
+
+def test_record_fact_refused_integrate_patch_is_not_a_keep(coord: Coordinator) -> None:
+    """An executor ``kept`` the lift refused adopted nothing: no_promote, never KEEP."""
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    task = Task(
+        task_id="t-refused-keep",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="t-refused-keep",
+    )
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess-a",
+        result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
+        verdict=Verdict.REFUSED,
+    )
+    assert coord._ensure_journal().entries[-1].outcome == OUTCOME_NO_PROMOTE
 
 
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
@@ -999,6 +1018,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         task=task,
         source_session_id="s",
         variant_outcome={"outcome": "SKIPPED_DEDUP", "variant_name": "v0"},
+        adopted=False,
     )
     coord._record_fact_per_variant(
         task=task,
@@ -1009,6 +1029,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
             "metrics": {"gain_pct": 4.0, "output_throughput": 900.0},
             "variant": {"name": "v1"},
         },
+        adopted=True,
     )
     coord._record_fact_per_variant(
         task=task,
@@ -1020,4 +1041,19 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
             "reason": "slower",
             "metrics": {},
         },
+        adopted=False,
     )
+    coord._record_fact_per_variant(
+        task=task,
+        source_session_id="s",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "v3",
+            "metrics": {"gain_pct": 2.0, "output_throughput": 880.0},
+            "variant": {"name": "v3"},
+        },
+        adopted=False,
+    )
+    by_name = {entry.variant_name: entry.outcome for entry in coord._ensure_journal().entries}
+    # An executor KEEP whose lift did not land adopted nothing.
+    assert by_name == {"v1": "KEEP", "v2": "REVERT", "v3": "no_promote"}

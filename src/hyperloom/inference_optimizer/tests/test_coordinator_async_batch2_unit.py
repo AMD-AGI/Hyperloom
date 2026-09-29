@@ -19,6 +19,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
@@ -1652,9 +1653,27 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
         task=task,
         source_session_id="sess",
         result_dict={"gain_pct": 6.0, "output_throughput": 950.0},
-        kept=True,
+        verdict=Verdict.ADOPTED,
     )
     assert amends and "append_lesson" in amends[0]
+
+
+@pytest.mark.asyncio
+async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord: Coordinator, monkeypatch) -> None:
+    """A lesson is for a change the session adopted; a measured gain the lift refused teaches nothing."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.recipe_kb = object()
+    amends: list[dict] = []
+    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess",
+        result_dict={"status": "kept", "gain_pct": 6.0, "output_throughput": 950.0},
+        verdict=Verdict.REFUSED,
+    )
+    assert not any("append_lesson" in amend for amend in amends)
 
 
 @pytest.mark.asyncio
@@ -1670,7 +1689,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
         task=task,
         source_session_id="sess",
         result_dict={"error_class": "oom", "reason": "bad"},
-        kept=False,
+        verdict=Verdict.FAILED,
     )
     assert amends and "append_pitfall" in amends[0]
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 from hyperloom.common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.launch_log_evidence import (
@@ -39,14 +39,13 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
-    PROMOTION_REFUSED_KEY,
+    Verdict,
     classify_change_kind,
     derive_journal_outcome,
     operation_kind_for,
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from ..actions.executors._grid_base import is_kept as _is_kept
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
@@ -204,32 +203,10 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
-def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
-
-    return {
-        **graded_axes_of(measurement),
-        **{
-            key: measurement[key]
-            for key in (
-                "ttft_mean_ms",
-                "e2el_mean_ms",
-                "tpot_mean_ms",
-                "workspace",
-                "raw_result_path",
-                "report_path",
-                "materialized_config",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            )
-            if key in measurement
-        },
-    }
-
-
 _INTEGRATE_KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
+
+# Statuses meaning a patch was applied and measured, then rolled back or rejected on measured grounds.
+_INTEGRATE_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
 
 
 def _integrate_marker_verdict(status: str, phase: str) -> str:
@@ -372,8 +349,14 @@ class IntegrateRecoveryIncomplete(RuntimeError):
 @dataclass
 class _PromoteOutcome:
     """Mutable carrier threaded through the per-kind promote handlers;
-    ``early_return`` skips the shared audit/save tail (sweep / conc_sweep)."""
+    ``early_return`` skips the shared audit/save tail (sweep / conc_sweep).
 
+    ``verdict`` is the settlement's single answer to "was this adopted";
+    ``adopted_variants`` names, by fingerprint, the explore winners whose lift
+    landed."""
+
+    verdict: Verdict = Verdict.RECORDED
+    adopted_variants: set[str] = field(default_factory=set)
     changed: bool = False
     audit_decision: str | None = None
     audit_extras: dict[str, Any] = field(default_factory=dict)
@@ -474,6 +457,7 @@ def _record_config_attempts(
     task: Any,
     per_variant: list[dict[str, Any]],
     result_dict: Mapping[str, Any],
+    adopted_variants: Collection[str],
 ) -> None:
     """Record the configuration arm's measured attempts on the framework event.
 
@@ -500,6 +484,7 @@ def _record_config_attempts(
         metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
         variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
         fingerprint = str(row.get("fingerprint") or "")
+        adopted = fingerprint in adopted_variants
         # The fingerprint identifies the variant within the round and the round
         # within the task, so the three together identify the attempt.
         attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
@@ -553,7 +538,7 @@ def _record_config_attempts(
                 "raw_result_path": str(row.get("raw_result_path") or ""),
             },
             decision=outcome,
-            adopted=_is_kept(outcome),
+            adopted=adopted,
             # Recorded rather than referenced: every KEEP advances the
             # stack, so the session's current config is not what this
             # variant was measured on top of.
@@ -562,9 +547,7 @@ def _record_config_attempts(
             validation_basis=str(row.get("validation_basis") or ""),
             # A pair is what makes a gain addable, so eligibility follows
             # the pair being present rather than the outcome being a KEEP.
-            attribution_eligible=(
-                _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
-            ),
+            attribution_eligible=(adopted and metrics.get("base_tput") is not None and metrics.get("tput") is not None),
         )
         for gate in gates:
             if not str(gate.get("gate") or ""):
@@ -1220,53 +1203,37 @@ class WritebackCollaborator:
         self,
         task: "Task",
         result: Any,
+        verdict: Verdict,
     ) -> None:
-        """Log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
+        """Log a settled task's change_type into SharedState.intervention_mix.
+
+        explore → ``config`` when adopted, else ``config_attempt``;
+        integrate_patch → ``code_patch`` when adopted, else ``code_patch_attempt``.
 
         Args:
-            task: The completed task whose kind selects the intervention class.
+            task: The settled task whose kind selects the intervention class.
             result: The task result dict; non-dict results are ignored.
+            verdict: The settlement verdict.
         """
         if not isinstance(result, dict):
             return
+        adopted = verdict is Verdict.ADOPTED
         kind = (task.kind or "").strip()
         if kind == "explore":
-            # Winner surrogate: result.winners present OR best_variant set.
-            winners = result.get("winners") or []
             best = result.get("best_variant")
-            if not winners and not best:
-                # An explore round that KEPT nothing still counts as a config-only attempt.
-                self.shared_state.record_intervention(
-                    change_type="config_attempt",
-                    action="explore",
-                    task_id=task.task_id,
-                    delta_pct=None,
-                )
-                return
-            delta_pct = None
-            if isinstance(best, dict):
-                delta_pct = best.get("gain_pct")
+            delta_pct = best.get("gain_pct") if adopted and isinstance(best, dict) else None
             self.shared_state.record_intervention(
-                change_type="config",
+                change_type="config" if adopted else "config_attempt",
                 action="explore",
                 task_id=task.task_id,
                 delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
             )
             return
         if kind == "integrate_patch":
-            status = str(result.get("status") or "").strip().lower()
-            if not status:
-                return
-            if status != "kept":
-                self.shared_state.record_intervention(
-                    change_type="code_patch_attempt",
-                    action="integrate_patch",
-                    task_id=task.task_id,
-                    delta_pct=result.get("delta_pct"),
-                )
+            if not str(result.get("status") or "").strip():
                 return
             self.shared_state.record_intervention(
-                change_type="code_patch",
+                change_type="code_patch" if adopted else "code_patch_attempt",
                 action="integrate_patch",
                 task_id=task.task_id,
                 delta_pct=result.get("delta_pct"),
@@ -1696,14 +1663,17 @@ class WritebackCollaborator:
         *,
         task: "Task",
         result: Any,
-        kept: bool,
+        verdict: Verdict,
+        adopted_variants: Collection[str] = (),
     ) -> None:
         """Per-task fact-write entry point (per_variant for explore grids, else per-task).
 
         Args:
             task: The completed task being recorded.
             result: The task's :class:`SubAgentResult` (or result dict).
-            kept: Whether the task's result was KEEP-promoted.
+            verdict: The settlement verdict.
+            adopted_variants: Fingerprints of the explore winners whose lift
+                landed; a per-variant KEEP outside it did not adopt anything.
         """
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
@@ -1713,7 +1683,13 @@ class WritebackCollaborator:
         if task.kind == "explore":
             _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
-            _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
+            _record_config_attempts(
+                self,
+                task=task,
+                per_variant=per_variant,
+                result_dict=result_dict,
+                adopted_variants=adopted_variants,
+            )
             round_id = str(result_dict.get("round_id") or "")
             for vo in per_variant:
                 outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
@@ -1726,6 +1702,7 @@ class WritebackCollaborator:
                         fingerprint=str(vo.get("fingerprint") or ""),
                         variant_name=str(vo.get("variant_name") or ""),
                         outcome=outcome,
+                        adopted=str(vo.get("fingerprint") or "") in adopted_variants,
                         gain_pct=metrics.get("gain_pct"),
                         before_tput=metrics.get("base_tput"),
                         after_tput=metrics.get("tput"),
@@ -1736,13 +1713,14 @@ class WritebackCollaborator:
                     task=task,
                     source_session_id=source_session_id,
                     variant_outcome=vo,
+                    adopted=str(vo.get("fingerprint") or "") in adopted_variants,
                 )
         else:
             self._record_fact_per_task(
                 task=task,
                 source_session_id=source_session_id,
                 result_dict=result_dict,
-                kept=kept,
+                verdict=verdict,
             )
         try:
             self.shared_state.save(self.session_dir)
@@ -1924,7 +1902,7 @@ class WritebackCollaborator:
         task: "Task",
         source_session_id: str,
         result_dict: dict[str, Any],
-        kept: bool,
+        verdict: Verdict,
     ) -> None:
         """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
 
@@ -1933,8 +1911,8 @@ class WritebackCollaborator:
             source_session_id: The hyperloom-local session id stamped on the
                 fact provenance.
             result_dict: The task result dict.
-            kept: Whether the result was KEEP-promoted (KEEP → lesson, else
-                pitfall/REVERT).
+            verdict: The settlement verdict (ADOPTED → KEEP and a lesson, else
+                a non-KEEP row and maybe a pitfall).
         """
         journal = self._ensure_journal()
         # integrate_patch reports its delta under ``delta_pct``;
@@ -1946,12 +1924,8 @@ class WritebackCollaborator:
         throughput_after = to_float(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
-        # Journal outcome follows the executor's per-status verdict for source-
-        # patch kinds (a ``reverted`` patch is promotable but NOT a KEEP); other
-        # kinds keep the binary promotable→KEEP behaviour. See
-        # ``derive_journal_outcome`` (fixes the "fake KEEP" bug).
-        outcome = derive_journal_outcome(task.kind, result_dict, promotable=kept)
-        is_keep = outcome == OUTCOME_KEEP
+        outcome = derive_journal_outcome(verdict, result_dict)
+        is_keep = verdict is Verdict.ADOPTED
         if is_keep:
             error_class = None
             reason = None
@@ -2062,6 +2036,7 @@ class WritebackCollaborator:
         task: "Task",
         source_session_id: str,
         variant_outcome: dict[str, Any],
+        adopted: bool,
     ) -> None:
         """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
 
@@ -2071,11 +2046,13 @@ class WritebackCollaborator:
                 fact provenance.
             variant_outcome: One per-variant outcome row (name, outcome,
                 metrics).
+            adopted: Whether this variant's lift landed; an executor KEEP that
+                was not adopted journals as ``no_promote``.
         """
         journal = self._ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
-            outcome = OUTCOME_KEEP
+            outcome = OUTCOME_KEEP if adopted else OUTCOME_NO_PROMOTE
         # ``KEEP_UNSTABLE`` is only reachable for a session recorded before the
         # per-KEEP confirmation round was removed; it still reads as a revert.
         elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
@@ -3536,17 +3513,18 @@ class WritebackCollaborator:
         result: dict,
         *,
         task: "Task | None" = None,
-    ) -> None:
+    ) -> _PromoteOutcome:
         """Lift specific action-result fields into the persistent SharedState (baseline/profile/roofline/grid).
 
         Args:
             task_kind: The settled task's kind, selecting the promote branch.
-            result: The task result dict; non-dict results are ignored.
+            result: The task result dict.
             task: The originating task, used for audit fingerprints and
                 pending-roofline gating.
+
+        Returns:
+            The promotion outcome; its ``verdict`` is the settlement verdict.
         """
-        if not isinstance(result, dict):
-            return
         # ``integrate_patch`` settles "apply_failed" / "reverted", which promote,
         # so a promoted result is still the only record of why a patch failed.
         error_class = str(result.get("error_class") or "").strip()
@@ -3561,13 +3539,14 @@ class WritebackCollaborator:
         # only reached further down this call, so mirroring it here published
         # every replay as discarded -- including the ones that went on to be
         # pushed onto the stack.
-        outcome = _PromoteOutcome()
         handler_name = self._PROMOTE_HANDLERS.get(task_kind)
-        if handler_name is not None:
-            await getattr(self, handler_name)(result, task, outcome)
+        if handler_name is None:
+            return _PromoteOutcome(verdict=Verdict.RECORDED)
+        outcome = _PromoteOutcome()
+        await getattr(self, handler_name)(result, task, outcome)
         # sweep / conc_sweep already recorded + saved + returned via their handler.
         if outcome.early_return:
-            return
+            return outcome
         # Audit trail: one succeeded-attempt record with branch-supplied decision/extras.
         if outcome.audit_decision is not None and task_kind in _AUDIT_ACTIONS:
             self.shared_state.record_action_attempt(
@@ -3582,6 +3561,7 @@ class WritebackCollaborator:
         if outcome.changed:
             self.shared_state.save(self.session_dir)
             self._drain_agent_keep_outbox()
+        return outcome
 
     _PROMOTE_HANDLERS: dict[str, str] = {
         "baseline": "_promote_baseline",
@@ -3827,10 +3807,13 @@ class WritebackCollaborator:
             changed = True
         if anchor_accepted:
             audit_decision = "promoted"
+            outcome.verdict = Verdict.ADOPTED
         elif isinstance(tput, (int, float)) and tput > 0:
             audit_decision = "no_promote"
+            outcome.verdict = Verdict.REVERTED
         else:
             audit_decision = "discarded"
+            outcome.verdict = Verdict.FAILED
         audit_extras = {
             "materialized_config": result.get("materialized_config"),
             "accuracy": result.get("accuracy"),
@@ -3941,7 +3924,7 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
-        self._promote_warm_replay(result, task=task)
+        outcome.verdict = self._promote_warm_replay(result, task=task)
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
@@ -3952,6 +3935,7 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
+        outcome.verdict = Verdict.RECORDED
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -3984,6 +3968,7 @@ class WritebackCollaborator:
         audit_extras["trace_capture_status"] = result.get("trace_capture_status")
         audit_extras["trace_capture_reason"] = (result.get("trace_capture") or {}).get("reason")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
+            outcome.verdict = Verdict.FAILED
             self.shared_state.last_profile_status = "failed"
             self.shared_state.last_profile_workload = {}
             if not trace_path:
@@ -4126,6 +4111,7 @@ class WritebackCollaborator:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a roofline result: audit + failure streak + roofline anchor (reads last_trace_analyze)."""
+        outcome.verdict = Verdict.RECORDED
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
@@ -4182,6 +4168,7 @@ class WritebackCollaborator:
                 )
             changed = True
         else:
+            outcome.verdict = Verdict.FAILED
             audit_decision = "discarded"
             audit_extras = {
                 "phase": result.get("phase"),
@@ -4542,7 +4529,6 @@ class WritebackCollaborator:
                         attempt_id=str(task.idempotency_key or task.task_id),
                     )
                     result["status"] = "no_promote"
-                    result[PROMOTION_REFUSED_KEY] = True
                 elif decision == "fallback":
                     # 2b inconclusive -> GEAK harness replay (2a), which
                     # clears the pending flag on success. Best-effort.
@@ -4597,7 +4583,6 @@ class WritebackCollaborator:
                         )
                         self.shared_state.geak_pending = {}
                         result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
-                        result[PROMOTION_REFUSED_KEY] = True
                     else:
                         promoted = True
                         decision = "validated"
@@ -4621,6 +4606,7 @@ class WritebackCollaborator:
                     result=result,
                     extras={"revalidation_decision": decision, "output_throughput": measured},
                 )
+                outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
                 outcome.changed = True
                 return
             else:
@@ -4684,6 +4670,8 @@ class WritebackCollaborator:
                 ):
                     promoted = True
                     last_lifted_winner = entry
+                    if winner.get("fingerprint"):
+                        outcome.adopted_variants.add(str(winner["fingerprint"]))
             changed = True
         self.shared_state.note_explore_outcome(promoted=promoted)
         # A round with no measured variant is not a data point for the plateau window.
@@ -4704,10 +4692,13 @@ class WritebackCollaborator:
             changed = True
         if promoted:
             audit_decision = "promoted"
+            outcome.verdict = Verdict.ADOPTED
         elif winners and not is_revalidation_task:
             audit_decision = "no_promote"
+            outcome.verdict = Verdict.REFUSED
         else:
             audit_decision = "discarded"
+            outcome.verdict = Verdict.RECORDED if is_revalidation_task else Verdict.REVERTED
         audit_extras = {
             "round_id": round_id,
             "winners_count": (len(winners) if isinstance(winners, list) else 0),
@@ -4764,8 +4755,6 @@ class WritebackCollaborator:
         """Promote only after recovery is confirmed; clear only its completed marker."""
         changed = False
         stack_len_before = len(self.shared_state.optimization_stack or [])
-        audit_decision: str | None = None
-        audit_extras: dict[str, Any] = {}
         status = str(result.get("status") or "")
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
@@ -4787,8 +4776,6 @@ class WritebackCollaborator:
                 stack_delta_pct=result.get("delta_pct"),
             ):
                 changed = True
-            audit_extras["framework_levers"] = [str(row.get("switch") or "") for row in levers]
-            audit_extras["framework_lever_outcome"] = lever_outcome
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(
             result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")
@@ -4885,38 +4872,21 @@ class WritebackCollaborator:
         if completed_pending is not None and self.shared_state.pending_integrate is completed_pending:
             self.shared_state.pending_integrate = {}
             changed = True
-        if prebaseline_enablement:
-            audit_decision = "enablement_accepted" if lifted else "no_promote"
-        elif lifted:
-            audit_decision = "promoted"
+        if lifted:
+            outcome.verdict = Verdict.ADOPTED
         elif kept_flag:
-            audit_decision = "no_promote"
-            result[PROMOTION_REFUSED_KEY] = True
+            outcome.verdict = Verdict.REFUSED
+        elif status in _INTEGRATE_REVERT_STATUSES:
+            outcome.verdict = Verdict.REVERTED
         elif status == "kept_inert":
-            # Applied but every switch off: nothing was promoted, yet the patch
-            # stays on disk as registered levers, so it is not a discard either.
-            audit_decision = "kept_inert"
+            # Applied but every switch off: nothing was adopted, yet the patch
+            # stays on disk as registered levers, so it is not a failure either.
+            outcome.verdict = Verdict.RECORDED
         else:
-            audit_decision = "discarded"
+            outcome.verdict = Verdict.FAILED
         # A measured integrate counts either way; KEEP/REVERT is a later judgement.
         if new_tput is not None:
             self.shared_state.gain_gated_action_count += 1
-        audit_extras = {
-            **audit_extras,
-            "status": status,
-            "specialist_task_id": result.get("specialist_task_id"),
-            "output_throughput": new_tput,
-            "delta_pct": result.get("delta_pct"),
-            "prebaseline_enablement": prebaseline_enablement,
-            "accuracy_pass": result.get("accuracy_pass"),
-            "patches_applied": result.get("patches_applied") or [],
-            "patches_reverted": result.get("patches_reverted") or [],
-            # Enablement eval-origin verdict fields for history.
-            "correctness_verified": result.get("correctness_verified"),
-            "enablement_eval_failure_kind": result.get("enablement_eval_failure_kind"),
-            "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
-            "provisional": result.get("provisional"),
-        }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
             if _is_patch_column_keep(task_params, result):
                 self._enqueue_agent_keep_outbox(
@@ -4926,8 +4896,6 @@ class WritebackCollaborator:
                     include_patches=True,
                 )
         outcome.changed = changed
-        outcome.audit_decision = audit_decision
-        outcome.audit_extras = audit_extras
 
     async def _promote_conc_sweep(
         self,
@@ -4942,6 +4910,7 @@ class WritebackCollaborator:
         conc_sweep event carries the skip reason, the budget verdict and the
         summary instead.
         """
+        outcome.verdict = Verdict.RECORDED
         outcome.early_return = True
         # Write last_conc_sweep so exit_normal_sweep can distinguish an honest sweep_done from a no-pair sweep_failed.
         self.shared_state.record_conc_sweep(result)

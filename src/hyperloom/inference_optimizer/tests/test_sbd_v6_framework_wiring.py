@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -317,7 +318,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
             {"variant_name": "v-dup", "outcome": "SKIPPED_DEDUP", "fingerprint": "fp3"},
         ],
     }
-    asyncio.run(coord._fact_write_hook(task=task, result=result, kept=True))
+    asyncio.run(coord._fact_write_hook(task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"}))
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
@@ -392,7 +393,7 @@ def test_the_config_arms_grid_lands_a_run_row(session_dir: Path):
                     {"variant_name": "v1", "outcome": "REVERT", "fingerprint": "fp1", "metrics": {}, "variant": {}}
                 ],
             },
-            kept=False,
+            verdict=Verdict.REVERTED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -421,7 +422,7 @@ def test_a_grid_that_measured_nothing_still_lands_a_run_row(session_dir: Path):
         coord._fact_write_hook(
             task=task,
             result={"status": "failed", "error_class": "empty_grid", "error": "params.grid has no valid variants"},
-            kept=False,
+            verdict=Verdict.FAILED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -471,7 +472,7 @@ def test_a_config_variants_accuracy_is_reported_as_well_as_gated(session_dir: Pa
                     {"variant_name": "v-ungated", "outcome": "REVERT", "fingerprint": "fp2", "metrics": {}},
                 ],
             },
-            kept=False,
+            verdict=Verdict.REVERTED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -520,6 +521,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "target_files": ["vllm/attention.py"],
             "reason": "above the floor",
         },
+        adopted=True,
     )
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
 
@@ -567,6 +569,7 @@ def _authored_outcome(coord, result: dict) -> dict:
             },
         ),
         result=result,
+        adopted=result.get("status") == "kept",
     )
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
     return _events(coord.session_dir)[0]["ext"]["attempts"][0]
@@ -616,6 +619,7 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": "cand-2"},
         ),
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
+        adopted=False,
     )
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
 
@@ -1004,7 +1008,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
                     }
                 ],
             },
-            kept=True,
+            verdict=Verdict.ADOPTED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -1041,7 +1045,7 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
                     }
                 ],
             },
-            kept=True,
+            verdict=Verdict.ADOPTED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -1072,6 +1076,7 @@ def test_every_applied_patch_is_recorded_not_just_the_primary(session_dir: Path)
             "patch_path": "patches/pr-7.patch",
             "patches_applied": ["patches/pr-7.patch", "patches/pr-7-fixup.patch"],
         },
+        adopted=True,
     )
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
 
@@ -1122,7 +1127,7 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
                     }
                 ],
             },
-            kept=False,
+            verdict=Verdict.REVERTED,
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -1166,7 +1171,8 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
                     }
                 ],
             },
-            kept=True,
+            verdict=Verdict.ADOPTED,
+            adopted_variants={"fpu"},
         )
     )
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
@@ -1177,6 +1183,45 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
     # The accuracy gate never ran, so it is absent rather than reported failed.
     assert [g["gate"] for g in attempt["gates"]] == ["keep_threshold"]
     assert attempt["blocked_by"] is None
+
+
+def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
+    """The attempt row, the ledger and the journal all read the lift, not the executor's KEEP."""
+    import asyncio
+    from types import SimpleNamespace
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    asyncio.run(
+        coord._fact_write_hook(
+            task=SimpleNamespace(task_id="t-exp-4", kind="explore", params={}),
+            result={
+                "round_id": "explore-004",
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "v-refused",
+                        "outcome": "KEEP",
+                        "fingerprint": "fpr",
+                        "metrics": {"base_tput": 100.0, "tput": 110.0, "gain_pct": 10.0},
+                        "variant": {"extra_server_args": "--foo 1"},
+                    }
+                ],
+            },
+            verdict=Verdict.REFUSED,
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    attempt = _events(session_dir)[0]["ext"]["attempts"][0]
+    assert attempt["outcome"] == "KEEP"
+    assert attempt["adopted"] is False
+    assert attempt["attribution_eligible"] is False
+    (row,) = coord.shared_state.attempts
+    assert row["adopted"] is False
+    (entry,) = [e for e in coord._ensure_journal().entries if e.task_id == "t-exp-4"]
+    assert entry.outcome == "no_promote"
 
 
 def test_no_recorder_leaves_the_phase_alone(session_dir: Path):
