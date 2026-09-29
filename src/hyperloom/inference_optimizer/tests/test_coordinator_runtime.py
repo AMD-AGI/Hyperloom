@@ -359,7 +359,9 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 
 # Coordinator — bounded ticks
 @pytest.mark.asyncio
-async def test_coordinator_starts_with_silent_backends(session_dir):
+async def test_coordinator_starts_with_silent_backends(session_dir, monkeypatch):
+    # Two identical ticks: the idle gate would hold the second orchestration call.
+    monkeypatch.setenv("HYPERLOOM_IDLE_TICK_GATE", "0")
     backends = _build_backends({})
     c = Coordinator(session_dir, backends=backends)
     try:

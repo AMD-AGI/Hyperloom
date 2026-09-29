@@ -939,7 +939,7 @@ class ConversationCollaborator:
             lines.extend(f"- {question}" for question in questions)
         full = "\n".join(lines)
         budget = _findings_prompt_chars()
-        if not budget or len(full) <= budget:
+        if budget == 0 or len(full) <= budget:
             return full
 
         question_room = min(sum(len(q) + 3 for q in questions), int(budget * _FINDINGS_QUESTIONS_SHARE))

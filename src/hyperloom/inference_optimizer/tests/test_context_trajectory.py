@@ -80,7 +80,9 @@ def _heartbeat() -> Intent:
 
 
 @pytest.mark.asyncio
-async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(session_dir):
+async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(session_dir, monkeypatch):
+    # Two identical ticks: the idle gate would hold the second orchestration call.
+    monkeypatch.setenv("HYPERLOOM_IDLE_TICK_GATE", "0")
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     c = Coordinator(
         session_dir,
