@@ -38,13 +38,14 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
     }
+    from types import SimpleNamespace
+
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=kb,
-        knowledge_plane=None,
+        knowledge_plane=SimpleNamespace(recipe_kb=kb),
     )
     ss = coord.shared_state
     ss.model_name = _MODEL

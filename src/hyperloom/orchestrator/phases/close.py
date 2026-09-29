@@ -70,6 +70,10 @@ def _task_is_dead(task: Task | None) -> bool:
 class ClosePhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
+    CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
+    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
+
     def _derive_close_stop_reason(self) -> str:
         """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""
         history = self.shared_state.phase_history or []

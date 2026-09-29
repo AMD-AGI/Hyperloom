@@ -1002,8 +1002,7 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a cap for it, since
-    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
@@ -2238,7 +2237,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,

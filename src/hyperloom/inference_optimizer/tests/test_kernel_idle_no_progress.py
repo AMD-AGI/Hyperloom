@@ -19,6 +19,9 @@ def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
         kernel_idle_since_unix=10_000.0 - idle_seconds,
         rejected_kernel_ids=[],
         phase="KERNEL_AGENT",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
     )
 
 
@@ -27,15 +30,15 @@ def _patch(monkeypatch, *, work_pending, hint=""):
     monkeypatch.setattr(ms, "_pending_escalate_hint", lambda s: hint)
     # Keep the hard budget/cap exits inert so only the idle logic decides.
     monkeypatch.setattr(ms, "phase_budget_remaining_seconds", lambda s, **k: 9_999.0)
-    monkeypatch.setattr(ms, "phase_cap_exceeded", lambda s, **k: False)
+    monkeypatch.setattr(ms, "phase_cap_seconds", lambda s: None)
 
 
 def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):
     _patch(monkeypatch, work_pending=False)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS)
-    result = ms.exit_normal_kernel(state, now_unix=10_000.0)
+    result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["evidence"] == "kernel_idle_no_progress"
     assert evidence["idle_ticks"] == ms.KERNEL_IDLE_MAX_TICKS
@@ -48,7 +51,7 @@ def test_idle_below_tick_threshold_does_not_exit(monkeypatch):
     _patch(monkeypatch, work_pending=False)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS - 1)
     # Below the tick threshold and budget healthy -> KERNEL keeps running.
-    assert ms.exit_normal_kernel(state, now_unix=10_000.0) is None
+    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
@@ -60,7 +63,7 @@ def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
         ms.KERNEL_IDLE_MAX_TICKS * 100,
         idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS - 1.0,
     )
-    assert ms.exit_normal_kernel(state, now_unix=10_000.0) is None
+    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_unstamped_streak_start_does_not_exit(monkeypatch):
@@ -69,7 +72,7 @@ def test_unstamped_streak_start_does_not_exit(monkeypatch):
     _patch(monkeypatch, work_pending=False)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS)
     state.kernel_idle_since_unix = 0.0
-    assert ms.exit_normal_kernel(state, now_unix=10_000.0) is None
+    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
@@ -77,9 +80,9 @@ def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
     # because three attempts on the ledger could never be advanced.
     _patch(monkeypatch, work_pending=True)
     state = _state(ms.KERNEL_IDLE_MAX_TICKS + 5)
-    result = ms.exit_normal_kernel(state, now_unix=10_000.0)
+    result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["evidence"] == "kernel_idle_no_progress"
 
@@ -88,9 +91,9 @@ def test_skip_to_sweep_hint_still_exits_when_no_work(monkeypatch):
     # The explicit escalate-hint path (when available) still yields the non-terminal leverage exit.
     _patch(monkeypatch, work_pending=False, hint=ESCALATE_HINT_SKIP_TO_SWEEP)
     state = _state(0)
-    result = ms.exit_normal_kernel(state, now_unix=10_000.0)
+    result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["hint"] == ESCALATE_HINT_SKIP_TO_SWEEP
 

@@ -172,8 +172,7 @@ def render_phase_action_bullets(
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
 # budget apportions optimisation effort, and a combo that cannot run has nothing
-# to optimise. It carries no cap at all -- ``compute_next_phase`` does not
-# consult ``phase_cap_exceeded`` for it -- and so has no override flag either.
+# to optimise. It carries no cap at all, and so has no override flag either.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share.
@@ -321,69 +320,6 @@ def _cycle_reloop_min_remaining_sec(
         grant = min(resolve_benchmark_timeouts()[1], budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
         effective = max(effective, grant)
     return effective
-
-
-def should_reloop_to_explore(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-    max_cycles: int = DEFAULT_MAX_MACRO_CYCLES,
-    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
-    no_gain_cycles: int = DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
-    min_gain_pct: float | None = None,
-) -> tuple[bool, dict[str, Any]]:
-    """Decide whether SWEEP should open a new macro-cycle (R1) or wind to CLOSE."""
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    evidence: dict[str, Any] = {"macro_cycle": cycle}
-
-    # Per-cycle gain since this cycle started → effective no-gain streak.
-    effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
-    cur_gain = _cumulative_gain_validated(state)
-    start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
-    cycle_gained = (cur_gain - start_gain) > effective_min_gain
-    evidence["min_gain_pct"] = round(effective_min_gain, 6)
-    prior_streak = int(getattr(state, "no_gain_cycle_streak", 0) or 0)
-    effective_streak = 0 if cycle_gained else prior_streak + 1
-    evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
-    evidence["cycle_gained"] = cycle_gained
-    evidence["no_gain_cycle_streak_effective"] = effective_streak
-
-    if target_was_reached(state):
-        evidence["reloop_blocked"] = "target_reached"
-        return False, evidence
-
-    # Safety cap on macro-cycles.
-    if (cycle + 1) >= int(max_cycles):
-        evidence["reloop_blocked"] = "max_cycles"
-        return False, evidence
-
-    # Physical ceiling convergence: if every roofline family that dominated is now within its saturation threshold,
-    # stop cleanly.
-    sat = getattr(state, "saturated_directions", {}) or {}
-    if isinstance(sat, dict) and sat:
-        rows = [v for v in sat.values() if isinstance(v, dict)]
-        if rows and all(bool(v.get("saturated")) for v in rows):
-            evidence["reloop_blocked"] = "all_directions_saturated"
-            evidence["saturated_directions"] = sorted(str(k) for k in sat.keys())
-            return False, evidence
-
-    # R7 global convergence.
-    if effective_streak >= int(no_gain_cycles):
-        evidence["reloop_blocked"] = "global_converged"
-        return False, evidence
-
-    # Require a session-scaled floor that can still fund one variant round.
-    effective_min_remaining = _cycle_reloop_min_remaining_sec(state, min_remaining_sec)
-    evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
-    remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining < effective_min_remaining:
-        evidence["reloop_blocked"] = "insufficient_remaining"
-        evidence["session_remaining_seconds"] = round(remaining, 2)
-        return False, evidence
-
-    evidence["reloop"] = True
-    evidence["next_cycle"] = cycle + 1
-    return True, evidence
 
 
 def _kernel_idle_max_ticks() -> int:
@@ -724,18 +660,6 @@ def phase_cap_seconds(state: Any) -> float | None:
     return float(min(proportional, abs_cap))
 
 
-def phase_cap_exceeded(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> bool:
-    """True when time spent in the current phase has reached its absolute cap."""
-    cap = phase_cap_seconds(state)
-    if cap is None:
-        return False
-    return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
-
-
 def session_remaining_seconds(
     state: Any,
     *,
@@ -810,7 +734,11 @@ def phase_status_summary(
     ]
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-        reloop, evidence = should_reloop_to_explore(state, now_unix=now_unix)
+        _sweep_result, _ = _sweep_predicate_inputs(
+            state, now_unix=float(now_unix if now_unix is not None else _now_unix(state))
+        )
+        _reloop_inputs = {"sweep_result": _sweep_result}
+        reloop, evidence = _reloop_decision(_reloop_inputs)
         feasible = reloop and state.framework_agent_phase_enabled
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
@@ -936,14 +864,6 @@ def compute_plateau_kernel(
 
 # Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
 _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
-
-
-def _sweep_has_recorded_closeout(state: Any) -> bool:
-    """Whether SWEEP already recorded a result the phase machine can close on."""
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
-    if isinstance(last_conc, dict):
-        return str(last_conc.get("status") or "").lower() in _SWEEP_CLOSEOUT_STATUSES
-    return False
 
 
 # per-phase judgments
@@ -1153,21 +1073,6 @@ def kernel_work_pending(state: Any) -> bool:
     return False
 
 
-def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``)."""
-    if warm_replay_in_flight(state):
-        return None
-    if bool(getattr(state, "baseline_measure_round_dropped", False)):
-        return None
-    try:
-        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if tput > 0.0:
-        return "prelude_done", {"baseline_tput": tput, **prelude_exit_viability(state)}
-    return None
-
-
 def measured_seconds(state: Any, field: str) -> float | None:
     """Read a duration an earlier round measured, or ``None`` when none did."""
     try:
@@ -1210,25 +1115,6 @@ def one_more_measurement_sec(state: Any) -> float | None:
     if boot_sec is None or benchmark_sec is None:
         return None
     return boot_sec + benchmark_sec
-
-
-def prelude_exit_viability(state: Any) -> dict[str, Any]:
-    """Report whether the budget PRELUDE leaves behind can still fund one optimization round."""
-    usable = session_usable_seconds(state)
-    round_sec = one_more_measurement_sec(state)
-    priced_by = "boot_plus_benchmark"
-    if round_sec is None:
-        round_sec = measured_seconds(state, "baseline_runtime_sec")
-        priced_by = "cold_round"
-    if usable is None or round_sec is None:
-        return {}
-    return {
-        "session_usable_sec": round(usable, 1),
-        "measured_round_sec": round(round_sec, 1),
-        "priced_by": priced_by,
-        "affordable_rounds": round(usable / round_sec, 2),
-        "fits_one_optimization_round": usable >= round_sec,
-    }
 
 
 def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
@@ -1288,189 +1174,6 @@ def prelude_can_afford(
     return affordable_sec >= cost, priced
 
 
-def exit_time_exhausted_prelude(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """Route to CLOSE when the session clock runs out before PRELUDE lands a baseline."""
-    usable = session_usable_seconds(state)
-    if usable is None or usable > 0.0:
-        return None
-    return "time_exhausted_during_prelude", {
-        "session_usable_sec": round(usable, 1),
-        "prelude_spent_sec": round(
-            phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
-            1,
-        ),
-    }
-
-
-def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Route to CLOSE when PRELUDE could only produce a cold anchor."""
-    if not bool(getattr(state, "baseline_measure_round_dropped", False)):
-        return None
-    usable = session_usable_seconds(state)
-    if usable is None:
-        return None
-    # Without the boot/benchmark split -- a scriptable workload runs no server, so it has no ready boundary to split
-    # on -- the cold round's whole wall-clock stands in for each half, the same upper bound the round's own gate falls
-    # back to.
-    cold_sec = measured_seconds(state, "baseline_runtime_sec")
-    round_sec = (
-        baseline_round_cost_sec(
-            state,
-            double_run=bool(getattr(state, "baseline_double_run", False)),
-        )
-        or cold_sec
-    )
-    use_sec = one_more_measurement_sec(state) or cold_sec
-    if round_sec is None or use_sec is None:
-        return None
-    if usable >= round_sec + use_sec:
-        return None
-    return "prelude_cold_anchor_low_budget", {
-        "baseline_anchor": "cold",
-        "retry_round_sec": round(round_sec, 1),
-        **prelude_exit_viability(state),
-    }
-
-
-def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Decide the PRELUDE terminal exit on repeated baseline failures."""
-    streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak >= 3:
-        return "prelude_baseline_failed", {"baseline_failure_streak": streak}
-    return None
-
-
-def exit_normal_kernel(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-    kernel_work_in_flight: bool = False,
-) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit.
-
-    Args:
-        state: The session state the exit rules read.
-        now_unix: Clock override for the wall-clock rules.
-        kernel_work_in_flight: Whether the ``kernel_agent`` task is queued or
-            running. It owns the phase until it returns, so only the budget
-            exits can end the phase under it.
-    """
-    if not kernel_work_in_flight:
-        leverage_exit = _kernel_leverage_exit(state, now_unix=now_unix)
-        if leverage_exit is not None:
-            return leverage_exit
-    rejected = getattr(state, "rejected_kernel_ids", None) or []
-    rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining <= 0:
-        return "kernel_phase_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    if phase_cap_exceeded(state, now_unix=now_unix):
-        return "kernel_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "rejected_kernel_count": rejected_count,
-        }
-    return None
-
-
-def _kernel_leverage_exit(state: Any, *, now_unix: float | None) -> tuple[str, dict[str, Any]] | None:
-    """The KERNEL exits that say the phase ran out of work rather than out of time."""
-    # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
-    # so asking it here keeps this exit from stepping over an unintegrated KEEP.
-    if _controller_phase_terminal(state) and not kernel_work_pending(state):
-        result = getattr(state, "kernel_rewrite_controller_result", None) or {}
-        return "kernel_controller_done", {
-            "controller_status": result.get("status"),
-            "patch_count": int(result.get("patch_count") or 0),
-            "task_count": int(result.get("task_count") or 0),
-            "reason": str(result.get("reason") or ""),
-        }
-    if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
-        if not kernel_work_pending(state):
-            return "kernel_no_more_leverage", {
-                "evidence": "kernel_no_more_leverage",
-                "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
-            }
-    # Idle-spin guard: the escalate-hint handoff above needs the kernel_agent to emit ``escalate_strategy_change``,
-    # but PolicyGate denies that intent for the kernel_agent role — so when the phase stops moving it can otherwise
-    # spin (hallucinated kernel-id requests / no-intent turns) until the wall-clock cap.
-    idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
-    idle_since = _kernel_idle_since_unix(state)
-    if idle_ticks >= KERNEL_IDLE_MAX_TICKS and idle_since > 0.0:
-        now = float(now_unix if now_unix is not None else _now_unix(state))
-        idle_seconds = max(0.0, now - idle_since)
-        if idle_seconds >= KERNEL_IDLE_MIN_SECONDS:
-            return "kernel_no_more_leverage", {
-                "evidence": "kernel_idle_no_progress",
-                "idle_ticks": idle_ticks,
-                "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
-                "idle_seconds": round(idle_seconds, 3),
-                "idle_min_seconds": KERNEL_IDLE_MIN_SECONDS,
-            }
-    return None
-
-
-#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
-#: any other reason keeps the ladder's own exit reason.
-_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
-    "global_converged": "global_converged",
-    "max_cycles": "global_converged",
-    "target_reached": "target_reached",
-}
-
-
-def exit_normal_sweep(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: the concurrency ladder's terminal state, or budget exhausted."""
-    last_conc = getattr(state, "last_conc_sweep", None) or {}
-    if isinstance(last_conc, dict):
-        status = str(last_conc.get("status") or "").lower()
-        if status == "failed":
-            return "sweep_failed", {"sweep_status": status}
-        if status in ("succeeded", "partial", "completed", "skipped"):
-            evidence: dict[str, Any] = {"sweep_status": status}
-            # A sweep that declined to run is also terminal, and the exit reason alone cannot tell the two apart
-            # afterwards. was_skipped covers both declining and spending the whole budget without a comparable pair,
-            # so it is only carried with the flag that separates them (see
-            # kernel.conc_sweep.conc_sweep_declined_to_run).
-            if last_conc.get("was_skipped"):
-                evidence["sweep_was_skipped"] = True
-                evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
-                evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
-                summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
-                exhausted_without_pair = bool(last_conc.get("budget_exhausted")) or (
-                    str(last_conc.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
-                )
-                ran_but_reported_no_pair = bool(summary) and int(summary.get("successful_pairs") or 0) <= 0
-                if exhausted_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
-                    return "sweep_failed", evidence
-            return "sweep_done", evidence
-    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining <= 0:
-        return "sweep_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    if phase_cap_exceeded(state, now_unix=now_unix):
-        return "sweep_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    return None
-
-
-# Transition decision (the only function the Coordinator calls each tick)
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
     overrides = getattr(state, "plateau_overrides", None) or {}
@@ -1585,47 +1288,13 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
-def _optimize_did_work_this_cycle(state: Any) -> bool:
-    """Whether the phase has dispatched or benched anything this macro-cycle."""
-    if _rows_for_current_cycle(getattr(state, "attempts", None) or [], state):
-        return True
-    return bool(_rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state))
-
-
-def exit_normal_optimize(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """OPTIMIZE normal exit."""
-    all_dry, arms = per_lever_dryness(state)
-
-    hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
-    if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
-        # Honoured only once the phase has actually run something this cycle: a phase that dispatched nothing must not
-        # end with zero validated work.
-        if _optimize_did_work_this_cycle(state):
-            return "optimize_no_more_leverage", {**arms, "evidence": "llm_escalation", "hint": hint}
-    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
-
-    if all_dry:
-        return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
-
-    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    if remaining is not None and remaining <= 0:
-        return "optimize_phase_budget_exhausted", {
-            **arms,
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    if phase_cap_exceeded(state, now_unix=now_unix):
-        return "optimize_budget_cap", {
-            **arms,
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    return None
+#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
+#: any other reason keeps the ladder's own exit reason.
+_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
+    "global_converged": "global_converged",
+    "max_cycles": "global_converged",
+    "target_reached": "target_reached",
+}
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
@@ -2575,7 +2244,6 @@ __all__ = [
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",
-    "should_reloop_to_explore",
     "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
@@ -2586,14 +2254,7 @@ __all__ = [
     "workflow_predicate_inputs",
     "coordinator_reserved_in_phase",
     "compute_plateau_kernel",
-    "exit_normal_optimize",
     "per_lever_dryness",
-    "exit_normal_kernel",
-    "exit_cold_anchor_prelude",
-    "exit_normal_prelude",
-    "exit_normal_sweep",
-    "exit_terminal_prelude",
-    "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
     "append_phase_history_event",
     "baseline_round_cost_sec",
@@ -2603,7 +2264,6 @@ __all__ = [
     "one_more_measurement_sec",
     "prelude_affordable_seconds",
     "prelude_can_afford",
-    "prelude_exit_viability",
     "session_usable_seconds",
     "render_phase_action_bullets",
     "compute_kernel_progress_fingerprint",

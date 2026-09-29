@@ -401,7 +401,7 @@ class TestIntentPathsAreGated:
 
         monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
         monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
-        out = await coord._run_action_now(_EXPENSIVE_ACTION, {})
+        out = await coord.dispatcher._run_action_now(_EXPENSIVE_ACTION, {})
         assert "denied" in out
         assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
 
@@ -543,8 +543,6 @@ class TestPreDispatchBackstop:
         coord: Coordinator,
     ):
         """Cancelling conc_sweep at dispatch must stamp last_conc_sweep so SWEEP can close."""
-        from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
-
         _set_budget(coord, minutes=180)
         task, _ = await coord.tasks.create_or_return_existing(
             kind="conc_sweep",
@@ -560,9 +558,14 @@ class TestPreDispatchBackstop:
         assert coord.shared_state.last_conc_sweep["status"] == "skipped"
         assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
         assert coord.shared_state.last_conc_sweep["was_skipped"] is True
-        result = exit_normal_sweep(coord.shared_state)
+        # Verify the sweep exit logic sees the recorded skip as a "done" closeout.
+        from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs, replay_next_phase
+
+        coord.shared_state.phase = "SWEEP"
+        inputs = workflow_predicate_inputs(coord.shared_state, optimize_enabled=False)
+        result = replay_next_phase(inputs)
         assert result is not None
-        reason, evidence = result
+        _target, reason, evidence = result
         assert reason == "sweep_done"
         assert evidence["sweep_status"] == "skipped"
 

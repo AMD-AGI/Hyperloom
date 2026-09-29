@@ -139,6 +139,8 @@ class _InflightAction(NamedTuple):
 class DispatcherCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
+    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
+
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
         # Task ids already charged a failure by the dead-holder reclaim path, so

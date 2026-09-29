@@ -117,27 +117,33 @@ def test_normalize_budget_pct_falls_back_to_defaults():
     assert "BOGUS" not in out
 
 
-def test_exit_normal_prelude_triggers_on_baseline_tput():
-    state = SimpleNamespace(baseline_tput=0.0)
-    assert phase_state.exit_normal_prelude(state) is None
+def test_prelude_exits_on_baseline_tput():
+    state = SimpleNamespace(
+        baseline_tput=0.0, phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0
+    )
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_tput = 1234.5
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next_phase, reason, evidence = out
     assert reason == "prelude_done"
-    assert evidence["baseline_tput"] == 1234.5
+    assert evidence["predicate_inputs"]["baseline"]["tput"] == 1234.5
 
 
-def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+def test_prelude_blocked_while_warm_replay_in_flight():
     """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
     state = SimpleNamespace(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
         baseline_tput=1234.5,
         warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
     )
-    assert phase_state.exit_normal_prelude(state) is None
+    assert phase_state.compute_next_phase(state) is None
     state.warm_replay_outcome = {"status": "failed"}
-    out = phase_state.exit_normal_prelude(state)
-    assert out is not None and out[0] == "prelude_done"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
 
 
 def _prelude_state(
@@ -158,6 +164,7 @@ def _prelude_state(
         max_minutes=max_minutes,
         phase_elapsed_totals={"PRELUDE": spent_sec},
         phase_started_unix=0.0,
+        phase_budget_pct={},
         baseline_tput=baseline_tput,
         baseline_runtime_sec=baseline_runtime_sec,
         baseline_post_ready_runtime_sec=baseline_post_ready_runtime_sec,
@@ -226,15 +233,17 @@ def test_a_landed_baseline_outranks_the_exhausted_clock():
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     """The plain statement neither field session ever got: preparation spent the run."""
     state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    evidence = out[1]
+    _next, reason, evidence = out
+    assert reason == "prelude_done"
     assert evidence["fits_one_optimization_round"] is True
     assert evidence["affordable_rounds"] == pytest.approx(1.03, abs=0.01)
 
     state.session_budget_usable_sec = lambda: 1200.0
-    evidence = phase_state.exit_normal_prelude(state)[1]
-    assert evidence["fits_one_optimization_round"] is False
+    out2 = phase_state.compute_next_phase(state)
+    assert out2 is not None
+    assert out2[2]["fits_one_optimization_round"] is False
 
 
 # The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
@@ -259,10 +268,10 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_normal_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
         state.baseline_measure_round_dropped = False
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        assert phase_state.compute_next_phase(state)[1] == "prelude_done"
 
     def test_a_session_that_cannot_afford_another_baseline_closes(self):
         """2050s buys a round and a variant to read against it; 1200s buys neither."""
@@ -290,7 +299,6 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
         assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
@@ -302,8 +310,8 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=1200.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        out = phase_state.compute_next_phase(state)
+        assert out is not None and out[1] == "prelude_done"
 
     def test_a_session_with_no_clock_is_not_closed_for_a_budget_it_does_not_have(self):
         """An unbounded run cannot fail an affordability test, so it retries."""
@@ -313,18 +321,20 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=None,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
 
-def test_exit_terminal_prelude_after_three_baseline_failures():
-    state = SimpleNamespace(baseline_failure_streak=2)
-    assert phase_state.exit_terminal_prelude(state) is None
+def test_prelude_baseline_failed_after_three_failures():
+    state = SimpleNamespace(
+        phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0, baseline_failure_streak=2
+    )
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_failure_streak = 3
-    out = phase_state.exit_terminal_prelude(state)
-    assert out is not None and out[0] == "prelude_baseline_failed"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_baseline_failed"
 
 
-def test_exit_normal_optimize_uses_budget_exhaustion():
+def test_optimize_phase_budget_exhaustion_advances():
     # Elapsed exceeds the phase budget.
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
@@ -336,8 +346,8 @@ def test_exit_normal_optimize_uses_budget_exhaustion():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(state)
-    assert out is not None and out[0] == "optimize_phase_budget_exhausted"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "optimize_phase_budget_exhausted"
 
 
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
@@ -362,7 +372,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
 
 
-def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
+def test_skip_to_kernel_requires_a_tested_round():
     """A skip_to_kernel hint must not end EXPLORE with zero validated work."""
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
@@ -376,11 +386,11 @@ def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(state)
+    out = phase_state.compute_next_phase(state)
     assert out is None
 
 
-def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
+def test_skip_to_kernel_fires_once_a_round_ran():
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
@@ -393,9 +403,9 @@ def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
 
@@ -485,9 +495,6 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         gain_at_cycle_start=0.0,
         no_gain_cycle_streak=0,
     )
-    raw = phase_state.exit_normal_sweep(state)
-    assert raw is not None and raw[0] in ("sweep_budget_exhausted", "sweep_budget_cap")
-
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"

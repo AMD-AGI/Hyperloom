@@ -1950,19 +1950,19 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
 # -- _run_action_now_sync ---------------------------------------------------
 def test_run_action_now_sync_disabled(coord: Coordinator) -> None:
     coord._inline_fast_actions_enabled = False
-    out = coord._run_action_now_sync("report")
+    out = coord.dispatcher._run_action_now_sync("report")
     assert "disabled" in out
 
 
 def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
     coord._inline_fast_actions_enabled = True
-    assert "action_name required" in coord._run_action_now_sync("")
+    assert "action_name required" in coord.dispatcher._run_action_now_sync("")
 
 
 def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
     monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
-    out = coord._run_action_now_sync("explore")
+    out = coord.dispatcher._run_action_now_sync("explore")
     assert "not inline-eligible" in out
 
 
@@ -1970,7 +1970,7 @@ def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
     monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
     coord._coordinator_loop = None
-    out = coord._run_action_now_sync("report")
+    out = coord.dispatcher._run_action_now_sync("report")
     assert "coordinator loop not running" in out
 
 
@@ -2715,7 +2715,7 @@ async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coo
     monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
 
-    out = coord._run_action_now_sync("inline_probe")
+    out = coord.dispatcher._run_action_now_sync("inline_probe")
 
     assert "unavailable" in out and "coordinator loop thread" in out
     create_action.assert_not_called()

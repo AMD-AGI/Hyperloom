@@ -149,7 +149,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
