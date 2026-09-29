@@ -4,8 +4,8 @@
 """Publish a session's Framework attempts as Experiences through the Hyperloom-KB mapping.
 
 The projection from ``session_breakdown.json`` to Experiences is the packaged
-``hyperloom-sbd-v6`` mapping in the ``hyperloom_kb`` SDK. Hyperloom owns only
-the two ends: recording the attempt fields that mapping reads, and handing the
+``hyperloom-sbd-v6`` mapping in ``hyperloom_kb``. The optimizer owns only the
+two ends: recording the attempt fields that mapping reads, and handing the
 written breakdown to ``collect``.
 """
 
@@ -16,6 +16,10 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from hyperloom.inference_optimizer.experience_kb_service import spool_root
+from hyperloom_kb import ConfigurationError, RemoteClientError, experience_kb_from_env
+from hyperloom_kb.collect import MappingError, SourceDocumentError, collect, load_mapping
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +34,7 @@ def enabled(env: Mapping[str, str] | None = None) -> bool:
 
 
 def mapping_schema_ref() -> str:
-    """Return the declaration the packaged mapping produces, proving the installed SDK can collect."""
-
-    from hyperloom_kb.collect import load_mapping
+    """Return the declaration the packaged mapping produces, proving the mapping loads."""
 
     return load_mapping(MAPPING).declaration.schema_ref
 
@@ -43,9 +45,7 @@ def validate_config() -> None:
     if not enabled():
         return
     expected = mapping_schema_ref()
-    from hyperloom_kb import ConfigurationError, experience_kb_from_env
-
-    target = experience_kb_from_env()
+    target = experience_kb_from_env(spool_root=spool_root())
     if target.schema_ref != expected:
         raise ConfigurationError(
             f"{MAPPING} produces {expected}, but the configured Experience KB validates {target.schema_ref}"
@@ -57,11 +57,9 @@ def collect_session(session_dir: Path, breakdown: Mapping[str, Any]) -> None:
 
     if not enabled():
         return
-    from hyperloom_kb import ConfigurationError, RemoteClientError
-    from hyperloom_kb.collect import MappingError, SourceDocumentError, collect
-
     try:
-        report = collect(MAPPING, breakdown, receipt=Path(session_dir) / RECEIPT)
+        target = experience_kb_from_env(spool_root=spool_root())
+        report = collect(MAPPING, breakdown, kb=target, receipt=Path(session_dir) / RECEIPT)
     except (ConfigurationError, MappingError, RemoteClientError, SourceDocumentError, OSError):
         log.warning(
             "Experience collection failed for %s; the session breakdown remains authoritative",

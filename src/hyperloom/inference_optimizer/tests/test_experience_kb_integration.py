@@ -8,8 +8,6 @@ import json
 import sys
 from types import SimpleNamespace
 
-import pytest
-
 from hyperloom.inference_optimizer.experience_kb import (
     ExperienceKBEvidence,
     ExperienceKBIntegration,
@@ -23,6 +21,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, SharedState
+from hyperloom_kb import RemoteClient, RemoteConfig
 
 _FIRST = "exp-00000000000000000000000000000001"
 _SECOND = "exp-00000000000000000000000000000002"
@@ -153,7 +152,6 @@ def test_specialist_read_context_describes_the_dispatch(tmp_path) -> None:
 
 
 def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) -> None:
-    sdk = pytest.importorskip("hyperloom_kb")
     requests = []
     response = {
         "read_id": "read-06b67219b0b8426593afc9914838a09c",
@@ -182,8 +180,8 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
         requests.append(request)
         return _Response()
 
-    config = sdk.RemoteConfig(base_url="https://kb.example", token="service-token")
-    integration = ExperienceKBIntegration(sdk.RemoteClient(config, opener=opener), tmp_path)
+    config = RemoteConfig(base_url="https://kb.example", token="service-token")
+    integration = ExperienceKBIntegration(RemoteClient(config, opener=opener), tmp_path)
 
     evidence = integration.read_for_specialist(_state(), {"domain": "serving_specialist"})
 
@@ -199,21 +197,15 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert evidence.experiences == tuple(response["experiences"])
 
 
-def test_bootstrap_without_a_service_url_never_needs_the_sdk(tmp_path, monkeypatch) -> None:
-    monkeypatch.setitem(sys.modules, "hyperloom_kb", None)
-
-    assert ExperienceKBIntegration.from_env(tmp_path, {}) is None
-
-
 def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
-    sdk = pytest.importorskip("hyperloom_kb")
+    assert ExperienceKBIntegration.from_env(tmp_path, {}) is None
     assert ExperienceKBIntegration.from_env(tmp_path, {"HYPERLOOM_KB_URL": "https://kb.example"}) is None
 
     env = {"HYPERLOOM_KB_URL": "https://kb.example/", "HYPERLOOM_KB_TOKEN": "service-token"}
     integration = ExperienceKBIntegration.from_env(tmp_path, env)
 
     assert integration is not None
-    assert isinstance(integration.client, sdk.RemoteClient)
+    assert isinstance(integration.client, RemoteClient)
     assert integration.client.config.base_url == "https://kb.example"
     assert integration.client.config.token == "service-token"
 

@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import hashlib
-import sys
+import json
+import socket
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer import experience_collect
+import hyperloom_kb.collect as kb_collect
+from hyperloom.inference_optimizer import experience_collect, experience_kb_service
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V6
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -22,6 +24,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import _patch_material
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom_kb import ConfigurationError, RemoteClient, RemoteConfig
 
 _AUTHORING_REF = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
 
@@ -75,73 +78,64 @@ def test_patch_material_keeps_only_publishable_session_patches(tmp_path: Path) -
     ]
 
 
-def test_unconfigured_collection_never_imports_the_sdk(monkeypatch, tmp_path: Path) -> None:
+def test_unconfigured_collection_is_a_no_op(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
-    monkeypatch.setitem(sys.modules, "hyperloom_kb", None)
-    monkeypatch.setitem(sys.modules, "hyperloom_kb.collect", None)
+    monkeypatch.setattr(experience_collect, "collect", _unexpected_collect)
+    monkeypatch.setattr(experience_collect, "experience_kb_from_env", _unexpected_collect)
 
     experience_collect.validate_config()
     experience_collect.collect_session(tmp_path, {"timeline": []})
 
 
-def _fake_sdk(monkeypatch, *, collect: Any, schema_ref: str = "schema:sha256:" + "a" * 64) -> None:
-    class ConfigurationError(ValueError):
-        pass
+def _unexpected_collect(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("an unconfigured Experience KB must not be contacted")
 
-    class MappingError(ValueError):
-        pass
 
-    class SourceDocumentError(ValueError):
-        pass
-
-    class RemoteClientError(RuntimeError):
-        pass
-
-    sdk = ModuleType("hyperloom_kb")
-    sdk.ConfigurationError = ConfigurationError
-    sdk.RemoteClientError = RemoteClientError
-    sdk.experience_kb_from_env = lambda: SimpleNamespace(schema_ref=schema_ref)
-    collect_module = ModuleType("hyperloom_kb.collect")
-    collect_module.MappingError = MappingError
-    collect_module.SourceDocumentError = SourceDocumentError
-    collect_module.collect = collect
-    collect_module.load_mapping = lambda name: SimpleNamespace(declaration=SimpleNamespace(schema_ref=schema_ref))
-    monkeypatch.setitem(sys.modules, "hyperloom_kb", sdk)
-    monkeypatch.setitem(sys.modules, "hyperloom_kb.collect", collect_module)
+def _configured_kb(monkeypatch, *, collect: Any, schema_ref: str | None = None) -> SimpleNamespace:
+    target = SimpleNamespace(schema_ref=schema_ref or experience_collect.mapping_schema_ref())
+    monkeypatch.setattr(experience_collect, "collect", collect)
+    monkeypatch.setattr(experience_collect, "experience_kb_from_env", lambda **_kwargs: target)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://kb.invalid")
+    return target
 
 
 def test_breakdown_write_collects_through_the_packaged_mapping(monkeypatch, session_dir: Path) -> None:
     seen: dict[str, Any] = {}
 
-    def collect(mapping: str, document: dict[str, Any], *, receipt: Path) -> Any:
-        seen.update(mapping=mapping, document=document, receipt=receipt)
+    def collect(mapping: str, document: dict[str, Any], *, kb: Any, receipt: Path) -> Any:
+        seen.update(mapping=mapping, document=document, kb=kb, receipt=receipt)
         return SimpleNamespace(to_dict=lambda: {"counts": {"collected": 0}})
 
-    _fake_sdk(monkeypatch, collect=collect)
+    target = _configured_kb(monkeypatch, collect=collect)
 
-    target = exporter.write_breakdown_json(session_dir)
+    written = exporter.write_breakdown_json(session_dir)
 
-    assert target.is_file()
+    assert written.is_file()
     assert seen["mapping"] == "hyperloom-sbd-v6"
     assert seen["document"]["schema_version"] == SCHEMA_VERSION_V6
+    assert seen["kb"] is target
     assert seen["receipt"] == session_dir / "reports" / "experience_collect.json"
 
 
 def test_collection_failure_leaves_the_breakdown_written(monkeypatch, session_dir: Path) -> None:
     def collect(*_args: Any, **_kwargs: Any) -> Any:
-        raise sys.modules["hyperloom_kb.collect"].MappingError("broken mapping")
+        raise kb_collect.MappingError("broken mapping")
 
-    _fake_sdk(monkeypatch, collect=collect)
+    _configured_kb(monkeypatch, collect=collect)
 
     assert exporter.write_breakdown_json(session_dir).is_file()
 
 
-def test_startup_rejects_a_kb_that_validates_another_declaration(monkeypatch) -> None:
-    _fake_sdk(monkeypatch, collect=lambda *a, **k: None)
-    sys.modules["hyperloom_kb"].experience_kb_from_env = lambda: SimpleNamespace(schema_ref="schema:sha256:other")
+def test_startup_accepts_a_kb_that_validates_the_mapping_declaration(monkeypatch) -> None:
+    _configured_kb(monkeypatch, collect=_unexpected_collect)
 
-    with pytest.raises(ValueError, match="hyperloom-sbd-v6 produces"):
+    experience_collect.validate_config()
+
+
+def test_startup_rejects_a_kb_that_validates_another_declaration(monkeypatch) -> None:
+    _configured_kb(monkeypatch, collect=_unexpected_collect, schema_ref="schema:sha256:other")
+
+    with pytest.raises(ConfigurationError, match="hyperloom-sbd-v6 produces"):
         experience_collect.validate_config()
 
 
@@ -230,9 +224,8 @@ def test_recorded_framework_rows_only_carry_declared_fields(session_dir: Path) -
         assert set(proposal) <= set(schema.V6FrameworkProposal.__annotations__)
 
 
-def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:
-    collect_module = pytest.importorskip("hyperloom_kb.collect")
-    breakdown = {
+def _breakdown(session_dir: Path) -> dict[str, Any]:
+    return {
         "metadata": {
             "session": {"session_id": "session-42"},
             "task_config": {
@@ -248,7 +241,66 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
         "timeline": _record_framework_attempts(session_dir),
     }
 
-    report = collect_module.collect(experience_collect.MAPPING, breakdown, dry_run=True).to_dict()
+
+def test_writes_the_service_cannot_take_wait_under_user_data_path(
+    monkeypatch, session_dir: Path, tmp_path: Path
+) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    monkeypatch.setenv("HYPERLOOM_KB_URL", f"http://127.0.0.1:{closed_port}")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "data"))
+
+    experience_collect.collect_session(session_dir, _breakdown(session_dir))
+
+    receipt = json.loads((session_dir / experience_collect.RECEIPT).read_text(encoding="utf-8"))
+    assert {row["status"] for row in receipt["collected"]} == {"spooled"}
+    spooled = list((tmp_path / "data" / "experience-kb" / "spool").glob("spool-*.json"))
+    assert len(spooled) == len(receipt["collected"])
+
+
+def test_a_later_run_reads_what_an_earlier_run_wrote_after_the_service_restarts(
+    monkeypatch, session_dir: Path, tmp_path: Path
+) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("HYPERLOOM_KB_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "data"))
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+
+    first_run = experience_kb_service.ensure_service()
+    assert first_run is not None and first_run.process is not None
+    try:
+        experience_collect.collect_session(session_dir, _breakdown(session_dir))
+    finally:
+        first_run.process.terminate()
+        first_run.process.wait(timeout=10)
+    receipt = json.loads((session_dir / experience_collect.RECEIPT).read_text(encoding="utf-8"))
+    written = {row["experience_id"] for row in receipt["collected"]}
+    assert {row["status"] for row in receipt["collected"]} == {"created"}
+
+    second_run = experience_kb_service.ensure_service()
+    assert second_run is not None and second_run.process is not None
+    try:
+        client = RemoteClient(RemoteConfig.from_env(spool_root=tmp_path / "unused-spool"))
+        listed = {str(item["experience_id"]) for item in client.list_experiences().items}
+    finally:
+        second_run.process.terminate()
+        second_run.process.wait(timeout=10)
+
+    # ``experience_count`` counts the corpus every read searches.
+    assert second_run.health["experience_count"] == len(written) > 0
+    assert listed == written
+
+
+def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:
+    breakdown = _breakdown(session_dir)
+
+    report = kb_collect.collect(experience_collect.MAPPING, breakdown, dry_run=True).to_dict()
 
     assert report["skipped"] == []
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}

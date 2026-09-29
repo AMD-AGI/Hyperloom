@@ -113,13 +113,6 @@ ci = [
     "pytest-split>=0.8",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
-# Experience KB service client (HYPERLOOM_KB_URL). It is not on any index: its
-# wheel is distributed next to the Hyperloom wheel and installed in the same pip
-# command. No other extra pulls it in, so ``runtime`` and ``test`` (CI) install
-# without it.
-kb = [
-    "hyperloom-kb==0.1.0",
-]
 # Opt-in Langfuse trace sink (HYPERLOOM_LANGFUSE_ENABLE=1).
 trace = [
     "langfuse>=2.0",
@@ -148,6 +141,8 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb-serve = "hyperloom_kb.http_service:main"
+hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -300,6 +295,11 @@ hyperloom = [
 kernelforge = [
     "data/**/*",
 ]
+hyperloom_kb = [
+    "py.typed",
+    "declarations/*.yaml",
+    "mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -327,6 +327,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
+    "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and

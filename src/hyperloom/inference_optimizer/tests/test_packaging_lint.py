@@ -93,11 +93,13 @@ def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         assert name in setup
         assert name in optimizer
-    assert "from hyperloom_kb import RemoteClient" in setup
-    assert "RemoteClient(config).health()" in setup
-    # Users without KB access keep the plain install and skip the KB gate.
+    # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.
+    assert "hyperloom.inference_optimizer.experience_kb_service init-env" in setup
+    assert "hyperloom.inference_optimizer.experience_kb_service ensure" in setup
+    assert "No Experience KB" not in setup
     assert "pip install your_package.whl --target ." in setup
-    assert "`No Experience KB`" in setup
+    assert "hyperloom_kb-" not in setup
+    assert "[kb]" not in setup
     assert "--require-experience-kb" in optimizer
     assert "experience_kb_injections" in optimizer
     for text in (setup, optimizer):
@@ -110,21 +112,17 @@ def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None
         assert "slack" not in text.lower()
 
 
-def test_the_private_experience_kb_client_is_reachable_only_through_the_kb_extra() -> None:
-    assert _REPO_ROOT is not None
-    project = _pyproject()["project"]
-    extras = project["optional-dependencies"]
+def test_the_experience_kb_runtime_ships_inside_this_distribution() -> None:
+    pyproject = _pyproject()
+    project = pyproject["project"]
     assert project["dependencies"] == []
-    [dependency] = extras["kb"]
-    assert dependency.startswith("hyperloom-kb==")
-    assert "Hyperloom-KB" not in (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    for name, requirements in extras.items():
-        if name == "kb":
-            continue
-        for requirement in requirements:
-            assert "hyperloom-kb" not in requirement, name
-            if requirement.startswith(project["name"] + "["):
-                assert "kb" not in requirement.split("[", 1)[1].rstrip("]").split(","), name
+    for name, requirements in project["optional-dependencies"].items():
+        assert not any(requirement.startswith("hyperloom-kb") for requirement in requirements), name
+    assert project["scripts"]["hyperloom-kb-serve"] == "hyperloom_kb.http_service:main"
+    assert project["scripts"]["hyperloom-kb-collect"] == "hyperloom_kb.collect.cli:main"
+    shipped = pyproject["tool"]["setuptools"]["package-data"]["hyperloom_kb"]
+    for resource in ("declarations/inference-recipe-v1.yaml", "mappings/hyperloom-sbd-v6.yaml"):
+        assert any(fnmatchcase(resource, pattern) for pattern in shipped), resource
 
 
 def _module_path(dotted: str) -> Path | None:
