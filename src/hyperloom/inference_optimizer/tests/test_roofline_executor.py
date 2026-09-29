@@ -942,17 +942,6 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_profile_status == "succeeded"
 
 
-@pytest.mark.asyncio
-async def test_promote_roofline_non_dict_result_short_circuits(session_dir):
-    coord = Coordinator(session_dir, backends=_silent_backends())
-    await coord._promote_to_shared_state(
-        "roofline",
-        None,
-        task=_roofline_task(),  # type: ignore[arg-type]
-    )
-    assert coord.shared_state.roofline_attempts == []
-
-
 # N11: strip base64 image data URLs from analysis.md.
 def test_strip_passes_text_through_when_no_base64_url():
     md = "# Analysis\n\nNo images here, just text.\nSome markdown link: [foo](https://example.com/bar)\n"

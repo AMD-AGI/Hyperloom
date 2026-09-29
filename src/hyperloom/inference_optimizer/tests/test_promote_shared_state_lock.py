@@ -20,6 +20,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE, OUTCOME_RECORDED, Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import writeback as wb
@@ -621,13 +622,8 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
 
 
 @pytest.mark.asyncio
-async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
-    """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
-    from hyperloom.inference_optimizer.session.optimization_journal import (
-        OUTCOME_NO_PROMOTE,
-        derive_journal_outcome,
-    )
-
+async def test_promote_integrate_patch_refuses_a_keep_below_the_anchor(session_dir):
+    """A KEEP measured below the live anchor is not adopted; the promotion says so."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -639,10 +635,98 @@ async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
         "specialist_task_id": "spec-1",
         "delta_pct": 40.0,
     }
-    await coord._promote_to_shared_state("integrate_patch", result, task=_task("integrate_patch", task_id="t1"))
+    outcome = await coord._promote_to_shared_state(
+        "integrate_patch", result, task=_task("integrate_patch", task_id="t1")
+    )
 
+    assert outcome.verdict is Verdict.REFUSED
     assert s.current_best["tput"] == 200.0
-    assert derive_journal_outcome("integrate_patch", result, promotable=True) == OUTCOME_NO_PROMOTE
+    assert "promotion_refused" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "tput", "expected"),
+    [
+        ("kept", 260.0, Verdict.ADOPTED),
+        ("reverted", 190.0, Verdict.REVERTED),
+        ("accuracy_unavailable_reject", 190.0, Verdict.REVERTED),
+        ("kept_inert", 201.0, Verdict.RECORDED),
+        ("apply_failed", None, Verdict.FAILED),
+        ("rejected_by_critic", None, Verdict.FAILED),
+    ],
+)
+async def test_promote_integrate_patch_settles_one_verdict(session_dir, status, tput, expected):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "explore", "tput": 200.0, "extra_server_args": "", "extra_envs": {}}
+    result: dict = {"status": status, "specialist_task_id": "spec-1"}
+    if tput is not None:
+        result["output_throughput"] = tput
+
+    outcome = await coord._promote_to_shared_state(
+        "integrate_patch", result, task=_task("integrate_patch", task_id="t1")
+    )
+
+    assert outcome.verdict is expected
+    assert (s.current_best["tput"] == tput) is (expected is Verdict.ADOPTED)
+
+
+@pytest.mark.asyncio
+async def test_a_lift_refused_integrate_patch_is_not_journalled_keep(session_dir, monkeypatch):
+    """The whole settlement reads the promotion's verdict: journal, settle row and intervention mix."""
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    settled: list[dict] = []
+    monkeypatch.setattr(phase_event, "record_settle", lambda **kwargs: settled.append(kwargs))
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "explore", "tput": 200.0, "extra_server_args": "", "extra_envs": {}}
+    s.optimization_stack = [{"action": "explore", "variant_name": "v0", "tput": 200.0}]
+    task = _task("integrate_patch", task_id="t-refused")
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={"status": "kept", "output_throughput": 150.0, "delta_pct": 50.0},
+    )
+
+    await coord._reap_dispatched_task(task, result)
+
+    assert len(s.optimization_stack) == 1
+    assert s.current_best["tput"] == 200.0
+    (entry,) = [e for e in coord._ensure_journal().entries if e.task_id == "t-refused"]
+    assert entry.outcome == OUTCOME_NO_PROMOTE
+    assert [row["change_type"] for row in s.intervention_mix] == ["code_patch_attempt"]
+    assert [row["decision"] for row in settled] == ["refused"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("specialist", {"runner_status": "ok", "specialist_done": {"proposal_set": []}}),
+        ("report", {"status": "succeeded"}),
+        ("session_breakdown", {"status": "succeeded"}),
+        ("target_analysis", {"status": "ok"}),
+    ],
+)
+async def test_a_step_without_adoption_semantics_is_never_journalled_keep(session_dir, kind, payload):
+    """A successful specialist or report adopts nothing; the journal must not claim a KEEP."""
+    coord = _coord(session_dir)
+    task = _task(kind, task_id=f"t-{kind}")
+
+    outcome = await coord._promote_to_shared_state(kind, dict(payload), task=task)
+    await coord._fact_write_hook(
+        task=task,
+        result=SubAgentResult(task.task_id, "succeeded", payload),
+        verdict=outcome.verdict,
+    )
+
+    assert outcome.verdict is Verdict.RECORDED
+    (entry,) = [e for e in coord._ensure_journal().entries if e.task_id == task.task_id]
+    assert entry.outcome == OUTCOME_RECORDED
 
 
 @pytest.mark.asyncio
@@ -2732,7 +2816,7 @@ async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
                 ],
             },
         ),
-        kept=False,
+        verdict=Verdict.REVERTED,
     )
 
     # The deduped variant was never measured, so it is not an attempt.

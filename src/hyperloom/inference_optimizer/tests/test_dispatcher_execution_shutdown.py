@@ -580,9 +580,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         task = await dispatcher.tasks.create(
             kind="specialist", params={}, idempotency_key="cancelled", requires_lanes=["research_lane"]
         )
-        result = await dispatcher.run_task_registered(
-            task, on_complete=partial(dispatcher._reap_dispatched_task, task, gpu_lease=None)
-        )
+        result = await dispatcher.run_task_registered(task, on_complete=partial(dispatcher._reap_dispatched_task, task))
         assert result.state == "cancelled"
         assert (await dispatcher.tasks.get(task.task_id)).state == "cancelled"
         events = await dispatcher.bus.tail(topic="delegated_result")

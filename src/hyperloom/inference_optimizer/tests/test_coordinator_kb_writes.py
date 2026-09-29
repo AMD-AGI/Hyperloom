@@ -137,6 +137,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
             "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
         },
+        adopted=True,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
@@ -144,6 +145,28 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
     assert bc.get("extra_server_args") == "--disable-radix-cache"
     assert float(row.get("best_throughput") or 0.0) == 6700.0
     assert any("disable-radix-cache" in str(l.get("statement") or "") for l in (row.get("lessons") or []))
+
+
+def test_record_fact_per_variant_writes_no_lesson_for_an_unadopted_keep(tmp_path: Path) -> None:
+    """An executor KEEP whose lift did not land is not a lesson or a best_config."""
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+    task = SimpleNamespace(kind="explore", task_id="t-keep-refused", params={})
+    coord._record_fact_per_variant(
+        task=task,
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "disable_radix",
+            "variant": {"extra_server_args": "--disable-radix-cache"},
+            "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
+        },
+        adopted=False,
+    )
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) or {}
+    assert not (row.get("lessons") or [])
+    assert not (row.get("best_config") or {})
 
 
 def test_record_fact_per_variant_does_not_clobber_better_best_config(
@@ -174,6 +197,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.1, "output_throughput": 6600.0},
         },
+        adopted=True,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     bc = row.get("best_config") or {}
@@ -647,6 +671,7 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
             "variant": {},
             "metrics": {"gain_pct": -10.0},
         },
+        adopted=False,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]

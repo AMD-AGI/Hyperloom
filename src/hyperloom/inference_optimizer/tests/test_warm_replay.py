@@ -947,6 +947,62 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
+def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
+    """A replay that beats the baseline but not the adopted configuration is not adopted.
+
+    Reached when a pre-baseline enablement patch already holds current_best: the
+    keep threshold is judged against the baseline, the lift against current_best.
+    """
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP, Verdict
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    prior_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+    coord.shared_state.current_best = dict(prior_best)
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "warm_recipe_tier": "exact",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    rollbacks: list[str] = []
+    coord.phase_prelude._rollback_combined_warm = (  # type: ignore[method-assign]
+        lambda result, task: rollbacks.append(task.task_id) or {"ok": True, "errors": []}
+    )
+    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
+
+    # +23% over the 600 baseline, but under the 800 current_best.
+    verdict = coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert verdict is Verdict.REVERTED
+    assert outcome["status"] == "drift"
+    assert "current_best refused" in outcome["reason"]
+    assert outcome["kernel"]["status"] == "reverted"
+    assert rollbacks == [task.task_id]
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.current_best == prior_best
+    assert coord.shared_state.cumulative_gain_validated == 0.0
+    assert coord.shared_state.cumulative_gain_validated_ts == ""
+    journal = coord._ensure_journal()
+    assert not [e for e in journal.entries if e.outcome == OUTCOME_KEEP]
+
+
+def test_promote_warm_replay_reports_its_verdict(tmp_path):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
+
+    assert coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task) is (
+        Verdict.ADOPTED
+    )
+
+    failed = _make_coord(tmp_path / "failed", warm_start_recipe=_warm_recipe_t1())
+    failed.shared_state.warm_replay_outcome = {"status": "in_flight"}
+    assert failed._promote_warm_replay({"status": "failed", "error": "boom"}, task=task) is Verdict.FAILED
+
+
 def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
     tmp_path,
 ):
@@ -1485,7 +1541,6 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
             result={},
             error=("replay_warm_recipe target_file='/usr/local/vllm.py' escapes session_dir"),
         ),
-        None,
     )
 
     assert target.read_text(encoding="utf-8") == "original\n"
@@ -2624,8 +2679,9 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path):
     zero = _make_coord(tmp_path / "zero", warm_start_recipe=_warm_recipe_t1())
     zero.shared_state.baseline_tput = 600.0
     zero.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    # +0.5%: clears the explicit 0.0 threshold, not the 1.0 default.
     zero._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 600.0},
+        {"status": "succeeded", "output_throughput": 603.0},
         task=_StubTask(
             params={
                 "baseline_tput_anchor": 600.0,

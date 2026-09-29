@@ -29,11 +29,15 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+    STATUS_BY_OUTCOME,
 )
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.optimization_journal import (
+    KIND_OTHER,
+    OUTCOME_KEEP,
     JournalEntry,
+    Verdict,
 )
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
 from ..state.shared_state import inject_stack_base_params
@@ -64,6 +68,14 @@ _WARM_REPLAY_EVENT_PHASE = "prelude"
 #: constant because a consumer asking "was the initial analysis refused, or
 #: never considered" selects on it.
 PRELUDE_ARM_DROPPED = "prelude_arm_dropped"
+
+# The settlement verdict of a replay, keyed by the timeline status its settled
+# outcome closes the event with; any other status produced nothing to judge.
+_VERDICT_BY_WARM_REPLAY_EVENT_STATUS: dict[str, Verdict] = {
+    "succeeded": Verdict.ADOPTED,
+    "rejected": Verdict.REVERTED,
+    "degraded": Verdict.REFUSED,
+}
 
 # The donor's identity, carried flattened on the outcome and re-nested for the
 # event. Listed once so the two directions cannot drift apart.
@@ -2072,13 +2084,17 @@ class PreludePhase(CoordinatorCollaborator):
         result: dict,
         *,
         task: "Task | None" = None,
-    ) -> None:
+    ) -> Verdict:
         """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
 
         Closes the replay's timeline event on whichever outcome the settling
         below persisted. Done here, around the whole arc, rather than at each
         of the ten branches that can end it: a branch that forgot to close
         would leave a settled replay reading as still in flight.
+
+        Returns:
+            The settlement verdict, read off the outcome status the settling
+            persisted.
         """
         recorder = self._warm_replay_timeline(task)
         try:
@@ -2087,8 +2103,11 @@ class PreludePhase(CoordinatorCollaborator):
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
+        outcome = self.shared_state.warm_replay_outcome
         if recorder is not None:
-            recorder.finish(self.shared_state.warm_replay_outcome)
+            recorder.finish(outcome)
+        event_status = STATUS_BY_OUTCOME.get(str((outcome or {}).get("status") or ""), "failed")
+        return _VERDICT_BY_WARM_REPLAY_EVENT_STATUS.get(event_status, Verdict.FAILED)
 
     def _settle_warm_replay(
         self,
@@ -2333,10 +2352,6 @@ class PreludePhase(CoordinatorCollaborator):
             promoted_checkout = (
                 str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
             )
-            if promoted_checkout:
-                outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -2389,10 +2404,6 @@ class PreludePhase(CoordinatorCollaborator):
                     passed=True,
                     reason="the replay carries params that can be pushed onto the stack",
                 )
-            outcome["status"] = "reproduced"
-            outcome.pop("replayed_patch_refs", None)
-            if replayed_patch_refs:
-                outcome["replayed_patch_refs"] = replayed_patch_refs
             # Stack-entry-only metadata; the lift keeps current_best pure config.
             entry_extra: dict[str, Any] = {
                 "gain_pct": round(measured_gain, 3),
@@ -2406,21 +2417,12 @@ class PreludePhase(CoordinatorCollaborator):
             }
             if promoted_checkout:
                 entry_extra["framework_source_root"] = promoted_checkout
-            kernel_outcome = self._book_combined_kernel_keep(result, task)
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            if kernel_outcome.get("kept"):
+            kernel_plan = [entry for entry in (params.get("warm_kernel_plan") or []) if isinstance(entry, dict)]
+            if kernel_plan:
                 entry_extra["kernel_replay"] = {
                     "validation": "combined_recipe_kernel",
-                    "count": kernel_outcome["kept"],
-                    "columns": sorted(
-                        {
-                            str(entry.get("column") or "")
-                            for entry in state.warm_kernel_kb_plan
-                            if isinstance(entry, dict)
-                        }
-                    ),
+                    "count": len(kernel_plan),
+                    "columns": sorted({str(entry.get("column") or "") for entry in kernel_plan}),
                 }
             patch_result = result.get("warm_patch_result")
             if isinstance(patch_result, dict):
@@ -2433,20 +2435,11 @@ class PreludePhase(CoordinatorCollaborator):
             already_pushed = any(
                 isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )
-            if already_pushed:
-                log.info(
-                    "warm-replay promote: stack already carries the entry; "
-                    "skipping duplicate push (likely resume mid-promote)",
-                )
-                state.warm_replay_pending = {}
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
             recipe_args = str(
                 params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
             recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            self._lift_to_current_best(
+            if not already_pushed and not self._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
@@ -2467,7 +2460,42 @@ class PreludePhase(CoordinatorCollaborator):
                     "workspace": str(result.get("workspace") or ""),
                 },
                 entry_extra=entry_extra,
-            )
+            ):
+                # Cleared the keep threshold against the baseline yet did not
+                # beat the adopted configuration on its graded objective.
+                if not self._reject_warm_replay_as_drift(
+                    result,
+                    task,
+                    outcome,
+                    recorder,
+                    reason=f"measured {measured_gain:+.2f}% over baseline but current_best refused the lift",
+                ):
+                    return
+                state.warm_replay_pending = {}
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
+            if promoted_checkout:
+                outcome["active_framework_root"] = promoted_checkout
+                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
+                state.active_inferencex_path = promoted_checkout
+            outcome["status"] = "reproduced"
+            outcome.pop("replayed_patch_refs", None)
+            if replayed_patch_refs:
+                outcome["replayed_patch_refs"] = replayed_patch_refs
+            kernel_outcome = self._book_combined_kernel_keep(result, task)
+            outcome["kernel"] = dict(kernel_outcome)
+            if recorder is not None:
+                recorder.record_applied(kernel=kernel_outcome)
+            if already_pushed:
+                log.info(
+                    "warm-replay promote: stack already carries the entry; "
+                    "skipping duplicate push (likely resume mid-promote)",
+                )
+                state.warm_replay_pending = {}
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
             if recorder is not None:
                 recorder.record_promotion(
                     promoted_checkout=promoted_checkout,
@@ -2492,8 +2520,6 @@ class PreludePhase(CoordinatorCollaborator):
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
                 journal = self._ensure_journal()
-                from hyperloom.inference_optimizer.session.optimization_journal import KIND_OTHER, OUTCOME_KEEP
-
                 journal.append_entry(
                     JournalEntry(
                         phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
@@ -2509,30 +2535,49 @@ class PreludePhase(CoordinatorCollaborator):
                 )
             except Exception:
                 log.exception("warm-replay journal append failed")
-        else:
-            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
-            kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
-            kernel_outcome = {
-                "status": "reverted",
-                "total": len(kernel_plan or []),
-                "kept": 0,
-                "reverted": len(kernel_plan or []),
-                "validation": "combined_recipe_kernel",
-            }
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            outcome["status"] = "drift"
-            outcome["reason"] = f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
-            log.info(
-                "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",
-                measured_gain,
-                keep_threshold,
-            )
+        elif not self._reject_warm_replay_as_drift(
+            result,
+            task,
+            outcome,
+            recorder,
+            reason=f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+        ):
+            return
         state.warm_replay_pending = {}
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
+
+    def _reject_warm_replay_as_drift(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: dict,
+        recorder: Any,
+        *,
+        reason: str,
+    ) -> bool:
+        """Roll back a measured replay that is not adopted and settle it as ``drift``.
+
+        Returns ``False`` when the rollback failed; the outcome then already
+        carries ``rollback_failed``.
+        """
+        if not self._require_combined_warm_rollback(result, task, outcome, recorder):
+            return False
+        kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
+        kernel_outcome = {
+            "status": "reverted",
+            "total": len(kernel_plan or []),
+            "kept": 0,
+            "reverted": len(kernel_plan or []),
+            "validation": "combined_recipe_kernel",
+        }
+        outcome["kernel"] = dict(kernel_outcome)
+        if recorder is not None:
+            recorder.record_applied(kernel=kernel_outcome)
+        outcome["status"] = "drift"
+        outcome["reason"] = reason
+        log.info("warm-replay DRIFT: %s", reason)
+        return True
 
     async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,

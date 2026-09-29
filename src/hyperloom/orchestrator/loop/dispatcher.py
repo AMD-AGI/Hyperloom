@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from ..actions.cancel_channel import CancelScope, use_cancel_scope
 from ..actions.executors._ray_serving import (
     CANCEL_ROUND_GRACE_SEC,
@@ -802,9 +803,7 @@ class DispatcherCollaborator:
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
-                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=gpu_lease)
-                    if join_in_pump
-                    else None,
+                    on_complete=partial(self._reap_dispatched_task, task) if join_in_pump else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
@@ -1167,41 +1166,19 @@ class DispatcherCollaborator:
                 task.kind,
             )
 
-    async def _reap_dispatched_task(
-        self,
-        task: Task,
-        maybe_result: Any,
-        gpu_lease: Any,
-    ) -> None:
+    async def _reap_dispatched_task(self, task: Task, result: SubAgentResult) -> None:
         """Run completion bookkeeping for one finished dispatched task.
 
         Performs post-completion bookkeeping: specialist auto-retry,
         ``delegated_result`` emission, ledgers, shared-state promotion,
         fact-write and explore-gap refresh. Execution owns resource cleanup.
+        The promotion decides the settlement :class:`Verdict` once; every
+        ledger after it reads that verdict.
 
         Args:
             task: The finished dispatched task.
-            maybe_result: The task's result, or the exception it raised.
-            gpu_lease: The GPU specialist lease to release, or ``None``.
+            result: The task's result.
         """
-        if isinstance(maybe_result, asyncio.CancelledError):
-            # Asked for, not gone wrong: the wall-clock defences stop
-            # in-flight actions on purpose. Logged as the deliberate act it
-            # is so a shutdown does not read as a crash.
-            log.warning(
-                "dispatcher: in-flight action task=%s kind=%s was cancelled",
-                task.task_id,
-                task.kind,
-            )
-            return
-        if isinstance(maybe_result, BaseException):
-            log.exception(
-                "dispatcher: spawned task %s raised: %r",
-                task.task_id,
-                maybe_result,
-            )
-            return
-        result: SubAgentResult = maybe_result
         # Bounded transient-failure auto-retry (infra only): on a subprocess
         # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
         # task and skip this attempt's bookkeeping. Semantic empties fall
@@ -1250,12 +1227,6 @@ class DispatcherCollaborator:
                     run_error=str(result.error or ""),
                 )
                 self.phase_framework.on_specialist_settled(task, done_payload, run_error=str(result.error or ""))
-        # intervention-mix ledger: log change_type for explore/integrate_patch.
-        if task.kind in ("explore", "integrate_patch"):
-            self._record_intervention_for_task(task, result.result)
-        # integrate_patch completion handling.
-        if task.kind == "integrate_patch" and result.state != "cancelled":
-            await self.phase_framework.on_integrate_patch_settled(task, result)
         # Auto-promote succeeded results into CORE_STATE_FIELDS
         # (Coordinator-only writer).  Warm replay is deliberately routed
         # through its promote handler even when dispatch itself failed:
@@ -1268,59 +1239,68 @@ class DispatcherCollaborator:
             result_payload.setdefault("error_class", "dispatch_failed")
             if result.error:
                 result_payload.setdefault("error", str(result.error))
-        kept = (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
-            task.kind, result_payload
-        )
-        # Settle the dispatch row on the phase that ordered it. Here rather
-        # than inside the two branches below: both of them return early on
-        # some paths, and the verdict is the same fact either way.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-
-            phase_event.record_settle(
-                task_id=str(task.task_id or ""),
-                status=str(result.state or ""),
-                decision="promoted" if kept else "no_promote",
-                error_class=result_payload.get("error_class") or result.error_class,
-                workspace=result_payload.get("workspace"),
-                settled_unix=time.time(),
-                phase=str(getattr(self.shared_state, "phase", "") or ""),
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                action=str(task.kind or ""),
-            )
-        except Exception:
-            log.debug("dispatcher: phase settle record failed", exc_info=True)
-        if result.state == "cancelled":
-            return
-        try:
-            if kept:
-                await self._promote_to_shared_state(
-                    task.kind,
-                    result_payload,
-                    task=task,
+        verdict = Verdict.FAILED
+        adopted_variants: Collection[str] = ()
+        promotion_raised = False
+        if result.state != "cancelled":
+            try:
+                if (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
+                    task.kind, result_payload
+                ):
+                    promoted = await self._promote_to_shared_state(
+                        task.kind,
+                        result_payload,
+                        task=task,
+                    )
+                    verdict, adopted_variants = promoted.verdict, promoted.adopted_variants
+                elif task.task_id not in self._dead_holder_accounted:
+                    unpromotable_result = dict(result.result or {})
+                    # Runner-level failures (no executor, executor raised) carry
+                    # their class on the result, not in the empty payload.
+                    if result.error_class and not unpromotable_result.get("error_class"):
+                        unpromotable_result["error_class"] = result.error_class
+                    await self._handle_unpromotable_result(task, unpromotable_result)
+            except Exception as exc:
+                log.exception(
+                    "dispatcher: promotion/unpromotable handling failed for task=%s",
+                    task.task_id,
                 )
-            elif task.task_id not in self._dead_holder_accounted:
-                unpromotable_result = dict(result.result or {})
-                # Runner-level failures (no executor, executor raised) carry
-                # their class on the result, not in the empty payload.
-                if result.error_class and not unpromotable_result.get("error_class"):
-                    unpromotable_result["error_class"] = result.error_class
-                await self._handle_unpromotable_result(task, unpromotable_result)
-        except Exception as exc:
-            log.exception(
-                "dispatcher: promotion/unpromotable handling failed for task=%s",
-                task.task_id,
-            )
-            self._record_coordinator_exception(
-                stage="dispatcher_promote",
-                exc=exc,
-            )
+                self._record_coordinator_exception(
+                    stage="dispatcher_promote",
+                    exc=exc,
+                )
+                promotion_raised = True
+        # Settle the dispatch row on the phase that ordered it, whichever way
+        # the promotion above ended.
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_settle(
+            task_id=str(task.task_id or ""),
+            status=str(result.state or ""),
+            decision=verdict.value,
+            error_class=result_payload.get("error_class") or result.error_class,
+            workspace=result_payload.get("workspace"),
+            settled_unix=time.time(),
+            phase=str(getattr(self.shared_state, "phase", "") or ""),
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            action=str(task.kind or ""),
+        )
+        if task.kind in ("explore", "integrate_patch"):
+            self._record_intervention_for_task(task, result.result, verdict)
+        if result.state == "cancelled" or promotion_raised:
             return
-        # Fact-write hook: lands KEEP/REVERT in the journal + optional KB
+        if task.kind == "integrate_patch":
+            await self.phase_framework.on_integrate_patch_settled(task, result, verdict)
+        # Fact-write hook: lands the verdict in the journal + optional KB
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
             try:
-                await self._fact_write_hook(task=task, result=result, kept=kept)
+                await self._fact_write_hook(
+                    task=task,
+                    result=result,
+                    verdict=verdict,
+                    adopted_variants=adopted_variants,
+                )
             except Exception as exc:
                 log.exception(
                     "dispatcher: fact-write hook failed for task=%s",

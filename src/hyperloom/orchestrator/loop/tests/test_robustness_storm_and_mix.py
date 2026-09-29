@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -85,7 +86,7 @@ def test_coordinator_intervention_hook_records_config_for_explore():
         "winners": [{"name": "var1", "gain_pct": 3.5}],
         "best_variant": {"name": "var1", "gain_pct": 3.5},
     }
-    c._record_intervention_for_task(task, result)
+    c._record_intervention_for_task(task, result, Verdict.ADOPTED)
     assert len(c.shared_state.intervention_mix) == 1
     assert c.shared_state.intervention_mix[0]["change_type"] == "config"
     assert c.shared_state.consecutive_config_only_rounds == 1
@@ -106,7 +107,7 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
         idempotency_key="explore-2",
     )
     result = {"status": "succeeded", "winners": [], "best_variant": None}
-    c._record_intervention_for_task(task, result)
+    c._record_intervention_for_task(task, result, Verdict.REVERTED)
     assert len(c.shared_state.intervention_mix) == 1
     assert c.shared_state.intervention_mix[0]["change_type"] == "config_attempt"
     assert c.shared_state.consecutive_config_only_rounds == 0
@@ -134,7 +135,7 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
         "delta_pct": 5.4,
         "patches_applied": ["patches/001.patch"],
     }
-    c._record_intervention_for_task(task, result)
+    c._record_intervention_for_task(task, result, Verdict.ADOPTED)
     assert c.shared_state.intervention_mix[-1]["change_type"] == "code_patch"
     assert c.shared_state.intervention_mix[-1]["delta_pct"] == 5.4
     assert c.shared_state.consecutive_config_only_rounds == 0
@@ -155,7 +156,7 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
         idempotency_key="ip-2",
     )
     for status in ("reverted", "apply_failed", "rejected_by_critic", "applied_no_bench", "no_patches"):
-        c._record_intervention_for_task(task, {"status": status})
+        c._record_intervention_for_task(task, {"status": status}, Verdict.FAILED)
     assert len(c.shared_state.intervention_mix) == 5
     assert {e["change_type"] for e in c.shared_state.intervention_mix} == {"code_patch_attempt"}
     assert c.shared_state.consecutive_config_only_rounds == 0

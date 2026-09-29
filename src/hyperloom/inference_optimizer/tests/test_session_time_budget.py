@@ -1131,7 +1131,9 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
     task = await coord.tasks.create(kind="specialist", params={}, idempotency_key="pending-cleanup")
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
-    await coord.dispatcher._reap_dispatched_task(task, asyncio.CancelledError(), gpu)
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+
+    await coord.dispatcher._reap_dispatched_task(task, SubAgentResult(task.task_id, "cancelled", {}))
     assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
 
 

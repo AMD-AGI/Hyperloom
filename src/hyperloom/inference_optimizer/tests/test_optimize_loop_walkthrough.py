@@ -142,6 +142,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
                 fingerprint=f"fp-{i}",
                 variant_name=f"variant-{i}",
                 outcome="REVERT",
+                adopted=False,
                 gain_pct=0.01,
                 before_tput=1500.0,
                 after_tput=1500.15,

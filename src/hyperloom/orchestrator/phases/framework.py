@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -26,7 +27,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
@@ -326,6 +326,7 @@ def _record_source_attempt(
     task: Any,
     candidate_id: str,
     status: str,
+    adopted: bool,
     result: Mapping[str, Any],
     params: Mapping[str, Any],
     specialist_task_id: str = "",
@@ -392,16 +393,16 @@ def _record_source_attempt(
             "server_log_path": str(result.get("server_log_path") or ""),
         },
         decision=status,
-        adopted=_is_kept(status),
+        adopted=adopted,
         # What stood behind the adoption, on the same rule the config arm
         # writes it under: a KEEP no accuracy gate ruled on rests on
         # throughput alone, a weaker claim that must not read alike. Only
         # an adoption carries it -- on a reverted row "accuracy_pass"
         # would name the gate that refused it.
         validation_basis=(
-            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if _is_kept(status) else ""
+            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if adopted else ""
         ),
-        attribution_eligible=(_is_kept(status) and base is not None and result.get("output_throughput") is not None),
+        attribution_eligible=(adopted and base is not None and result.get("output_throughput") is not None),
         **measured_against,
     )
     if accuracy_pass is not None:
@@ -502,10 +503,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         self._record_framework_agent_authoring_empty_outcome(task=task, done_payload=done_payload, run_error=run_error)
         self._ingest_candidate_discovery(task=task, done_payload=done_payload, run_error=run_error)
 
-    async def on_integrate_patch_settled(self, task: "Task", result: Any) -> None:
-        """Record an authored patch's KEEP/REVERT, then re-arm or drain the authored lane."""
+    async def on_integrate_patch_settled(self, task: "Task", result: Any, verdict: Verdict) -> None:
+        """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
-            self._record_framework_agent_authored_outcome(task=task, result=result)
+            self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
 
@@ -2091,8 +2092,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         *,
         task: "Task",
         result: Any,
+        adopted: bool,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped)."""
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped). The row is ``kept`` only when the patch was adopted."""
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
             return
@@ -2129,9 +2131,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
         matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
-        # A KEEP is the last word on a candidate; any other row is an outcome a later attempt may better, and is
-        # replaced below.
-        if any(str(row.get("status") or "") == "kept" for row in matching):
+        # An adopted patch is the last word on a candidate; any other row is an outcome a later attempt may better,
+        # and is replaced below.
+        if any(row.get("kept") for row in matching):
             return
         if matching:
             progress[:] = [
@@ -2141,7 +2143,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             candidate_id=cand_id,
             batch_id=batch_id,
             status=status,
-            kept=status == "kept",
+            kept=adopted,
             rationale=str(res.get("reason") or ""),
             provenance="authored",
             gain_pct=gain,
@@ -2163,6 +2165,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             task_id=str(getattr(task, "task_id", "") or ""),
             specialist_task_id=spec_tid,
             outcome=status,
+            adopted=adopted,
             gain_pct=delta_pct,
             before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
             after_tput=new_tput,
@@ -2176,6 +2179,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             task=task,
             candidate_id=cand_id,
             status=status,
+            adopted=adopted,
             result=res,
             params=params,
             specialist_task_id=spec_tid,
@@ -2238,9 +2242,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             ):
                 continue
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            # The bus carries the executor's result, not the settlement verdict; the stack entry the
+            # lift wrote for this task is the durable record of the adoption.
             self._record_framework_agent_authored_outcome(
                 task=integrate_task,
                 result=result,
+                adopted=any(
+                    isinstance(entry, dict) and str(entry.get("task_id") or "") == task_id
+                    for entry in (self.shared_state.optimization_stack or [])
+                ),
             )
             if cand_id in self._framework_processed_candidate_keys():
                 return True

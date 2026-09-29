@@ -702,7 +702,8 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 @pytest.mark.asyncio
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _PromoteOutcome
 
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
     state = _state()
@@ -710,14 +711,9 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     collaborator = WritebackCollaborator.__new__(WritebackCollaborator)
     collaborator.shared_state = state
 
-    class _Outcome:
-        changed = False
-        audit_decision = None
-        audit_extras: dict[str, Any] = {}
-
-    outcome = _Outcome()
+    outcome = _PromoteOutcome()
     await collaborator._promote_integrate_patch(result, None, outcome)
-    assert outcome.audit_decision == "kept_inert"
+    assert outcome.verdict is Verdict.RECORDED
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
     assert all(row["default_on"] is False for row in state.authored_framework_levers)
     assert not state.current_best

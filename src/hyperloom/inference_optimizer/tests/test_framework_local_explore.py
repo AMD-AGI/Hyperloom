@@ -516,6 +516,7 @@ def test_the_arms_deliverable_decides_its_lever():
             task_id="t-1",
             specialist_task_id="spec-1",
             outcome="reverted",
+            adopted=False,
             gain_pct=None,
             before_tput=5000.0,
             after_tput=4900.0,
@@ -549,6 +550,7 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
             stub,
             task=task,
             result=result,
+            adopted=result.get("status") == "kept",
         )
         return [r for r in stub.shared_state.attempts if r.get("task_id") == "integrate-1"]
 

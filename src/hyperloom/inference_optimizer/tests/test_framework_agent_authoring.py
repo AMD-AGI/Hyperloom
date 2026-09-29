@@ -384,6 +384,7 @@ def test_record_authored_outcome_writes_progress(
     stub._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=True,
     )
 
     progress = stub.shared_state.framework_agent_phase_progress
@@ -412,6 +413,7 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     stub._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -427,6 +429,7 @@ def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
     stub._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "kept", "delta_pct": 1.0},
+        adopted=True,
     )
 
     assert stub.shared_state.framework_agent_phase_progress == []
@@ -454,6 +457,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
     stub._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -484,6 +488,7 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
     stub._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "reverted", "delta_pct": -0.2},
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -491,6 +496,44 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
     assert rows[0]["status"] == "reverted"
     assert rows[0]["provenance"] == "authored"
     assert rows[0]["integrate_task_id"] == "integrate-local-2"
+
+
+def test_a_kept_patch_the_lift_refused_is_not_a_kept_row(tmp_path: Path):
+    """The row's ``kept`` follows the adoption, so a later attempt may still better the candidate."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    stub = _Stub(tmp_path, authoring=True)
+    task = SimpleNamespace(
+        task_id="i-refused",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "pr-77",
+            "framework_batch_id": "b1",
+        },
+    )
+
+    stub._record_framework_agent_authored_outcome(
+        task=task,
+        result={"status": "kept", "delta_pct": 2.0, "output_throughput": 1020.0},
+        adopted=False,
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert rows[0]["status"] == "kept"
+    assert rows[0]["kept"] is False
+    assert summarize_candidate_outcomes(rows)["keeps"] == 0
+
+    retry = SimpleNamespace(task_id="i-refused-2", params=task.params)
+    stub._record_framework_agent_authored_outcome(
+        task=retry,
+        result={"status": "kept", "delta_pct": 5.0, "output_throughput": 1050.0},
+        adopted=True,
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["kept"] is True
+    assert rows[0]["integrate_task_id"] == "i-refused-2"
 
 
 @pytest.mark.asyncio
@@ -600,8 +643,8 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
     phase = stub.phase_framework
-    phase._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
-        str(result.result.get("status") or "")
+    phase._record_framework_agent_authored_outcome = lambda *, task, result, adopted: recorded.append(
+        (str(result.result.get("status") or ""), adopted)
     )
     phase._maybe_rearm_authored_lane = _noop_async
     phase._drain_apply_fail_retry_pending = _noop_async
@@ -620,9 +663,9 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         result={"status": "reverted"},
     )
 
-    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
+    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result)
 
-    assert recorded == ["reverted"]
+    assert recorded == [("reverted", False)]
     assert result.result["reauthor_attempt"] == 1
 
 
