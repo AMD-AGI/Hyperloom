@@ -1167,7 +1167,7 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     recorder = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK)
     assert recorder is not None
     recorder.begin()
-    coordinator._kernel_timeline_recorder = recorder
+    coordinator.phase_kernel._kernel_timeline_recorder = recorder
     await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
     if settled:
         assert coordinator.shared_state.geak_result == previous

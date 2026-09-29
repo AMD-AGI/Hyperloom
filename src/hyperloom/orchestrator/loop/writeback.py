@@ -4055,7 +4055,7 @@ class WritebackCollaborator:
             got_hash: The fingerprint the run reported.
             got_overlay_digest: The overlay digest observed after the run.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self.phase_kernel.timeline()
         if recorder is None:
             return
         params = task.params or {}
@@ -4095,7 +4095,7 @@ class WritebackCollaborator:
         afterwards. The recorder declines silently when the kernel event has
         already closed, and the close-out's ``geak_candidate`` carries it then.
         """
-        recorder = self.phase_kernel._kernel_timeline()
+        recorder = self.phase_kernel.timeline()
         if recorder is None:
             return
         recorder.record_geak_rebench_conclusion(

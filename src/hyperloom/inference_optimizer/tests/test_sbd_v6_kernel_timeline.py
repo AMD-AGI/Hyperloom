@@ -1392,6 +1392,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
             },
             "proposal": {"decision": "KEEP"},
         },
+        recorder=recorder,
     )
     recorder.finish(tput_after=1000.0)
 

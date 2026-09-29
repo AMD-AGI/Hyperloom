@@ -1686,7 +1686,7 @@ class TestKernelE2EMeasurementPromotion:
         with session_scope(coord.session_dir):
             phase._open_kernel_timeline(route=ROUTE_FORGE, route_reason="unit", from_phase="")
             await phase._handle_gemm_tuning_result(result)
-            recorder = phase._kernel_timeline()
+            recorder = phase.timeline()
             ext, _status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
 
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)

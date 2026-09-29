@@ -90,7 +90,7 @@ def promotion(tmp_path, monkeypatch, request):
         assert recorder is not None
         if request.node.get_closest_marker("asyncio") is None:
             recorder.begin(tput_before=110.0)
-        coord._kernel_timeline_recorder = recorder
+        coord.phase_kernel._kernel_timeline_recorder = recorder
         yield coord, result, recorder
 
 
