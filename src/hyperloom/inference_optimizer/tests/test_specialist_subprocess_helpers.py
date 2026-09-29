@@ -309,6 +309,26 @@ def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: P
     assert manual.read_text(encoding="utf-8") == diff
 
 
+def test_collect_patches_does_not_deliver_a_harvest_off_the_inferencex_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pip-installed framework has no checkout, so the worktree can be cut from the benchmark harness instead."""
+    base, wt = _make_harvest_worktree(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(base))
+    tune = wt / "scratch" / "custom_tune.py"
+    tune.parent.mkdir(parents=True)
+    tune.write_text("print('tune the gemm table')\n", encoding="utf-8")
+    manual = wt / "patches" / "manual.patch"
+    manual.parent.mkdir()
+    manual.write_text("p", encoding="utf-8")
+
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+
+    assert patches == [str(manual)]
+    assert roots == {}
+    assert not (wt / "patches" / "_worktree_diff.patch").exists()
+
+
 def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path) -> None:
     base, wt = _make_harvest_worktree(tmp_path)
     before = (wt / "runtime.py").read_text(encoding="utf-8")

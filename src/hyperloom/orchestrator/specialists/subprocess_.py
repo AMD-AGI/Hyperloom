@@ -64,7 +64,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-from hyperloom.inference_optimizer.framework_paths import enclosing_checkout
+from hyperloom.inference_optimizer.framework_paths import enclosing_checkout, resolve_inferencex_root
 from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -1741,7 +1741,15 @@ class SpecialistSubprocessDispatcher:
         Returns:
             ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
-        if worktree is not None and (worktree / ".git").exists():
+        benchmark_root = resolve_inferencex_root()
+        # A pip-installed framework has no checkout, so the worktree may be cut from the benchmark
+        # harness; edits there are the specialist's scratch, never a change to the tree under optimisation.
+        off_benchmark = bool(
+            benchmark_root
+            and worktree_base is not None
+            and os.path.realpath(worktree_base) == os.path.realpath(benchmark_root)
+        )
+        if worktree is not None and (worktree / ".git").exists() and not off_benchmark:
             harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
                 worktree,
                 base=worktree_base_commit or "HEAD",
