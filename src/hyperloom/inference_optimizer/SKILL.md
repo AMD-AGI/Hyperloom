@@ -533,6 +533,86 @@ GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not deri
 these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
+### Step 1.25 — Prove a cold environment before spending a long budget
+
+On every new host, image, container, or source checkout, run the bounded
+cold-start check after `install.sh` and before `optimize`:
+
+```bash
+mkdir -p "$USER_DATA_PATH/optimizer_runs"
+python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/cold_start_check.py" \
+  --model "$MODEL_PATH" \
+  --framework "${FRAMEWORK:-sglang}" \
+  --output "$USER_DATA_PATH/optimizer_runs/cold_start_$(date -u +%Y%m%dT%H%M%SZ).json"
+```
+
+Pass `--require-experience-kb` when Experience collection is part of the run.
+The check runs `install.sh --check-only`, the launcher GPU/model gate,
+framework and Experience-KB bootstrap checks, verified gateway TLS, and one
+real request through the production orchestration backend. Any required
+failure exits 2. A PID plus `manifest.json` and `state.json` is not a substitute:
+the environment is ready only after this check succeeds and a short canary
+produces a measured baseline.
+
+### Experience KB service
+
+Experience KB is optional. For a user with KB access, `hyperloom-setup` writes
+`HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` to the workspace `.env` and
+validates authenticated health; the `hyperloom_kb` SDK comes from Hyperloom's
+`kb` extra. Load `.env` before launching; do not ask the user for these values
+again. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads or
+writes and needs no SDK.
+
+No enable flag, declaration path, service identity, Run scope, worker identity,
+job identity, or spool path is required. The URL enables the integration; the
+SDK owns its packaged declaration and local retry spool.
+
+During FRAMEWORK_AGENT the service is read at two points and the returned block
+is injected into the prompt:
+
+- every orchestration tick, with the untested proposals as context;
+- every specialist dispatch, with the specialist's domain, investigation, and
+  task as context. The block renders as the specialist prompt's
+  `EXPERIENCE KB` section.
+
+Every written Experience is readable by the next read. Retrieved evidence is
+advisory and never replaces the measured benchmark baseline. A read failure
+soft-degrades to the original prompt.
+
+Every complete measured attempt is written idempotently when the session
+breakdown is written. Rendered Experience references from an orchestration
+proposal are carried through to the measured Experience. A network write
+failure is spooled for retry.
+
+Each injection appends one entry to `state.json` `experience_kb_injections`
+(latest last, capped at 20); an orchestration entry is added only when its
+injected Experience set changes:
+`{tick, phase, ts, consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}`.
+`consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
+identify the specialist dispatch and are empty for orchestration.
+`prompt_block` is the injected text; each Experience appears in it under an
+`Experience <id>` heading with its complete record. `experiences` holds one
+summary per injected Experience, in `experience_ids` order: `experience_id`,
+`source_run_id`, `change_summary`, `decision`, `baseline_value`,
+`outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints
+the latest orchestration and specialist entries with one line per injected
+Experience. When a poll shows a new entry, report each Experience's summary
+together with the matching section of `prompt_block` to the user.
+
+When Experience KB is enabled, after the workload Skill resolves `MODEL_PATH`
+and `FRAMEWORK`, validate the same production path:
+
+```bash
+mkdir -p "$USER_DATA_PATH/optimizer_runs"
+python3 -m hyperloom.inference_optimizer.tools.cold_start_check \
+  --model "$MODEL_PATH" \
+  --framework "$FRAMEWORK" \
+  --require-experience-kb \
+  --output "$USER_DATA_PATH/optimizer_runs/experience-kb-cold-start.json"
+```
+
+Require `cold_start_ready=true`.
+
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side
@@ -729,7 +809,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
-export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH="${ROCM_PATH:-/opt/rocm}/llvm/bin:${ROCM_PATH:-/opt/rocm}/bin:$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 bash "$INSTALL_SH"
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
@@ -1376,7 +1456,8 @@ python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
 `last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
-`phase`, plus the recent lifecycle events.
+`phase`, the latest orchestration and specialist Experience KB injections when
+they exist, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1563,4 +1644,5 @@ Report concise status:
 - `cumulative_gain_validated` and `current_best`
 - explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
+- any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why

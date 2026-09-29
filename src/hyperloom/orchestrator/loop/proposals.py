@@ -124,10 +124,16 @@ def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> N
     per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
     """
-    if pending.action_name != "explore" or not pending.proposal_msg_id:
+    if not pending.proposal_msg_id:
         return
     recorder = coord.phase_framework.timeline()
     if recorder is None:
+        return
+    kb_read_id = str(pending.payload.get("kb_read_id") or "")
+    rendered_refs = pending.payload.get("kb_rendered_refs") or []
+    if kb_read_id or rendered_refs:
+        recorder.record_proposal(pending.proposal_msg_id, kb_read_id=kb_read_id, rendered_refs=rendered_refs)
+    if pending.action_name != "explore":
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
         ARM_CONFIG,
@@ -154,6 +160,8 @@ def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> N
         producer_ref=producer_ref,
         lever_kind=LEVER_CONFIG,
         scope=scopes.pop() if len(scopes) == 1 else "",
+        kb_read_id=kb_read_id,
+        rendered_refs=rendered_refs,
     )
     recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_PROPOSED, outcome="submitted")
 

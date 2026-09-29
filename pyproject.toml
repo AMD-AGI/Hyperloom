@@ -113,6 +113,13 @@ ci = [
     "pytest-split>=0.8",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
+# Experience KB service client (HYPERLOOM_KB_URL). It is not on any index: its
+# wheel is distributed next to the Hyperloom wheel and installed in the same pip
+# command. No other extra pulls it in, so ``runtime`` and ``test`` (CI) install
+# without it.
+kb = [
+    "hyperloom-kb==0.1.0",
+]
 # Opt-in Langfuse trace sink (HYPERLOOM_LANGFUSE_ENABLE=1).
 trace = [
     "langfuse>=2.0",

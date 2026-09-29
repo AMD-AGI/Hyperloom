@@ -103,6 +103,24 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
 log = __import__("logging").getLogger(__name__)
 
 
+def _stamp_kb_exposure(
+    router: Any,
+    payload: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    """Attach the current orchestration read to proposals emitted by that tick."""
+    evidence = getattr(router._coord, "_kb_last_read", None)
+    if (
+        source != "orchestration"
+        or evidence is None
+        or int(getattr(evidence, "tick", -1)) != int(getattr(router.shared_state, "tick", 0) or 0)
+    ):
+        return
+    payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
+    payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+
+
 def _variant_review_rows(
     payload: Mapping[str, Any] | None,
     held_by_name: Mapping[str, str] | None,
@@ -450,6 +468,7 @@ class IntentRouter(CoordinatorCollaborator):
             await self._coord.writeback.record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
+        _stamp_kb_exposure(self, payload, source=source)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
