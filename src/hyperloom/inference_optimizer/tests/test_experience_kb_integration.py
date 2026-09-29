@@ -355,6 +355,11 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
     asyncio.run(coordinator._warm_specialist_params(params))
 
     assert params["experience_kb_block"] == evidence.prompt_block
+    assert params["kb_read_id"] == "read-9"
+    assert params["kb_rendered_refs"] == [
+        {"id": _FIRST, "purpose": "representative"},
+        {"id": _SECOND, "purpose": "representative"},
+    ]
     [read_params] = integration.specialist_params
     assert read_params["domain"] == "kernel_switch_specialist"
     assert read_params["gap_symptom"] == "VLLM_ROCM_USE_AITER defaults False"
@@ -393,8 +398,8 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     offline_params = {"domain": "serving_specialist"}
     asyncio.run(coordinator._warm_specialist_params(offline_params))
 
-    assert "experience_kb_block" not in prelude_params
-    assert "experience_kb_block" not in offline_params
+    for params in (prelude_params, offline_params):
+        assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
     assert len(integration.specialist_params) == 1
     assert state.experience_kb_injections == []
 

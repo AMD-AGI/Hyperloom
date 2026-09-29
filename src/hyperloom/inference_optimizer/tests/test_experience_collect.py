@@ -23,6 +23,8 @@ from hyperloom.orchestrator.phases.framework import _patch_material
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
+_AUTHORING_REF = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
+
 
 @pytest.fixture
 def session_dir(tmp_path: Path):
@@ -162,6 +164,9 @@ def _record_framework_attempts(session_dir: Path) -> list[dict[str, Any]]:
                 "audit_step": "author_via_specialist",
                 "lever_kind": "upstream_pr",
                 "reasoning": "Profiling shows redundant attention setup on every request.",
+                # What the authoring specialist was shown, forwarded from its dispatch.
+                "kb_read_id": "read-authoring",
+                "kb_rendered_refs": [_AUTHORING_REF],
             },
         ),
         result={
@@ -252,6 +257,8 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
     assert source["change"]["resource_refs"] == ["artifacts/source.patch"]
     assert "optimized = True" in source["change"]["content"]
     assert source["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert source["rendered_refs"] == [_AUTHORING_REF]
+    assert source["provenance"]["extra"]["kb_read_id"] == "read-authoring"
     config = experiences["t-exp-1:explore-001:fp1"]
     assert config["change"]["kind"] == "config_variant"
     assert config["outcome"]["decision"] == "revert"

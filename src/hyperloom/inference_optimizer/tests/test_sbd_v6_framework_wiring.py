@@ -678,6 +678,62 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
     ]
 
 
+def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path):
+    """The discovery and the authoring specialist each saw a read; the proposal the attempt joins keeps both."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+
+    discovery_ref = {"id": "exp-00000000000000000000000000000001", "purpose": "representative"}
+    authoring_ref = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.framework_agent_specialist_candidate_map = {"t-auth-1": "https://x/pr/1"}
+    coord.phase_framework._open_framework_timeline()
+    coord.phase_framework._ingest_candidate_discovery(
+        task=SimpleNamespace(
+            task_id="t-disc-1",
+            params={
+                "candidate_discovery": True,
+                "domain": "candidate_discovery_specialist",
+                "kb_read_id": "read-discovery",
+                "kb_rendered_refs": [discovery_ref],
+            },
+        ),
+        done_payload={
+            "proposal_set": [
+                {
+                    "pr_url": "https://x/pr/1",
+                    "title": "live one",
+                    "repo": "vllm",
+                    "verdict": "worth_a_bench",
+                    "reasoning": "The patch removes work from the profiled attention path.",
+                }
+            ]
+        },
+    )
+    integrate_params = {
+        "framework_agent_authoring": True,
+        "specialist_task_id": "t-auth-1",
+        "framework_agent_candidate_id": "https://x/pr/1",
+    }
+    _forward_integrate_source(
+        {"domain": "serving_specialist", "kb_read_id": "read-authoring", "kb_rendered_refs": [authoring_ref]},
+        integrate_params,
+    )
+    coord.phase_framework._record_framework_agent_authored_outcome(
+        task=SimpleNamespace(task_id="t-int-1", kind="integrate_patch", params=integrate_params),
+        result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
+    )
+    coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
+
+    ext = _events(session_dir)[0]["ext"]
+    [attempt] = ext["attempts"]
+    [proposal] = [row for row in ext["proposals"] if row["proposal_id"] == attempt["proposal_ref"]]
+    assert proposal["rendered_refs"] == [discovery_ref, authoring_ref]
+    assert proposal["kb_read_id"] == "read-authoring"
+
+
 def _authored_outcome(coord, result: dict) -> dict:
     """One authored-patch outcome recorded, and the attempt row it produced."""
     from types import SimpleNamespace

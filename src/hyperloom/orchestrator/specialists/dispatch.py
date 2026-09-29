@@ -275,6 +275,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if evidence.status != "completed" or not evidence.prompt_block:
             return
         params["experience_kb_block"] = evidence.prompt_block
+        # The exposure travels with everything this specialist authors, under the keys orchestration proposals use.
+        params["kb_read_id"] = evidence.read_id
+        params["kb_rendered_refs"] = [dict(ref) for ref in evidence.rendered_refs]
         state.record_experience_kb_injection(
             consumer="specialist",
             domain=str(params.get("domain") or ""),
