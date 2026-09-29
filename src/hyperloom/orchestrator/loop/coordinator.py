@@ -55,6 +55,7 @@ from ..bus.resource_lock import (
 )
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
+from .idle_gate import IdleTickGate
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
@@ -302,6 +303,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
+        self._idle_gate = IdleTickGate()
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
         try:
             self._backend_error_streak_threshold: int = max(
@@ -1003,6 +1005,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     self._advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
+            await self._await_within_session_bound(
+                self.router.retry_parked_integrates,
+                stage="retry_parked_integrates",
+            )
             for name in self._tick_roles:
                 await self._await_within_session_bound(
                     lambda n=name: self._reactor_pass(n),
@@ -1298,6 +1304,19 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             exc=exc,
                             tick=tick_n,
                         )
+                    if not self.shared_state.closing_phase:
+                        try:
+                            await self._await_within_session_bound(
+                                self.router.retry_parked_integrates,
+                                stage="retry_parked_integrates",
+                            )
+                        except Exception as exc:
+                            log.exception("deferred integrate retry (run) failed")
+                            self._record_coordinator_exception(
+                                stage="retry_parked_integrates",
+                                exc=exc,
+                                tick=tick_n,
+                            )
                     in_closing = self.shared_state.closing_phase
                     # One reactor + dispatcher pass; during closing skip LLM passes.
                     if not in_closing:
@@ -1464,6 +1483,19 @@ class Coordinator(metaclass=_CoordinatorMeta):
         backend = self.backends[agent_name]
         sys_prompt = await self._load_system_prompt(agent_name)
         prompt = await self._compose_prompt(agent_name)
+        gated = agent_name == "orchestration"
+        if gated and self._idle_gate.should_skip(prompt, time.monotonic()):
+            self.shared_state.orchestration_idle_skips += 1
+            if self._idle_gate.streak == 1:
+                log.info(
+                    "Coordinator: orchestration sees nothing new since its last turn; "
+                    "holding its LLM turn until state changes (heartbeat %.0fs)",
+                    self._idle_gate.heartbeat_sec,
+                )
+            return
+        if gated:
+            # Only a turn that completes re-arms the skip; a failed one leaves the next tick open.
+            self._idle_gate.reset()
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1547,6 +1579,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
+        if gated and self._idle_gate.enabled:
+            # The state this turn left behind; the next tick is skipped only if it shows the same.
+            try:
+                self._idle_gate.record_turn(
+                    await self._compose_prompt(agent_name), time.monotonic(), prompt_before=prompt
+                )
+            except Exception:
+                # A failed snapshot may only cost the skip, never the turn.
+                log.debug("idle gate snapshot failed", exc_info=True)
+                self._idle_gate.reset()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

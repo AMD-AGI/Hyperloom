@@ -1090,7 +1090,8 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if bool(getattr(state, "has_keep_pending_integrate", False)):
+    # A KEEP whose integrate wait expired is integrated at SWEEP entry, so it no longer holds KERNEL.
+    if bool(getattr(state, "keep_pending_holds_kernel", getattr(state, "has_keep_pending_integrate", False))):
         return True
 
     if _controller_phase_terminal(state):

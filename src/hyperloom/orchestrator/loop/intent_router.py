@@ -60,6 +60,8 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
 )
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from ..phases.machine_state import PHASE_KERNEL_AGENT as _PHASE_KERNEL_AGENT
+from .deferred_integrate import DeferredIntegrates, ParkedIntegrate, integrate_kernel_id
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
@@ -406,6 +408,7 @@ class IntentRouter:
 
     def __init__(self, coordinator: Any) -> None:
         self._coord = coordinator
+        self._deferred_integrates = DeferredIntegrates()
 
     def __getattr__(self, name: str) -> Any:
         # Attributes not defined on the router resolve onto the coordinator.
@@ -1243,6 +1246,9 @@ class IntentRouter:
                             ttl_sec=ttl or 60,
                         )
                         if handler_lease is None:
+                            deferred = {"status": "deferred", "reason": "lanes_busy", "lanes": lanes}
+                            if kind == "integrate":
+                                deferred.update(await self._park_deferred_integrate(source, intent, lanes))
                             await self.bus.append_and_seq(
                                 Message.new(
                                     "kernel_agent",
@@ -1252,7 +1258,7 @@ class IntentRouter:
                                         "in_reply_to": request_msg.msg_id,
                                         "kind": f"{kind}_done",
                                         "status": "deferred",
-                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
+                                        "result": deferred,
                                         "source": "lanes_busy",
                                     },
                                     in_reply_to=request_msg.msg_id,
@@ -1337,6 +1343,7 @@ class IntentRouter:
                     cache_hit=cache_hit_source is not None,
                 )
             if kind == "integrate":
+                self._deferred_integrates.discard(integrate_kernel_id(intent.payload))
                 if result.get("status") != "skipped":
                     self.shared_state.record_kernel_integrate_result(result)
                 decision = str(result.get("decision", "")).upper()
@@ -1369,6 +1376,98 @@ class IntentRouter:
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
+
+    async def _park_deferred_integrate(self, source: str, intent: Intent, lanes: list[str]) -> dict[str, Any]:
+        """Park a lane-deferred ``integrate`` for the coordinator and say, in the reply, who retries it.
+
+        The reply fields are the same on every deferral of one request, so a re-sent integrate does
+        not read as new state to the idle-tick gate.
+        """
+        kernel_id = integrate_kernel_id(intent.payload)
+        if kernel_id and kernel_id in set(self.shared_state.integrate_wait_expired_kernel_ids()):
+            return {"retry": "sweep_entry"}
+        now = time.time()
+        entry = self._deferred_integrates.park(source, dict(intent.payload), lanes, now)
+        if entry is None:
+            return {}
+        reason = self._deferred_integrates.expiry_reason(entry, now)
+        if reason:
+            await self._expire_parked_integrate(entry, reason)
+            return {"retry": "sweep_entry"}
+        return {"retry": "coordinator"}
+
+    async def _expire_parked_integrate(self, entry: ParkedIntegrate, reason: str) -> None:
+        """Stop waiting on a parked integrate: its KEEP no longer holds KERNEL, and SWEEP entry integrates it."""
+        self._deferred_integrates.discard(entry.kernel_id)
+        waited_min = round((time.time() - entry.first_deferred) / 60.0, 1)
+        marked = self.shared_state.mark_integrate_wait_expired(entry.kernel_id, reason=reason, at=now_iso())
+        self.shared_state.save(self.session_dir)
+        log.warning(
+            "Coordinator: integrate(%s) stayed deferred (%s, %.1f min); it no longer holds KERNEL open and is left "
+            "to the SWEEP-entry drain (records=%s)",
+            entry.kernel_id,
+            reason,
+            waited_min,
+            marked,
+        )
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                entry.source,
+                "observation",
+                {
+                    "kind": "integrate_wait_expired",
+                    "kernel_id": entry.kernel_id,
+                    "reason": reason,
+                    "deferrals": entry.attempts,
+                    "waited_min": waited_min,
+                    "body_md": (
+                        f"integrate({entry.kernel_id}) stayed deferred ({reason}). It no longer holds KERNEL open "
+                        "and is integrated at SWEEP entry; do not re-send it."
+                    ),
+                },
+            )
+        )
+
+    async def _lanes_free(self, lanes: list[str]) -> bool:
+        """Whether every lane has room, read without taking a lease."""
+        holders_fn = getattr(self.locks, "lane_holders", None)
+        caps_fn = getattr(self.locks, "lane_capacities", None)
+        if not (callable(holders_fn) and callable(caps_fn)):
+            return True
+        holders = await holders_fn()
+        caps = await caps_fn()
+        return all(int(holders.get(lane, 0)) < int(caps.get(lane, 1)) for lane in lanes)
+
+    async def retry_parked_integrates(self) -> None:
+        """Re-dispatch each parked integrate whose lanes are free, and expire the ones waited on too long."""
+        parked = self._deferred_integrates
+        if not len(parked):
+            return
+        if str(getattr(self.shared_state, "phase", "") or "").upper() != _PHASE_KERNEL_AGENT:
+            # Outside KERNEL the SWEEP-entry drain owns pending KEEPs.
+            for entry in parked.entries():
+                parked.discard(entry.kernel_id)
+            return
+        now = time.time()
+        for entry in parked.entries():
+            reason = parked.expiry_reason(entry, now)
+            if reason:
+                await self._expire_parked_integrate(entry, reason)
+                continue
+            if not await self._lanes_free(entry.lanes):
+                continue
+            attempts = entry.attempts
+            entry.dispatches += 1
+            log.info(
+                "Coordinator: lanes %s are free; retrying the deferred integrate(%s) (deferred %d times)",
+                entry.lanes,
+                entry.kernel_id,
+                attempts,
+            )
+            await self._handle_intent(entry.source, Intent(type=IntentType.REQUEST, payload=dict(entry.payload)))
+            if parked.get(entry.kernel_id) is entry and entry.attempts == attempts:
+                parked.discard(entry.kernel_id)
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""

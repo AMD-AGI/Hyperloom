@@ -856,6 +856,41 @@ def has_keep_pending_integrate(state) -> bool:
     return bool(next_pending_keep_kernel_id(state))
 
 
+def keep_pending_holds_kernel(state) -> bool:
+    """Whether a pending KEEP still holds KERNEL open; one whose integrate wait expired is left to SWEEP entry."""
+    return any(not record.get("integrate_wait_expired_at") for record in pending_kernel_integration_records(state))
+
+
+def integrate_wait_expired_kernel_ids(state) -> list[str]:
+    """Pending KEEPs whose integrate stayed deferred past the wait bound, in integration order."""
+    return [
+        str(record.get("kernel_id") or "")
+        for record in pending_kernel_integration_records(state)
+        if record.get("integrate_wait_expired_at") and str(record.get("kernel_id") or "")
+    ]
+
+
+def mark_integrate_wait_expired(state, kernel_id: str, *, reason: str, at: str) -> list[str]:
+    """Mark the pending KEEP records of ``kernel_id`` as no longer holding KERNEL open.
+
+    The records stay ``pending``, so the SWEEP-entry drain still integrates them.
+
+    Returns:
+        list[str]: The integration ids that were marked.
+    """
+    kid = str(kernel_id or "").strip()
+    marked: list[str] = []
+    for integration_id, record in (state.pending_kernel_integrations or {}).items():
+        if not isinstance(record, dict) or str(record.get("kernel_id") or "") != kid:
+            continue
+        if str(record.get("status") or "pending") != "pending" or record.get("integrate_wait_expired_at"):
+            continue
+        record["integrate_wait_expired_at"] = at
+        record["integrate_wait_expired_reason"] = reason
+        marked.append(str(integration_id))
+    return marked
+
+
 def index_attempts_by_kernel_id(attempts: Any) -> dict[str, dict]:
     """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``."""
     latest: dict[str, tuple[str, dict]] = {}

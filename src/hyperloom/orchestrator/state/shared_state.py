@@ -698,6 +698,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
+    # Orchestration ticks whose LLM turn was held because the prompt showed nothing new (idle gate).
+    orchestration_idle_skips: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
@@ -1809,6 +1811,25 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         return _m.has_keep_pending_integrate(self)
+
+    @property
+    def keep_pending_holds_kernel(self) -> bool:
+        """True while a pending KEEP whose integrate wait has not expired holds KERNEL open."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.keep_pending_holds_kernel(self)
+
+    def integrate_wait_expired_kernel_ids(self) -> list[str]:
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.integrate_wait_expired_kernel_ids(self)
+
+    def mark_integrate_wait_expired(self, kernel_id: str, *, reason: str, at: str) -> list[str]:
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.mark_integrate_wait_expired(self, kernel_id, reason=reason, at=at)
 
     @property
     def kernel_opt_attempts_count(self) -> int:

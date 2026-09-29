@@ -557,8 +557,9 @@ class _RenderMixin:
             f"explore_search={self._format_search_state(self.explore_search)}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
-            (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
-            (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
+            (f"pending_keep_kernels={self._keeps_to_integrate_now() or '(none)'}"),
+            (f"has_keep_pending_integrate={'true' if self.keep_pending_holds_kernel else 'false'}"),
+            *self._integrate_wait_expired_lines(),
             f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
@@ -573,11 +574,31 @@ class _RenderMixin:
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
+            *(
+                [f"pending_escalate_hint={self.pending_escalate_hint} (queued; do not re-send)"]
+                if str(self.pending_escalate_hint or "").strip()
+                else []
+            ),
             f"closing_phase={self.closing_phase}  "
             f"closing_started_unix={self.closing_started_unix or 0.0}  "
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def _keeps_to_integrate_now(self) -> list[str]:
+        """Pending KEEP kernel ids the orchestrator should integrate now (wait-expired ones go to SWEEP)."""
+        return [
+            str(record.get("kernel_id") or "")
+            for record in self.pending_kernel_integration_records()
+            if str(record.get("kernel_id") or "") and not record.get("integrate_wait_expired_at")
+        ]
+
+    def _integrate_wait_expired_lines(self) -> list[str]:
+        """One line naming the KEEPs whose integrate wait expired; nothing when there are none."""
+        expired = self.integrate_wait_expired_kernel_ids()
+        if not expired:
+            return []
+        return [f"integrate_wait_expired={expired} (integrated at SWEEP entry; do not re-send their integrate)"]
 
     def _format_agent_last_active(self) -> str:
         """Render each agent's last completed reactor pass as a relative age.
