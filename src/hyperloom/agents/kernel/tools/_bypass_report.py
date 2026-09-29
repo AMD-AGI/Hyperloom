@@ -22,6 +22,7 @@ from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
 from _kernel_partition import build_kernel_candidates_document
+
 # Source path mapping delegates to TraceLens' independent kernel_source
 # path-identifier (path mapping only); the bypass analysis is otherwise
 # TraceLens-free. Bypass route is slated for removal.

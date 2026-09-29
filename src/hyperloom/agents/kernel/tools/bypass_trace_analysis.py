@@ -502,7 +502,10 @@ def main(argv: list[str] | None = None) -> int:
         trace_input=str(args.trace_input),
     )
     for _skipped_step, _skip_reason in (
-        ("install_tracelens", "the bypass reader/analysis need no TraceLens checkout; source path mapping uses TraceLens' importable kernel_source module"),
+        (
+            "install_tracelens",
+            "the bypass reader/analysis need no TraceLens checkout; source path mapping uses TraceLens' importable kernel_source module",
+        ),
         ("split_trace", "the reader windows the trace in memory and writes no split chunks"),
         ("select_chunk", "no split chunks exist to select from"),
     ):
