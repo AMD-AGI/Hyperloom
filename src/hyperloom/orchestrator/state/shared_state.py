@@ -390,7 +390,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # unchanged. Written once at launch and archived, like the latency budget.
     power_budget_w: float = 0.0
     # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
-    # {gpu: {power_cap_w, perf_level}}}. Read at launch, never set by the optimizer.
+    # {gpu: {power_cap_w, perf_level}}, and "applied": {by, gpus, originals} when --apply-gpu-power-settings set them}.
+    # Fixed for the session: read (or applied) at launch, never changed by the optimizer.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /

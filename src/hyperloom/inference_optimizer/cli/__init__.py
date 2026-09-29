@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import logging
 import os
 import shlex
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,8 @@ from .bootstrap import (
     agentx_state_is_stale,
     latency_budget_resume_conflict,
     power_budget_resume_conflict,
+    apply_declared_gpu_power_settings,
+    orphaned_power_settings_warning,
     resolve_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
@@ -1316,6 +1319,50 @@ def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
         os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
 
 
+def _restore_gpu_power_at_exit(restore: Callable[[], list[str]]) -> None:
+    """Put the cards back the way the session found them; loud when that fails, since the host is left changed."""
+    problems = restore()
+    if problems:
+        print(
+            "WARNING: could not restore the GPU power settings this session applied: "
+            + "; ".join(problems)
+            + ". The record is kept, so the next launch with --apply-gpu-power-settings restores them.",
+            file=sys.stderr,
+        )
+    else:
+        print("GPU power settings restored to the values the session found.")
+
+
+def _establish_gpu_power_settings(
+    *,
+    power_cap_w: float | None,
+    perf_level: str | None,
+    nodes: int,
+    apply: bool,
+    owner: str,
+) -> tuple[dict[str, Any], str]:
+    """Apply the declared power settings when permitted, then check and record them; ``(record, error)``.
+
+    The check after applying is the same one an operator-set value gets, so a set that did not take is caught the same
+    way. The restore is registered before the check so an ``exit(2)`` on a failed check still restores.
+    """
+    applied: dict[str, Any] = {}
+    if apply:
+        restore, applied, error = apply_declared_gpu_power_settings(
+            power_cap_w=power_cap_w, perf_level=perf_level, nodes=nodes, owner=owner
+        )
+        if error:
+            return {}, error
+        atexit.register(_restore_gpu_power_at_exit, restore)
+        print(f"GPU power settings applied to GPU(s) {', '.join(map(str, applied['gpus']))}; restored at exit.")
+    elif warning := orphaned_power_settings_warning():
+        print(f"WARNING: {warning}.", file=sys.stderr)
+    record, error = resolve_gpu_power_settings(power_cap_w=power_cap_w, perf_level=perf_level, nodes=nodes)
+    if applied:
+        record["applied"] = applied
+    return record, error
+
+
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     """Fill the partition flags from the archive when this resume omitted them."""
     archived = dict(getattr(state, "compute_partition", None) or {})
@@ -1844,13 +1891,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # path as the paths above.
         _restore_partition_shape_from_state(args, state)
         # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
-        _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
-        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+        _archived_power = dict(getattr(state, "gpu_power_settings", None) or {})
+        _declared_power = dict(_archived_power.get("declared") or {})
+        _apply_power = bool(getattr(args, "apply_gpu_power_settings", False))
+        gpu_power, _gpu_power_error = _establish_gpu_power_settings(
             power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
             perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
             nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+            apply=_apply_power,
+            owner=str(getattr(state, "session_id", "") or Path(session_dir).name),
         )
         if _gpu_power_error:
+            if _archived_power.get("applied") and not _apply_power:
+                _gpu_power_error += (
+                    "; this session applied its power settings itself and restored them when it exited, so pass "
+                    "--apply-gpu-power-settings to apply them again"
+                )
             session_lock.release()
             print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
             sys.exit(2)
@@ -2184,10 +2240,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
-        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+        gpu_power, _gpu_power_error = _establish_gpu_power_settings(
             power_cap_w=getattr(args, "gpu_power_cap_w", None),
             perf_level=getattr(args, "gpu_perf_level", None),
             nodes=nodes_resolved,
+            apply=bool(getattr(args, "apply_gpu_power_settings", False)),
+            owner=str(manifest["session_id"]),
         )
         if _gpu_power_error:
             print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)

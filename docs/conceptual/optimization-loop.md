@@ -243,16 +243,39 @@ block (`gpu_metrics.json`) is only the fallback for rounds no sampler ran on:
 on one node it reads a single card over the whole process lifetime, boot and
 idle tail included.
 
-The optimizer never changes power settings. The power cap and DPM performance
-level decide how much of the card's throughput is available at what power, so
-they are part of the measurement contract, and setting them is privileged and
-card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
-launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
+The optimizer never changes power settings as part of its search. The power cap
+and DPM performance level decide how much of the card's throughput is available
+at what power, so they are part of the measurement contract, and setting them
+is privileged and card-wide. By default the operator sets them with
+`amd-smi set --power-cap` / `--perf-level` before launch, and
+`--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
 `--compute-partition-mode` asserts a partition mode: the session refuses to
 start (and to resume) if a card it uses is at a different value. The observed
 cap and perf level are recorded in the platform fingerprint whether or not
 they are asserted. Neither can be checked on a multi-node session, so asserting
 one there refuses.
+
+`--apply-gpu-power-settings` permits the session to set the declared values
+itself, once at launch, on the cards in its visible-device mask, and to keep
+them for the whole session. The same read-back check then verifies them, and
+the fingerprint records them as applied by Hyperloom along with the originals.
+It needs `amd-smi set` privileges and refuses rather than continuing
+unchecked when a set fails. It also refuses on multi-node, and on a card that
+already holds more than 2 GB of VRAM before the session starts: that is
+someone else's resident model, and a cap would change their run too.
+
+Only the settings that were declared are changed, and only those are put back.
+The originals are written to a per-card record under
+`$HYPERLOOM_RUNTIME_DIR/gpu_power_settings/` before anything is set, and the
+session holds an exclusive `flock` on that record until it exits. That lock
+keeps two sessions from setting the same card, and it survives container
+boundaries, where process IDs do not. The originals are restored at exit,
+including after a stop reason or an operator stop. A session killed outright
+leaves its record behind with the lock free. The next launch that passes the
+flag restores those cards before doing anything else. A launch without the
+flag warns that the cards were left changed and names their original values.
+On resume the flag must be passed again, since the settings were restored when
+the previous leg exited.
 
 ### Runnable gate (earned KEEP)
 

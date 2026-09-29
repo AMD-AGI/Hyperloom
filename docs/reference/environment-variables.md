@@ -95,10 +95,12 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
   sets its cadence (default 2 s, minimum 0.5 s).
-- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
-  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
-  refuses to start or resume if a card it uses differs, and records what the
-  cards report either way.
+- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`. Asserted by
+  default: set them with `amd-smi set` before launch, and the session refuses
+  to start or resume if a card it uses differs. It records what the cards
+  report either way. `--apply-gpu-power-settings` lets the session set them
+  itself on its own cards for the whole session, and restore the originals at
+  exit.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
