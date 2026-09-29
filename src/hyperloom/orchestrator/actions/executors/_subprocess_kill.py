@@ -824,6 +824,46 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
         return None
 
 
+class _RecorderFanout:
+    """Drives several round recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
+
+    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    """
+
+    def __init__(self, recorders: list[Any]) -> None:
+        self._recorders = recorders
+
+    def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
+        for recorder in self._recorders:
+            try:
+                getattr(recorder, method)(*args, **kwargs)
+            except Exception:
+                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+
+    def note_phase(self, phase: str, mono: float) -> None:
+        self._each("note_phase", phase, mono)
+
+    def tick(self, mono: float) -> None:
+        self._each("tick", mono)
+
+    def close(self, *, aborted: bool = False) -> None:
+        self._each("close", aborted=aborted)
+
+
+def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> Any:
+    """KV metrics and measured-phase GPU power for this round, behind one recorder surface; ``None`` when neither runs."""
+    from ._gpu_power import build_gpu_power_recorder
+
+    recorders = [
+        recorder
+        for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
+        if recorder is not None
+    ]
+    if not recorders:
+        return None
+    return recorders[0] if len(recorders) == 1 else _RecorderFanout(recorders)
+
+
 def _run_relative_path(workspace: Path) -> str:
     """Path of this round's workspace below ``runs/``, which is what the session breakdown keys rows by."""
     parts = workspace.parts
@@ -879,7 +919,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
-                    kv_recorder=_build_kv_recorder(server_log_path, child_env),
+                    kv_recorder=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)

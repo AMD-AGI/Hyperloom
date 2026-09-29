@@ -603,6 +603,22 @@ def _tag_latency_origins(
             origins[field] = label
 
 
+def _round_gpu_power_w(
+    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> float | None:
+    """Per-GPU mean power over the round's measured phase.
+
+    Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
+    was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
+    from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
+    is the fallback for rounds no recorder ran on.
+    """
+    from ._gpu_power import read_measured_gpu_power
+
+    found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
+    return watts if found else gpu_metrics_from_report(report).get("avg_power_w")
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
@@ -664,8 +680,7 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
-        # Per-GPU mean power over the round, from the same telemetry ``gpu_metrics.json`` is written from.
-        "gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"),
+        "gpu_power_avg_w": _round_gpu_power_w(report, workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
