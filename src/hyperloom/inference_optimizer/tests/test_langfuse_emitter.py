@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.session.optimization_journal import Journal, JournalEntry
+from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
+from hyperloom.inference_optimizer.trace.decision_trace import write_session_decision_trace
 from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
@@ -687,30 +690,6 @@ def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
     assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 2}
 
 
-def test_a_receipt_from_before_rows_sent_still_resumes_ext_and_trajectory_shards(tmp_path, monkeypatch):
-    """A persisted receipt outlives the code that wrote it: its per-shard cursors must still hold."""
-    from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
-
-    _enable_env(monkeypatch)
-    sd = _seed_trace_dir(tmp_path)
-    ext_shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
-    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="old"))
-    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="new", output_tokens=777))
-    trajectory_shard = trajectory_dir(sd) / "1-a.jsonl"
-    _append_jsonl(trajectory_shard, {"kind": "session", "status": "started"})
-    legacy = {"ext_rows_sent": {"forge-1.jsonl": 1}, "trajectory_rows_sent": {"1-a.jsonl": 1}}
-    (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(json.dumps(legacy), encoding="utf-8")
-
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    lfe.LangfuseEmitter(sd).flush_session()
-
-    assert [g.kwargs["usage_details"]["output"] for g in client.generations] == [777]
-    receipt = lfe.read_receipt(sd)
-    assert receipt["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 2, "reports/trace/trajectory/1-a.jsonl": 1}
-    assert "ext_rows_sent" not in receipt and "trajectory_rows_sent" not in receipt
-
-
 def _append_jsonl(path: Path, *rows: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -724,6 +703,7 @@ def _forge_iteration(iteration: int) -> dict:
 
 def _kernel_decision(task_id: str, ts: str = "2026-06-09T16:00:00Z") -> dict:
     return {
+        "decision_id": task_id,
         "decision": {
             "component": "kernel_agent",
             "operation_kind": "kernel_opt",
@@ -735,12 +715,10 @@ def _kernel_decision(task_id: str, ts: str = "2026-06-09T16:00:00Z") -> dict:
     }
 
 
-def _rewrite_decision_trace(sd: Path, *rows: dict) -> None:
-    """Mirror the decision_trace writer: every export rewrites the whole file as a ts-sorted join."""
-    path = sd / "reports" / "trace" / "decision_trace.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ordered = sorted(rows, key=lambda row: row.get("ts") or "")
-    path.write_text("".join(json.dumps(row) + "\n" for row in ordered), encoding="utf-8")
+def _journal_decision(sd: Path, task_id: str, ts: str) -> None:
+    Journal.load_or_create(sd, session_id="SID", model="m", hardware="h").append_entry(
+        JournalEntry(phase="KERNEL", iter=1, kind="kernel", change=task_id, outcome="KEEP", task_id=task_id, ts=ts)
+    )
 
 
 def _decision_task_ids(client: _FakeClient) -> list[str]:
@@ -749,26 +727,28 @@ def _decision_task_ids(client: _FakeClient) -> list[str]:
 
 
 def test_a_decision_the_writer_sorts_before_sent_ones_is_pushed_once(tmp_path, monkeypatch):
-    """decision_trace.jsonl is rewritten ts-sorted, so a new decision can land ahead of rows already sent."""
+    """Each export rewrites decision_trace.jsonl ts-sorted with fresh joins, so rows are matched by their id."""
     _enable_env(monkeypatch)
     sd = _seed_trace_dir(tmp_path)
-    late = _kernel_decision("late", ts="2026-06-09T17:00:00Z")
-    _rewrite_decision_trace(sd, late)
+    _journal_decision(sd, "late", "2026-06-09T17:00:00Z")
+    write_session_decision_trace(sd)
 
     first = _FakeClient()
     _install_fake_sdk(monkeypatch, first)
     lfe.LangfuseEmitter(sd).flush_session()
     assert _decision_task_ids(first) == ["late"]
 
-    _rewrite_decision_trace(
-        sd, late, _kernel_decision("early", ts="2026-06-09T15:00:00Z"), _kernel_decision("no-ts", ts="")
-    )
+    _journal_decision(sd, "early", "2026-06-09T15:00:00Z")
+    _append_jsonl(sd / "reports" / "trace" / "llm_calls.jsonl", _llm_row(task_id="late"))
+    write_session_decision_trace(sd)
+    rows = [json.loads(line) for line in decision_trace_path(sd).read_text(encoding="utf-8").splitlines()]
+    assert [(r["decision"]["task_id"], r["tokens"]["calls"]) for r in rows] == [("early", 0), ("late", 1)]
 
     second = _FakeClient()
     _install_fake_sdk(monkeypatch, second)
     lfe._REGISTRY.clear()
     lfe.LangfuseEmitter(sd).flush_session()
-    assert _decision_task_ids(second) == ["no-ts", "early"]
+    assert _decision_task_ids(second) == ["early"]
 
 
 def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeypatch):
@@ -1157,6 +1137,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d2",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "kernel_agent",
@@ -1173,6 +1154,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
         + "\n"
         + json.dumps(
             {
+                "decision_id": "d3",
                 "decision": {
                     "change": "radix",
                     "component": "grid",
@@ -1222,6 +1204,7 @@ def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d4",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "specialist:perf",
@@ -1265,6 +1248,7 @@ def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d5",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "specialist:perf",
@@ -1767,6 +1751,7 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps(
             {
+                "decision_id": "d6",
                 "decision": {
                     "change": "x",
                     "component": "kernel_agent",

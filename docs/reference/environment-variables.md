@@ -852,13 +852,11 @@ Primary switch (default **off**) for live Langfuse trace push.
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
   next call or the next leg. `decision_trace.jsonl` is rewritten ts-sorted on
-  every export, so decision scores are tracked by decision identity instead
-  (`decisions_sent`, a hash of the decision's timestamp, tick, ids, change and
-  outcome). Both record what was handed to the Langfuse SDK: its flush does not
-  report a failed export, so a row lost in export is not re-pushed. Receipts
-  written before `rows_sent` existed carry `ext_rows_sent` /
-  `trajectory_rows_sent`; those are still read. The `*_read` counters count only
-  what the current leg read past those cursors. The
+  every export, so decision scores are tracked by the `decision_id` its writer
+  stamps on each row instead (`decisions_sent`). Both record what was handed to
+  the Langfuse SDK: its flush does not report a failed export, so a row lost in
+  export is not re-pushed. The `*_read` counters count only what the current leg
+  read past those cursors. The
   one-shot `session_start` / `session_breakdown` pushes are claimed through an
   exclusive marker file (`reports/trace/.session_start.claim`) rather than
   through the receipt read. The receipt also carries `payload_sha256` over its own body; a

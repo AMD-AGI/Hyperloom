@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.session.session_paths import (
     specialist_intel_path,
     trace_dir,
     trace_ext_dir,
-    trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
@@ -69,15 +68,9 @@ def _manifest_path(session_dir: Path) -> Path:
     return session_dir / "manifest.json"
 
 
-#: Per-shard cursors of receipts written before ``rows_sent``, with the directory their shard names live in.
-_LEGACY_SHARD_CURSORS: dict[str, Callable[[Path], Path]] = {
-    "ext_rows_sent": trace_ext_dir,
-    "trajectory_rows_sent": trajectory_dir,
-}
-
-
-def _cursor_entries(persisted: Any) -> dict[str, int]:
-    """Return the well-formed ``{name: rows}`` entries of one persisted cursor map."""
+def _persisted_rows_sent(receipt: dict[str, Any]) -> dict[str, int]:
+    """Return how many rows of each source log a previous process sent, keyed by its path under the session dir."""
+    persisted = receipt.get("rows_sent")
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -86,16 +79,6 @@ def _cursor_entries(persisted: Any) -> dict[str, int]:
             cursors[str(name)] = max(0, int(count))
         except (TypeError, ValueError):
             continue
-    return cursors
-
-
-def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
-    """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``."""
-    cursors: dict[str, int] = {}
-    for key, directory in _LEGACY_SHARD_CURSORS.items():
-        prefix = directory(session_dir).relative_to(session_dir).as_posix()
-        cursors.update({f"{prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get(key)).items()})
-    cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
 
@@ -362,7 +345,7 @@ class LangfuseEmitter:
         # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
         # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
         persisted = read_receipt(self.session_dir) or {}
-        self._rows_sent: dict[str, int] = _persisted_rows_sent(self.session_dir, persisted)
+        self._rows_sent: dict[str, int] = _persisted_rows_sent(persisted)
         decisions_sent = persisted.get("decisions_sent")
         self._decisions_sent: set[str] = set(map(str, decisions_sent)) if isinstance(decisions_sent, list) else set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
@@ -911,16 +894,16 @@ class LangfuseEmitter:
         """Convert each decision_trace row earlier legs did not score into Langfuse Score(s).
 
         The writer rewrites the file as a ts-sorted join on every export, so a new decision can land ahead of ones
-        already sent; rows are matched by :func:`lfmap.decision_identity`, not by position. Raises at the first row
-        that could not be sent, leaving it and the rows after it owed.
+        already sent; rows are matched by the ``decision_id`` the writer stamps, not by position. Raises at the first
+        row that could not be sent, leaving it and the rows after it owed.
         """
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
-            identity = lfmap.decision_identity(drow)
-            if identity in self._decisions_sent:
+            decision_id = drow["decision_id"]
+            if decision_id in self._decisions_sent:
                 continue
             if not self._send_decision(drow):
-                raise RuntimeError(f"decision {identity} could not be sent")
-            self._decisions_sent.add(identity)
+                raise RuntimeError(f"decision {decision_id} could not be sent")
+            self._decisions_sent.add(decision_id)
 
     def _send_decision(self, drow: dict[str, Any]) -> bool:
         """Hand one decision's step span and Scores to the SDK; return whether every Score was handed over."""
