@@ -5151,11 +5151,6 @@ def main() -> int:
         help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
     )
     parser.add_argument(
-        "--runtime-config",
-        default="",
-        help=("Materialized workload YAML used only to recover EXTRA_*_ARGS for bounded source-resolution context."),
-    )
-    parser.add_argument(
         "--height",
         type=int,
         default=0,
