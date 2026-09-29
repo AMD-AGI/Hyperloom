@@ -69,23 +69,6 @@ def _manifest_path(session_dir: Path) -> Path:
     return session_dir / "manifest.json"
 
 
-#: Session-end reconcile steps, in run order. A retry in the same process skips
-#: the steps that already succeeded; across processes the durable unit is the
-#: row, through the ``rows_sent`` and ``decisions_sent`` receipt entries.
-_FLUSH_STEP_NAMES: tuple[str, ...] = (
-    "pending_halves",
-    "ext_shards",
-    "recipe_kb_audit",
-    "specialist_intel",
-    "forge_steps",
-    "gemm_tuning",
-    "trajectory",
-    "decision_scores",
-    "close_spans",
-    "client_flush",
-)
-
-
 #: Per-shard cursors of receipts written before ``rows_sent``, with the directory their shard names live in.
 _LEGACY_SHARD_CURSORS: dict[str, Callable[[Path], Path]] = {
     "ext_rows_sent": trace_ext_dir,
@@ -347,6 +330,9 @@ class LangfuseEmitter:
         self._root_span: Any = None
         self._phase_spans: dict[str, Any] = {}
         self._agent_spans: dict[tuple[str, str], Any] = {}
+        # Hierarchy spans not ended yet, in creation order. The caches above keep ended spans as parents for rows
+        # recorded after a flush, so a later flush ends only what was opened since.
+        self._unended_spans: list[Any] = []
         self._trace_attrs_set = False
         # Receipt counters (for the session_breakdown ``langfuse`` section).
         self._disabled_reason: str | None = None
@@ -371,9 +357,7 @@ class LangfuseEmitter:
             "trajectory_spans_sent": 0,  # closed trajectory spans + point events projected
             "errors": 0,  # swallowed send failures
         }
-        # Reconcile steps that already succeeded in *this* process, so a retry after a partial flush neither re-emits
-        # them nor loses the ones still owed.
-        self._flush_steps_done: set[str] = set()
+        # Whether the last flush_session completed every step, leaving nothing it read unsent.
         self._flushed = False
         # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
         # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
@@ -451,6 +435,7 @@ class LangfuseEmitter:
                 trace_context={"trace_id": self._trace_id},
                 metadata=lfmap.trace_metadata(self._manifest),
             )
+            self._unended_spans.append(self._root_span)
             if not self._trace_attrs_set:
                 _set_trace_attrs(
                     self._root_span,
@@ -474,6 +459,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase},
             )
             self._phase_spans[phase] = span
+            self._unended_spans.append(span)
             self._counts["spans_opened"] += 1
         return span
 
@@ -491,6 +477,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase, "agent": agent},
             )
             self._agent_spans[key] = span
+            self._unended_spans.append(span)
             self._counts["spans_opened"] += 1
         return span
 
@@ -617,20 +604,16 @@ class LangfuseEmitter:
             # Still drop a receipt so the breakdown can report why nothing was pushed.
             self._write_receipt()
             return
-        if self._flushed:
-            log.debug("langfuse: flush_session already ran; shipping only the trajectory tail")
-            self._flush_trajectory_tail()
-            self._write_receipt()
-            return
-        # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
-        # SDK's buffer, so a failed final flush means nothing reached Langfuse and has to be retried.
+        # Every step sends only what is still owed (the pending halves, the rows past the receipt cursors, the spans
+        # not yet ended), so each call runs them all. ``client_flush`` is last because everything before it only fills
+        # the SDK's buffer.
         kb_backfills: dict[str, tuple[Callable[[Path], Path], str, str, _SpanBuilder]] = {
             "recipe_kb_audit": (recipe_snapshot_audit_jsonl, "recipe_audit_read", "recipe_kb", self._recipe_audit_span),
             "specialist_intel": (specialist_intel_path, "specialist_intel_read", "specialist", _specialist_intel_span),
             "forge_steps": (forge_steps_path, "forge_steps_read", "forge", _forge_step_span),
             "gemm_tuning": (gemm_tuning_steps_path, "gemm_tuning_read", "gemm_tuning", _gemm_tuning_span),
         }
-        steps: dict[str, Any] = {
+        steps: dict[str, Callable[[], None]] = {
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
             **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
@@ -639,21 +622,15 @@ class LangfuseEmitter:
             "close_spans": self._close_spans,
             "client_flush": self._flush_client,
         }
-        for name in _FLUSH_STEP_NAMES:
-            if name in self._flush_steps_done:
-                continue
-            if name != "client_flush":
-                # Whatever this step hands the SDK sits in its buffer until the final flush, so a step retried after
-                # an earlier pass's flush owes that flush again.
-                self._flush_steps_done.discard("client_flush")
+        failed = False
+        for name, step in steps.items():
             try:
-                steps[name]()
+                step()
             except Exception:
+                failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
-                continue
-            self._flush_steps_done.add(name)
-        self._flushed = self._flush_steps_done.issuperset(_FLUSH_STEP_NAMES)
+        self._flushed = not failed
         self._write_receipt()
 
     def _flush_client(self) -> None:
@@ -667,7 +644,7 @@ class LangfuseEmitter:
     def _drain(self, source: Path, rows: list[dict[str, Any]], send: Callable[[dict[str, Any]], bool]) -> None:
         """Send the rows of ``source`` past its ``rows_sent`` cursor, advancing the cursor one sent row at a time.
 
-        Raises at the first row ``send`` could not hand to the SDK, so its step stays owed and every retry, in this
+        Raises at the first row ``send`` could not hand to the SDK, so the flush is not final and every retry, in this
         process or the next leg, resumes at that row.
         """
         key = self._rows_sent_key(source)
@@ -830,13 +807,9 @@ class LangfuseEmitter:
             log.debug("langfuse: record_status failed", exc_info=True)
 
     def _close_spans(self) -> None:
-        """End every open span, innermost first (agent -> phase -> root)."""
-        for span in list(self._agent_spans.values()):
-            self._safe_end(span)
-        for span in list(self._phase_spans.values()):
-            self._safe_end(span)
-        if self._root_span is not None:
-            self._safe_end(self._root_span)
+        """End every hierarchy span not ended yet, innermost first (a span is always opened after its parent)."""
+        while self._unended_spans:
+            self._safe_end(self._unended_spans.pop())
 
     @staticmethod
     def _safe_end(span: Any) -> None:
@@ -918,30 +891,6 @@ class LangfuseEmitter:
 
         for shard, rows in shard_rows.items():
             self._drain(shard, rows, _send)
-
-    def _flush_trajectory_tail(self) -> None:
-        """Ship the trajectory rows recorded after the full flush, ending any span opened to parent them.
-
-        The CLOSE phase flushes from inside the run, so the last close work and the session's own terminal row land on
-        the ledger after it; the per-shard cursors make a re-flush send only those rows.
-        """
-        agent_keys, phase_keys, had_root = set(self._agent_spans), set(self._phase_spans), self._root_span is not None
-        sent = self._counts["trajectory_spans_sent"]
-        try:
-            self._flush_trajectory()
-            for key, span in list(self._agent_spans.items()):
-                if key not in agent_keys:
-                    self._safe_end(span)
-            for phase, span in list(self._phase_spans.items()):
-                if phase not in phase_keys:
-                    self._safe_end(span)
-            if not had_root and self._root_span is not None:
-                self._safe_end(self._root_span)
-            if self._counts["trajectory_spans_sent"] != sent:
-                self._flush_client()
-        except Exception:  # trace must never break shutdown
-            self._counts["errors"] += 1
-            log.debug("langfuse: trajectory tail flush failed", exc_info=True)
 
     def _emit_trajectory_span(self, spec: trajmap.TrajectorySpanSpec) -> None:
         """Create and close one projected trajectory span under its (phase, agent) span."""
@@ -1099,9 +1048,6 @@ class LangfuseEmitter:
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,
-            # Which reconcile steps have completed, so a receipt written after a partial flush says what is still owed
-            # instead of reading as final.
-            "flush_steps_done": sorted(self._flush_steps_done),
             "rows_sent": dict(self._rows_sent),
             "decisions_sent": sorted(self._decisions_sent),
         }

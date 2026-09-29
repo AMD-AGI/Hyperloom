@@ -24,6 +24,7 @@ class _FakeObservation:
         self.kind = kind
         self.kwargs = kwargs
         self.ended = False
+        self.end_calls = 0
         self.end_time = None
         self.trace_update: dict | None = None
         self.observation_scores: list[dict] = []
@@ -40,6 +41,7 @@ class _FakeObservation:
         self._sink.observation_scores.append(kwargs)
 
     def end(self, **kwargs):
+        self.end_calls += 1
         self.ended = True
         self.end_time = kwargs.get("end_time")
 
@@ -529,8 +531,8 @@ def test_reasoning_tokens_reach_usage_details(tmp_path, monkeypatch):
     assert usage["output"] == 40
 
 
-def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
-    """A partial reconcile is not marked flushed; the retry re-runs only what failed."""
+def test_a_failed_step_is_retried_without_re_emitting_what_landed(tmp_path, monkeypatch):
+    """A partial reconcile is not final; the retry re-sends nothing that already landed."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -549,13 +551,12 @@ def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
 
     em.flush_session()
     assert em._flushed is False
-    assert "decision_scores" not in em._flush_steps_done
+    assert lfe.read_receipt(sd)["counts_final"] is False
     assert len(client.generations) == 1
 
     em.flush_session()
     assert calls["scores"] == 2
     assert em._flushed is True
-    # The step that already succeeded did not re-emit its generation.
     assert len(client.generations) == 1
 
 
@@ -581,7 +582,6 @@ def test_flush_is_not_final_until_client_flush_succeeds(tmp_path, monkeypatch):
 
     em.flush_session()
     assert em._flushed is False
-    assert "client_flush" not in em._flush_steps_done
     assert lfe.read_receipt(sd)["counts_final"] is False
 
     em.flush_session()
@@ -611,9 +611,8 @@ def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
 
     em.flush_session()
-    # The step reported itself unfinished and the row is still buffered.
+    # The flush reported itself unfinished and the row is still buffered.
     assert em._flushed is False
-    assert "pending_halves" not in em._flush_steps_done
     assert client.generations == []
 
     monkeypatch.setattr(em, "_emit_generation", real_emit)
@@ -646,12 +645,12 @@ def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypa
 
     monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
     em.flush_session()
-    assert "ext_shards" not in em._flush_steps_done
+    assert em._flushed is False
     assert len(client.generations) == 1
 
     monkeypatch.setattr(em, "_emit_generation", real_emit)
     em.flush_session()
-    assert "ext_shards" in em._flush_steps_done
+    assert em._flushed is True
     # The row that already landed was not emitted twice.
     assert len(client.generations) == 2
     assert em._counts["ext_shards_read"] == 1
@@ -804,7 +803,7 @@ def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeyp
 
 
 def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path, monkeypatch):
-    """A step left out of flush_steps_done must not have its rows marked delivered."""
+    """A step that raised must not have its rows marked delivered."""
     _enable_env(monkeypatch)
     sd = _seed_trace_dir(tmp_path)
     _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"), _kernel_decision("k2"))
@@ -824,10 +823,11 @@ def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path
 
     monkeypatch.setattr(em, "_open_decision_span", _second_row_fails)
     em.flush_session()
-    assert "decision_scores" not in em._flush_steps_done
+    assert em._flushed is False
     flushes_before_retry = client.flushed
     em.flush_session()
 
+    assert em._flushed is True
     assert client.flushed == flushes_before_retry + 1
     steps = [
         s.kwargs["metadata"]["task_id"] for s in client.spans if s.kwargs["name"] == "optimization_step:kernel_opt"
@@ -1101,7 +1101,7 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
 
 
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan leftovers / decision_trace and re-emit (would duplicate Generations/Scores)."""
+    """A second flush_session() must not re-emit what the first sent (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -1120,6 +1120,31 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     # Second call: no new Generation emitted.
     em.flush_session()
     assert len(client.generations) == gens_after_first
+
+
+def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, monkeypatch):
+    """CLOSE flushes from inside the run, so the shutdown flush must push every row recorded after it."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert em._flushed is True
+
+    em.record_llm_call(_llm_row(phase="CLOSE", call_id="late"))
+    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"))
+    em.flush_session()
+
+    assert [g.kwargs["metadata"]["phase"] for g in client.generations] == ["CLOSE"]
+    assert client.span_named("forge:iter:1") is not None
+    assert _decision_task_ids(client) == ["k1"]
+    # The SDK warns on ending a span twice, so a repeat flush ends only the spans opened since the last one.
+    assert [s.end_calls for s in client.spans] == [1] * len(client.spans)
+    assert em._flushed is True
 
 
 def test_flush_creates_decision_scores(tmp_path, monkeypatch):

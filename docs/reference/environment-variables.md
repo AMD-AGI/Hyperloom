@@ -836,18 +836,19 @@ Primary switch (default **off**) for live Langfuse trace push.
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
   session-end reconcile runs as named steps (leftover halves, `ext/` shards,
-  recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
-  span close, final SDK flush). Each step runs at most once **per process**, so
-  a duplicated CLOSE step won't double-push; a step that raised is retried by
-  the next call. The receipt reports `flush_steps_done` (the steps that
-  succeeded, for this process) and `counts_final`, which is `true` only once
-  *every* step has completed — a `false` there means the push is still
-  incomplete, not that the session was short-lived. Across processes (a crash
-  plus a `--resume`, or two shutdown paths racing), every leg reports into the
-  same trace and the durable unit is finer than a step. `rows_sent` maps each
+  recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
+  decision scores, span close, final SDK flush). Every call runs every step,
+  and each step sends only what is still owed, so a duplicated CLOSE step
+  won't double-push, a row that failed is retried by the next call, and a
+  later call (the shutdown flush after CLOSE) pushes whatever was recorded
+  since the earlier one. `counts_final` is `true` when the latest call
+  completed every step — a `false` there means the push is still incomplete,
+  not that the session was short-lived. Every leg of a resumed session
+  (a crash plus a `--resume`, or two shutdown paths racing) reports into the
+  same trace. `rows_sent` maps each
   append-only log, by its path under the session directory, to how many of its
   rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
-  recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A leg
+  recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
   next call or the next leg. `decision_trace.jsonl` is rewritten ts-sorted on

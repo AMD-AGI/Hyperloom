@@ -227,7 +227,6 @@ def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_p
 
     emitter.flush_session()
     assert len([s for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]) == 2
-    assert client.flushed == flushed + 1
 
 
 def _heartbeat() -> Intent:
