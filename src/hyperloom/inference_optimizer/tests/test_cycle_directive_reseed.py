@@ -31,16 +31,18 @@ def _explore_with_stub_coordinator(
         rebuild_calls.append(kwargs)
         return f"PROMPT[cycle={kwargs.get('macro_cycle')}|{kwargs.get('cycle_directive')}]"
 
+    # _plan_cycle_focus is owned by phase_macro_cycle; provide a stub collaborator with it.
+    plan_focus_value = plan_focus if plan_focus is not None else {}
+    phase_macro_cycle_stub = SimpleNamespace(_plan_cycle_focus=lambda: plan_focus_value)
     coord = SimpleNamespace(
         shared_state=st,
         session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
+        phase_macro_cycle=phase_macro_cycle_stub,
     )
     phase = ExplorePhase(coord)
-    if plan_focus is not None:
-        phase._plan_cycle_focus = lambda: plan_focus  # type: ignore[method-assign]
     return phase, coord, rebuild_calls
 
 
