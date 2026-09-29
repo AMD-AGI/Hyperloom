@@ -34,6 +34,19 @@ _RECIPE_FINGERPRINT = "a" * 64
 _EXECUTION_FINGERPRINT = "b" * 64
 
 
+@pytest.fixture(autouse=True)
+def isolate_source_config(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", "")
+
+
+@pytest.fixture
+def native_config(monkeypatch, tmp_path):
+    source = tmp_path / "native-source.yaml"
+    source.write_text("benchmark:\n  agentx: enable\n", encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
+    return source
+
+
 def _budget_args(**over) -> argparse.Namespace:
     base = dict(
         # What the parser produces when ``--max-hours`` is absent: the flag
@@ -176,6 +189,7 @@ def test_bypass_guard_rejects_the_silent_combination(monkeypatch):
     assert ei.value.code == 2
 
 
+@pytest.mark.usefixtures("native_config")
 def test_guard_rejects_explicit_ray_execution(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
@@ -201,6 +215,7 @@ def test_guard_allows_agentx_with_a_serving_framework(monkeypatch):
         _preflight_agentx_backend(argparse.Namespace(framework=fw))  # must not raise
 
 
+@pytest.mark.usefixtures("native_config")
 def test_guard_rejects_native_agentx_multi_node(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
@@ -209,6 +224,7 @@ def test_guard_rejects_native_agentx_multi_node(monkeypatch):
     assert exc.value.code == 2
 
 
+@pytest.mark.usefixtures("native_config")
 def test_guard_rejects_framework_without_native_argv_bridge(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
@@ -218,6 +234,7 @@ def test_guard_rejects_framework_without_native_argv_bridge(monkeypatch):
 
 
 @pytest.mark.parametrize("framework", ["atom", "xdit"])
+@pytest.mark.usefixtures("native_config")
 def test_guard_rejects_unsupported_framework_from_environment(monkeypatch, framework):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
@@ -596,6 +613,7 @@ def test_resume_ignores_inherited_benchmark_yaml(monkeypatch, tmp_path):
     assert "HYPERLOOM_AGENTX" not in os.environ
 
 
+@pytest.mark.usefixtures("native_config")
 def test_agentx_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
@@ -930,10 +948,11 @@ def test_synthetic_resume_does_not_read_agentx_runtime_pins(monkeypatch, tmp_pat
     assert os.environ["AGENTX_MODEL_ID"] == ""
 
 
-def test_resume_rejects_stale_agentx_epoch(monkeypatch):
+@pytest.mark.parametrize("epoch", [0, AGENTX_MEASUREMENT_EPOCH + 1])
+def test_resume_rejects_stale_agentx_epoch(monkeypatch, epoch):
     """Same knobs, different workload: the old numbers cannot anchor."""
     _on(monkeypatch)
-    reason = agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH - 1))
+    reason = agentx_state_is_stale(_St("agentx", epoch))
     assert "epoch" in reason
 
 
@@ -1002,7 +1021,7 @@ def test_agentx_switch_does_not_resolve_launch_timeout(monkeypatch):
         apply_agentx_switch,
     )
 
-    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200, "agentx": "enable"}
     apply_agentx_switch(bench)
     assert bench["timeout_seconds"] == 7200
     assert bench["benchmark_script"] == "single_node/agentic/test_fp4_mi300x_vllm_mtp.sh"
@@ -1231,3 +1250,74 @@ def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):
     envs = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert "AGENTX_WARMUP_GRACE_PERIOD" not in envs
     assert envs["CONC"] == "128"
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_legacy_agentx_keeps_optimizer_launch_options_without_native_pins(monkeypatch, framework):
+    _blank_agentx_runtime_pins(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    _preflight_agentx_backend(argparse.Namespace(framework=framework, nodes=2, enable_conc_sweep=True))
+
+
+def test_legacy_resume_preserves_epoch_one_and_does_not_require_native_pins(monkeypatch, native_config):
+    from hyperloom.inference_optimizer.cli import _enforce_agentx_resume_workload
+
+    _blank_agentx_runtime_pins(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT", "stale-native-pin")
+    monkeypatch.setenv("HYPERLOOM_AGENTX_GPU_COUNT", "4")
+    state = _St("agentx", 1, baseline_config_path="/old-session/missing-baseline.yaml")
+    assert agentx_state_is_stale(state) == ""
+    assert _restore_agentx_runtime_pins_from_state(state) == {}
+    assert "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT" not in os.environ
+    assert "HYPERLOOM_AGENTX_GPU_COUNT" not in os.environ
+    args = argparse.Namespace(tp=8, ep=4, conc=16, precision="fp8")
+    _enforce_agentx_resume_workload(args, state)
+    assert args.conc == 16
+
+
+def test_native_resume_rejects_epoch_one_measurements(monkeypatch, native_config):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    state = _St("agentx", 1, baseline_config_path=str(native_config))
+    assert "epoch 1" in agentx_state_is_stale(state)
+
+
+def test_native_preflight_requires_pins_but_legacy_resume_ignores_fresh_native_config(monkeypatch, native_config):
+    _blank_agentx_runtime_pins(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
+    args = argparse.Namespace(framework="sglang", nodes=1)
+    with pytest.raises(SystemExit):
+        _preflight_agentx_backend(args)
+    _preflight_agentx_backend(args, _St("agentx", 1))
+
+
+@pytest.mark.parametrize("ray_override", [None, "1"])
+def test_accepted_native_resume_restores_direct_execution_identity(monkeypatch, tmp_path, ray_override):
+    from hyperloom.common.agentx_mode import native_agentx_session
+    from hyperloom.orchestrator.actions.executors import _ray_backend
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    state, pins = _saved_native_baseline(tmp_path)
+    _blank_agentx_runtime_pins(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    if ray_override is None:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    else:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", ray_override)
+    _configure_benchmark_config(argparse.Namespace(resume_from=str(tmp_path), benchmark_config=None))
+    assert "HYPERLOOM_BENCHMARK_CONFIG" not in os.environ
+
+    _restore_agentx_env_from_state(state)
+    assert _restore_agentx_runtime_pins_from_state(state) == pins
+
+    assert os.environ["HYPERLOOM_BENCHMARK_CONFIG"] == state.baseline_config_path
+    assert native_agentx_session() is True
+    assert _ray_backend._should_use_ray_backend() is False
+    assert _ray_backend.ray_gpu_specialist_exec_enabled() is False
+    assert ProfileExecutor()._resolve_default_config().name.startswith("profile_")

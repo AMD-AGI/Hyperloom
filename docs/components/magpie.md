@@ -46,6 +46,12 @@ immutable commit. A source configuration with
 the recipe's radix/prefix-cache settings and trace-replay protocol. The native
 path validates the installed package and launcher files before running.
 
+Existing `HYPERLOOM_AGENTX=1` sessions keep Hyperloom's `aiperf_client.sh`
+measurement and optimization path unless their source or accepted config
+explicitly enables `benchmark.agentx`. Legacy server tuning, GEAK proposal
+validation, patch integration, and concurrency sweeps remain available. The
+measurement-only restrictions below apply to native AgentX.
+
 Generic benchmark paths still apply compatibility patches when needed; native
 AgentX keeps the audited package and recipe files unchanged. Its separate
 diagnostic profiling path does not modify the serving framework's source and

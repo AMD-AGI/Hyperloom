@@ -28,6 +28,7 @@ from hyperloom.agents.kernel.tools._trace_rank import (
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.agentx_mode import native_agentx_session
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -1401,7 +1402,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from ._workload_envs import agentx_active
 
         agentx_session = agentx_active(shared_state)
-        if agentx_session:
+        if native_agentx_session(shared_state):
             compatibility_error = self._agentx_profile_compatibility_error(shared_state)
             if compatibility_error:
                 return {

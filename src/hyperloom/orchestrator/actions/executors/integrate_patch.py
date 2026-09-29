@@ -53,7 +53,8 @@ from ...state.shared_state import (
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, agentx_active
+from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.agentx_mode import native_agentx_session
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
 from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_prepared_records, load_records, mark_prepared, restore_records
@@ -2347,9 +2348,7 @@ class IntegratePatchExecutor:
                 "error_class": "integrate_restore_incomplete",
                 "error": "previous integration still requires recovery",
             }
-        if agentx_active(
-            benchmark_mode=getattr(shared_state, "benchmark_mode", ""),
-        ):
+        if native_agentx_session(shared_state):
             return {
                 "status": "skipped",
                 "error_class": "unsupported_upstream_launcher_hook",

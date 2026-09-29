@@ -26,7 +26,8 @@ override. To use a mounted checkpoint, keep the canonical recipe id in
 `benchmark.model` and add `--model /absolute/path/to/checkpoint`.
 
 The YAML source switch automatically enables the session-wide AgentX contract;
-HYPERLOOM_AGENTX is only needed by the legacy environment-driven entry point.
+`HYPERLOOM_AGENTX=1` alone keeps the legacy client and optimization backend;
+this YAML's `agentx: enable` explicitly selects native measurement.
 At `CONC=8`, the recipe has one GLM-5.2 arm: TP4/EP4 with DRAM+HiCache.
 `envs.TP` is not an arm selector and is intentionally absent. If a concurrency
 belongs to multiple arms, change `agentx: enable` into the object form shown in

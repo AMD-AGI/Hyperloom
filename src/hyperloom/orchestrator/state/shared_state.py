@@ -1105,7 +1105,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
         if str(filtered.get("benchmark_mode") or "").strip().lower() == "agentx":
-            filtered["warm_replay_enabled"] = False
+            from hyperloom.common.agentx_mode import native_agentx_session
+
+            if native_agentx_session(filtered):
+                filtered["warm_replay_enabled"] = False
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),

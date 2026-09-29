@@ -34,6 +34,7 @@ from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.agentx_mode import native_agentx_session
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -2358,12 +2359,13 @@ class BenchmarkRunExecutor:
         effective_extra_server_args = str(params.get("extra_server_args") or "")
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
+        native_agentx = native_agentx_session(live_shared_state)
         mutation_replay = (
             str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
             or bool(params.get("patches"))
             or bool(params.get("warm_kernel_plan"))
         )
-        if agentx_active(live_shared_state) and mutation_replay:
+        if native_agentx and mutation_replay:
             return {
                 "status": "skipped",
                 "error_class": "unsupported_upstream_launcher_hook",
@@ -2374,8 +2376,8 @@ class BenchmarkRunExecutor:
                 ),
                 "output_dir": str(self._resolve_workspace(ctx, "baseline")),
             }
-        profile_compat_error = self._agentx_profile_compatibility_error(live_shared_state)
-        if agentx_active(live_shared_state) and profile_compat_error:
+        profile_compat_error = self._agentx_profile_compatibility_error(live_shared_state) if native_agentx else ""
+        if profile_compat_error:
             return {
                 "status": "skipped",
                 "error_class": "agentx_profile_topology_unsupported",
@@ -2442,7 +2444,7 @@ class BenchmarkRunExecutor:
         # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
         _rt_from_params = params.get("runtime_override")
-        if agentx_active(live_shared_state) and isinstance(_rt_from_params, dict) and _rt_from_params:
+        if native_agentx and isinstance(_rt_from_params, dict) and _rt_from_params:
             return {
                 "status": "failed",
                 "error_class": "unsupported_upstream_launcher_hook",
@@ -2477,6 +2479,7 @@ class BenchmarkRunExecutor:
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
+                native_agentx_mode=native_agentx,
                 grading=getattr(live_shared_state, "grading", None),
                 allow_agentx_profile_compat=self.allow_agentx_profile_compat,
             )
@@ -2533,7 +2536,7 @@ class BenchmarkRunExecutor:
             config_path=config_path,
             output_dir=output_dir,
             inferencex_path=effective_inferencex_path,
-            agentx_session=agentx_active(live_shared_state),
+            agentx_session=native_agentx,
         )
         if checkout_error is not None:
             checkout_error.setdefault("materialized_config", str(config_path))

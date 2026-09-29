@@ -936,33 +936,16 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
-def _preflight_agentx_backend(args: argparse.Namespace) -> None:
-    """Reject the combinations where AgentX labels work it did not do."""
-    if not _agentx_enabled():
-        return
-    if not os.environ.get("AGENTX_MODEL_ID", "").strip():
-        model_value = str(getattr(args, "model", "") or "").strip()
-        if model_value.count("/") == 1 and not model_value.startswith(("/", ".", "~")):
-            os.environ["AGENTX_MODEL_ID"] = model_value
-    from hyperloom.inference_optimizer.agentx.native import (
-        AGENTX_REQUIRED_RUNTIME_PIN_NAMES,
-    )
-
-    missing_pins = [name for name in AGENTX_REQUIRED_RUNTIME_PIN_NAMES if not os.environ.get(name, "").strip()]
-    if missing_pins:
-        print(
-            "ERROR: native Magpie AgentX requires these immutable runtime "
-            "pins before session creation: " + ", ".join(missing_pins),
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+def _preflight_agentx_backend(args: argparse.Namespace, state: Any = None) -> None:
+    """Reject benchmark combinations that cannot execute their advertised workload."""
+    from hyperloom.common.agentx_mode import native_agentx_session
     from hyperloom.inference_optimizer import framework_registry
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        resolve_backend_name,
-    )
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
 
-    backend = resolve_backend_name()
-    if backend == "bypass":
+    native = native_agentx_session(state)
+    if not native and not _agentx_enabled():
+        return
+    if resolve_backend_name() == "bypass":
         print(
             "ERROR: HYPERLOOM_AGENTX=1 with HYPERLOOM_BENCHMARK_BACKEND=bypass. "
             "The bypass backend ignores benchmark_script for serving frameworks, "
@@ -971,47 +954,65 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
-
-    ray_override = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
-    if ray_override in {"1", "true", "yes", "on"}:
-        print(
-            "ERROR: native Magpie AgentX v1 cannot run inside Hyperloom's Ray "
-            "serving actor. Leave INFERENCE_OPTIMIZER_RAY_EXEC unset (AgentX "
-            "automatically uses direct local execution) or set it to 0.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes != 1:
-        print(
-            "ERROR: native Magpie AgentX currently supports only --nodes 1. "
-            "The selected single_node/agentic launcher ignores Hyperloom's "
-            "multi-node client phase and would start the wrong local workload.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
     framework = (
         str(getattr(args, "framework", "") or os.environ.get("FRAMEWORK", "")).strip().lower()
         or framework_registry.DEFAULT_FRAMEWORK
     )
-    if framework not in {"sglang", "vllm"}:
+    if framework_registry.is_scriptable(framework):
         print(
-            f"ERROR: native Magpie AgentX currently supports only SGLang or vLLM; got --framework {framework!r}. "
-            "Other frameworks do not have a verified optimizer-argv bridge.",
+            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
+            "scriptable. AgentX requires a serving framework to replay its trace workload.",
             file=sys.stderr,
         )
         raise SystemExit(2)
+    if native:
+        _preflight_native_agentx_backend(args, framework)
 
+
+def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str) -> None:
+    """Check the pinned single-node launcher contract for explicit native sessions."""
+    from hyperloom.inference_optimizer.agentx.native import AGENTX_REQUIRED_RUNTIME_PIN_NAMES
+
+    if not os.environ.get("AGENTX_MODEL_ID", "").strip():
+        model_value = str(getattr(args, "model", "") or "").strip()
+        if model_value.count("/") == 1 and not model_value.startswith(("/", ".", "~")):
+            os.environ["AGENTX_MODEL_ID"] = model_value
+    missing_pins = [name for name in AGENTX_REQUIRED_RUNTIME_PIN_NAMES if not os.environ.get(name, "").strip()]
+    if missing_pins:
+        print(
+            "ERROR: native Magpie AgentX requires these immutable runtime "
+            "pins before session creation: " + ", ".join(missing_pins),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print(
+            "ERROR: native Magpie AgentX v1 cannot run inside Hyperloom's Ray "
+            "serving actor. Leave INFERENCE_OPTIMIZER_RAY_EXEC unset (native AgentX "
+            "automatically uses direct local execution) or set it to 0.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if int(getattr(args, "nodes", 1) or 1) != 1:
+        print(
+            "ERROR: native Magpie AgentX currently supports only --nodes 1. "
+            "The selected single_node/agentic launcher ignores Hyperloom's multi-node client phase.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if framework not in {"sglang", "vllm"}:
+        print(
+            f"ERROR: native Magpie AgentX currently supports only SGLang or vLLM; got --framework {framework!r}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if getattr(args, "enable_conc_sweep", None) is True:
         print(
             "ERROR: native Magpie AgentX does not yet support Hyperloom's "
             "post-optimization concurrency sweep. The pinned InferenceX "
             "launcher has no optimizer-argv hook, so there is no distinct "
-            "optimized arm to compare. Omit --enable-conc-sweep (the AgentX "
-            "default is off) and run the desired recipe concurrency with "
-            "--conc.",
+            "optimized arm to compare. Omit --enable-conc-sweep and run the "
+            "desired recipe concurrency with --conc.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1477,7 +1478,16 @@ def _restore_agentx_runtime_pins_from_state(
     pins back into the process before those actions build a workload so a new
     shell cannot silently choose another model, launcher, checkout, or image.
     """
-    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+    from hyperloom.common.agentx_mode import native_agentx_session
+
+    if not native_agentx_session(state):
+        for name in (
+            "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT",
+            "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT",
+            "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+            "HYPERLOOM_AGENTX_GPU_COUNT",
+        ):
+            os.environ.pop(name, None)
         return {}
 
     config_path = str(getattr(state, "baseline_config_path", "") or "").strip()
@@ -1643,6 +1653,10 @@ def _restore_agentx_runtime_pins_from_state(
     for name in AGENTX_RUNTIME_PIN_NAMES:
         if name not in saved_pins:
             os.environ.pop(name, None)
+    if config_path:
+        # Env-only dispatch (including Ray) must inherit the accepted native
+        # identity after resume cleared the caller's source YAML.
+        os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(Path(config_path).expanduser().resolve())
     return restored
 
 
@@ -1651,7 +1665,9 @@ def _enforce_agentx_resume_workload(
     state: Any,
 ) -> None:
     """Keep a resumed native AgentX session on its original workload point."""
-    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+    from hyperloom.common.agentx_mode import native_agentx_session
+
+    if not native_agentx_session(state):
         return
     for name in ("tp", "ep", "conc"):
         saved = int(getattr(state, name, 0) or 0)
@@ -2510,7 +2526,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print("  restored native AgentX session pins: " + ", ".join(sorted(restored_agentx_pins)))
         resume_preflight_args = argparse.Namespace(**vars(args))
         resume_preflight_args.framework = state.framework or getattr(args, "framework", "")
-        _preflight_agentx_backend(resume_preflight_args)
+        _preflight_agentx_backend(resume_preflight_args, state)
         _apply_agentx_budget_profile(args)
         resolve_benchmark_timeouts()
         prior_stop = state.stop_reason

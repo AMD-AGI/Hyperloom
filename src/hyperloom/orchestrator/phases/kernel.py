@@ -1005,6 +1005,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
         from hyperloom.common.perf_metric import is_agentx_mode
+        from hyperloom.common.agentx_mode import native_agentx_session
         from ..actions.executors._workload_envs import agentx_enabled
 
         benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
@@ -1047,7 +1048,7 @@ class KernelPhase(CoordinatorCollaborator):
             state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
-        if agentx:
+        if native_agentx_session(state):
             # The pinned native launcher exposes neither Hyperloom nor GEAK an
             # optimizer-argv hook. Running the proxy here can consume the full
             # KERNEL_AGENT budget, but every resulting candidate is
@@ -1126,6 +1127,9 @@ class KernelPhase(CoordinatorCollaborator):
             reference_verification_status = "verified_declared_only"
         else:
             reference_verification_status = "unverified"
+        if agentx:
+            # Matching launch identities do not make AgentX and GEAK's proxy workload comparable.
+            reference_verification_status = "unverified_workload"
         reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
         if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
@@ -1207,7 +1211,8 @@ class KernelPhase(CoordinatorCollaborator):
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
-            "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            # AgentX canonical throughput is not a reference for GEAK's proxy workload.
+            "raw_baseline_tput": 0.0 if agentx else float(getattr(state, "baseline_tput", 0.0) or 0.0),
             # Zero means no verified same-config reference.
             "orchestrator_best_tput_same_config": same_config_tput,
             "same_config_reference_status": "verified" if reference_verified else "unverified",
@@ -1232,7 +1237,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
             "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
-            # GEAK owns client selection.
+            # GEAK owns client selection; AgentX results are proposal proxies.
             "bench_client": "auto",
             "e2e_metric": e2e_metric,
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
@@ -1283,6 +1288,11 @@ class KernelPhase(CoordinatorCollaborator):
         # Full layered environment and its matching measurement identity.
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
+        if agentx:
+            # The saved recipe names aiperf_client.sh, not a server launcher.
+            handoff["bench_launcher"] = "native"
+            log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
         handoff_path = out_dir / "handoff.json"
@@ -1306,7 +1316,7 @@ class KernelPhase(CoordinatorCollaborator):
         def _settled_replay(candidate: dict[str, Any]) -> bool:
             """Whether ``candidate`` is a result this session already settled."""
             prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=True)
+            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
 
         def _promote_recovered_result(
             result: dict[str, Any],
@@ -1485,7 +1495,7 @@ class KernelPhase(CoordinatorCollaborator):
             # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
             # the phase as a timeout.
             recovered = _read_geak_result(result_path)
-            if recovered.get("status") == "ok":
+            if recovered.get("status") == "ok" and not (agentx and _settled_replay(recovered)):
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
@@ -1539,6 +1549,20 @@ class KernelPhase(CoordinatorCollaborator):
                 duration_sec=time.monotonic() - runner_started_monotonic,
                 runner_timeout_s=runner_timeout,
                 kill_timeout_s=kill_timeout,
+            )
+            return
+        if agentx and _settled_replay(result):
+            # The runner left the candidate this session already settled, so it
+            # shipped no product: recording it would retire the verdict and
+            # re-enqueue the revalidation that produced it. The file stays for
+            # the next run to overwrite.
+            _finish_skip(
+                {
+                    "status": "error",
+                    "error_class": "no_new_geak_product",
+                    "error": (f"runner rc={proc.returncode} left the already-adjudicated result.json at {result_path}"),
+                    "stderr_tail": stderr_tail,
+                }
             )
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.

@@ -130,8 +130,12 @@ of dispatching an optimizer.
 
 Session mode is selected before PRELUDE: `--benchmark-config <yaml>` reads the
 source config, and `benchmark.agentx: enable` automatically stamps AgentX mode
-for grading and persisted state. `HYPERLOOM_AGENTX` is only a legacy optional
-switch; it is not a second requirement for the YAML path.
+for grading and persisted state. `HYPERLOOM_AGENTX=1` without native opt-in
+keeps the legacy client and its optimization paths. The environment switch
+alone does not select native measurement, and is not a second requirement for
+the YAML path. Backend identity survives resume through the accepted/source
+config and measurement epoch; native-only refusals do not apply to legacy
+AgentX sessions.
 
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.

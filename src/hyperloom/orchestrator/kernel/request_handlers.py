@@ -4773,9 +4773,9 @@ async def integrate_handler(
     # materializing the native recipe.  Refuse before touching the framework
     # tree.  The specialist integrate path enforces the same boundary.
     state = SharedState.load_or_init(session_dir)
-    from hyperloom.common.perf_metric import agentx_active
+    from hyperloom.common.agentx_mode import native_agentx_session
 
-    if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+    if native_agentx_session(state):
         return {
             "status": "skipped",
             "error_class": "unsupported_upstream_launcher_hook",

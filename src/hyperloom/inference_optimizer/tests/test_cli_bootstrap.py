@@ -166,9 +166,11 @@ def _neutralize_seed_io(monkeypatch):
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
 
 
+@pytest.mark.parametrize("ambient_agentx", [None, "1"])
 def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
     tmp_path: Path,
     monkeypatch,
+    ambient_agentx,
 ) -> None:
     _neutralize_seed_io(monkeypatch)
     inferencex = tmp_path / "InferenceX"
@@ -191,7 +193,10 @@ def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
         "MAGPIE_REF": "c" * 40,
         "INFERENCEX_REF": "d" * 40,
     }
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    if ambient_agentx is None:
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_AGENTX", ambient_agentx)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
     monkeypatch.setenv(
         "HYPERLOOM_BENCHMARK_CONFIG_SHA256",
@@ -209,6 +214,8 @@ def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
     snapshot = tmp_path / "benchmark.source.yaml"
     assert snapshot.read_text(encoding="utf-8") == source_text
     assert state.benchmark_mode == "agentx"
+    assert state.agentx_epoch == cb.AGENTX_MEASUREMENT_EPOCH
+    assert state.conc_sweep_enabled is False
     assert state.agentx_runtime_pins == pins
     assert state.benchmark_source_config_path == str(snapshot)
     assert state.active_inferencex_path == str(inferencex.resolve())
@@ -764,3 +771,21 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc_info:
         cb._resolve_reference_recipe(_args(reference_script="empty.sh"))
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("enable_conc_sweep, expected", [(None, True), (True, True), (False, False)])
+def test_legacy_agentx_seed_keeps_epoch_and_optimizer_features(tmp_path, monkeypatch, enable_conc_sweep, expected):
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("AGENTX_SERVER_SCRIPT", "irrelevant-ambient-native-pin.sh")
+    state = cb._seed_shared_state(
+        tmp_path, _args(enable_conc_sweep=enable_conc_sweep, conc_sweep_concs=None), session_id="legacy-agentx"
+    )
+    assert state.benchmark_mode == "agentx"
+    assert state.agentx_epoch == 1
+    assert state.agentx_runtime_pins == {}
+    assert state.benchmark_source_config_path == ""
+    assert state.warm_replay_enabled is True
+    assert state.conc_sweep_enabled is expected
+    assert state.conc_sweep_concs == [1, 4, 8, 10, 14, 20, 28]

@@ -1722,61 +1722,29 @@ def _magpie_health_code(*, native_agentx: bool) -> str:
     return _MAGPIE_GENERIC_HEALTH_CODE
 
 
-def _config_enables_native_agentx(path: str | Path) -> bool:
-    """Read only the public AgentX switch from a benchmark YAML."""
-    import yaml
-
-    try:
-        parsed = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError, TypeError, ValueError):
-        return False
-    benchmark = parsed.get("benchmark") if isinstance(parsed, dict) else {}
-    if not isinstance(benchmark, dict):
-        return False
-    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
-
-    return native_agentx_enabled(benchmark.get("agentx"))
-
-
 def _native_agentx_preflight_requested(
     args: argparse.Namespace | None,
 ) -> bool:
     """Detect native AgentX before preflight is allowed to mutate checkouts."""
-    resume_from = str(getattr(args, "resume_from", "") or "").strip()
-    if resume_from:
-        state_path = Path(resume_from).expanduser() / "state.json"
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return False
-        if str(state.get("benchmark_mode") or "").strip().lower() != "agentx":
-            return False
-        pins = state.get("agentx_runtime_pins")
-        if isinstance(pins, dict):
-            for name in ("MAGPIE_REF", "INFERENCEX_REF"):
-                saved = str(pins.get(name) or "").strip()
-                if saved and not os.environ.get(name, "").strip():
-                    os.environ[name] = saved
-        if isinstance(pins, dict) and str(pins.get("AGENTX_SERVER_SCRIPT") or "").strip():
-            return True
-        for key in ("baseline_config_path", "benchmark_source_config_path"):
-            config_path = str(state.get(key) or "").strip()
-            if config_path and _config_enables_native_agentx(config_path):
-                return True
-        return False
+    from hyperloom.common.agentx_mode import native_agentx_session
 
-    config_path = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
-    if config_path and _config_enables_native_agentx(config_path):
-        return True
-    raw_mode = os.environ.get("HYPERLOOM_AGENTX", "").strip().lower()
-    return bool(os.environ.get("AGENTX_SERVER_SCRIPT", "").strip()) and raw_mode in {
-        "1",
-        "true",
-        "yes",
-        "on",
-        "enable",
-        "enabled",
-    }
+    resume_from = str(getattr(args, "resume_from", "") or "").strip()
+    if not resume_from:
+        return native_agentx_session()
+    state_path = Path(resume_from).expanduser() / "state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not native_agentx_session(state):
+        return False
+    pins = state.get("agentx_runtime_pins")
+    if isinstance(pins, dict):
+        for name in ("MAGPIE_REF", "INFERENCEX_REF"):
+            saved = str(pins.get(name) or "").strip()
+            if saved and not os.environ.get(name, "").strip():
+                os.environ[name] = saved
+    return True
 
 
 def _inferencex_head_sha(path: Path | str) -> str:

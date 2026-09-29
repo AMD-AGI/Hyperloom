@@ -496,7 +496,7 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
         ("applied", "failed", "integrate_restore_incomplete"),
     ],
 )
-async def test_agentx_rejects_integrate_patch_before_mutation(
+async def test_native_agentx_rejects_integrate_patch_before_mutation(
     tmp_path: Path, recovery_phase, expected_status, expected_error
 ):
     from types import SimpleNamespace
@@ -520,6 +520,7 @@ async def test_agentx_rejects_integrate_patch_before_mutation(
     )
     ctx.extra["shared_state"] = SimpleNamespace(
         benchmark_mode="agentx",
+        agentx_epoch=2,
         pending_integrate={"recovery": {"phase": recovery_phase}} if recovery_phase else {},
     )
 
@@ -2496,12 +2497,7 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
-    if grading_mode == "agentx":
-        # Exercise the AgentX comparison policy without claiming this source-
-        # mutation test is a native AgentX session. Native sessions now reject
-        # source patches before any mutation by design.
-        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
-    elif grading_mode == "explicit-output":
+    if grading_mode == "explicit-output":
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     session_dir = tmp_path / "session"
     repo = tmp_path / "framework"
@@ -2538,7 +2534,7 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         framework="vllm",
-        benchmark_mode="synthetic",
+        benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
         current_best={
             "tput": 100.0,
             "total_throughput": 20000.0,

@@ -50,11 +50,12 @@ class TestResolveGradingAnchorTput:
         assert resolve_grading_anchor_tput(SharedState()) == 0.0
 
 
-def test_agentx_resume_disables_legacy_warm_replay_state(tmp_path):
-    state = SharedState(benchmark_mode="agentx", warm_replay_enabled=True)
+@pytest.mark.parametrize("epoch, expected", [(1, True), (2, False)])
+def test_agentx_resume_preserves_legacy_warm_replay_but_disables_native(tmp_path, epoch, expected):
+    state = SharedState(benchmark_mode="agentx", agentx_epoch=epoch, warm_replay_enabled=True)
     state.save(tmp_path)
 
-    assert SharedState.load_or_init(tmp_path).warm_replay_enabled is False
+    assert SharedState.load_or_init(tmp_path).warm_replay_enabled is expected
 
 
 class TestInjectStackBaseParams:

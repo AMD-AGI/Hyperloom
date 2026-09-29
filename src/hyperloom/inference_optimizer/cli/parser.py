@@ -295,7 +295,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Magpie benchmark YAML for the initial baseline. The resolved path "
             "is reused by downstream rounds. A source config containing "
-            "`benchmark.agentx: enable` automatically starts an AgentX session; "
+            "`benchmark.agentx: enable` selects native AgentX measurement; "
             "HYPERLOOM_AGENTX does not need to be exported separately. For an "
             "ambiguous recipe point, use benchmark.agentx.selector; "
             "benchmark.envs.TP is not a selector. Fresh "
@@ -1069,7 +1069,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep: enabled by default for synthetic workloads and disabled for native AgentX.
+    # Post-optimization concurrency sweep: native launchers do not expose a candidate-argv hook.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
@@ -1078,7 +1078,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default for synthetic workloads and off for native AgentX. "
+        "On by default for synthetic and legacy AgentX workloads, off for native AgentX. "
         "Native AgentX rejects an explicit enable until InferenceX exposes "
         "an optimizer-argv hook.",
     )
@@ -1091,7 +1091,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "native AgentX. Ordered "
         "high-to-low internally for single-server arm reuse, so the order given "
         "does not matter. The synthetic default is "
-        "256,128,64,32,16,8,4,2. Native AgentX rejects an explicitly enabled "
+        "256,128,64,32,16,8,4,2; legacy AgentX uses 1,4,8,10,14,20,28. "
+        "Native AgentX rejects an explicitly enabled "
         "sweep until the pinned launcher exposes an optimizer-argv hook; this "
         "option alone never enables a sweep.",
     )

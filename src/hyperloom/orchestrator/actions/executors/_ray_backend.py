@@ -31,8 +31,10 @@ def _should_use_ray_backend() -> bool:
     # Magpie AgentX v1 is local-only.  More importantly, its idle-GPU selector
     # reads the materialized YAML rather than Ray's ambient actor mask, so
     # nesting it in a Ray lease can escape the allocation.  Keep the entire
-    # AgentX session on the direct local backend.
-    if env_flag("HYPERLOOM_AGENTX", default=False):
+    # native session on the direct local backend.
+    from hyperloom.common.agentx_mode import native_agentx_session
+
+    if native_agentx_session():
         return False
     from ._multi_node_env import is_multi_node
 

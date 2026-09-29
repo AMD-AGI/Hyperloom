@@ -91,6 +91,10 @@ def _write(path, **bench_extra):
     return path
 
 
+def _write_native(path, **bench_extra):
+    return _write(path, **{"model": "", "agentx": "enable", **bench_extra})
+
+
 def _materialize(src, out, **kw):
     source = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
     source_native = we._serialized_native_agentx_enabled((source.get("benchmark") or {}).get("agentx"))
@@ -127,7 +131,7 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
 def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     # gpu_type pre-pins vllm_mi300x.sh; the switch must overwrite it.
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == _VLLM_LAUNCHER
@@ -149,7 +153,7 @@ def test_native_outer_gpu_count_does_not_overwrite_inner_recipe_tp(
     monkeypatch.setenv("TP", "4")
     monkeypatch.setenv("HYPERLOOM_AGENTX_GPU_COUNT", "4")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    src = _write(
+    src = _write_native(
         tmp_path / "base.yaml",
         agentx="enable",
         envs={
@@ -174,7 +178,7 @@ def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatc
     _clear_env(monkeypatch)
     monkeypatch.setenv("AGENTX_MODEL_ID", _MODEL_ID)
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _VLLM_LAUNCHER)
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     bench = _materialize(
         src,
         tmp_path / "out",
@@ -219,7 +223,7 @@ def test_native_magpie_yaml_round_trips_without_duplicate_agentx_envs(tmp_path, 
 def test_switch_on_injects_model_and_run_eval(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/model/x")
     envs = bench["envs"]
     assert envs["RUN_EVAL"] == "false"
@@ -233,7 +237,7 @@ def test_remote_model_id_does_not_become_a_relative_model_path(tmp_path, monkeyp
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _VLLM_LAUNCHER)
     remote_model = "amd/GLM-5.2-MXFP4"
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path=remote_model)
 
@@ -246,7 +250,7 @@ def test_switch_on_pins_zero_based_gpu_mask_for_native_launcher(tmp_path, monkey
     _enable_native(monkeypatch)
     monkeypatch.setenv("TP", "4")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")
 
@@ -259,7 +263,7 @@ def test_switch_on_rejects_nonzero_outer_gpu_mask(tmp_path, monkeypatch):
     _enable_native(monkeypatch)
     monkeypatch.setenv("TP", "4")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     with pytest.raises(ValueError, match="ROCR_VISIBLE_DEVICES"):
         _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")
@@ -269,7 +273,7 @@ def test_native_agentx_keeps_physical_mi325_runner_identity(tmp_path, monkeypatc
     _clear_env(monkeypatch)
     _enable_native(monkeypatch, launcher="single_node/agentic/glm5.2_fp8_mi325x_mtp.sh")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/models/glm")
 
@@ -283,7 +287,7 @@ def test_native_switch_rejects_legacy_corpus_and_client_overrides(tmp_path, monk
     monkeypatch.setenv("AGENTX_DATASET", "semianalysis-cc-traces-weka-with-subagents")
     monkeypatch.setenv("AGENTX_NUM_ENTRIES", "8")
     monkeypatch.setenv("AIPERF_BIN", "/venv/bin/aiperf")
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     with pytest.raises(ValueError, match="corpus selection belongs"):
         _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
 
@@ -295,7 +299,7 @@ def test_switch_on_materializes_workload_spec(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTX_MODEL_ID", "moonshotai/Kimi-K3")
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setenv("AGENTX_DURATION", "3600")
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Kimi-K3")
     spec = bench.get("workload_spec") or {}
     assert spec.get("kind") == "agentx_trace_replay"
@@ -314,7 +318,7 @@ def test_home_relative_checkpoint_is_expanded_before_launch(tmp_path, monkeypatc
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="~/checkpoint")
 
@@ -326,7 +330,7 @@ def test_home_relative_checkpoint_cannot_be_inferred_as_hf_identity(tmp_path, mo
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _VLLM_LAUNCHER)
     monkeypatch.setenv("HOME", str(tmp_path))
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     with pytest.raises(ValueError, match="AGENTX_MODEL_ID"):
         _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="~/checkpoint")
@@ -338,7 +342,7 @@ def test_local_checkpoint_name_does_not_choose_the_agentx_corpus(tmp_path, monke
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("AGENTX_MODEL_ID", "amd/GLM-5.2-MXFP4")
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _VLLM_LAUNCHER)
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
 
     bench = _materialize(
         src,
@@ -356,7 +360,7 @@ def test_profile_compat_uses_recipe_model_for_corpus(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("AGENTX_MODEL_ID", "amd/GLM-5.2-MXFP4")
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _VLLM_LAUNCHER)
-    src = _write(tmp_path / "profile.yaml", profiler={"torch_profiler": {"enabled": True}})
+    src = _write_native(tmp_path / "profile.yaml", profiler={"torch_profiler": {"enabled": True}})
 
     bench = _materialize(
         src,
@@ -383,7 +387,7 @@ def test_native_switch_rejects_weka_loader_override(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
     monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
-    src = _write(tmp_path / "base.yaml")
+    src = _write_native(tmp_path / "base.yaml")
     with pytest.raises(ValueError, match="WEKA_LOADER_OVERRIDE"):
         _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
 
@@ -428,7 +432,7 @@ def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
 def test_profile_keeps_phase_gated_compatibility_client(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
-    src = _write(
+    src = _write_native(
         tmp_path / "profile.yaml",
         envs={"PROFILE": "1"},
         profiler={"torch_profiler": {"enabled": True}},
@@ -458,7 +462,7 @@ def test_profile_keeps_phase_gated_compatibility_client(tmp_path, monkeypatch):
 def test_all_magpie_incompatible_profile_modes_use_compat_client(tmp_path, monkeypatch, extra):
     _clear_env(monkeypatch)
     _enable_native(monkeypatch)
-    src = _write(tmp_path / "profile.yaml", **extra)
+    src = _write_native(tmp_path / "profile.yaml", **extra)
 
     bench = _materialize(
         src,
@@ -482,7 +486,7 @@ def test_runtime_overrides_honor_agentx_on(monkeypatch):
         apply_runtime_benchmark_overrides,
     )
 
-    bench = {"framework": "vllm"}
+    bench = {"framework": "vllm", "agentx": "enable"}
     apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
     assert bench["benchmark_script"] == _VLLM_LAUNCHER
     assert bench["agentx"] == "enable"
@@ -634,7 +638,7 @@ def test_switch_on_injects_framework_for_native_launcher(tmp_path, monkeypatch):
     for fw in ("sglang", "vllm"):
         launcher = f"single_node/agentic/test_fp4_mi300x_{fw}_mtp.sh"
         _enable_native(monkeypatch, launcher=launcher)
-        src = _write(tmp_path / f"{fw}.yaml", framework=fw)
+        src = _write_native(tmp_path / f"{fw}.yaml", framework=fw)
         bench = _materialize(src, tmp_path / f"out_{fw}", gpu_type="mi300x", model_path="/m")
         assert bench["benchmark_script"] == launcher
         assert bench["envs"]["FRAMEWORK"] == fw

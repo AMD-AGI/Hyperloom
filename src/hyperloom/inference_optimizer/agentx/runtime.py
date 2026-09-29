@@ -151,7 +151,7 @@ def maybe_prepare_agentx(
     config_path: str | Path,
     allow_profile_compat: bool = False,
 ) -> bool:
-    """Prepare either native Magpie AgentX or the profiler compatibility client."""
+    """Prepare native Magpie AgentX or the legacy client, including diagnostics."""
     expected_recipe = str(env.get("HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT") or "").strip()
     expected_execution = str(env.get("HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT") or "").strip()
     expected_materialized_execution = str(

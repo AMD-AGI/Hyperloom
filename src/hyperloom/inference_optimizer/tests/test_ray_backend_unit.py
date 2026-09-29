@@ -56,11 +56,23 @@ def test_should_use_ray_backend_unset_multi_node_false(monkeypatch: pytest.Monke
     assert rb._should_use_ray_backend() is False
 
 
-def test_agentx_session_forces_direct_local_execution(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+@pytest.mark.parametrize("legacy_switch", ["0", "1"])
+def test_native_agentx_session_forces_direct_local_execution(monkeypatch, tmp_path, legacy_switch):
+    source = tmp_path / "native.yaml"
+    source.write_text(yaml.safe_dump({"benchmark": {"agentx": "enable"}}), encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
+    monkeypatch.setenv("HYPERLOOM_AGENTX", legacy_switch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     assert rb._should_use_ray_backend() is False
     assert rb.ray_gpu_specialist_exec_enabled() is False
+
+
+def test_legacy_agentx_keeps_the_ray_backend(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    assert rb._should_use_ray_backend() is True
+    assert rb.ray_gpu_specialist_exec_enabled() is True
 
 
 # ── visible-device merge invariant ───────────────────────────────────────────

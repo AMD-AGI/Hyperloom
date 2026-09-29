@@ -6185,11 +6185,9 @@ class WritebackCollaborator:
             ``"fallback": "geak_harness"`` when only GEAK's own harness can
             deploy the candidate.
         """
-        from hyperloom.common.perf_metric import agentx_active
+        from hyperloom.common.agentx_mode import native_agentx_session
 
-        if agentx_active(
-            benchmark_mode=getattr(self.shared_state, "benchmark_mode", ""),
-        ):
+        if native_agentx_session(self.shared_state):
             # The native launcher has no optimizer-argv/overlay hook.  A GEAK
             # rebench would therefore enqueue a grid candidate that can never
             # be represented by the canonical AgentX harness.  Refuse here as

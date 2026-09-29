@@ -787,11 +787,48 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     assert "result_dir" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_legacy_agentx_baseline_keeps_candidate_runtime(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    checkout = tmp_path / "legacy-inferencex"
+    monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
+    base = tmp_path / "legacy.yaml"
+    _write_yaml(base, framework="sglang")
+    state = SharedState(benchmark_mode="agentx", agentx_epoch=1, baseline_double_run=False)
+    executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=state)
+    captured = {}
+
+    async def measure(**kwargs):
+        captured.update(kwargs)
+        return {"status": "succeeded", "output_throughput": 100.0, "submission_valid": True}
+
+    monkeypatch.setattr(executor, "_run_single_benchmark", measure)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.baseline.prepare_agentx_runtime", lambda **kwargs: None
+    )
+    runtime = {"path_prefix": "/candidate/bin", "pythonpath_prefix": "/candidate/python"}
+    ctx = _make_ctx({"output_dir": str(tmp_path / "run"), "runtime_override": runtime})
+    ctx.extra["shared_state"] = state
+
+    result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    bench = yaml.safe_load(captured["config_path"].read_text(encoding="utf-8"))["benchmark"]
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+    assert bench["envs"]["PATH"].split(":")[0] == "/candidate/bin"
+    assert bench["envs"]["PYTHONPATH"].split(":")[0] == "/candidate/python"
+    assert captured["inferencex_path"] == str(checkout)
+    assert "agentx" not in bench
+
+
 def test_native_agentx_rejects_runtime_override_before_materialization(tmp_path):
     base = tmp_path / "agentx.yaml"
     _write_yaml(base, framework="sglang")
     state = SimpleNamespace(
         benchmark_mode="agentx",
+        agentx_epoch=2,
         model_path="/models/glm",
     )
     executor = BaselineExecutor(
@@ -804,8 +841,8 @@ def test_native_agentx_rejects_runtime_override_before_materialization(tmp_path)
         {
             "output_dir": str(tmp_path / "ws"),
             "runtime_override": {
-                "PATH": "/candidate/bin",
-                "PYTHONPATH": "/candidate/python",
+                "path_prefix": "/candidate/bin",
+                "pythonpath_prefix": "/candidate/python",
             },
         }
     )
@@ -835,6 +872,7 @@ def test_native_agentx_rejects_mutation_replay_before_materialization(
     _write_yaml(base, framework="sglang")
     state = SimpleNamespace(
         benchmark_mode="agentx",
+        agentx_epoch=2,
         model_path="/models/glm",
     )
     executor = BaselineExecutor(

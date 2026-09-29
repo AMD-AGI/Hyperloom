@@ -581,6 +581,7 @@ def test_agentx_diagnostic_profile_preserves_installed_framework(monkeypatch, tm
     src = _write(
         tmp_path / "profile.yaml",
         framework=framework,
+        agentx="enable",
         envs={"PROFILE": "1", "SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "32"},
         profiler={"torch_profiler": {"enabled": True}},
     )
@@ -832,6 +833,7 @@ def test_native_agentx_filters_credentials_before_recipe_fingerprint(monkeypatch
     monkeypatch.setattr(native_agentx, "resolve_native_recipe", _capture_resolved_envs)
     src = _write(
         tmp_path / "cfg.yaml",
+        agentx="enable",
         envs={
             "CONC": 8,
             "OPENAI_API_KEY": "must-not-be-fingerprinted",

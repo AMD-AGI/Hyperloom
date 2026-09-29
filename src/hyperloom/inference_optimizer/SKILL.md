@@ -939,8 +939,13 @@ default, which is commonly shorter than one complete canonical AgentX round.
 
 The source `benchmark.agentx: enable` switch automatically stamps Hyperloom
 session state and selects AgentX grading before preflight. Do not require or
-export `HYPERLOOM_AGENTX` on this path; it remains an optional legacy switch for
-callers without a source YAML. `--benchmark-config` is fresh-launch only. A
+export `HYPERLOOM_AGENTX` on this path. `HYPERLOOM_AGENTX=1` without an enabled
+`benchmark.agentx` field keeps the legacy `aiperf_client.sh` measurement and
+optimization backend: server tuning, source/kernel patch integration, GEAK
+proposal revalidation, and concurrency sweeps remain supported. Legacy epoch-1
+sessions can resume; native epoch-2 sessions retain their own config and pins.
+Never reinterpret a legacy baseline or KEEP as native evidence.
+`--benchmark-config` is fresh-launch only. A
 resume rejects a new source-config flag. It restores the accepted materialized
 config and runtime pins after baseline acceptance, or the session's snapshotted
 source config and pins if baseline was not accepted yet.

@@ -965,7 +965,7 @@ weighted number, and it has **no fixed interactivity target** — interactivity 
 a frontier coordinate, not a constraint, so a point that trades interactivity for
 throughput moves along the frontier rather than violating a rule.
 
-Normal AgentX measurements are materialized from that source YAML as Magpie
+Native AgentX measurements are materialized from that source YAML as Magpie
 `agentx: enable` runs.
 The canonical identity and launcher are intentionally separate from the local
 checkpoint path. The tested pair is Magpie v0.3.0 release commit
@@ -975,16 +975,16 @@ checkpoint path. The tested pair is Magpie v0.3.0 release commit
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `HYPERLOOM_BENCHMARK_CONFIG` | No | None | Legacy environment alias for CLI `--benchmark-config`. Prefer the CLI flag. Fresh launches only. Resume restores the accepted materialized config, or the snapshotted source config when baseline was not accepted yet. |
-| `HYPERLOOM_AGENTX` | No | Off | Optional legacy mode switch for callers without a source YAML. A `--benchmark-config` whose source has `benchmark.agentx: enable` sets session mode automatically; an explicitly false environment value conflicts and is rejected. |
+| `HYPERLOOM_AGENTX` | No | Off | Enables the legacy `aiperf_client.sh` measurement and optimization backend unless the source/accepted config explicitly enables native AgentX. Native `benchmark.agentx: enable` sets AgentX session mode automatically; an explicitly false environment value conflicts and is rejected. |
 | `HYPERLOOM_IMAGE` | No | Effective resolved image | Optional strict consistency assertion for native local mode. `benchmark.docker_image` overrides/pins the effective recipe image; otherwise the recipe default is used. If this variable already exists, it must match exactly. It does not attest the running container. |
-| `AGENTX_MODEL_ID` | Only without `benchmark.model` | None | Legacy fallback for the exact model id from the selected InferenceX recipe (for example `amd/GLM-5.2-MXFP4`). A separate CLI `--model` may name the local checkpoint and is emitted as `MODEL_PATH`; omitting it uses the source model id remotely. |
-| `AGENTX_SERVER_SCRIPT` | Only without `benchmark.benchmark_script` | None | Legacy fallback for the launcher. It must be one file directly under `InferenceX/benchmarks/single_node/agentic/`; Hyperloom refuses traversal, generic launchers, and missing files, and never edits it. |
+| `AGENTX_MODEL_ID` | Native: only without `benchmark.model` | None | For native AgentX, fallback for the exact model id from the selected InferenceX recipe (for example `amd/GLM-5.2-MXFP4`). A separate CLI `--model` may name the local checkpoint and is emitted as `MODEL_PATH`; omitting it uses the source model id remotely. |
+| `AGENTX_SERVER_SCRIPT` | Native: only without `benchmark.benchmark_script`; legacy: optional | None | Native launcher fallback: one file directly under `InferenceX/benchmarks/single_node/agentic/`, validated and never edited. On the legacy backend this retains its original server-launcher override meaning; native path restrictions do not apply. |
 | `INFERENCEX_PATH` | No | Installer pin | Legacy fallback for source `benchmark.inferencex_path`. The source path nominates a preferred writable checkout. Preflight replaces a missing or wrong-revision path with a pinned clone; an explicit correct but non-writable checkout fails. A simultaneously supplied, different ambient path conflicts with the source before preflight. Because pinned Magpie interpolates the checkout into an unquoted local `bash -c` command, its resolved absolute path must use only shell-safe token characters; whitespace or shell metacharacters fail closed before launch. |
-| `AGENTX_MODE` | No | `canonical` | Legacy equivalent of `benchmark.agentx.mode`. `canonical` uses the 3600-second native protocol and is required by `optimize`. `fast` uses 1200 seconds and is a direct-Magpie diagnostic; its non-publishable result is rejected as a Hyperloom baseline. |
-| `AGENTX_RECIPE` | When inference is ambiguous | Inferred by Magpie | Legacy equivalent of `benchmark.agentx.recipe`: an exact recipe key from the pinned InferenceX config. |
-| `AGENTX_CONFIG_FILE` | No | InferenceX `configs/amd-master.yaml` or `nvidia-master.yaml` | Legacy equivalent of `benchmark.agentx.config_file`: an explicit recipe-config path understood by Magpie. |
-| `AGENTX_SELECTOR` | When one recipe/concurrency has multiple arms | `{}` | Legacy equivalent of `benchmark.agentx.selector`, encoded as a JSON object, for example `{"tp":4,"kv_offloading":"dram","kv_offload_backend":"hicache"}`. Prefer the YAML object with `--benchmark-config`. |
-| `AGENTX_FAILED_REQUEST_THRESHOLD` | No | `0.10` | Legacy equivalent of `benchmark.agentx.failed_request_threshold`, from `0` through `1`. |
+| `AGENTX_MODE` | No | `canonical` | Environment equivalent for enabled native AgentX of `benchmark.agentx.mode`. `canonical` uses the 3600-second native protocol and is required by `optimize`. `fast` uses 1200 seconds and is a direct-Magpie diagnostic; its non-publishable result is rejected as a Hyperloom baseline. |
+| `AGENTX_RECIPE` | When inference is ambiguous | Inferred by Magpie | Environment equivalent for enabled native AgentX of `benchmark.agentx.recipe`: an exact recipe key from the pinned InferenceX config. |
+| `AGENTX_CONFIG_FILE` | No | InferenceX `configs/amd-master.yaml` or `nvidia-master.yaml` | Environment equivalent for enabled native AgentX of `benchmark.agentx.config_file`: an explicit recipe-config path understood by Magpie. |
+| `AGENTX_SELECTOR` | When one recipe/concurrency has multiple arms | `{}` | Environment equivalent for enabled native AgentX of `benchmark.agentx.selector`, encoded as a JSON object, for example `{"tp":4,"kv_offloading":"dram","kv_offload_backend":"hicache"}`. Prefer the YAML object with `--benchmark-config`. |
+| `AGENTX_FAILED_REQUEST_THRESHOLD` | No | `0.10` | Environment equivalent for enabled native AgentX of `benchmark.agentx.failed_request_threshold`, from `0` through `1`. |
 
 The source YAML can provide `benchmark.model`, `benchmark.precision`,
 `benchmark.framework`, `benchmark.runner_type`, `benchmark.run_mode`,
@@ -1018,8 +1018,10 @@ availability and context-length filters. Native `AGENTX_DATASET` and
 `WEKA_LOADER_OVERRIDE` overrides are
 rejected. A pre-existing `HYPERLOOM_IMAGE` must exactly match the effective
 resolved image. In contrast,
-`AGENTX_DURATION` and `AGENTX_NUM_ENTRIES` apply only to the profiler
-compatibility client, not normal native measurements.
+`AGENTX_DURATION` and `AGENTX_NUM_ENTRIES` still control legacy measurements
+and the native diagnostic profiler client. They do not change native measurement
+duration or corpus size. Legacy `AGENTX_DATASET` and `WEKA_LOADER_OVERRIDE`
+remain supported on the legacy backend.
 
 Hyperloom owns the fixed concurrency of native measurement rounds through
 CLI `--conc` or source/materialized `benchmark.envs.CONC`. It removes

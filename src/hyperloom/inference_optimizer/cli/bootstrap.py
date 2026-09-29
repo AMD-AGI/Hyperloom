@@ -60,6 +60,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 2
+LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -107,11 +108,14 @@ def agentx_state_is_stale(state: Any) -> str:
             "sets of measurements would overwrite each other"
         )
     if want_mode == "agentx":
+        from hyperloom.common.agentx_mode import native_agentx_session
+
+        expected_epoch = AGENTX_MEASUREMENT_EPOCH if native_agentx_session(state) else LEGACY_AGENTX_MEASUREMENT_EPOCH
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
-        if had_epoch != AGENTX_MEASUREMENT_EPOCH:
+        if had_epoch != expected_epoch:
             return (
                 f"session carries AgentX epoch {had_epoch}, this build measures "
-                f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
+                f"epoch {expected_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
     return ""
@@ -227,10 +231,13 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
-    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    from hyperloom.common.agentx_mode import native_agentx_session
+
+    native_agentx = native_agentx_session()
+    benchmark_mode = "agentx" if native_agentx or _agentx_enabled() else "synthetic"
     _agentx_runtime_pins: dict[str, str] = {}
     _benchmark_source_config_path = ""
-    if benchmark_mode == "agentx":
+    if native_agentx:
         from hyperloom.inference_optimizer.agentx.native import (
             AGENTX_RUNTIME_PIN_NAMES,
         )
@@ -308,7 +315,7 @@ def _seed_shared_state(
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
-        warm_replay_enabled=(benchmark_mode != "agentx" and not bool(getattr(args, "no_warm_replay", False))),
+        warm_replay_enabled=(not native_agentx and not bool(getattr(args, "no_warm_replay", False))),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
         warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
@@ -330,16 +337,20 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
-        # rung is a 3600s window and the session grades at a fixed CONC.
-        # Pass --enable-conc-sweep explicitly to override.
+        # Native launchers cannot measure an optimized concurrency-sweep arm.
         conc_sweep_enabled=(
             bool(getattr(args, "enable_conc_sweep", None))
             if getattr(args, "enable_conc_sweep", None) is not None
-            else benchmark_mode != "agentx"
+            else not native_agentx
         ),
         benchmark_mode=benchmark_mode,
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_epoch=(
+            AGENTX_MEASUREMENT_EPOCH
+            if native_agentx
+            else LEGACY_AGENTX_MEASUREMENT_EPOCH
+            if benchmark_mode == "agentx"
+            else 0
+        ),
         agentx_runtime_pins=_agentx_runtime_pins,
         benchmark_source_config_path=_benchmark_source_config_path,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),

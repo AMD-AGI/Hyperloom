@@ -22,7 +22,11 @@ it.
 
 ### Added
 
-- **Run AgentX measurements through native Magpie/InferenceX launchers.** The
+- **Opt into native Magpie/InferenceX AgentX measurements.** Existing
+  `HYPERLOOM_AGENTX=1` launches keep the legacy client, server tuning, GEAK
+  revalidation, patch integration, and concurrency sweeps unless the source or
+  accepted config enables `benchmark.agentx`. Legacy epoch-1 sessions remain
+  resumable; native epoch-2 results cannot be mixed with legacy measurements. The
   tested pair is Magpie v0.3.0 release commit
   `5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
   `3d5581562f643f9bdeb8410cd924e2c70906c966`. Both dependencies are pinned by

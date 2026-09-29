@@ -83,6 +83,13 @@ integration is pinned to Magpie
 `5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
 `3d5581562f643f9bdeb8410cd924e2c70906c966`.
 
+Native AgentX is opt-in through `benchmark.agentx: enable`. Existing
+`HYPERLOOM_AGENTX=1` launches without that config field continue to use the
+legacy `aiperf_client.sh` benchmark, including server tuning, patch integration,
+GEAK proposals with canonical revalidation, and concurrency sweeps. Legacy
+AgentX epoch-1 sessions can resume on that same backend; native epoch-2
+measurements remain separate and cannot reuse a legacy baseline or KEEP record.
+
 For the pinned GLM-5.2 TP4 recipe, create a source YAML. It carries the public
 model identity, framework, launcher, image pin, and fixed concurrency; recipe
 internals remain in InferenceX:
@@ -183,9 +190,10 @@ agentx:
     kv_offload_backend: hicache
 ```
 
-Add `agentx.recipe` only when multiple recipe names match. The legacy
-`AGENTX_RECIPE` and JSON `AGENTX_SELECTOR` environment variables provide the
-same escape hatches for callers without a source object. Magpie fails closed
+Add `agentx.recipe` only when multiple recipe names match. For an enabled
+native configuration, `AGENTX_RECIPE` and JSON `AGENTX_SELECTOR` environment
+variables provide the same selectors when the YAML does not specify them;
+they do not select the native backend by themselves. Magpie fails closed
 rather than guessing. Hyperloom writes the fixed measurement concurrency to
 `benchmark.envs.CONC` and removes a stale `benchmark.agentx.concurrency` from
 the input YAML. The resolved recipe owns

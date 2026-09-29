@@ -12,7 +12,7 @@ import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -2283,6 +2283,139 @@ async def test_agentx_profile_rejects_incompatible_topology_before_side_effects(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+async def test_profile_executor_preserves_session_identity_with_generic_template(tmp_path, monkeypatch, native):
+    import yaml
+
+    from hyperloom.inference_optimizer.agentx.runtime import _profile_compatibility_checkout
+    from hyperloom.orchestrator.actions.executors import _workload_envs
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
+
+    source = tmp_path / "inferencex"
+    head = _init_profile_inferencex_checkout(source)
+    model = tmp_path / "local-model"
+    model.mkdir()
+    for name, value in {
+        "USER_DATA_PATH": str(tmp_path),
+        "FRAMEWORK": "sglang",
+        "MODEL_PATH": str(model),
+        "GPU_TYPE": "mi355x",
+        "TP": "2",
+        "CONC": "1",
+        "INFERENCEX_PATH": str(source),
+        "INFERENCEX_REF": head,
+        "HYPERLOOM_AGENTX": "1",
+        "HYPERLOOM_ENABLE_PATCH": "1",
+        "HYPERLOOM_SGLANG_SHAPE_MODE": "patch",
+        "AGENTX_MODEL_ID": "amd/GLM-5.2-MXFP4",
+        "AGENTX_SERVER_SCRIPT": "single_node/agentic/glm.sh" if native else "legacy_server.sh",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    if native:
+        for name, value in {
+            "MAGPIE_REF": "a" * 40,
+            "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT": "recipe",
+            "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT": "execution",
+            "HYPERLOOM_AGENTX_GPU_COUNT": "2",
+        }.items():
+            monkeypatch.setenv(name, value)
+    config = tmp_path / "profile.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": str(model),
+                    "envs": {"TP": 2, "CONC": 1},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_config = config.read_bytes()
+    framework_patch = Mock(return_value=True)
+    ck_patch = Mock(return_value=True)
+    monkeypatch.setattr(_workload_envs, "ensure_sglang_patched_for_tracelens", framework_patch)
+    monkeypatch.setattr(_workload_envs, "ensure_sglang_patched_for_ck_blockscale", ck_patch)
+    patch_roots = []
+
+    def patch_checkout(path):
+        patch_roots.append(Path(path))
+        (Path(path) / "benchmarks" / "benchmark_lib.sh").write_text("${NUM_PROMPTS:-$max_concurrency}\n")
+        serving = profile_mod.benchmark_serving_path_in(Path(path))
+        serving.parent.mkdir(parents=True, exist_ok=True)
+        serving.write_text("PROFILE_EXTRA_BODY\n")
+        return True
+
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_lib_patched", patch_checkout)
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_lib_eval_dest_patched", patch_checkout)
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_serving_patched", patch_checkout)
+    executor = ProfileExecutor(session_dir=tmp_path)
+    executor.shared_state = _agentx_profile_state(tmp_path) if native else SimpleNamespace(benchmark_mode="agentx")
+    captured = {}
+
+    async def measure(**kwargs):
+        bench = yaml.safe_load(kwargs["config_path"].read_text(encoding="utf-8"))["benchmark"]
+        captured.update(bench)
+        if native:
+            _profile_compatibility_checkout(
+                bench,
+                config_path=kwargs["config_path"],
+                explicit_inferencex_path=kwargs["inferencex_path"],
+                env=os.environ,
+            )
+        workspace = kwargs["output_dir"] / "benchmark_sglang_agentx"
+        traces = workspace / "torch_trace"
+        traces.mkdir(parents=True)
+        (traces / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"rank-zero")
+        Path(bench["envs"]["AGENTX_CAPTURE_STATUS_PATH"]).write_text(
+            json.dumps({"capture_id": bench["envs"]["AGENTX_CAPTURE_ID"], "status": "succeeded"}),
+            encoding="utf-8",
+        )
+        return {"status": "succeeded", "framework": "sglang", "workspace": str(workspace), "submission_valid": True}
+
+    monkeypatch.setattr(executor, "_run_single_benchmark", measure)
+    output = tmp_path / "output"
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="profile",
+            task_id="profile-identity",
+            params={
+                "config_path": str(config),
+                "output_dir": str(output),
+                "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "1"},
+            },
+        ),
+        extra={},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "succeeded", result
+    assert config.read_bytes() == original_config
+    assert captured["benchmark_script"] == "aiperf_client.sh"
+    assert "agentx" not in captured
+    if native:
+        assert captured["workload_spec"]["harness"] == "hyperloom-profiler-compat"
+        assert captured["envs"]["AGENTX_SERVER_SCRIPT"] == ""
+        assert captured["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+        framework_patch.assert_not_called()
+        ck_patch.assert_not_called()
+        assert set(patch_roots) == {output / ".agentx-profile-inferencex"}
+        assert not subprocess.run(
+            ["git", "-C", str(source), "status", "--porcelain"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    else:
+        assert "harness" not in captured["workload_spec"]
+        assert captured["envs"]["AGENTX_SERVER_SCRIPT"] == "legacy_server.sh"
+        framework_patch.assert_called_once()
+        ck_patch.assert_called_once()
+        assert set(patch_roots) == {source}
+
+
+@pytest.mark.asyncio
 async def test_agentx_profile_checkout_keeps_event_loop_responsive(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
@@ -2335,6 +2468,27 @@ async def test_agentx_profile_checkout_keeps_event_loop_responsive(tmp_path, mon
     assert result["status"] == "failed"
     assert result["error_class"] == "agentx_profile_checkout_unavailable"
     assert "simulated clone failure" in result["error"]
+
+
+def test_legacy_agentx_profile_checkout_needs_no_native_pin(tmp_path, monkeypatch):
+    source = tmp_path / "legacy-inferencex"
+    source.mkdir()
+    monkeypatch.setenv("INFERENCEX_REF", "native-pin-is-not-relevant")
+    config = tmp_path / "profile.yaml"
+    original = "benchmark:\n  benchmark_script: aiperf_client.sh\n"
+    config.write_text(original, encoding="utf-8")
+    output = tmp_path / "profile-output"
+
+    selected, error = ProfileExecutor(session_dir=tmp_path)._agentx_runtime_checkout(
+        config_path=config,
+        output_dir=output,
+        inferencex_path=str(source),
+        agentx_session=False,
+    )
+
+    assert (selected, error) == (str(source), None)
+    assert config.read_text(encoding="utf-8") == original
+    assert not output.exists()
 
 
 def test_agentx_profile_checkout_rejects_symlink_to_pinned_source(tmp_path):
@@ -2468,7 +2622,8 @@ def test_agentx_profile_checkout_rejects_dirty_reused_clone(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch, native):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("TP", "2")
     db = SqliteConnection(tmp_path / "x.db")
@@ -2507,7 +2662,7 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    pe.shared_state = _agentx_profile_state(tmp_path)
+    pe.shared_state = _agentx_profile_state(tmp_path) if native else SimpleNamespace(benchmark_mode="agentx")
     task = await tr.create(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},

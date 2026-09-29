@@ -614,10 +614,11 @@ def apply_agentx_switch(
     *,
     conc: Any = None,
     active: bool | None = None,
+    native_agentx_mode: bool | None = None,
     grading: Mapping[str, Any] | None = None,
     allow_profile_compat: bool = False,
 ) -> None:
-    """Switch serving benchmarks to native Magpie AgentX or its trace shim.
+    """Preserve the native or legacy AgentX harness selected by the session or YAML.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap,
     the client's warmup grace and the published ``workload_spec.concurrency`` are
@@ -628,8 +629,13 @@ def apply_agentx_switch(
     GEAK; callers that cannot reach the live state leave it ``None`` and the
     spec derives both from the environment as before.
     """
+    workload = bench.get("workload_spec")
+    native_profile = isinstance(workload, Mapping) and workload.get("harness") == "hyperloom-profiler-compat"
+    native_selected = (
+        bool(native_agentx_mode) or _serialized_native_agentx_enabled(bench.get("agentx")) or native_profile
+    )
     if active is None:
-        active = agentx_enabled()
+        active = native_selected or agentx_enabled()
     if not active:
         return
     from hyperloom.inference_optimizer import framework_registry
@@ -664,7 +670,7 @@ def apply_agentx_switch(
     _agentx_env = agentx_env_for_conc(resolved_conc)
     envs["RUN_EVAL"] = "false"
     envs["FRAMEWORK"] = framework
-    profile_compat = _agentx_profile_requested(bench)
+    profile_compat = native_selected and _agentx_profile_requested(bench)
     if profile_compat and not allow_profile_compat:
         raise ValueError(
             "Native AgentX profiler/gap-analysis settings are diagnostic-only "
@@ -676,7 +682,7 @@ def apply_agentx_switch(
         "AGENTX_WARMUP_REQUESTS_PER_LANE",
         "WEKA_LOADER_OVERRIDE",
     )
-    if not profile_compat:
+    if native_selected and not profile_compat:
         overridden = [
             name for name in forbidden_native_corpus_envs if str(envs.get(name) or os.environ.get(name) or "").strip()
         ]
@@ -686,13 +692,15 @@ def apply_agentx_switch(
                 "InferenceX recipe; remove " + ", ".join(overridden)
             )
 
-    # The profiler compatibility client still consumes the legacy AGENTX_*
-    # controls.  Native Magpie must not inherit them: duration, entry count,
+    # The legacy and profiler clients consume the AGENTX_* controls.
+    # Native Magpie must not inherit them: duration, entry count,
     # dataset, or a foreign AIPerf binary would change the replay without
     # changing InferenceX's recipe fingerprint.
     for key, value in os.environ.items():
-        if profile_compat and (key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE")):
-            if key in _AGENTX_IDENTITY_ENVS and str(envs.get(key) or "").strip():
+        if (not native_selected or profile_compat) and (
+            key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE")
+        ):
+            if native_selected and key in _AGENTX_IDENTITY_ENVS and str(envs.get(key) or "").strip():
                 continue
             envs[key] = value
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
@@ -708,8 +716,12 @@ def apply_agentx_switch(
             _raw_grace or "unset",
         )
 
-    canonical_model = _canonical_agentx_model(envs, local_model)
-    if profile_compat:
+    canonical_model = _canonical_agentx_model(envs, local_model) if native_selected else local_model
+    if not native_selected:
+        bench["benchmark_script"] = "aiperf_client.sh"
+        envs["MODEL"] = local_model
+        native = False
+    elif profile_compat:
         # Magpie AgentX v1 deliberately rejects torch/system profiling. Keep
         # Hyperloom's phase-gated client for this one leg, and clear the native
         # launcher pin so the client cannot recursively invoke a full AgentX
@@ -780,7 +792,8 @@ def apply_agentx_switch(
         env=_agentx_env,
         grading=grading,
     )
-    spec["harness"] = "magpie-native-agentx" if native else "hyperloom-profiler-compat"
+    if native_selected:
+        spec["harness"] = "magpie-native-agentx" if native else "hyperloom-profiler-compat"
     if native:
         mode = str(bench["agentx"].get("mode") or "canonical") if isinstance(bench["agentx"], dict) else "canonical"
         # InferenceX owns these values on the native path. Do not advertise
@@ -1577,6 +1590,7 @@ def materialize_config_with_envs(
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
     agentx_mode: bool | None = None,
+    native_agentx_mode: bool | None = None,
     grading: Mapping[str, Any] | None = None,
     allow_agentx_profile_compat: bool = False,
 ) -> Path:
@@ -1628,6 +1642,9 @@ def materialize_config_with_envs(
             cache key. Off by default: only a run that applied such a patch needs it.
         agentx_mode: Explicit session-level AgentX decision. ``None`` preserves
             the legacy environment-based fallback.
+        native_agentx_mode: Native session identity retained when a diagnostic
+            profile uses a generic template without ``benchmark.agentx``.
+            ``None`` derives identity from the source YAML.
         grading: The session's ``SharedState.grading``, which settles the axis
             and noise band the AgentX ``workload_spec`` publishes to GEAK.
             ``None`` preserves the environment-derived fallback.
@@ -1690,6 +1707,7 @@ def materialize_config_with_envs(
         bench,
         model_path,
         active=True if source_native_agentx else agentx_mode,
+        native_agentx_mode=native_agentx_mode,
         grading=grading,
         allow_profile_compat=allow_agentx_profile_compat,
     )
@@ -1700,6 +1718,7 @@ def materialize_config_with_envs(
         isinstance(bench.get("workload_spec"), Mapping)
         and str(bench["workload_spec"].get("kind") or "").strip() == "agentx_trace_replay"
     )
+    native_profile_compat = agentx_workload and bench["workload_spec"].get("harness") == "hyperloom-profiler-compat"
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -1906,6 +1925,7 @@ def materialize_config_with_envs(
             model_path,
             conc=envs.get("CONC"),
             active=True,
+            native_agentx_mode=native_agentx_mode,
             grading=grading,
             allow_profile_compat=allow_agentx_profile_compat,
         )
@@ -2090,12 +2110,12 @@ def materialize_config_with_envs(
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_requested = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        patch_attempted = patch_requested and not agentx_workload
+        patch_attempted = patch_requested and not native_profile_compat
         # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
         # "never tried because the image already carries it", and those two call for different reactions when a
         # trace later turns up without annotations.
         envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-        if patch_requested and agentx_workload:
+        if patch_requested and native_profile_compat:
             # Diagnostic capture shares the recipe's installed framework.
             # Patching it would change subsequent native measurements.
             envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
@@ -2589,7 +2609,7 @@ def materialize_config_with_envs(
     # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
     _fw = str(bench.get("framework") or "").lower()
     if (
-        not agentx_workload
+        not native_profile_compat
         and _tracelens_patch_enabled()
         and "sglang" in _fw
         and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
@@ -2693,6 +2713,7 @@ def materialize_config_with_envs(
             model_path,
             conc=envs.get("CONC"),
             active=True,
+            native_agentx_mode=native_agentx_mode,
             grading=grading,
             allow_profile_compat=allow_agentx_profile_compat,
         )
