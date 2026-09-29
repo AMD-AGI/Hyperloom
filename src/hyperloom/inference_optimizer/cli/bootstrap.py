@@ -221,7 +221,6 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
-    conc_sweep_flag = getattr(args, "enable_conc_sweep", None)
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -299,7 +298,9 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=not is_agentx_mode(benchmark_mode) if conc_sweep_flag is None else bool(conc_sweep_flag),
+        conc_sweep_enabled=(
+            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),

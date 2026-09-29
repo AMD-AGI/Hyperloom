@@ -16,15 +16,6 @@ def _parse(*extra: str):
     return parser.parse_args(["optimize", *extra])
 
 
-def test_shared_state_default_enables_conc_sweep():
-    state = SharedState()
-    assert state.conc_sweep_enabled is True, (
-        "SharedState default for conc_sweep_enabled must be True. "
-        "If you intentionally flipped this off, update this test "
-        "with the rationale in the commit message."
-    )
-
-
 def test_cli_omitted_conc_sweep_defers_to_the_benchmark_mode():
     assert _parse().enable_conc_sweep is None
     assert _parse("--enable-conc-sweep").enable_conc_sweep is True

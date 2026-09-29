@@ -356,7 +356,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
-    # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
+    # SWEEP-phase concurrency sweep; ``_seed_shared_state`` resolves it at seed time from ``--enable-conc-sweep`` and the
+    # benchmark mode.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
