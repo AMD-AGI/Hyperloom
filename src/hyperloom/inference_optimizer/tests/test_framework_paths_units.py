@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer import framework_paths as fp
+from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -357,18 +358,6 @@ class TestDefaultSourceRootsIncludesXdit:
             f"_DEFAULT_SOURCE_ROOTS missing xDiT entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
         )
 
-    def test_xfuser_in_framework_packages(self):
-        """xfuser must be in _FRAMEWORK_PACKAGES for importlib discovery."""
-        assert "xfuser" in fp._FRAMEWORK_PACKAGES
-
-    def test_xdit_in_framework_buckets(self):
-        """xdit must be in _FRAMEWORK_BUCKETS for summarise_framework_root_discovery."""
-        assert "xdit" in fp._FRAMEWORK_BUCKETS
-
-    def test_custom_in_framework_buckets(self):
-        """custom must be in _FRAMEWORK_BUCKETS for root discovery summaries."""
-        assert "custom" in fp._FRAMEWORK_BUCKETS
-
 
 class TestScriptableRepoRootDiscovery:
     """A scriptable framework runs from a checkout, not an installed package.
@@ -573,6 +562,23 @@ class TestSummariseFrameworkRootDiscovery:
         """A path like ``/xdit_tools/`` must not match the ``xdit`` bucket."""
         out = fp.summarise_framework_root_discovery("/sgl-workspace/xdit_tools/")
         assert "xdit=missing" in out
+
+    def test_installed_xfuser_package_counts_as_xdit(self):
+        """xDiT installs as ``xfuser``; the root resolve_framework_tree picks must read as found here too."""
+        out = fp.summarise_framework_root_discovery("/usr/local/lib/python3.12/dist-packages/xfuser/")
+        assert "xdit=ok" in out
+
+
+class TestDerivedFromTheRegistry:
+    """A framework that declares its package or checkout is discovered without another edit here."""
+
+    def test_every_declared_package_is_discovered(self):
+        declared = {spec.python_package for spec in fr.FRAMEWORKS.values() if spec.python_package}
+        assert declared - set(fp.FRAMEWORK_SOURCE_PACKAGES) == set()
+
+    def test_every_declared_checkout_is_a_default_root(self):
+        declared = {spec.source_root for spec in fr.FRAMEWORKS.values() if spec.source_root}
+        assert declared - set(fp._DEFAULT_SOURCE_ROOTS) == set()
 
 
 class TestAtomPathPresentInAllThreeLocations:
@@ -823,11 +829,12 @@ class TestResolveFrameworkTree:
         assert fp.resolve_framework_tree("sglang") == f"{tree}/"
 
     def test_absent_env_falls_to_package_origin(self, monkeypatch, tmp_path):
-        pkg_parent = tmp_path / "site-packages"
-        (pkg_parent / "myfw").mkdir(parents=True)
-        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_parent if name == "myfw" else None)
-        assert fp.resolve_framework_tree("myfw") == f"{pkg_parent}/"
+        pkg_dir = tmp_path / "site-packages" / "vllm"
+        pkg_dir.mkdir(parents=True)
+        for key in ("VLLM_REPO_PATH", "VLLM_DIR", "FRAMEWORK_REPO_PATH"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_dir if name == "vllm" else None)
+        assert fp.resolve_framework_tree("vllm") == f"{pkg_dir}/"
 
     def test_xdit_is_found_under_its_xfuser_package(self, monkeypatch, tmp_path):
         """xDiT installs as ``xfuser``; there is no importable ``xdit`` package."""
@@ -846,10 +853,12 @@ class TestResolveFrameworkTree:
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", (f"{checkout}/",))
         assert fp.resolve_framework_tree("xdit") == f"{checkout}/"
 
-    def test_unknown_framework_resolves_to_nothing(self, monkeypatch):
-        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
-        assert fp.resolve_framework_tree("not-a-framework") == ""
+    def test_a_framework_without_a_tree_resolves_to_nothing(self, monkeypatch):
+        for key in ("CUSTOM_REPO_PATH", "CUSTOM_DIR", "FRAMEWORK_REPO_PATH"):
+            monkeypatch.delenv(key, raising=False)
+        assert fp.resolve_framework_tree("custom") == ""
 
-    def test_empty_name_resolves_to_nothing(self):
-        assert fp.resolve_framework_tree("") == ""
+    @pytest.mark.parametrize("name", ["not-a-framework", ""])
+    def test_unregistered_name_is_rejected(self, name):
+        with pytest.raises(KeyError):
+            fp.resolve_framework_tree(name)

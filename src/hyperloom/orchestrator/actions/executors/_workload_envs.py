@@ -1012,14 +1012,14 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
 
 
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``; unset or unknown resolves to sglang's.
+    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
     Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
-    fw = os.environ.get("FRAMEWORK", "sglang")
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 

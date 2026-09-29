@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Upstream repos a framework-agent round scouts: the framework's own, and the bridging ones."""
+"""Bridging repos a framework-agent round scouts; a framework's own repo is its ``FrameworkSpec.repo_url``."""
 
 from __future__ import annotations
-
-from hyperloom.inference_optimizer import framework_registry
 
 # Enablement bridging repos, keyed by ``bridge_layer``.
 _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
@@ -23,9 +21,4 @@ def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
     return _BRIDGE_LAYER_TO_REPO_URLS.get((bridge_layer or "").strip().lower(), ())
 
 
-def repo_url_for_framework(framework: str) -> str:
-    """Return the canonical GitHub repo URL for ``framework``."""
-    return framework_registry.repo_url(framework)
-
-
-__all__ = ["bridge_repo_urls", "repo_url_for_framework"]
+__all__ = ["bridge_repo_urls"]

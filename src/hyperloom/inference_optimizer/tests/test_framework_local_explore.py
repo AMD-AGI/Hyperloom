@@ -393,6 +393,21 @@ def test_a_failed_discovery_round_is_not_an_empty_one(tmp_path: Path):
     assert stub.shared_state.framework_agent_empty_discoveries == 1
 
 
+def test_a_discovery_proposal_naming_an_unregistered_framework_is_dropped(tmp_path: Path):
+    """The candidate's framework picks the specialist's source tree, so it must be one the registry knows."""
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    proposals = [
+        {"pr_url": "https://x/pr/1", "verdict": "worth_a_bench", "framework": "tensorrt"},
+        {"pr_url": "https://x/pr/2", "verdict": "worth_a_bench", "framework": "SGLang"},
+        {"pr_url": "https://x/pr/3", "verdict": "worth_a_bench"},
+    ]
+    candidates = stub._candidates_from_discovery_proposals(proposals)
+    assert [(c["pr_url"], c["framework"]) for c in candidates] == [
+        ("https://x/pr/2", "sglang"),
+        ("https://x/pr/3", ""),
+    ]
+
+
 def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
     """The pump must not read a failed task query as \"nothing in flight\"."""
     stub = _Stub(tmp_path, authoring=True, local_explore=True)

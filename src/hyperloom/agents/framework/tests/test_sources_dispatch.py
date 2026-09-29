@@ -11,6 +11,7 @@ import hyperloom.agents.framework.sources as src
 from hyperloom.agents.framework.keywords import extract_keywords
 from hyperloom.agents.framework.models import CandidateSearchRequest, PRMonitorConfig
 from hyperloom.agents.framework.sources._shared import GitHubPr
+from hyperloom.inference_optimizer import framework_registry
 
 _PR_MONITOR = PRMonitorConfig(base_url="http://x")
 
@@ -23,14 +24,6 @@ def _minimal_request(**overrides) -> CandidateSearchRequest:
 def _gap_keywords(gap: str) -> tuple[str, ...]:
     """Keywords the way the enablement mandate derives them from a gap."""
     return tuple(extract_keywords(gap))
-
-
-# Per-framework repo URLs to parametrise dispatch tests over every framework.
-_FRAMEWORK_TO_REPO_URL: dict[str, str] = {
-    "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm": "https://github.com/ROCm/vllm.git",
-    "atom": "https://github.com/ROCm/ATOM.git",
-}
 
 
 def test_pr_states_defaults_to_open() -> None:
@@ -84,7 +77,7 @@ def test_pr_monitor_search_state_open_only_default(monkeypatch) -> None:
 def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -> None:
     """PR-search backends are framework-agnostic; the framework only determines which repo gets queried."""
     req = _minimal_request(
-        repo_url=_FRAMEWORK_TO_REPO_URL[framework],
+        repo_url=framework_registry.repo_url(framework),
         search_modes=("pr_monitor",),
         max_search_candidates=2,
         pr_monitor=_PR_MONITOR,
@@ -101,7 +94,7 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
     monkeypatch.setattr(src, "list_perf_prs", fake_pr_monitor)
 
     out = src.enumerate_candidates(req)
-    assert seen_repo_urls == [_FRAMEWORK_TO_REPO_URL[framework]]
+    assert seen_repo_urls == [framework_registry.repo_url(framework)]
     assert any(c.source == "pr_monitor" for c in out)
 
 

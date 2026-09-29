@@ -23,6 +23,7 @@ the local filesystem (source-root probe + installed package version) unless
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -207,12 +208,10 @@ _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
 
 
 def _resolve_package_version(package: str) -> str:
-    """Return the installed version of *package*, or empty string on failure."""
+    """Return the installed version of *package*, or empty string when it is not installed."""
     try:
-        import importlib.metadata as _m
-
-        return _m.version(package)
-    except Exception:  # noqa: BLE001
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
         return ""
 
 

@@ -379,7 +379,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     worldplay = tmp_path / "HY-WorldPlay"
     worldplay.mkdir()
     (worldplay / ".git").mkdir()
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
         framework_source_roots=(str(aiter), str(worldplay)),
@@ -395,7 +395,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
-            params={"framework": "worldplay", "domain": "framework_rewrite_specialist"},
+            params={"framework": "custom", "domain": "framework_rewrite_specialist"},
         )
     )
 
@@ -410,12 +410,12 @@ def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(tm
     aiter = tmp_path / "aiter"
     aiter.mkdir()
     (aiter / ".git").mkdir()
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "not-a-checkout"))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "not-a-checkout"))
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
     monkeypatch.setattr(sr, "_setup_worktree", lambda base, path, branch: (path, ""))
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
     _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 

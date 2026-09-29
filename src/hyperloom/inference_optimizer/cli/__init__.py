@@ -261,6 +261,18 @@ def _persist_operator_supplied_paths(state: SharedState) -> None:
     state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
 
 
+def _registered_framework_or_exit(requested: str, *, hint: str) -> str:
+    """Return ``requested`` normalised, or the default when blank; exit 2 when it names no registered framework."""
+    framework = requested.strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    if not framework_registry.is_supported(framework):
+        print(
+            f"ERROR: framework must be one of {', '.join(framework_registry.names())} (got {framework!r}); {hint}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return framework
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -1742,16 +1754,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 if state.model_info:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
-        if state.framework:
-            _enforce_expected_framework(state.framework)
-            os.environ["FRAMEWORK"] = state.framework
-            print(f"  re-exported FRAMEWORK : {state.framework}")
-            # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
-            # it is gone in this new process. Without re-applying the default, a resumed atom
-            # session runs GEAK while the persisted state still reads 'forge' -- and silently,
-            # because the warning for an operator-named backend lives in the same function.
-            if state.framework == "atom":
-                _apply_atom_auto_tighten(args)
+        state.framework = _registered_framework_or_exit(
+            state.framework or os.environ.get("FRAMEWORK", ""),
+            hint="it comes from the resumed session, or from $FRAMEWORK when the session recorded none",
+        )
+        _enforce_expected_framework(state.framework)
+        os.environ["FRAMEWORK"] = state.framework
+        print(f"  re-exported FRAMEWORK : {state.framework}")
+        # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
+        # it is gone in this new process. Without re-applying the default, a resumed atom
+        # session runs GEAK while the persisted state still reads 'forge' -- and silently,
+        # because the warning for an operator-named backend lives in the same function.
+        if state.framework == "atom":
+            _apply_atom_auto_tighten(args)
         if state.gpu_type:
             runner_gpu_type = _gpu_runner_type(state.gpu_type)
             os.environ["TARGET_GPU_TYPE"] = state.gpu_type
@@ -1980,18 +1995,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (
-            args.framework or os.environ.get("FRAMEWORK", "")
-        ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-        if not framework_registry.is_supported(framework):
-            print(
-                f"ERROR: --framework must be one of "
-                f"{', '.join(framework_registry.names())} "
-                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
-                "--framework",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        framework = _registered_framework_or_exit(
+            args.framework or os.environ.get("FRAMEWORK", ""),
+            hint="set $FRAMEWORK accordingly or pass --framework",
+        )
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")

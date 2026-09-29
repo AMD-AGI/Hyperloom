@@ -29,6 +29,7 @@ def _build(domain_key: str) -> str:
         gap_canonical_id=f"gap.{domain_key}.example",
         gap_symptom="example symptom",
         gap_layer=domain.layer,
+        framework="sglang",
         workspace_path=f"/tmp/test/{domain_key}",
     )
     system, user = build_specialist_prompts(inp)
@@ -200,6 +201,7 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_lessons=[{"attrs": {"statement": "prior keep lesson"}}],
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
         kb_subgraph={"nodes": ["x"]},
+        framework="sglang",
         workspace_path=f"/tmp/test/{domain_key}",
     )
     return build_specialist_prompts(inp)

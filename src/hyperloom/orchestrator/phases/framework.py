@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -2497,6 +2498,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             head_sha = str(entry.get("head_sha") or "").strip()
             if not pr_url and not head_sha:
                 continue
+            framework = str(entry.get("framework") or "").strip().lower()
+            if framework and not framework_registry.is_supported(framework):
+                log.warning(
+                    "FRAMEWORK: dropping discovery proposal %s: framework=%r is not registered",
+                    pr_url or head_sha,
+                    framework,
+                )
+                continue
             cand: dict[str, Any] = {
                 "pr_url": pr_url,
                 "url": pr_url,
@@ -2506,7 +2515,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "repo": str(entry.get("repo") or "").strip(),
                 "pr_number": entry.get("pr_number"),
                 "ref": str(entry.get("ref") or "").strip(),
-                "framework": str(entry.get("framework") or "").strip().lower(),
+                "framework": framework,
                 "changed_files": entry.get("changed_files") or [],
                 "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
                 "gap_keywords": entry.get("gap_keywords") or [],
