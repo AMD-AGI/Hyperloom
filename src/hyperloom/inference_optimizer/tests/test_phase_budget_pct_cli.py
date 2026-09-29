@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 import pytest
 
@@ -201,3 +202,81 @@ def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     assert once == base
     twice = redistribute_budget_pct(once, kernel_enabled=True, optimize_enabled=True)
     assert twice == once
+
+
+# ---------------------------------------------------------------------------
+# Resume budget semantics
+# ---------------------------------------------------------------------------
+
+
+def _make_phase_machine_stub(state: Any) -> Any:
+    """Minimal MachinePhase stub whose _ensure_phase_initialised can run."""
+    from hyperloom.orchestrator.phases.machine import MachinePhase
+
+    stub = object.__new__(MachinePhase)
+    stub.shared_state = state  # type: ignore[attr-defined]
+    stub.session_dir = None  # type: ignore[attr-defined]
+    # Bind the phase-capability predicates so _ensure_phase_initialised can call them.
+    stub._optimize_enabled = lambda: bool(state.framework_agent_phase_enabled)  # type: ignore[attr-defined]
+    stub._kernel_enabled = lambda: bool(state.kernel_enabled)  # type: ignore[attr-defined]
+    stub._enablement_admitted = lambda: True  # type: ignore[attr-defined]
+    return stub
+
+
+def test_fresh_session_budget_args_override_state() -> None:
+    """Fresh session: explicit budget args reach state after renormalise + redistribute."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState()
+    # Fresh session has no phase and no budget.
+    assert not state.phase_budget_pct
+
+    stub = _make_phase_machine_stub(state)
+    explicit = {PHASE_KERNEL_AGENT: 0.55}
+    stub._ensure_phase_initialised(explicit)
+
+    assert state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.55)
+    # And defaults survive for other phases.
+    assert PHASE_FRAMEWORK_AGENT in state.phase_budget_pct
+
+
+def test_resume_without_explicit_budget_args_preserves_state() -> None:
+    """Resume without explicit args: state budget (including LLM-added bumps) is unchanged."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    state = SharedState()
+    # Simulate a session that already has a saved budget with an LLM-added bump.
+    bumped = dict(DEFAULT_PHASE_BUDGET_PCT)
+    bumped[PHASE_KERNEL_AGENT] = 0.65  # LLM bumped this above the default
+    state.phase_budget_pct = bumped
+    state.phase = PHASE_PRELUDE  # session is mid-run
+
+    stub = _make_phase_machine_stub(state)
+    # No explicit budget args (None means "operator said nothing").
+    stub._ensure_phase_initialised(None)
+
+    # The bump must survive.
+    assert state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.65)
+
+
+def test_resume_with_explicit_budget_args_overwrites_state() -> None:
+    """Resume with explicit args: state budget is overwritten by the CLI values."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    state = SharedState()
+    # Simulate a prior-session budget with an LLM-added bump.
+    bumped = dict(DEFAULT_PHASE_BUDGET_PCT)
+    bumped[PHASE_KERNEL_AGENT] = 0.65
+    state.phase_budget_pct = bumped
+    state.phase = PHASE_PRELUDE
+
+    stub = _make_phase_machine_stub(state)
+    # Operator explicitly passes a new kernel share.
+    explicit = {PHASE_KERNEL_AGENT: 0.30}
+    stub._ensure_phase_initialised(explicit)
+
+    # The CLI value wins; the LLM bump is gone.
+    assert state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.30)
+    assert state.phase_budget_pct[PHASE_KERNEL_AGENT] != pytest.approx(0.65)

@@ -1120,7 +1120,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03. "
+        "On --resume-from, the budget from the prior session is kept unless this flag is explicitly set.",
     )
     opt.add_argument(
         "--max-minutes-framework-pct",
@@ -1132,7 +1133,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38. "
+        "On --resume-from, the budget from the prior session is kept unless this flag is explicitly set.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1140,7 +1142,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
+        "On --resume-from, the budget from the prior session is kept unless this flag is explicitly set.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1148,7 +1151,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
+        "On --resume-from, the budget from the prior session is kept unless this flag is explicitly set.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",
@@ -1156,7 +1160,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_close_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+        help="Wall-clock budget cap for CLOSE. Default: 0.02. "
+        "On --resume-from, the budget from the prior session is kept unless this flag is explicitly set.",
     )
 
     rec = sub.add_parser(
