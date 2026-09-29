@@ -1081,21 +1081,15 @@ class DispatcherCollaborator:
         """Resolve the live serving process's TP size (cards it holds).
 
         Used for the serving-disjoint specialist pool (B1) and as the default
-        ``gpu_count`` for TP-coupled GPU specialists (B2). Prefers the
-        resume-safe ``shared_state.tp``; falls back to the ``TP`` env the CLI
-        exports before construction. Returns ``0`` when neither is set (the
+        ``gpu_count`` for TP-coupled GPU specialists (B2). Reads the
+        resume-safe ``shared_state.tp``. Returns ``0`` when unset (the
         legacy whole-pool / single-card behaviour).
 
         Returns:
             int: The serving TP size, or ``0`` when unknown.
         """
         tp = int(getattr(self.shared_state, "tp", 0) or 0)
-        if tp > 0:
-            return tp
-        try:
-            return max(0, int(os.environ.get("TP", "0") or 0))
-        except ValueError:
-            return 0
+        return tp
 
     def _gpu_lease_ttl_sec(
         self,

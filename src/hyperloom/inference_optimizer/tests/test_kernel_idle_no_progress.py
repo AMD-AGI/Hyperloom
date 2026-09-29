@@ -107,11 +107,16 @@ def test_default_idle_max_ticks_is_three(monkeypatch):
 def test_idle_max_ticks_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "5")
     assert ms._kernel_idle_max_ticks() == 5
-    # Non-positive / garbage falls back to 3.
+    # Non-positive falls back to 3.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "0")
     assert ms._kernel_idle_max_ticks() == 3
+    # Malformed raises.
+    import pytest
+    from hyperloom.common.env import EnvValueError
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "xx")
-    assert ms._kernel_idle_max_ticks() == 3
+    with pytest.raises(EnvValueError):
+        ms._kernel_idle_max_ticks()
 
 
 def test_default_idle_min_seconds_is_ten_minutes(monkeypatch):
@@ -122,8 +127,13 @@ def test_default_idle_min_seconds_is_ten_minutes(monkeypatch):
 def test_idle_min_seconds_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "90")
     assert ms._kernel_idle_min_seconds() == 90.0
-    # Non-positive / garbage falls back to the 600s default.
+    # Non-positive falls back to the 600s default.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "0")
     assert ms._kernel_idle_min_seconds() == 600.0
+    # Malformed raises.
+    import pytest
+    from hyperloom.common.env import EnvValueError
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "xx")
-    assert ms._kernel_idle_min_seconds() == 600.0
+    with pytest.raises(EnvValueError):
+        ms._kernel_idle_min_seconds()

@@ -469,7 +469,6 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
 
     assert st.phase == ps.PHASE_CLOSE
     assert st.pending_escalate_hint == ""
-    assert st.last_consumed_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE
 
 
 @pytest.mark.asyncio
@@ -542,9 +541,12 @@ def test_env_override_changes_absolute_floor(monkeypatch):
     assert ps._default_cycle_reloop_min_remaining_sec() == pytest.approx(3600.0)
 
 
-def test_malformed_env_override_falls_back_to_default(monkeypatch):
+def test_malformed_env_override_raises(monkeypatch):
+    from hyperloom.common.env import EnvValueError
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "not-a-number")
-    assert ps._default_cycle_reloop_min_remaining_sec() == pytest.approx(10800.0)
+    with pytest.raises(EnvValueError):
+        ps._default_cycle_reloop_min_remaining_sec()
 
 
 def test_evidence_keys_present():

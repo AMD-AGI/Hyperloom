@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Collection, Mapping
 from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom.common.env import env_int
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
@@ -6378,10 +6379,7 @@ class WritebackCollaborator:
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
 
-        try:
-            timeout = int(os.environ.get("SWEEP_VARIANT_TIMEOUT_SEC", "").strip() or "2400")
-        except (TypeError, ValueError):
-            timeout = 2400
+        timeout = env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400)
         res = await sweep_via_geak(
             result=ps,
             handoff=handoff,
