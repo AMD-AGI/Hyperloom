@@ -11,6 +11,11 @@ TraceLens owns path-finding: :func:`resolve_source_verdict` is the one call both
 routes make, wrapping TraceLens' ``resolve_kernel_source`` and returning its
 ``ResolveResult`` straight through. Only the Triton-vs-native routing decision
 is HL's, and it lives here so both callers route identically.
+
+TraceLens' ``kernel_source`` is an independent path-identifier (source path
+mapping only, not TraceLens' analysis layer). The bypass analysis backend is
+otherwise TraceLens-free and depends on TraceLens solely through this seam; the
+bypass route is slated for removal.
 """
 
 from __future__ import annotations
