@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.framework.artifacts import candidate_key
 
@@ -48,7 +48,7 @@ class _MiniCoord:
     _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = FrameworkPhase._select_next_framework_agent_candidate
     record_unpromoted_candidate = FrameworkPhase.record_unpromoted_candidate
-    _handle_unpromotable_result = Coordinator._handle_unpromotable_result
+    _handle_unpromotable_result = WritebackCollaborator._handle_unpromotable_result
 
     @property
     def phase_framework(self) -> "_MiniCoord":
