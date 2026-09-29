@@ -339,7 +339,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
-    session_dir: Path | None = None,
+    session_dir: Path,
 ) -> None:
     """Print the end-of-run summary block to stdout."""
     print()
@@ -352,7 +352,7 @@ def _print_final_summary(
     print(
         f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
     )
-    if session_dir is not None and stop_reason == "baseline_failed":
+    if stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):
             print(
@@ -374,7 +374,6 @@ def _print_final_summary(
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state, session_dir)
     print("===============================================")
 
 
@@ -468,33 +467,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         reconcile_final_crash_count(session_dir, live)
     except Exception:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
-
-
-def _print_kernel_opt_summary_line(state: SharedState, session_dir: Path | None) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
-    if session_dir is None:
-        return
-    try:
-        from hyperloom.orchestrator.kernel.attempt_summary import (
-            build_kernel_optimization_summary,
-        )
-
-        summary = build_kernel_optimization_summary(state, session_dir)
-        totals = summary.get("totals") or {}
-        attempted = int(totals.get("attempted") or 0)
-        if attempted == 0:
-            return
-        integrated = int(totals.get("integrated") or 0)
-        rejected = int(totals.get("rejected") or 0)
-        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
-        takeaways = summary.get("top_takeaways") or []
-        if len(takeaways) >= 2:
-            print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        if report_path.is_file():
-            print(f"  kernel_opt_report    : {report_path}")
-    except Exception:  # noqa: BLE001 — stdout print must never fail the run
-        pass
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:

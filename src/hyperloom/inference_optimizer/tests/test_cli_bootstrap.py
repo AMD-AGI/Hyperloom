@@ -406,7 +406,7 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -447,7 +447,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
         "done",
-        None,
+        tmp_path,
     )
     assert "never validated" in capsys.readouterr().out
 
@@ -646,30 +646,6 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
     patched = json.loads((reports / "final.json").read_text(encoding="utf-8"))
     assert patched["crash_count"] == 5
     assert patched["other"] is True
-
-
-def test_final_summary_prints_the_kernel_opt_line_for_its_session(tmp_path: Path, monkeypatch, capsys) -> None:
-    from hyperloom.orchestrator.kernel import attempt_summary as kernel_attempt_summary
-
-    monkeypatch.delenv("HYPERLOOM_SESSION_DIR", raising=False)
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "kernel_optimization_summary.json").write_text("{}", encoding="utf-8")
-
-    def _summary(_state, _session_dir):
-        return {
-            "totals": {"attempted": 3, "integrated": 1, "rejected": 1, "unattempted": 2},
-            "top_takeaways": ["headline", "root cause"],
-        }
-
-    monkeypatch.setattr(kernel_attempt_summary, "build_kernel_optimization_summary", _summary)
-
-    cb._print_final_summary(SharedState(session_id="s"), "time_budget_exhausted", tmp_path)
-
-    out = capsys.readouterr().out
-    assert "3 attempted" in out
-    assert "root cause" in out
-    assert "kernel_optimization_summary.json" in out
 
 
 def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
