@@ -4484,15 +4484,9 @@ class IntegratePatchExecutor:
             # and that check now runs on this path too.
             if switch_manifest and applied:
                 return await self._keep_inert_switches(
+                    attempt,
                     params=params,
                     extra=extra,
-                    specialist_task_id=specialist_task_id,
-                    done_payload=done_payload,
-                    output_root=output_root,
-                    framework_root=framework_root,
-                    applied=applied,
-                    applied_artifacts=applied_artifacts,
-                    switch_manifest=switch_manifest,
                     parity=parity,
                     bench_result=bench_result,
                     new_tput=new_tput,
@@ -4847,16 +4841,10 @@ class IntegratePatchExecutor:
 
     async def _keep_inert_switches(
         self,
+        attempt: IntegrateAttempt,
         *,
         params: dict[str, Any],
         extra: dict[str, Any],
-        specialist_task_id: str,
-        done_payload: dict[str, Any] | None,
-        output_root: Path,
-        framework_root: Path | None,
-        applied: list[Path],
-        applied_artifacts: list[dict[str, Any]],
-        switch_manifest: list[dict[str, Any]],
         parity: dict[str, Any],
         bench_result: dict[str, Any],
         new_tput: Any,
@@ -4882,15 +4870,10 @@ class IntegratePatchExecutor:
         bundle at a time.
 
         Args:
+            attempt: The attempt whose applied patches, artifacts and switch
+                manifest are kept.
             params: The task params.
             extra: The runner's extra context.
-            specialist_task_id: The originating specialist.
-            done_payload: The specialist's done payload, for the KB record.
-            output_root: The per-task workspace.
-            framework_root: The patched framework checkout.
-            applied: Patches that were applied and are being kept.
-            applied_artifacts: Artifacts that were installed.
-            switch_manifest: Parsed switch manifest.
             parity: The switch-off parity verdict, recorded on the result so the
                 inert KEEP carries its own evidence of being inert.
             bench_result: The measured bench result (switches on).
@@ -4905,12 +4888,13 @@ class IntegratePatchExecutor:
         Returns:
             The ``kept_inert`` result envelope.
         """
+        switch_manifest = attempt.switch_manifest
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         reason_bits = [
             f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
             if delta_pct is not None
             else "bundle throughput not measurable",
-            f"code kept inert ({len(applied)} patch(es), all switches default-off) and "
+            f"code kept inert ({len(attempt.applied)} patch(es), all switches default-off) and "
             f"{len(switch_manifest)} lever(s) registered for per-lever exploration",
         ]
         if enablers:
@@ -4920,7 +4904,7 @@ class IntegratePatchExecutor:
             )
         await self._maybe_write_framework_kb_record(
             params=params,
-            done_payload=done_payload,
+            done_payload=attempt.done_payload,
             outcome="kept_inert_levers_registered",
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
@@ -4929,7 +4913,7 @@ class IntegratePatchExecutor:
         )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
-            specialist_task_id,
+            attempt.specialist_task_id,
             f"{delta_pct:+.2f}%" if delta_pct is not None else "n/a",
             keep_threshold_pct,
             len(switch_manifest),
@@ -4943,10 +4927,10 @@ class IntegratePatchExecutor:
             # per lever from here. The flag exists so nothing downstream reads
             # this as a clean keep.
             "quality_unverified": accuracy_pass is False,
-            "specialist_task_id": specialist_task_id,
-            "patches_applied": [str(p) for p in applied],
+            "specialist_task_id": attempt.specialist_task_id,
+            "patches_applied": [str(p) for p in attempt.applied],
             "patches_reverted": [],
-            "artifacts_applied": applied_artifacts,
+            "artifacts_applied": attempt.applied_artifacts,
             # Empty on purpose: the code is present but dormant, so nothing
             # may enter current_best. The levers below are how it gets turned
             # on, one measured bundle at a time.
@@ -4960,8 +4944,8 @@ class IntegratePatchExecutor:
             "keep_threshold_pct": keep_threshold_pct,
             "reason": "; ".join(reason_bits),
             "bench_result": bench_result,
-            "workspace": str(output_root),
-            "framework_root": str(framework_root or ""),
+            "workspace": str(attempt.output_root),
+            "framework_root": str(attempt.framework_root or ""),
             "framework_levers": switch_manifest,
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
