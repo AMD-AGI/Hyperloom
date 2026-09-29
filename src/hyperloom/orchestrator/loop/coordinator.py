@@ -418,7 +418,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_run_kernel_agent": "phase_kernel",
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
-        "_kernel_timeline": "phase_kernel",
+        "timeline": "phase_kernel",
         "_resolve_bench_protocol": "phase_kernel",
         "_geak_timeouts": "phase_kernel",
         "_run_geak_kernel_phase": "phase_kernel",
@@ -1068,9 +1068,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         open for every exception and is the thing that raised for almost none
         of them. Its own pump records what it is responsible for.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
-
-        for recorder in (active_kernel_recorder(), self.phase_framework.timeline()):
+        for recorder in (self.phase_kernel.timeline(), self.phase_framework.timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)

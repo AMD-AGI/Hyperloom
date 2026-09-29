@@ -542,7 +542,7 @@ class TestE2EValidationFailsOpen:
             "_replace_latest_gemm_tuning_attempt",
             "_writeback_gemm_result_json",
             "_record_gemm_tuning_timeline",
-            "_kernel_timeline",
+            "timeline",
         ):
             setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
         return phase, recorded

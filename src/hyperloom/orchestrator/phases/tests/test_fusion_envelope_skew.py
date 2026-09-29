@@ -44,7 +44,7 @@ def _phase(*, spent: int = 0, session_dir=None):
         integrated=integrated,
         _integrate_fusion=_integrate_fusion,
     )
-    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
+    phase.timeline = KernelPhase.timeline.__get__(phase)
     phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
     return phase
 

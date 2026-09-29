@@ -264,7 +264,7 @@ class KernelPhase(CoordinatorCollaborator):
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
         workload_changed = self._profile_workload_changed()
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
 
         def _note_reprofile(**fields: Any) -> None:
             if recorder is None:
@@ -366,7 +366,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         return geak_selected()
 
-    def _kernel_timeline(self) -> Any:
+    def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
         return getattr(self, "_kernel_timeline_recorder", None)
 
@@ -401,7 +401,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_kernel_discovered_from_cache(self, *, provenance: str) -> None:
         """Record the profiling table the visit inherited or just produced."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
@@ -472,6 +472,7 @@ class KernelPhase(CoordinatorCollaborator):
                     },
                     "proposal": {"decision": decision},
                 },
+                recorder=self.timeline(),
             )
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
@@ -487,7 +488,7 @@ class KernelPhase(CoordinatorCollaborator):
         best micro speedup is never substituted for it, since a per-shape timing ratio is not the
         axis the KEEP verdict was graded on.
         """
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None or not isinstance(result, dict):
             return
         tuners = result.get("tuners_run")
@@ -604,7 +605,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None or not isinstance(result, dict):
             return
         recorder.record_fusion_run(
@@ -630,7 +631,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _close_kernel_timeline(self, *, exit_reason: str = "") -> None:
         """Close the kernel timeline event when the phase is left."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         self._kernel_timeline_recorder = None
@@ -1075,7 +1076,7 @@ class KernelPhase(CoordinatorCollaborator):
             env_spec = self.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
-            recorder = self._kernel_timeline()
+            recorder = self.timeline()
             if recorder is not None:
                 recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
             _finish_skip(
@@ -1291,7 +1292,7 @@ class KernelPhase(CoordinatorCollaborator):
         handoff_path = out_dir / "handoff.json"
         handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is not None:
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
@@ -1790,7 +1791,7 @@ class KernelPhase(CoordinatorCollaborator):
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is not None:
             recorder.record_geak_claim(
                 self.shared_state.geak_pending,
@@ -1910,7 +1911,7 @@ class KernelPhase(CoordinatorCollaborator):
             provenance="geak_promote_rejected",
             rejection_reason=reason,
         )
-        recorder = KernelPhase._kernel_timeline(self)
+        recorder = KernelPhase.timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
                 attempt_id=attempt_id,
@@ -2233,7 +2234,7 @@ class KernelPhase(CoordinatorCollaborator):
         """
         if not isinstance(result, dict) or not result:
             return
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         recorder.record_geak_measurement(result)
@@ -2250,7 +2251,7 @@ class KernelPhase(CoordinatorCollaborator):
         kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
-        recorder = self._kernel_timeline()
+        recorder = self.timeline()
         if recorder is None:
             return
         versions = result.get("versions")

@@ -32,7 +32,7 @@ def _phase(last_fusion, *, spent=0, session_dir=None):
 
     bus.append_and_seq = _append_and_seq
     phase = SimpleNamespace(shared_state=state, bus=bus, session_dir=session_dir)
-    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
+    phase.timeline = KernelPhase.timeline.__get__(phase)
     phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
     return phase
 
