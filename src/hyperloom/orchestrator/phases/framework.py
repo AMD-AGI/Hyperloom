@@ -229,8 +229,17 @@ def _forward_integrate_source(
     # proposal ownership only needs the gap metadata below.
     # ``lever_kind`` travels with the proposal: the patch that lands moved the
     # same lever the specialist was dispatched against, and re-deriving it at
-    # writeback time is how attribution drifts.
-    for key in ("gap_canonical_id", "gap_layer", "lever_kind", "reauthor_attempt", "apply_retry_attempt"):
+    # writeback time is how attribution drifts. The KB exposure does too: it is
+    # what the authoring specialist was shown, and the attempt is recorded later.
+    for key in (
+        "gap_canonical_id",
+        "gap_layer",
+        "lever_kind",
+        "reauthor_attempt",
+        "apply_retry_attempt",
+        "kb_read_id",
+        "kb_rendered_refs",
+    ):
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
@@ -394,6 +403,18 @@ def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, s
     return material
 
 
+def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, Any]) -> None:
+    """Add the Experience KB read a specialist was shown to the proposal it produced.
+
+    The proposal row is an upsert whose lists merge, so a candidate shaped by
+    both a discovery and an authoring specialist keeps both reads' refs.
+    """
+    read_id = str(params.get("kb_read_id") or "")
+    refs = params.get("kb_rendered_refs") or []
+    if read_id or refs:
+        recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
+
+
 def _record_source_attempt(
     coord: Any,
     *,
@@ -509,6 +530,7 @@ def _record_source_attempt(
         attribution_eligible=(adopted and base is not None and result.get("output_throughput") is not None),
         **measured_against,
     )
+    _record_kb_exposure(recorder, candidate_id, params)
     delta_pct = result.get("delta_pct")
     keep_threshold = result.get("keep_threshold_pct")
     if keep_threshold is None:
@@ -565,11 +587,13 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
     )
 
     run_id = str(getattr(task, "task_id", "") or "")
-    domain = str((getattr(task, "params", None) or {}).get("domain") or "")
+    discovery_params = getattr(task, "params", None) or {}
+    domain = str(discovery_params.get("domain") or "")
     kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
     for cand_id, cand in kept.items():
         if not cand_id:
             continue
+        _record_kb_exposure(recorder, cand_id, discovery_params)
         recorder.record_proposal(
             cand_id,
             arm=ARM_SOURCE,
