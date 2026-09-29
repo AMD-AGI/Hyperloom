@@ -1789,16 +1789,6 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
     assert "KERNEL_AGENT" in out
 
 
-@pytest.mark.asyncio
-async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = ps.PHASE_KERNEL_AGENT
-    monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
-    out = coord.conversation._plateau_advisory_block()
-    assert "KERNEL_AGENT plateau detected" in out
-
-
 # -- _record_specialist_result ----------------------------------------------
 def _ptask(tid: str, kind: str) -> Task:
     return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")

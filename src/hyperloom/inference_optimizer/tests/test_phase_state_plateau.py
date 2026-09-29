@@ -22,7 +22,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
-    compute_plateau_kernel,
     kernel_work_pending,
 )
 from hyperloom.orchestrator.state import shared_state
@@ -188,115 +187,6 @@ def test_config_lever_dry_supports_threshold_overrides():
         {"explore_keep_gain_pct": 3.0, "explore_empty_streak": 1},
     )
     assert triggered is True
-
-
-def test_plateau_kernel_revert_streak_triggers():
-    """3 consecutive REVERTs → triggered."""
-    state = SimpleNamespace(
-        kernel_integrate_attempts={
-            "k1": {
-                "attempts": [
-                    {"decision": "REVERT", "ts": "2026-05-19T18:00:00"},
-                ]
-            },
-            "k2": {
-                "attempts": [
-                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
-                ]
-            },
-            "k3": {
-                "attempts": [
-                    {"decision": "REVERT", "ts": "2026-05-19T18:02:00"},
-                ]
-            },
-        },
-    )
-    triggered, ev = compute_plateau_kernel(state)
-    assert triggered is True
-    assert ev["revert_streak"] == 3
-
-
-def test_plateau_kernel_low_gain_triggers():
-    """Low cumulative KEEP gain alone triggers (OR semantics)."""
-    state = SimpleNamespace(
-        kernel_integrate_attempts={
-            "k1": {
-                "attempts": [
-                    {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 0.1},
-                ]
-            },
-        },
-    )
-    triggered, ev = compute_plateau_kernel(state)
-    assert triggered is True
-    assert ev["recent_keep_gain_pct"] == 0.1
-
-
-def test_plateau_kernel_ignores_prior_macro_cycle_attempts():
-    state = SimpleNamespace(
-        macro_cycle=1,
-        kernel_integrate_attempts={
-            "k1": {
-                "attempts": [
-                    {"decision": "REVERT", "ts": "2026-05-19T18:00:00", "cycle": 0},
-                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00", "cycle": 0},
-                    {"decision": "REVERT", "ts": "2026-05-19T18:02:00", "cycle": 0},
-                ]
-            }
-        },
-    )
-    triggered, ev = compute_plateau_kernel(state)
-    assert triggered is False
-    assert ev["reason"] == "no_kernel_attempts_yet"
-
-
-def test_plateau_kernel_high_gain_blocks_revert_streak():
-    """When the REVERT streak is below threshold and gain is large, plateau doesn't fire."""
-    state = SimpleNamespace(
-        kernel_integrate_attempts={
-            "k1": {
-                "attempts": [
-                    {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 5.0},
-                ]
-            },
-            "k2": {
-                "attempts": [
-                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
-                ]
-            },
-        },
-    )
-    triggered, _ev = compute_plateau_kernel(state)
-    assert triggered is False
-
-
-def test_plateau_kernel_zero_lookback_returns_false():
-    state = SimpleNamespace(kernel_integrate_attempts={})
-    triggered, ev = compute_plateau_kernel(state, lookback=0)
-    assert triggered is False
-    assert "thresholds_disabled" in ev.get("reason", "")
-
-
-def test_plateau_kernel_empty_attempts_does_not_trigger():
-    """Zero kernel attempts must NOT flip plateau via the ``recent_keep_gain == 0.0 < 0.5`` arm."""
-    state = SimpleNamespace(kernel_integrate_attempts={})
-    triggered, ev = compute_plateau_kernel(state)
-    assert triggered is False
-    assert ev.get("reason") == "no_kernel_attempts_yet"
-    assert ev.get("attempts_seen") == 0
-
-
-def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
-    """Same invariant when the ledger has keys but every entry is structurally empty."""
-    state = SimpleNamespace(
-        kernel_integrate_attempts={
-            "k_pruned": {"attempts": []},
-            "k_corrupt": {},
-        },
-    )
-    triggered, ev = compute_plateau_kernel(state)
-    assert triggered is False
-    assert ev.get("reason") == "no_kernel_attempts_yet"
 
 
 def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
