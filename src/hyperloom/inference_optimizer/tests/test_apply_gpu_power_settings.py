@@ -92,7 +92,7 @@ def _apply(tmp_path, monkeypatch, *, observed=None, vram=None, mask="4,5,6,7", s
     reads = iter(observed or [_cards(), _cards()])
     kw.setdefault("power_cap_w", 1000.0)
     kw.setdefault("perf_level", None)
-    out = apply_declared_gpu_power_settings(
+    restore, applied, error = apply_declared_gpu_power_settings(
         nodes=kw.pop("nodes", 1),
         owner="sess",
         ledger_dir=tmp_path,
@@ -102,7 +102,7 @@ def _apply(tmp_path, monkeypatch, *, observed=None, vram=None, mask="4,5,6,7", s
         restore=lambda originals: restore_gpu_power_settings(originals, run=smi),
         **kw,
     )
-    return (*out, smi)
+    return restore, applied, error, smi
 
 
 class TestApplyDeclared:

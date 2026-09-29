@@ -90,7 +90,8 @@ def test_samples_nothing_outside_the_measured_phase(tmp_path):
     frozen = query.calls
     time.sleep(0.05)
     assert query.calls == frozen
-    assert recorder.close()["avg_power_w"] == 800.0
+    out = recorder.close()
+    assert out["avg_power_w"] == 800.0
 
 
 def test_visible_mask_limits_the_cards_considered(tmp_path):
@@ -98,7 +99,8 @@ def test_visible_mask_limits_the_cards_considered(tmp_path):
     recorder = GpuPowerRecorder(output_path=None, gpus={2, 3}, query=query, interval_sec=0.5)
     recorder._interval = 0.01
     _run_measured(recorder, query, samples=2)
-    assert recorder.close()["serving_gpus"] == [2, 3]
+    out = recorder.close()
+    assert out["serving_gpus"] == [2, 3]
 
 
 def test_query_failures_leave_the_round_unmeasured_not_zero(tmp_path):

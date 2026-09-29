@@ -264,7 +264,7 @@ class PowerSettingsLease:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             for gpu in sorted(gpus):
-                fd = os.open(self._dir / f"gpu{gpu}.json", os.O_RDWR | os.O_CREAT, 0o644)
+                fd = os.open(self._dir / f"gpu{gpu}.json", os.O_RDWR | os.O_CREAT, 0o600)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
