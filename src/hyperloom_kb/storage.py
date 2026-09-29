@@ -111,6 +111,9 @@ class SchemaRegistry(Protocol):
     def get_schema(self, schema_ref: str) -> ExperienceDeclaration | None:
         """Return one exact declaration, or ``None`` when it is unknown."""
 
+    def list_schemas(self) -> tuple[ExperienceDeclaration, ...]:
+        """Return every registered declaration in stable schema_ref order."""
+
 
 def _experience_id(value: str) -> str:
     if not isinstance(value, str) or not _EXPERIENCE_ID_RE.fullmatch(value):
@@ -154,6 +157,10 @@ class InMemorySchemaRegistry:
         _schema_digest(schema_ref)
         with self._lock:
             return self._schemas.get(schema_ref)
+
+    def list_schemas(self) -> tuple[ExperienceDeclaration, ...]:
+        with self._lock:
+            return tuple(self._schemas[schema_ref] for schema_ref in sorted(self._schemas))
 
 
 class InMemoryExperienceStore:
@@ -272,6 +279,17 @@ class LocalSchemaRegistry:
         if declaration.schema_ref != schema_ref:
             raise StorageContractError("registered schema content does not match schema_ref")
         return declaration
+
+    def list_schemas(self) -> tuple[ExperienceDeclaration, ...]:
+        if not self.schemas.exists():
+            return ()
+        declarations = []
+        for path in self.schemas.glob("*.json"):
+            try:
+                declarations.append(ExperienceDeclaration.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+            except (OSError, ValueError) as exc:
+                raise StorageContractError(f"registered schema {path.name} is invalid: {exc}") from exc
+        return tuple(sorted(declarations, key=lambda declaration: declaration.schema_ref))
 
 
 class LocalExperienceStore:

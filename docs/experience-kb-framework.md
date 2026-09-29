@@ -89,14 +89,19 @@ the run continues; its writes are spooled under
 `$USER_DATA_PATH/experience-kb/spool` and sent by the next launch that finds
 the service serving. A restarted service serves every Experience it stored
 before it stopped, so a later run reads what an earlier one wrote. A service
-already listening on that port must answer with this workspace's token and the
-packaged declaration, otherwise the start is refused.
+already listening on that port must answer with this workspace's token,
+otherwise the start is refused; one that does but serves another declaration or
+was started with other settings is restarted with the current ones.
+
+A service holds every schema written to it: each write carries its
+declaration, so a workspace that moves to a new declaration keeps the
+Experiences of the old one. A run's reads search only the schema it writes.
+Push sends Experiences of every schema; pull fetches the global KB's
+Experiences for each schema the workspace holds.
 
 The service plans reads through the Anthropic-side gateway in `.env`
 (`ANTHROPIC_BASE_URL`, its key, and `CLAUDE_MODEL`). Without one it still
-accepts writes, and reads report `unavailable`. It keeps the environment it was
-started with, so stop the `hyperloom_kb.http_service` process after changing
-those values; the next launch starts it again.
+accepts writes, and reads report `unavailable`.
 
 Publication is disabled only when `HYPERLOOM_KB_URL` is unset. The
 `hyperloom_kb` package ships inside Hyperloom. CLI startup fails when the

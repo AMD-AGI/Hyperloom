@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import socket
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,7 +27,16 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import _patch_material
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
-from hyperloom_kb import ConfigurationError, RemoteClient, RemoteConfig
+from hyperloom_kb import (
+    PACKAGED_DECLARATION,
+    ConfigurationError,
+    ExperienceHTTPService,
+    HTTPServiceConfig,
+    RemoteClient,
+    RemoteConfig,
+    create_http_server,
+    load_declaration,
+)
 
 _AUTHORING_REF = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
 
@@ -295,6 +307,62 @@ def test_a_later_run_reads_what_an_earlier_run_wrote_after_the_service_restarts(
     # ``experience_count`` counts the corpus every read searches.
     assert second_run.health["experience_count"] == len(written) > 0
     assert listed == written
+
+
+def _workspace(monkeypatch, root: Path) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("HYPERLOOM_KB_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", f"{root.name}-token")
+    monkeypatch.setenv("USER_DATA_PATH", str(root))
+
+
+def _stop_workspace_service() -> None:
+    service = experience_kb_service.ensure_service()
+    assert service is not None
+    os.kill(int(service.health["pid"]), signal.SIGTERM)
+
+
+def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
+    monkeypatch, session_dir: Path, tmp_path: Path
+) -> None:
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    declaration = load_declaration(PACKAGED_DECLARATION)
+    global_kb = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None)
+    server = create_http_server(global_kb, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    try:
+        monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_URL", f"http://127.0.0.1:{server.server_address[1]}")
+        monkeypatch.setenv("HYPERLOOM_GLOBAL_KB_TOKEN", "global-token")
+        monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+
+        _workspace(monkeypatch, tmp_path / "first")
+        try:
+            experience_collect.collect_session(session_dir, _breakdown(session_dir))
+        finally:
+            _stop_workspace_service()
+        receipt = json.loads((session_dir / experience_collect.RECEIPT).read_text(encoding="utf-8"))
+        written = {row["experience_id"] for row in receipt["collected"]}
+        shared = {str(item["experience_id"]) for item in global_kb.list_experiences()["items"]}
+
+        _workspace(monkeypatch, tmp_path / "second")
+        try:
+            assert experience_kb_service.main(["pull"]) == 0
+            config = RemoteConfig.from_env()
+            assert config is not None
+            pulled = {str(item["experience_id"]) for item in RemoteClient(config).list_experiences().items}
+        finally:
+            _stop_workspace_service()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert written and shared == written
+    assert pulled == written
 
 
 def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:

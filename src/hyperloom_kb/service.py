@@ -33,6 +33,9 @@ class ExperienceService:
     def get_schema(self, schema_ref: str) -> ExperienceDeclaration | None:
         return self._schemas.get_schema(schema_ref)
 
+    def list_schemas(self) -> tuple[ExperienceDeclaration, ...]:
+        return self._schemas.list_schemas()
+
     def submit_complete(self, experience: Experience) -> InsertResult:
         if experience.status is not ExperienceStatus.COMPLETE:
             raise CompleteExperienceRequired("submit_complete requires a complete Experience")

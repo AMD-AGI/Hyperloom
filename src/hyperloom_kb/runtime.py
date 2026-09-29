@@ -20,6 +20,7 @@ from hyperloom_kb.remote import (
 from hyperloom_kb.schema import (
     Alternative,
     Change,
+    ExperienceDeclaration,
     JsonValue,
     Outcome,
     RenderedRef,
@@ -86,8 +87,12 @@ def experience_kb_from_env(
     env: Mapping[str, str] | None = None,
     *,
     spool_root: Path | None = None,
+    declaration: ExperienceDeclaration | None = None,
 ) -> ConfiguredExperienceKB:
-    """Bootstrap the Experience service named by ``HYPERLOOM_KB_URL``, or a no-op facade."""
+    """Bootstrap the Experience service named by ``HYPERLOOM_KB_URL``, or a no-op facade.
+
+    The collector writes ``declaration``'s schema, the packaged one by default; the service registers it on first write.
+    """
 
     remote_config = RemoteConfig.from_env(os.environ if env is None else env, spool_root=spool_root)
     if remote_config is None:
@@ -97,7 +102,7 @@ def experience_kb_from_env(
         client.flush_spool()
     except (RemoteClientError, OSError) as exc:
         log.warning("Experience service spool flush deferred: %s", exc)
-    return RemoteExperienceKB(client, load_declaration(PACKAGED_DECLARATION))
+    return RemoteExperienceKB(client, declaration or load_declaration(PACKAGED_DECLARATION))
 
 
 __all__ = [

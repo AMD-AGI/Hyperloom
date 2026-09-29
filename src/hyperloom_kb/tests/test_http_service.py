@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -252,6 +253,9 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "status": "ok",
         "schema_ref": schema.schema_ref,
         "experience_count": 1,
+        "schemas": {schema.schema_ref: 1},
+        "pid": os.getpid(),
+        "config_digest": "",
     }
 
 

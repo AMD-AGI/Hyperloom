@@ -37,6 +37,7 @@ from hyperloom_kb.schema import (
 log = logging.getLogger(__name__)
 
 _PERMANENT_HTTP_STATUSES = frozenset({HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT})
+_SYNC_COUNTS = ("created", "unchanged", "skipped")
 
 
 class RemoteClientError(RuntimeError):
@@ -165,12 +166,15 @@ class RemoteClient:
         *,
         outcome: str | None = None,
         limit: int | None = None,
+        schema_ref: str | None = None,
     ) -> RemoteReadResult:
         body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
         if outcome is not None:
             body["outcome"] = outcome
         if limit is not None:
             body["limit"] = limit
+        if schema_ref is not None:
+            body["schema_ref"] = schema_ref
         try:
             payload = self._request("POST", "/v1/read", body)
             refs = payload.get("rendered_refs")
@@ -195,18 +199,29 @@ class RemoteClient:
                 warnings=(str(exc),),
             )
 
-    def publish(self, experience: Experience) -> RemoteWriteResult:
-        """Write one complete Experience; spool only retryable failures."""
-
+    @staticmethod
+    def _write_body(experience: Experience, declaration: ExperienceDeclaration | None) -> dict[str, JsonValue]:
         body: dict[str, JsonValue] = {"experience": experience.to_dict()}
+        if declaration is not None:
+            body["declaration"] = declaration.to_dict()
+        return body
+
+    def write(self, experience: Experience, *, declaration: ExperienceDeclaration | None = None) -> RemoteWriteResult:
+        """Write one complete Experience, raising on any failure; ``declaration`` registers a schema the service lacks."""
+
+        payload = self._request("PUT", f"/v1/experiences/{experience.id}", self._write_body(experience, declaration))
+        return self._write_result(payload, experience.id)
+
+    def publish(self, experience: Experience, *, declaration: ExperienceDeclaration | None = None) -> RemoteWriteResult:
+        """Write one complete Experience; spool only retryable failures, with the declaration they need later."""
+
         try:
-            payload = self._request("PUT", f"/v1/experiences/{experience.id}", body)
+            return self.write(experience, declaration=declaration)
         except RemoteClientError as exc:
             if not exc.retryable:
                 raise
-            self._spool(experience.id, body)
+            self._spool(experience.id, self._write_body(experience, declaration))
             return RemoteWriteResult("spooled", experience.id)
-        return self._write_result(payload, experience.id)
 
     def _spool(self, experience_id: str, body: dict[str, JsonValue]) -> None:
         root = self.config.spool_root
@@ -259,27 +274,32 @@ class RemoteClient:
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
                 experience = Experience.from_dict(value["experience"])
+                declaration = (
+                    None if "declaration" not in value else ExperienceDeclaration.from_dict(value["declaration"])
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 self._reject_spooled(path, f"unreadable spool file: {exc}")
                 continue
             try:
-                payload = self._request(
-                    "PUT",
-                    f"/v1/experiences/{experience.id}",
-                    {"experience": experience.to_dict()},
-                )
+                result = self.write(experience, declaration=declaration)
             except RemoteClientError as exc:
                 if exc.retryable:
                     break
                 self._reject_spooled(path, str(exc))
                 continue
             path.unlink()
-            results.append(self._write_result(payload, experience.id))
+            results.append(result)
         return tuple(results)
 
-    def list_experiences(self, *, after: int = 0, limit: int = 100) -> ListPage:
-        query = urllib.parse.urlencode({"after": after, "limit": limit})
-        payload = self._request("GET", f"/v1/list?{query}")
+    @staticmethod
+    def _page_query(after: int, limit: int, schema_ref: str | None) -> str:
+        values: dict[str, str | int] = {"after": after, "limit": limit}
+        if schema_ref is not None:
+            values["schema_ref"] = schema_ref
+        return urllib.parse.urlencode(values)
+
+    def list_experiences(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> ListPage:
+        payload = self._request("GET", f"/v1/list?{self._page_query(after, limit, schema_ref)}")
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience list response is invalid")
@@ -288,6 +308,42 @@ class RemoteClient:
             next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
             has_more=payload.get("has_more") is True,
         )
+
+    def export_page(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> ListPage:
+        """One page of complete records, ``{"sequence", "experience"}``, in the service's write order."""
+
+        payload = self._request("GET", f"/v1/export?{self._page_query(after, limit, schema_ref)}")
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise RemoteClientError("Experience export response is invalid")
+        return ListPage(
+            items=tuple(item for item in items if isinstance(item, dict)),
+            next_cursor=_int(payload.get("next_cursor"), "next_cursor"),
+            has_more=payload.get("has_more") is True,
+        )
+
+    def push(self) -> dict[str, JsonValue]:
+        """Ask this service to send every Experience written here and not yet pushed to its global KB."""
+
+        return self._sync("/v1/push")
+
+    def pull(self) -> dict[str, JsonValue]:
+        """Ask this service to store every global-KB Experience of its declaration it does not hold yet."""
+
+        return self._sync("/v1/pull")
+
+    def _sync(self, path: str) -> dict[str, JsonValue]:
+        # Each request handles one bounded batch, so no single request outlives the client timeout.
+        totals = dict.fromkeys(_SYNC_COUNTS, 0)
+        rejected: list[JsonValue] = []
+        while True:
+            report = self._request("POST", path, {})
+            for key in _SYNC_COUNTS:
+                totals[key] += _int(report.get(key, 0), key)
+            batch_rejected = report.get("rejected")
+            rejected.extend(batch_rejected if isinstance(batch_rejected, list) else ())
+            if report.get("status") != "completed" or report.get("has_more") is not True:
+                return {**report, **totals, "rejected": rejected}
 
 
 class RemoteExperienceSession:
@@ -342,7 +398,7 @@ class RemoteExperienceSession:
         return self._experience
 
     def publish(self) -> RemoteWriteResult:
-        return self._client.publish(self._experience)
+        return self._client.publish(self._experience, declaration=self._declaration)
 
 
 class RemoteExperienceKB:
@@ -416,7 +472,7 @@ class RemoteExperienceKB:
         outcome: str | None = None,
         limit: int | None = None,
     ) -> RemoteReadResult:
-        return self.client.read(decision, context, outcome=outcome, limit=limit)
+        return self.client.read(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref)
 
 
 __all__ = [

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import logging
@@ -31,7 +32,6 @@ from hyperloom_kb.knowledge_read import (
     PlannerConfiguration,
     PlannerGatewayConfig,
     QueryExecutor,
-    QueryPlanValidationError,
     ReadStatus,
     ReadTrace,
 )
@@ -41,6 +41,7 @@ from hyperloom_kb.query_view import (
     QueryViewBuilder,
     RetrievalCapability,
 )
+from hyperloom_kb.remote import RemoteClient, RemoteConfig
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
@@ -48,19 +49,17 @@ from hyperloom_kb.retrieval_policy import (
     RetrievalConfiguration,
 )
 from hyperloom_kb.schema import Experience, ExperienceDeclaration, JsonValue
-from hyperloom_kb.service import (
-    CompleteExperienceRequired,
-    ExperienceService,
-    UnknownSchemaRef,
-)
+from hyperloom_kb.service import ExperienceService
 from hyperloom_kb.storage import (
     ImmutableExperienceConflict,
+    StorageContractError,
     InMemoryExperienceStore,
     InsertStatus,
     LocalExperienceStore,
     LocalSchemaRegistry,
     StoredExperience,
 )
+from hyperloom_kb.sync import GlobalSync, SyncLedger, SyncUnavailable, global_config_from_env
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +67,13 @@ MIXED_OUTCOME = "mixed"
 DEFAULT_READ_LIMIT = 10
 MAX_READ_LIMIT = 100
 MAX_LIST_LIMIT = 500
+# Complete records carry patch content, so an export page stays far smaller than a summary page.
+MAX_EXPORT_LIMIT = 100
 READ_POLICY_VERSION = "shared-experience-read@v1"
 DEFAULT_HOME = Path("~/.local/share/hyperloom-kb").expanduser()
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
-_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit"})
-_WRITE_FIELDS = frozenset({"experience"})
+_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref"})
+_WRITE_FIELDS = frozenset({"experience", "declaration"})
 
 
 class HTTPServiceError(ValueError):
@@ -91,6 +92,44 @@ def _canonical(value: Any) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class ServiceSettings:
+    """What the service takes from its environment at start, besides its token."""
+
+    planner: PlannerGatewayConfig | None
+    planner_problem: str
+    global_kb: RemoteConfig | None
+    global_problem: str
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> ServiceSettings:
+        planner: PlannerGatewayConfig | None = None
+        global_kb: RemoteConfig | None = None
+        planner_problem = global_problem = ""
+        try:
+            planner = PlannerGatewayConfig.from_env(env)
+        except ValueError as exc:
+            planner_problem = str(exc)
+        try:
+            global_kb = global_config_from_env(env)
+        except SyncUnavailable as exc:
+            global_problem = str(exc)
+        return cls(planner, planner_problem, global_kb, global_problem)
+
+    def digest(self) -> str:
+        """Equal digests mean two environments start behaviorally identical services, whatever their spelling."""
+
+        planner = self.planner
+        values = {
+            "planner": None
+            if planner is None
+            else [planner.base_url, planner.api_key, planner.model, planner.timeout_seconds, planner.max_output_tokens],
+            "global": None if self.global_kb is None else [self.global_kb.base_url, self.global_kb.token],
+            "problems": [self.planner_problem, self.global_problem],
+        }
+        return hashlib.sha256(_canonical(values).encode()).hexdigest()
 
 
 def _required_text(value: Any, name: str) -> str:
@@ -123,6 +162,11 @@ def _query_int(query: Mapping[str, list[str]], name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise HTTPServiceError(f"{name} must be an integer") from exc
+
+
+def _query_text(query: Mapping[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    return _required_text(values[0], name) if values else None
 
 
 def _reject_unknown(body: Mapping[str, JsonValue], allowed: frozenset[str]) -> None:
@@ -193,19 +237,21 @@ class ExperienceIndex:
 
     def page(
         self,
-        schema_ref: str,
+        schema_ref: str | None,
         *,
         after: int,
         limit: int,
     ) -> tuple[tuple[tuple[int, str], ...], int, bool]:
+        """One page in write order, of one schema or, with ``schema_ref=None``, of every schema."""
+
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT sequence, experience_id FROM experiences
-                WHERE schema_ref = ? AND sequence > ?
+                WHERE (? IS NULL OR schema_ref = ?) AND sequence > ?
                 ORDER BY sequence LIMIT ?
                 """,
-                (schema_ref, after, limit + 1),
+                (schema_ref, schema_ref, after, limit + 1),
             ).fetchall()
         page = tuple((int(row["sequence"]), str(row["experience_id"])) for row in rows[:limit])
         return page, page[-1][0] if page else after, len(rows) > limit
@@ -231,16 +277,24 @@ def _completion_order(record: StoredExperience) -> tuple[str, str]:
 
 
 class ExperienceHTTPService:
-    """Write, read, and list one authoritative shared Experience corpus."""
+    """Write, read, and list one authoritative Experience corpus holding any number of schemas.
+
+    ``declaration`` is the schema a read searches when it names none; every other registered schema is stored,
+    listed, exported, and synced the same way.
+    """
 
     def __init__(
         self,
         config: HTTPServiceConfig,
         declaration: ExperienceDeclaration,
         planner: LLMQueryPlanner | None,
+        *,
+        global_kb: RemoteClient | None = None,
+        config_digest: str = "",
     ) -> None:
         self.config = config
         self.declaration = declaration
+        self._config_digest = config_digest
         canonical_root = config.home / "canonical"
         self._store = LocalExperienceStore(canonical_root)
         self._experience_service = ExperienceService(
@@ -252,20 +306,45 @@ class ExperienceHTTPService:
         self._planner = planner
         self._write_lock = threading.RLock()
         self._mirror = InMemoryExperienceStore()
-        records = self._store.list_experiences(declaration.schema_ref)
-        indexed = self._index.indexed_ids(declaration.schema_ref)
+        self._declarations: dict[str, ExperienceDeclaration] = {}
+        self._views: dict[str, QueryView] = {}
+        for registered in self._experience_service.list_schemas():
+            self._load(registered)
+        self._sync = GlobalSync(self, SyncLedger(config.home / "sync.sqlite3"), global_kb)
+
+    def _load(self, declaration: ExperienceDeclaration) -> None:
+        schema_ref = declaration.schema_ref
+        records = self._store.list_experiences(schema_ref)
+        indexed = self._index.indexed_ids(schema_ref)
         for record in sorted(records, key=_completion_order):
             self._mirror.insert_complete(record.experience)
             if record.experience.id not in indexed:
-                self._index.register(record.experience.id, declaration.schema_ref)
-        self._view = self._build_view()
+                self._index.register(record.experience.id, schema_ref)
+        self._declarations[schema_ref] = declaration
+        self._views[schema_ref] = self._build_view(declaration)
 
-    def _build_view(self) -> QueryView:
+    def _build_view(self, declaration: ExperienceDeclaration) -> QueryView:
         return QueryViewBuilder().build(
-            self.declaration,
-            self._mirror.list_experiences(self.declaration.schema_ref),
+            declaration,
+            self._mirror.list_experiences(declaration.schema_ref),
             fuzzy_ready=True,
         )
+
+    @property
+    def schema_refs(self) -> tuple[str, ...]:
+        return tuple(sorted(self._declarations))
+
+    def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
+        declaration = self._declarations.get(schema_ref)
+        if declaration is None:
+            raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
+        return declaration
+
+    def register(self, declaration: ExperienceDeclaration) -> None:
+        with self._write_lock:
+            if declaration.schema_ref not in self._declarations:
+                self._experience_service.register_schema(declaration)
+                self._load(declaration)
 
     def _stored(self, experience_id: str) -> Experience:
         stored = self._mirror.get_experience(experience_id)
@@ -277,23 +356,26 @@ class ExperienceHTTPService:
         outcome = self._stored(experience_id).outcome
         return outcome.decision if outcome is not None else ""
 
-    def _outcome(self, value: Any) -> str:
+    def _outcome(self, value: Any, declaration: ExperienceDeclaration) -> str:
         outcome = MIXED_OUTCOME if value is None else _required_text(value, "outcome")
-        allowed = (*self.declaration.decisions, MIXED_OUTCOME)
+        allowed = (*declaration.decisions, MIXED_OUTCOME)
         if outcome not in allowed:
             raise HTTPServiceError(f"outcome must be one of: {', '.join(allowed)}")
         return outcome
 
-    def write(self, experience: Experience) -> dict[str, JsonValue]:
-        if experience.schema_ref != self.declaration.schema_ref:
-            raise HTTPServiceError(
-                f"Experience schema_ref must be the service declaration {self.declaration.schema_ref}"
-            )
+    def write(self, experience: Experience, declaration: ExperienceDeclaration | None = None) -> dict[str, JsonValue]:
+        """Store one complete Experience; ``declaration`` registers its schema when this service lacks it."""
+
+        if declaration is not None:
+            if declaration.schema_ref != experience.schema_ref:
+                raise HTTPServiceError("declaration does not derive the Experience schema_ref")
+            self.register(declaration)
+        schema = self.declaration_for(experience.schema_ref)
         with self._write_lock:
             result = self._experience_service.submit_complete(experience)
             if self._mirror.get_experience(experience.id) is None:
                 self._mirror.insert_complete(result.record.experience)
-                self._view = self._build_view()
+                self._views[schema.schema_ref] = self._build_view(schema)
             self._index.register(experience.id, experience.schema_ref)
         return {
             "status": result.status.value,
@@ -321,11 +403,15 @@ class ExperienceHTTPService:
         context: dict[str, JsonValue],
         outcome: str | None = None,
         limit: int = DEFAULT_READ_LIMIT,
+        schema_ref: str | None = None,
     ) -> dict[str, JsonValue]:
+        """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another."""
+
         decision = _required_text(decision, "decision")
-        selected_outcome = self._outcome(outcome)
+        declaration = self.declaration_for(schema_ref or self.declaration.schema_ref)
+        selected_outcome = self._outcome(outcome, declaration)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
-        view = self._view
+        view = self._views[declaration.schema_ref]
         if selected_outcome != MIXED_OUTCOME:
             view = QueryViewBuilder().restrict(
                 view,
@@ -355,7 +441,7 @@ class ExperienceHTTPService:
         views.publish_view(view)
         provider_refs = {RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF}
         configuration = RetrievalConfiguration.create(
-            self.declaration.schema_ref,
+            declaration.schema_ref,
             READ_POLICY_VERSION,
             limits={capability: eligible_count for capability in RetrievalCapability},
             provider_refs=provider_refs,
@@ -374,7 +460,7 @@ class ExperienceHTTPService:
         )
         traces: list[ReadTrace] = []
         result = KnowledgeReadService(
-            self.declaration,
+            declaration,
             executor,
             configuration,
             planner=self._planner,
@@ -413,24 +499,50 @@ class ExperienceHTTPService:
         *,
         after: int = 0,
         limit: int = 100,
+        schema_ref: str | None = None,
     ) -> dict[str, JsonValue]:
         after = _bounded_int(after, "after", minimum=0)
         limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_LIST_LIMIT)
-        page, next_cursor, has_more = self._index.page(
-            self.declaration.schema_ref,
-            after=after,
-            limit=limit,
-        )
+        page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
         items: list[JsonValue] = [
             {"sequence": sequence, **_summary(self._stored(experience_id))} for sequence, experience_id in page
         ]
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
+    def records_after(
+        self, after: int, limit: int, schema_ref: str | None = None
+    ) -> tuple[tuple[tuple[int, Experience], ...], int, bool]:
+        """Complete Experiences in write order after the ``after`` sequence, of one schema or of all of them."""
+
+        page, next_cursor, has_more = self._index.page(schema_ref, after=after, limit=limit)
+        return tuple((sequence, self._stored(experience_id)) for sequence, experience_id in page), next_cursor, has_more
+
+    def export(
+        self, *, after: int = 0, limit: int = MAX_EXPORT_LIMIT, schema_ref: str | None = None
+    ) -> dict[str, JsonValue]:
+        after = _bounded_int(after, "after", minimum=0)
+        limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_EXPORT_LIMIT)
+        records, next_cursor, has_more = self.records_after(after, limit, schema_ref)
+        items: list[JsonValue] = [
+            {"sequence": sequence, "experience": experience.to_dict()} for sequence, experience in records
+        ]
+        return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+
+    def push(self) -> dict[str, JsonValue]:
+        return self._sync.push()
+
+    def pull(self) -> dict[str, JsonValue]:
+        return self._sync.pull()
+
     def health(self) -> dict[str, JsonValue]:
+        counts = {schema_ref: len(view.visible_experience_ids) for schema_ref, view in sorted(self._views.items())}
         return {
             "status": "ok",
             "schema_ref": self.declaration.schema_ref,
-            "experience_count": len(self._view.visible_experience_ids),
+            "experience_count": sum(counts.values()),
+            "schemas": dict(counts),
+            "pid": os.getpid(),
+            "config_digest": self._config_digest,
         }
 
 
@@ -484,13 +596,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 app.list_experiences(
                     after=_query_int(query, "after", 0),
                     limit=_query_int(query, "limit", 100),
+                    schema_ref=_query_text(query, "schema_ref"),
                 ),
             )
+            return
+        if self.command == "GET" and parsed.path == "/v1/export":
+            self._write(
+                HTTPStatus.OK,
+                app.export(
+                    after=_query_int(query, "after", 0),
+                    limit=_query_int(query, "limit", MAX_EXPORT_LIMIT),
+                    schema_ref=_query_text(query, "schema_ref"),
+                ),
+            )
+            return
+        if self.command == "POST" and parsed.path in ("/v1/push", "/v1/pull"):
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.push() if parsed.path == "/v1/push" else app.pull())
             return
         if self.command == "POST" and parsed.path == "/v1/read":
             body = self._body()
             _reject_unknown(body, _READ_FIELDS)
             outcome = body.get("outcome")
+            schema_ref = body.get("schema_ref")
             self._write(
                 HTTPStatus.OK,
                 app.read(
@@ -503,6 +631,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         minimum=1,
                         maximum=MAX_READ_LIMIT,
                     ),
+                    schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
                 ),
             )
             return
@@ -513,7 +642,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             experience = Experience.from_dict(body.get("experience"))
             if experience.id != parsed.path.removeprefix(prefix):
                 raise HTTPServiceError("Experience path id differs from payload")
-            self._write(HTTPStatus.OK, app.write(experience))
+            declaration = body.get("declaration")
+            self._write(
+                HTTPStatus.OK,
+                app.write(experience, None if declaration is None else ExperienceDeclaration.from_dict(declaration)),
+            )
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -522,7 +655,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._dispatch()
         except ImmutableExperienceConflict as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "conflict", "detail": str(exc)})
-        except (ValueError, UnknownSchemaRef, CompleteExperienceRequired) as exc:
+        except SyncUnavailable as exc:
+            self._write(HTTPStatus.CONFLICT, {"error": "sync_unavailable", "detail": str(exc)})
+        except (ValueError, StorageContractError) as exc:
             self._write(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
         except Exception as exc:
             log.exception("Experience service request failed: %s %s", self.command, self.path)
@@ -567,18 +702,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    planner: LLMQueryPlanner | None
-    try:
-        gateway = PlannerGatewayConfig.from_env(os.environ)
-    except QueryPlanValidationError as exc:
-        log.warning("Experience reads are unavailable until a planner gateway is configured: %s", exc)
-        planner = None
+    settings = ServiceSettings.from_env(os.environ)
+    planner: LLMQueryPlanner | None = None
+    if settings.planner is None:
+        log.warning(
+            "Experience reads are unavailable until a planner gateway is configured: %s", settings.planner_problem
+        )
     else:
-        planner = LLMQueryPlanner(AnthropicPlannerBackend(gateway), PlannerConfiguration.create(gateway.model))
+        planner = LLMQueryPlanner(
+            AnthropicPlannerBackend(settings.planner), PlannerConfiguration.create(settings.planner.model)
+        )
+    if settings.global_problem:
+        log.warning("Push and pull are unavailable: %s", settings.global_problem)
     app = ExperienceHTTPService(
         HTTPServiceConfig(args.home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
         load_declaration(args.declaration),
         planner,
+        global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
+        config_digest=settings.digest(),
     )
     for seed in args.seed_jsonl:
         log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
@@ -606,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "DEFAULT_READ_LIMIT",
+    "MAX_EXPORT_LIMIT",
     "MAX_READ_LIMIT",
     "MIXED_OUTCOME",
     "ExperienceHTTPServer",
@@ -614,6 +756,7 @@ __all__ = [
     "HTTPServiceConfig",
     "HTTPServiceError",
     "RequestHandler",
+    "ServiceSettings",
     "create_http_server",
     "main",
 ]

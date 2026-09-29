@@ -396,9 +396,10 @@ def collect(
 ) -> CollectReport:
     """Project every unit of ``document`` through ``mapping`` and publish the results.
 
-    Without ``kb`` the target comes from :func:`experience_kb_from_env`; an
-    unconfigured environment returns a disabled report and writes nothing. A
-    dry run projects and validates without touching any KB.
+    Without ``kb`` the target comes from :func:`experience_kb_from_env` and
+    writes the mapping's own declaration; an unconfigured environment returns a
+    disabled report and writes nothing. A dry run projects and validates without
+    touching any KB.
     """
 
     compiled = mapping if isinstance(mapping, CollectMapping) else load_mapping(mapping)
@@ -410,7 +411,7 @@ def collect(
 
     target: CollectionTarget | None = None
     if not dry_run:
-        target = experience_kb_from_env() if kb is None else kb
+        target = experience_kb_from_env(declaration=compiled.declaration) if kb is None else kb
         if not target.enabled:
             report = CollectReport(compiled.reference, schema_ref, document_ref, dry_run, False)
             if receipt is not None:

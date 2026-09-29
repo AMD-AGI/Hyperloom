@@ -7,23 +7,30 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import yaml
 
+import hyperloom_kb
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
     ExperienceDeclaration,
     ExperienceHTTPService,
     FieldDeclaration,
     HTTPServiceConfig,
+    LocalService,
     LocalServiceError,
     ObjectiveDeclaration,
     ObjectiveDirection,
     RemoteConfig,
+    ServiceSettings,
     create_http_server,
     ensure_local_service,
     is_loopback,
@@ -37,6 +44,15 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _reachable(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        time.sleep(0.1)
+        return False
 
 
 def _config(port: int, tmp_path: Path) -> RemoteConfig:
@@ -88,17 +104,84 @@ def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp
     assert not home.exists()
 
 
-def test_a_service_with_another_declaration_is_refused(tmp_path: Path) -> None:
-    other = ExperienceDeclaration(
+def _other_declaration() -> ExperienceDeclaration:
+    return ExperienceDeclaration(
         identity=(FieldDeclaration("model", "Model."),),
         baseline_identity=(FieldDeclaration("config", "Config."),),
         change_identity=(FieldDeclaration("knob", "Knob."),),
         objectives=(ObjectiveDeclaration("throughput@v1", ObjectiveDirection.HIGHER_IS_BETTER, "T."),),
         decisions=("keep", "revert", "failed"),
     )
-    with _serving(tmp_path, other, TOKEN) as port:
-        with pytest.raises(LocalServiceError, match="stop that service"):
+
+
+def test_a_stale_service_inside_this_process_is_refused_rather_than_signalled(tmp_path: Path) -> None:
+    with _serving(tmp_path, _other_declaration(), TOKEN) as port:
+        with pytest.raises(LocalServiceError, match="no process to restart"):
             ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=_env_without_planner_gateway(tmp_path))
+
+
+def _stop(service: LocalService) -> None:
+    if service.process is not None:
+        service.process.terminate()
+        service.process.wait(timeout=10)
+
+
+def test_a_service_started_with_other_settings_is_restarted_with_the_launch_settings(tmp_path: Path) -> None:
+    config = _config(_free_port(), tmp_path)
+    home = tmp_path / "home"
+    before = _env_without_planner_gateway(tmp_path)
+    after = {**before, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "global"}
+    first = ensure_local_service(config, home, env=before)
+    second = LocalService({})
+    try:
+        second = ensure_local_service(config, home, env=after)
+
+        assert first.process is not None and first.process.wait(timeout=10) is not None
+        assert second.restarted and second.process is not None
+        assert second.health["pid"] == second.process.pid != first.process.pid
+        assert second.health["config_digest"] == ServiceSettings.from_env(after).digest()
+    finally:
+        _stop(first)
+        _stop(second)
+
+
+def test_the_same_settings_spelled_differently_reuse_the_running_service(tmp_path: Path) -> None:
+    config = _config(_free_port(), tmp_path)
+    gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
+    launched = {**_env_without_planner_gateway(tmp_path), **gateway}
+    aliased = {**launched, "ANTHROPIC_AUTH_TOKEN": "key", "ANTHROPIC_MODEL": "m"}
+    first = ensure_local_service(config, tmp_path / "home", env=launched)
+    try:
+        assert ensure_local_service(config, tmp_path / "home", env=aliased).process is None
+    finally:
+        _stop(first)
+
+
+def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_one(tmp_path: Path) -> None:
+    port = _free_port()
+    declaration = tmp_path / "older.yaml"
+    declaration.write_text(yaml.safe_dump(_other_declaration().to_dict(), sort_keys=False), encoding="utf-8")
+    env = _env_without_planner_gateway(tmp_path)
+    older = subprocess.Popen(
+        [sys.executable, "-c", "from hyperloom_kb.http_service import main; raise SystemExit(main())"]
+        + ["--declaration", str(declaration), "--home", str(tmp_path / "older"), "--port", str(port)],
+        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(hyperloom_kb.__file__).parent.parent)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    current = LocalService({})
+    try:
+        while not _reachable(port):
+            assert older.poll() is None
+        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env)
+
+        assert older.wait(timeout=10) is not None
+        assert current.restarted
+        assert current.health["schema_ref"] == load_declaration(PACKAGED_DECLARATION).schema_ref
+    finally:
+        older.kill()
+        older.wait(timeout=10)
+        _stop(current)
 
 
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:

@@ -131,6 +131,62 @@ def test_a_launch_continues_when_the_service_cannot_serve(monkeypatch, caplog) -
     assert "Experience writes are spooled" in caplog.text
 
 
+def _push_report(**overrides: Any) -> dict[str, Any]:
+    return {
+        "status": "completed",
+        "global_url": "https://global.example",
+        "created": 2,
+        "unchanged": 0,
+        "skipped": 0,
+        "rejected": [],
+        **overrides,
+    }
+
+
+def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> None:
+    pushed: list[str] = []
+    monkeypatch.setattr(experience_kb_service, "sync_with_global", lambda direction: pushed.append(direction))
+    monkeypatch.delenv("HYPERLOOM_KB_AUTO_PUSH", raising=False)
+    experience_kb_service.auto_push()
+    assert pushed == []
+
+    monkeypatch.setattr(experience_kb_service, "sync_with_global", lambda direction: _push_report())
+    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+    with caplog.at_level(logging.INFO):
+        experience_kb_service.auto_push()
+    assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 0 rejected" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        LocalServiceError("Experience service exited with status 1"),
+        _push_report(status="incomplete", created=1, error="global KB went away"),
+    ],
+)
+def test_a_failed_auto_push_is_logged_and_never_fails_the_run(monkeypatch, caplog, outcome: Any) -> None:
+    def push(_direction: str) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(experience_kb_service, "sync_with_global", push)
+    monkeypatch.setenv("HYPERLOOM_KB_AUTO_PUSH", "1")
+
+    with caplog.at_level(logging.WARNING):
+        experience_kb_service.auto_push()
+
+    assert "auto push" in caplog.text
+    assert "the next push" in caplog.text
+
+
+def test_push_without_a_global_kb_explains_what_is_missing(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("HYPERLOOM_GLOBAL_KB_URL", raising=False)
+
+    assert experience_kb_service.main(["push"]) == 1
+    assert "HYPERLOOM_GLOBAL_KB_URL is not configured" in capsys.readouterr().err
+
+
 def test_setup_then_launch_start_one_service_for_the_workspace(monkeypatch, tmp_path: Path, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"HYPERLOOM_KB_URL=http://127.0.0.1:{_free_port()}\n", encoding="utf-8")
