@@ -18,7 +18,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskNotFound
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
-from ._optimize_fixtures import FakeCoordinator, optimize_state
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from ._optimize_fixtures import optimize_state
 
 
 def test_the_capped_phases_spend_the_session_on_the_work_phases():
@@ -99,20 +100,32 @@ class _Bus:
         return list(reversed(self.messages[-n:]))
 
 
-class _Stub(FakeCoordinator):
-    """The state the arm reads; the rest resolves to the real collaborators."""
+class _Stub:
+    """Coordinator stand-in: real lazy collaborators, test-controlled state."""
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True, local_explore: bool = True) -> None:
-        state = _state(authoring=authoring, local_explore=local_explore)
-        super().__init__(
-            tmp_path,
-            shared_state=state,
-            state=SimpleNamespace(pending_proposals={}),
-            tasks=_Tasks(),
-            # No GPU pool: the specialist dispatch stays on the research lane.
-            framework_gpu_pool=None,
-            bus=_Bus(),
-        )
+        coord = Coordinator.__new__(Coordinator)
+        coord.session_dir = tmp_path
+        coord.shared_state = _state(authoring=authoring, local_explore=local_explore)
+        coord.state = SimpleNamespace(pending_proposals={})
+        coord.tasks = _Tasks()
+        coord.framework_gpu_pool = None
+        coord.bus = _Bus()
+        coord._warm_specialist_params = self._warm_specialist_params  # type: ignore[method-assign]
+        object.__setattr__(self, "_coord", coord)
+
+    def __getattr__(self, name: str) -> Any:
+        coord = object.__getattribute__(self, "_coord")
+        try:
+            return getattr(coord, name)
+        except AttributeError:
+            return getattr(coord.phase_framework, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_coord":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_coord"), name, value)
 
     async def _warm_specialist_params(self, _params: dict[str, Any]) -> None:
         return None

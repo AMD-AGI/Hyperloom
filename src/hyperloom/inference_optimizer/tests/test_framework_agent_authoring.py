@@ -9,12 +9,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from ._optimize_fixtures import FakeCoordinator, optimize_state
+from ._optimize_fixtures import optimize_state
 
 
 def _state(*, authoring: bool = True) -> SharedState:
@@ -95,26 +96,49 @@ class _BusStub:
         return list(reversed(messages[-n:]))
 
 
-class _Stub(FakeCoordinator):
-    """The state a FRAMEWORK pump tick reads; the rest resolves for real."""
+class _Stub:
+    """Coordinator stand-in: real lazy collaborators, test-controlled state.
+
+    Wraps a ``Coordinator.__new__`` instance so collaborators (phase_framework,
+    etc.) resolve via the real property mechanism while the test-controlled
+    attributes (shared_state, tasks, bus) shadow the coordinator's own.
+    """
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
-        super().__init__(
-            tmp_path,
-            shared_state=_state(authoring=authoring),
-            tasks=_TasksStub(),
-            bus=_BusStub(),
-            backends={"critic": _ApproveCritic()},
-            state=SimpleNamespace(pending_proposals={}),
-            framework_agent_discover_timeout_sec=0.0,
-            # No GPU pool: authoring degrades to the research-lane-only path.
-            framework_gpu_pool=None,
-        )
+        # Borrow the lazy-collaborator machinery without running __init__.
+        coord = Coordinator.__new__(Coordinator)
+        coord.session_dir = tmp_path
+        coord.shared_state = _state(authoring=authoring)
+        coord.tasks = _TasksStub()
+        coord.bus = _BusStub()
+        coord.backends = {"critic": _ApproveCritic()}
+        coord.state = SimpleNamespace(pending_proposals={})
+        coord.framework_agent_discover_timeout_sec = 0.0
+        coord.framework_gpu_pool = None
+        # Override methods the FrameworkPhase calls back through the coordinator.
+        coord._record_observation = self._record_observation  # type: ignore[method-assign]
+        coord._warm_specialist_params = self._warm_specialist_params  # type: ignore[method-assign]
+        object.__setattr__(self, "_coord", coord)
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate to the inner coordinator first, then to phase_framework for
+        # framework-specific methods not on the coordinator surface.
+        coord = object.__getattribute__(self, "_coord")
+        try:
+            return getattr(coord, name)
+        except AttributeError:
+            return getattr(coord.phase_framework, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_coord":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_coord"), name, value)
 
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+    async def _warm_specialist_params(self, _params: dict[str, Any]) -> None:
         return None
 
 
@@ -128,16 +152,16 @@ _CANDIDATE = {
 }
 
 
-def _seed_batch(stub: _Stub, *candidates: dict[str, Any]) -> None:
+def _seed_batch(stub: Coordinator, *candidates: dict[str, Any]) -> None:
     """Put a discovered batch in state."""
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [dict(c) for c in candidates]}]
 
 
-def _pump(stub: _Stub) -> None:
+def _pump(stub: Coordinator) -> None:
     asyncio.run(stub._pump_framework_agent_phase())
 
 
-def _pump_then_materialize(stub: _Stub) -> None:
+def _pump_then_materialize(stub: Coordinator) -> None:
     """Run the pump (resolves audit route + submits a candidate proposal) then materialise it."""
     asyncio.run(stub._pump_framework_agent_phase())
     pendings = [
@@ -150,7 +174,7 @@ def _pump_then_materialize(stub: _Stub) -> None:
         p.decided = True
 
 
-def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
+def _materialize(stub: Coordinator, *, audit_step: str = "") -> None:
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
