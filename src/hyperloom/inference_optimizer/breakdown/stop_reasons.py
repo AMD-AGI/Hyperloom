@@ -23,8 +23,6 @@ SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
 #: spending the budget in the enablement lane.
 AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
-PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON: str = "prelude_orchestration_unavailable"
-
 #: A patch lifecycle owed the framework tree a revert and could not complete it,
 #: so the tree still holds patches the session never measured against. Two
 #: independent recoveries -- the integrate sentinel and the kernel stack
@@ -57,15 +55,7 @@ ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 #: that cannot run the combo, an argv the installed parser refuses, a bring-up
 #: round that expired unreaped, or a supervisor that found the coordinator dead
 #: or its tick wedged.
-INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
-    {
-        ENV_FAULT,
-        ARGV_INVALID,
-        DIED_STOP_REASON,
-        WEDGED_STOP_REASON,
-        PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON,
-    }
-)
+INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset({ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON})
 
 #: Terminals the model gate reached before the loop started. Verdicts about the
 #: model, so absent from :data:`INFRASTRUCTURE_STOP_REASONS`.
@@ -95,7 +85,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "custom",
         "robustness_escalated",
         "prelude_baseline_failed",
-        PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON,
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
@@ -184,7 +173,6 @@ __all__ = [
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
     "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",
-    "PRELUDE_ORCHESTRATION_UNAVAILABLE_STOP_REASON",
     "STOP_REASON_VOCAB",
     "SUCCESS_STOP_REASONS",
     "SUPERVISOR_RESTART_REASON",

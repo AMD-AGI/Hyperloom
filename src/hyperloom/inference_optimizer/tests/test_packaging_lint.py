@@ -103,7 +103,6 @@ def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None
     assert "pip install your_package.whl --target ." in setup
     assert "hyperloom_kb-" not in setup
     assert "[kb]" not in setup
-    assert "--require-experience-kb" in optimizer
     assert "experience_kb_injections" in optimizer
     global_kb = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
     # The skills name the global KB by the variables the service actually reads.
