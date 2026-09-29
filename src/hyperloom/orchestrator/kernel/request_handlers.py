@@ -891,6 +891,37 @@ def _positive_int(value: object) -> int:
     return parsed if parsed > 0 else 0
 
 
+def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
+    """Attention TP shard behind the session's serving ``tp``.
+
+    DP-attention splits the ``tp`` ranks into ``dp`` attention groups, so
+    forge-fuse cannot infer the attention shard from ``--tp`` alone -- and it
+    stamps the harness group/head dims from exactly this number.
+    """
+    explicit = _positive_int(payload.get("attn_tp"))
+    if explicit:
+        return explicit
+    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+
+    server_args = str(payload.get("extra_server_args") or "").strip()
+    if not server_args:
+        try:
+            server_args = resolve_runtime_workload(state, arm="current_best").server_args
+        except Exception:  # noqa: BLE001 - best-effort for partial state / test doubles
+            server_args = ""
+
+    if "--enable-dp-attention" not in str(server_args).replace("=", " ").split():
+        return tp
+    # launch_infera_node injects --dp-size = tp when a dp-attention flag arrives
+    # without one, and these args are read before that injection.
+    dp = (
+        _positive_int(_parse_server_arg(server_args, "--dp-size"))
+        or _positive_int(_parse_server_arg(server_args, "--data-parallel-size"))
+        or tp
+    )
+    return max(1, tp // dp)
+
+
 def _fusion_session_serve_args(
     state: object,
     payload: dict,
@@ -898,7 +929,7 @@ def _fusion_session_serve_args(
     framework: str,
     model_path: str,
 ) -> dict[str, int]:
-    """TP / KV block size / max-model-len the serving smoke must match."""
+    """TP / attention TP / KV block size / max-model-len the smoke must match."""
     tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
@@ -911,6 +942,7 @@ def _fusion_session_serve_args(
     args: dict[str, int] = {}
     if tp:
         args["tp"] = tp
+        args["attn_tp"] = _fusion_attn_tp_size(state, payload, tp=tp)
     if block_size:
         args["block_size"] = block_size
     if max_model_len:

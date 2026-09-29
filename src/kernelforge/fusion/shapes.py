@@ -98,9 +98,10 @@ def resolve_decode_shapes(
     if o_groups is not None:
         with contextlib.suppress(TypeError, ValueError, ZeroDivisionError):
             shapes["n_local_groups"] = int(o_groups) // tp
-    if o_groups is not None or n_heads is not None:
         # Agents previously mistook gqa_groups / num_attention_heads for the
-        # wo_a group axis. Stamp an explicit reminder into every recipe prompt.
+        # wo_a group axis. Stamp an explicit reminder into the recipe prompt --
+        # only for models that actually have the axis, since the whole shapes
+        # dict is rendered into the authoring prompt.
         shapes["group_axis_note"] = (
             "For DeepSeek-V4 wo_a / mxfp8 group-quant paths, G is "
             "n_local_groups (from o_groups // attn_tp_size), NOT gqa_groups "

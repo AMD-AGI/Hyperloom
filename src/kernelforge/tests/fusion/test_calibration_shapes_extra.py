@@ -148,6 +148,9 @@ def test_shapes_non_dsv4_model_omits_o_groups_fields(tmp_path):
     s = resolve_decode_shapes(str(tmp_path), attn_tp_size=8)
     assert "o_groups" not in s
     assert "n_local_groups" not in s
+    # The whole shapes dict is rendered into the authoring prompt, so the DSv4
+    # instruction must not reach a model that has no group axis.
+    assert "group_axis_note" not in s
     # n_local_heads is generic attention TP math and still stamped.
     assert s["n_local_heads"] == 64 // 8
     assert s["gqa_groups"] == 64 // 8
@@ -195,6 +198,31 @@ def test_shapes_attn_tp_scales_local_dims(tmp_path):
     s = resolve_decode_shapes(str(tmp_path), attn_tp_size=8)
     assert s["n_local_heads"] == 16
     assert s["n_local_groups"] == 2
+
+
+def test_shapes_dsv4_tp_sharded_attention_scales_group_axis(tmp_path):
+    """DSv4-Flash at tp=4 with attention sharded by TP (no DP-attention).
+
+    Same config as ``test_deepseek_v4_sparse_mla_matches_runtime_shapes`` in
+    gemm_tune, which is the sharding this repo already serves DSv4-Flash with.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "hidden_size": 4096,
+                "num_attention_heads": 64,
+                "num_key_value_heads": 1,
+                "o_groups": 8,
+                "head_dim": 512,
+                "o_lora_rank": 1024,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=4)
+    assert s["n_local_groups"] == 2
+    assert s["n_local_heads"] == 16
 
 
 def test_harness_group_dim_mismatch_catches_gqa_as_g(tmp_path):
