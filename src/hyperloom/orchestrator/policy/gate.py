@@ -593,8 +593,7 @@ class PolicyGate:
         capability, presence of ``action_name``, the
         kernel_agent-owned-action guard, the per-action specialised paths
         (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, the action-catalogue unknown-action lookup, per-action
-        source and required-payload guards, the phase-compatibility check,
+        ownership gate, per-action source and required-payload guards,
         and the external-tool collision guard (R5).
 
         Args:

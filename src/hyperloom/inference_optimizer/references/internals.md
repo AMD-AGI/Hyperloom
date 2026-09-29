@@ -112,8 +112,8 @@ The optimizer should:
    last_roofline_tput >= 1.10`; compound). Default is `roofline` (profile +
    trace_analyze + analysis.md); `--no-enable-roofline` switches to plain
    `profile`. The LLM cannot propose either — both names are Coordinator-managed
-   and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
-   `rule='phase_incompatible'`. Concurrent GPU work is serialised by the lane /
+   and not in the LLM-proposable action set for any phase. Concurrent GPU work
+   is serialised by the lane /
    GPU lease rather than a policy deny, so explore / kernel dispatches keep
    flowing while analysis refreshes. Each analysis also stamps a decode roofline
    ceiling (`inference_optimizer/roofline_ceiling.py`) for the report's

@@ -63,8 +63,8 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase ↔ allowed action set: ALLOWED passes R1; Coordinator-auto actions stay out of PROPOSABLE so LLM proposals are
-# denied.
+# Phase ↔ allowed action set: drives the LLM-proposable action list shown in the prompt; Coordinator-auto actions
+# stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
         {
