@@ -427,6 +427,16 @@ def _discover_inferencex_root() -> tuple[str, ...]:
     return _env_named_root("INFERENCEX_PATH")
 
 
+def resolve_inferencex_root() -> str:
+    """The InferenceX benchmark checkout named by ``$INFERENCEX_PATH``, or ``""``.
+
+    Returns:
+        str: The normalised checkout root, or ``""`` when unset or absent.
+    """
+    roots = _discover_inferencex_root()
+    return roots[0] if roots else ""
+
+
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 

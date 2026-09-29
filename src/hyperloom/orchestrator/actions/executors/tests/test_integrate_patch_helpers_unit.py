@@ -195,6 +195,31 @@ def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp
     assert ip._resolve_framework_root(None, patch_paths=[]) == checkout
 
 
+@pytest.mark.parametrize("image_has_source_checkout", [True, False])
+def test_resolve_framework_root_without_patches_never_lands_on_inferencex(
+    tmp_path, monkeypatch, image_has_source_checkout
+):
+    """A pip-installed framework has no checkout of its own; the InferenceX benchmark tree must still not stand in."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / ".git").mkdir(parents=True)
+    site_packages = tmp_path / "site-packages" / "vllm"
+    site_packages.mkdir(parents=True)
+    roots = [inferencex]
+    source_checkout = tmp_path / "app" / "vllm"
+    if image_has_source_checkout:
+        (source_checkout / ".git").mkdir(parents=True)
+        roots.append(source_checkout)
+    roots.append(site_packages)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(r) for r in roots])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(site_packages))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
+
+    expected = source_checkout if image_has_source_checkout else site_packages
+    assert ip._resolve_framework_root(None, patch_paths=[]) == expected
+
+
 def test_resolve_framework_root_none(monkeypatch):
     monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [])
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")

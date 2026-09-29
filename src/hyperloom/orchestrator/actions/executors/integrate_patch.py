@@ -38,6 +38,7 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.inference_optimizer.framework_paths import (
     enclosing_checkout,
     resolve_framework_tree,
+    resolve_inferencex_root,
     resolve_kernel_search_roots,
     resolve_session_framework_root,
 )
@@ -1043,6 +1044,10 @@ def _resolve_framework_root(
     framework_checkout = enclosing_checkout(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
     if framework_checkout is not None:
         return framework_checkout
+    # A pip-installed framework has no checkout, and the benchmark tree is never the one under optimisation.
+    benchmark_root = resolve_inferencex_root()
+    if benchmark_root:
+        roots = [root for root in roots if os.path.realpath(root) != os.path.realpath(benchmark_root)]
     for root in roots:
         if root.is_dir() and (root / ".git").exists():
             return root
