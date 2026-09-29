@@ -1193,8 +1193,13 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "written"
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1264,8 +1269,13 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
     coord.shared_state.recipe_kb_session_id = "local-session"
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1294,8 +1304,13 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
     coord.shared_state.recipe_kb_session_id = "  "
     coord.shared_state.close_sequence_done = False
 
-    finalize_calls: list[int] = []
-    coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 

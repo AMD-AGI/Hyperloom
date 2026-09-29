@@ -117,9 +117,6 @@ class _Stub(FakeCoordinator):
     async def _warm_specialist_params(self, _params: dict[str, Any]) -> None:
         return None
 
-    async def _framework_agent_authoring_inflight(self) -> bool:
-        return False
-
 
 # --------------------------------------------------------------------------- # 3.
 def test_arm_disabled_dispatch_is_noop(tmp_path: Path):
