@@ -6496,6 +6496,50 @@ def _kernel_name_looks_truncated(value: str) -> bool:
     return _TRUNCATION_MARK in (value or "")
 
 
+def _args_key(raw: str) -> tuple[str, ...]:
+    """Normalize an args cell or shape list into comparable argument lines."""
+    text = str(raw or "").replace("<br>", "\n")
+    return tuple(piece.strip() for piece in text.split("\n") if piece.strip() and piece.strip() not in {"-", "—"})
+
+
+def _candidate_args_key(candidate: dict[str, Any]) -> tuple[str, ...]:
+    """Args identity for a candidate, taken from the shapes parsed out of analysis.md."""
+    shapes = candidate.get("shapes") or []
+    if not isinstance(shapes, list):
+        return _args_key(str(shapes))
+    return _args_key("\n".join(str(shape) for shape in shapes))
+
+
+def _current_kernel_names(candidate: dict[str, Any]) -> list[str]:
+    """Device kernel names already on the candidate, in cell order."""
+    names = [str(name) for name in (candidate.get("device_kernel_names") or []) if name]
+    if names:
+        return names
+    one = str(candidate.get("device_kernel_name") or "").strip()
+    return [one] if one else []
+
+
+def _replacement_extends_truncated_prefix(full_names: list[str], current_names: list[str]) -> bool:
+    """True when a unique sidecar row is the untruncated form of ``current_names``.
+
+    A truncated current name is accepted only when the full name starts with the
+    text before ``...``. A name that is already complete must be equal. At least
+    one current name must be truncated; this does not choose among several rows.
+    """
+    if not current_names or len(full_names) != len(current_names):
+        return False
+    saw_truncated = False
+    for full_name, current_name in zip(full_names, current_names):
+        if _kernel_name_looks_truncated(current_name):
+            saw_truncated = True
+            prefix = current_name.split(_TRUNCATION_MARK, 1)[0]
+            if not prefix or not full_name.startswith(prefix):
+                return False
+        elif full_name != current_name:
+            return False
+    return saw_truncated
+
+
 def overlay_metrics_kernel_names(
     candidates: list[dict[str, Any]],
     analysis_output: Path,
@@ -6503,16 +6547,23 @@ def overlay_metrics_kernel_names(
     """Replace truncated device kernel names from ``category_data/*_metrics.json``.
 
     ``analysis.md`` truncates long kernel symbols. The metrics sidecars keep the
-    full name, so both the pipeline and the offline emitter restore it here
-    before finalizing. Matching is by operation name. Fusion sidecars are
-    skipped because they are not per-op ranking rows.
+    full name. Rows are not indexed by operation name: several ``aten::mm``
+    entries with different args are normal, and last-one-wins would give every
+    same-named candidate the last row's kernel and shapes.
 
+    A sidecar row is eligible only when both the operation name and the args
+    match. The candidate's ``shapes`` are that Args column. When more than one
+    row still matches, the candidate is left unchanged, including its shapes.
+    A unique row replaces kernel names only when each full name starts with
+    that candidate's truncated prefix.
+
+    Fusion sidecars are skipped because they are not per-op ranking rows.
     Mutates ``candidates`` in place.
     """
     metrics_dir = analysis_output / "category_data"
     if not metrics_dir.is_dir():
         return
-    by_op: dict[str, dict[str, Any]] = {}
+    rows: list[tuple[str, tuple[str, ...], list[str]]] = []
     for path in sorted(metrics_dir.glob("*_metrics.json")):
         if path.name == "kernel_fusion_metrics.json":
             continue
@@ -6521,31 +6572,23 @@ def overlay_metrics_kernel_names(
             if not isinstance(op, dict):
                 continue
             name = str(op.get("name") or "").strip()
-            if name:
-                by_op[name] = op
+            parsed = _parse_kernel_name_cell(str(op.get("kernel_name") or "").replace("<br>", "\n"))
+            if name and parsed:
+                rows.append((name, _args_key(str(op.get("args") or "")), parsed))
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        op = by_op.get(str(cand.get("name") or "").strip())
-        if not op:
+        name = str(cand.get("name") or "").strip()
+        current_names = _current_kernel_names(cand)
+        args_key = _candidate_args_key(cand)
+        matches = [parsed for row_name, row_args, parsed in rows if row_name == name and row_args == args_key]
+        if len(matches) != 1:
             continue
-        full_cell = str(op.get("kernel_name") or "")
-        parsed = _parse_kernel_name_cell(full_cell.replace("<br>", "\n"))
-        current_names = [str(n) for n in (cand.get("device_kernel_names") or []) if n]
-        current_one = str(cand.get("device_kernel_name") or "")
-        truncated = (
-            (not current_names and parsed)
-            or _kernel_name_looks_truncated(current_one)
-            or any(_kernel_name_looks_truncated(n) for n in current_names)
-        )
-        if parsed and truncated:
-            cand["device_kernel_name"] = parsed[0]
-            cand["device_kernel_names"] = parsed
-        if not cand.get("shapes"):
-            shape_args = str(op.get("args") or "").replace("<br>", "\n").strip()
-            shapes = [s.strip() for s in shape_args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
-            if shapes:
-                cand["shapes"] = shapes
+        parsed = matches[0]
+        if not _replacement_extends_truncated_prefix(parsed, current_names):
+            continue
+        cand["device_kernel_name"] = parsed[0]
+        cand["device_kernel_names"] = parsed
 
 
 def build_kernel_candidates_from_analysis_md(

@@ -79,7 +79,7 @@ def _stub_emit_deps(monkeypatch, *, parsed=None, recovered=None, finalized=None)
     return written
 
 
-def test_overlay_metrics_kernel_names_replaces_truncated_symbols(tmp_path):
+def test_overlay_metrics_kernel_names_rejects_full_name_that_misses_prefix(tmp_path):
     metrics = {
         "operations": [
             {
@@ -93,20 +93,119 @@ def test_overlay_metrics_kernel_names_replaces_truncated_symbols(tmp_path):
     cands = [
         {
             "name": "aten::mm",
-            "device_kernel_name": "Cijk_Ailk_Bljk_A...",
+            "device_kernel_name": "Cijk_B_PostGSU2",
             "device_kernel_names": ["Cijk_B_PostGSU2", "Cijk_Ailk_Bljk_A..."],
-            "shapes": [],
+            "shapes": ["(256,131072) bf16", "(131072,512) bf16"],
         }
     ]
     tla.overlay_metrics_kernel_names(cands, tmp_path)
     assert cands[0]["device_kernel_name"] == "Cijk_B_PostGSU2"
-    assert cands[0]["device_kernel_names"] == ["Cijk_B_PostGSU2", "Cijk_Ailk_Bljk_FULL"]
+    assert cands[0]["device_kernel_names"] == ["Cijk_B_PostGSU2", "Cijk_Ailk_Bljk_A..."]
     assert cands[0]["shapes"] == ["(256,131072) bf16", "(131072,512) bf16"]
 
 
+def test_overlay_metrics_kernel_names_distinguishes_same_op_by_args(tmp_path):
+    metrics = {
+        "operations": [
+            {
+                "name": "aten::mm",
+                "kernel_name": "Kernel 1: Cijk_A_small_TILE",
+                "args": "(8,8) bf16",
+            },
+            {
+                "name": "aten::mm",
+                "kernel_name": "Kernel 1: Cijk_B_large_TILE",
+                "args": "(256,512) bf16",
+            },
+        ]
+    }
+    _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(metrics))
+    cands = [
+        {
+            "name": "aten::mm",
+            "device_kernel_name": "Cijk_A_sm...",
+            "device_kernel_names": ["Cijk_A_sm..."],
+            "shapes": ["(8,8) bf16"],
+        },
+        {
+            "name": "aten::mm",
+            "device_kernel_name": "Cijk_B_la...",
+            "device_kernel_names": ["Cijk_B_la..."],
+            "shapes": ["(256,512) bf16"],
+        },
+    ]
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
+    assert cands[0]["device_kernel_name"] == "Cijk_A_small_TILE"
+    assert cands[0]["device_kernel_names"] == ["Cijk_A_small_TILE"]
+    assert cands[1]["device_kernel_name"] == "Cijk_B_large_TILE"
+    assert cands[1]["device_kernel_names"] == ["Cijk_B_large_TILE"]
+
+
+def test_overlay_metrics_kernel_names_rejects_non_prefix(tmp_path):
+    metrics = {
+        "operations": [
+            {"name": "aten::mm", "kernel_name": "Kernel 1: Cijk_Other_TILE", "args": "(8,8) bf16"},
+        ]
+    }
+    _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(metrics))
+    cands = [
+        {
+            "name": "aten::mm",
+            "device_kernel_name": "Cijk_A_sm...",
+            "device_kernel_names": ["Cijk_A_sm..."],
+            "shapes": ["(8,8) bf16"],
+        }
+    ]
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
+    assert cands[0]["device_kernel_name"] == "Cijk_A_sm..."
+
+
+def test_overlay_metrics_kernel_names_leaves_ambiguous_match(tmp_path):
+    metrics = {
+        "operations": [
+            {"name": "aten::mm", "kernel_name": "Kernel 1: Cijk_Ambiguous_ONE", "args": "(8,8) bf16"},
+            {"name": "aten::mm", "kernel_name": "Kernel 1: Other_TILE", "args": "(8,8) bf16"},
+        ]
+    }
+    _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(metrics))
+    cands = [
+        {
+            "name": "aten::mm",
+            "device_kernel_name": "Cijk_Amb...",
+            "device_kernel_names": ["Cijk_Amb..."],
+            "shapes": ["(8,8) bf16"],
+        }
+    ]
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
+    assert cands[0]["device_kernel_name"] == "Cijk_Amb..."
+    assert cands[0]["device_kernel_names"] == ["Cijk_Amb..."]
+
+
+def test_overlay_metrics_kernel_names_does_not_copy_shapes_without_args_match(tmp_path):
+    metrics = {
+        "operations": [
+            {"name": "aten::mm", "kernel_name": "Kernel 1: Cijk_A_small_TILE", "args": "(8,8) bf16"},
+            {"name": "aten::mm", "kernel_name": "Kernel 1: Cijk_B_large_TILE", "args": "(256,512) bf16"},
+        ]
+    }
+    _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(metrics))
+    cands = [
+        {
+            "name": "aten::mm",
+            "device_kernel_name": "Cijk_B_la...",
+            "device_kernel_names": ["Cijk_B_la..."],
+            "shapes": [],
+        }
+    ]
+    tla.overlay_metrics_kernel_names(cands, tmp_path)
+    assert cands[0]["device_kernel_name"] == "Cijk_B_la..."
+    assert cands[0]["device_kernel_names"] == ["Cijk_B_la..."]
+    assert cands[0]["shapes"] == []
+
+
 def test_overlay_metrics_kernel_names_skips_fusion_sidecar(tmp_path):
-    fusion = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: should_not_apply", "args": "(1,1) bf16"}]}
-    gemm = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: real_symbol", "args": "(2,2) bf16"}]}
+    fusion = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: trunc_from_fusion", "args": "(2,2) bf16"}]}
+    gemm = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: trunc_full_symbol", "args": "(2,2) bf16"}]}
     _write(tmp_path / "category_data" / "kernel_fusion_metrics.json", json.dumps(fusion))
     _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(gemm))
     cands = [
@@ -114,12 +213,12 @@ def test_overlay_metrics_kernel_names_skips_fusion_sidecar(tmp_path):
             "name": "aten::mm",
             "device_kernel_name": "trunc...",
             "device_kernel_names": ["trunc..."],
-            "shapes": ["already"],
+            "shapes": ["(2,2) bf16"],
         }
     ]
     tla.overlay_metrics_kernel_names(cands, tmp_path)
-    assert cands[0]["device_kernel_name"] == "real_symbol"
-    assert cands[0]["shapes"] == ["already"]
+    assert cands[0]["device_kernel_name"] == "trunc_full_symbol"
+    assert cands[0]["shapes"] == ["(2,2) bf16"]
 
 
 def test_infer_model_name_ignores_placeholder(tmp_path):
