@@ -803,19 +803,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
     )
-    opt.add_argument(
-        "--warm-replay-min-reproduce-pct",
-        dest="warm_replay_min_reproduce_pct",
-        type=float,
-        default=0.8,
-        help="Minimum fraction of the recipe's recorded gain we need "
-        "to reproduce to count as ``status=reproduced`` and push "
-        "the warm config onto the optimization stack. Default "
-        "0.8 — a recipe claiming +25%% counts if we measure "
-        "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular optimisation "
-        "flow without inheriting the warm config.",
-    )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
         "--degraded-pr",

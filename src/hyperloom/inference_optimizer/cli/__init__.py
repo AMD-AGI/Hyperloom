@@ -1787,13 +1787,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        for _wr_attr, _wr_default in (
-            ("warm_replay_min_confidence", 0.7),
-            ("warm_replay_min_reproduce_pct", 0.8),
-        ):
-            _wr_value = getattr(args, _wr_attr)
-            if _wr_value != _wr_default:
-                setattr(state, _wr_attr, _wr_value)
+        _wr_value = getattr(args, "warm_replay_min_confidence", 0.7)
+        if _wr_value != 0.7:
+            state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -2242,10 +2238,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
-        # Warm-recipe replay controls.
-        warm_replay_enabled=state.warm_replay_enabled,
-        warm_replay_min_confidence=state.warm_replay_min_confidence,
-        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))

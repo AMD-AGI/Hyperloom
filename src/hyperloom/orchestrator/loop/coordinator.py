@@ -142,9 +142,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         proposal_scorer: Any = None,
-        warm_replay_enabled: bool = True,
-        warm_replay_min_confidence: float = 0.7,
-        warm_replay_min_reproduce_pct: float = 0.8,
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -156,10 +153,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.recipe_kb: RecipeKB | None = getattr(knowledge_plane, "recipe_kb", None)
         # Per-session optimization journal; lazy-instantiated on first use.
         self._journal: Journal | None = None
-        # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
-        self._warm_replay_enabled: bool = bool(warm_replay_enabled)
-        self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
-        self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
         # ProposalScorer facade (advisory only).
