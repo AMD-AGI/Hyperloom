@@ -163,9 +163,9 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
     row = st.cycle_strategy_log[-1]
     assert row["cycle"] == 2
     assert row["focus"] != "kernel_switch_specialist"
-    block = c._cycle_strategy_block()
-    assert "=== Cycle 2 strategy ===" in block
-    assert f"focus={row['focus']}" in block
+    strategy = c._plan_cycle_focus()
+    assert strategy["focus"] != "kernel_switch_specialist"
+    assert "focus" in strategy
 
 
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):

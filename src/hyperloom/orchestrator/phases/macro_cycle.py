@@ -114,6 +114,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             reasons[domain].append(f"recent negative ledger count={count} penalty={penalty:.1f}")
         focus = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if scores else "freeform_specialist"
         rationale_bits = reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
+        prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
         return {
             "cycle": cycle,
             "focus": focus,
@@ -127,6 +128,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             ),
             "gain_at_start": float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0),
             "gain_delta": None,
+            "prior_cycles": prior_cycles[-5:],
         }
 
     def _record_cycle_strategy_for_current_cycle(self) -> None:
@@ -146,34 +148,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         if not replaced:
             log_rows.append(planned)
         state.cycle_strategy_log = log_rows[-50:]
-
-    def _cycle_strategy_block(self) -> str:
-        """Render persisted cycle focus facts for the orchestration prompt."""
-        rows = [r for r in (getattr(self.shared_state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
-        if not rows:
-            return ""
-        cur_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
-        current = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cur_cycle), rows[-1])
-        lines = [
-            f"=== Cycle {cur_cycle} strategy ===",
-            f"focus={current.get('focus') or '(none)'} score={current.get('score', 0)}",
-        ]
-        rationale = str(current.get("rationale") or "").strip()
-        if rationale:
-            lines.append(f"rationale: {rationale}")
-        saturated = current.get("saturated_at_start") or []
-        if saturated:
-            lines.append(f"saturated_at_start={saturated}")
-        prior = [r for r in rows if int(r.get("cycle", -1) or -1) != cur_cycle][-5:]
-        if prior:
-            lines.append("previous cycles:")
-            for row in prior:
-                lines.append(
-                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
-                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
-                )
-        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
-        return "\n".join(lines)
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback into FRAMEWORK_AGENT.

@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Orchestration-memory I/O: capture, directive fallback, and per-cycle prompt reseeding."""
+"""Orchestration-memory I/O: capture and per-cycle prompt reseeding."""
 
 from __future__ import annotations
 
 import logging as _logging
-from datetime import datetime, timezone
 
 from ..collaborator import CoordinatorCollaborator
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
@@ -56,36 +55,13 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         state.orchestration_memory_history = [*(state.orchestration_memory_history or []), record][-10:]
         return True
 
-    def _cycle_directive_fallback(self) -> str:
-        """Render a deterministic cycle focus from ``_plan_cycle_focus``.
-
-        Used when the memory capture produced no ``next_cycle_directive``; keeps
-        every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
-        """
-        planned = self._plan_cycle_focus()
-        focus = str(planned.get("focus") or "").strip()
-        if not focus:
-            return ""
-        parts = [f"focus={focus}"]
-        rationale = str(planned.get("rationale") or "").strip()
-        if rationale:
-            parts.append(rationale)
-        bottleneck = str(planned.get("bottleneck_at_start") or "").strip()
-        if bottleneck:
-            parts.append(f"bottleneck={bottleneck}")
-        saturated = planned.get("saturated_at_start") or []
-        if saturated:
-            parts.append(f"deprioritize saturated={list(saturated)}")
-        return "; ".join(parts)
-
     def _reseed_orch_prompt_for_cycle(self) -> bool:
         """Rebuild the orchestration system prompt for the new macro-cycle.
 
-        Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
-        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``,
-        snapshots the installed scope, and records the directive in the
-        ``cycle_directive_history`` ring. Skips a user-supplied
-        ``--orch-prompt``. Best-effort; returns True when reseeded.
+        Injects the freshly-captured ``next_cycle_directive`` and the deterministic
+        cycle strategy into a rebuilt prompt, mutates ``system_prompt_overrides``,
+        and snapshots the installed scope. Skips a user-supplied ``--orch-prompt``.
+        Best-effort; returns True when reseeded.
         """
         if getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
@@ -95,24 +71,15 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
         directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
-        source = "llm"
-        if not directive:
-            directive = self._cycle_directive_fallback()
-            source = "deterministic"
-        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive, phase=state.phase)
+        new_prompt = rebuild(
+            macro_cycle=cycle,
+            cycle_directive=directive,
+            cycle_strategy=self._plan_cycle_focus(),
+            phase=state.phase,
+        )
         overrides = getattr(self, "system_prompt_overrides", None)
         if not isinstance(overrides, dict):
             return False
         overrides["orchestration"] = new_prompt
         _write_prompt_snapshot(self.session_dir, "orchestration", new_prompt, phase=state.phase)
-        history = list(getattr(state, "cycle_directive_history", []) or [])
-        history.append(
-            {
-                "cycle": cycle,
-                "directive": directive,
-                "source": source,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        state.cycle_directive_history = history[-10:]
         return True

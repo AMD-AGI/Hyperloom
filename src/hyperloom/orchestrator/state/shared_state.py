@@ -795,10 +795,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # back to an earlier one.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
 
-    # Bounded ring (cap 10) of per-macro-cycle directives injected into the orchestration system prompt; entries:
-    # {cycle, directive, source, ts}.
-    cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
-
     # Non-field instance attr (set in load_or_init / save): session dir for breakdown instrumentation.
     _session_dir = None
 
