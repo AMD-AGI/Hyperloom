@@ -7,16 +7,21 @@ A patch or artifact whose tree is unnamed cannot be replayed, and a non-git root
 has no content identity at all, so each contributing root is named by the
 operation that bound it, mapped to an anchor a fresh image can resolve, and
 captured byte-exact by the shipped snapshot mechanism.
+
+The same KEEP records what the tree alone can refute: the accepted levers no
+file in the framework reads, and the linked build's compiled extensions the
+framework root does not carry.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ...source_snapshot import snapshot_source_layer
-from .projections import root_id_for
+from .projections import root_id_for, select_linked_build
 
 PATCH_APPLY = "patch_apply"
 ARTIFACT_INSTALL = "artifact_install"
@@ -225,3 +230,172 @@ def _portable_manifest(
     portable["root_id"] = str(record.get("id") or "")
     portable["snapshot_ref"] = snapshot_ref
     return portable
+
+
+def levers_without_readers(
+    enablement: Any,
+    framework_root: Path | None,
+    *,
+    framework: str,
+    effective_config: Mapping[str, Any] | None = None,
+) -> list[str] | None:
+    """Return accepted env levers in the framework's namespace that nothing reads.
+
+    A lever is accepted because a round that set it advanced, not because
+    anything was shown to read it. A knob a specialist introduced in a patch
+    that was later superseded leaves its name behind in ``accepted_config``,
+    and the recipe then exports an env no code consults -- a replay sets it
+    and reproduces nothing, silently.
+
+    Only the framework's own namespace is judged. ``AMD_SERIALIZE_KERNEL``
+    is read by the HIP runtime and ``NCCL_*`` by the collective library;
+    their absence from the framework tree says nothing about them.
+
+    Every regular file the framework ships is searched, matched as bytes. A
+    lever is as likely to be read by a kernel through ``getenv`` or by a
+    launch script through shell expansion as by Python, and a reader can sit
+    in a file with no extension at all -- a ``Dockerfile``, a ``Makefile``.
+    A suffix list is not evidence of absence: skipping a file is what turns
+    a working lever into a refusal. A match inside a compiled artifact
+    counts too, which can only make this miss a dangling lever, never invent
+    one.
+
+    Returns:
+        The lever names with no reader, ``[]`` when a scan found none, and
+        ``None`` when the tree could not be read -- which is not evidence
+        that every lever has one.
+    """
+    if framework_root is None or not framework.strip():
+        return []
+    # This KEEP's own effective config wins. The standing ``accepted_config``
+    # is not replaced with it until the lane re-arms on the result, so a
+    # lever this round introduced -- the one the recipe will export -- is
+    # not in shared state yet, and scanning only that would check every
+    # round's levers except the decisive one.
+    accepted = getattr(enablement, "accepted_config", None) or {}
+    envs = {**accepted.get("extra_envs", {}), **(effective_config or {}).get("extra_envs", {})}
+    prefix = f"{framework.strip().upper()}_"
+    names = sorted({str(k).strip() for k in envs if str(k).strip().startswith(prefix)})
+    if not names:
+        return []
+    if not framework_root.is_dir():
+        # An empty walk over a tree that is not there would report every
+        # lever as unread, which is a refusal built out of nothing.
+        return None
+    needles = {name: name.encode("ascii", "ignore") for name in names}
+    unread = set(names)
+    try:
+        for source in framework_root.rglob("*"):
+            if not unread:
+                break
+            if not source.is_file():
+                continue
+            blob = source.read_bytes()
+            unread -= {name for name in unread if needles[name] in blob}
+    except OSError:
+        return None
+    return sorted(unread)
+
+
+def _build_output_trees(attempt_root: Path) -> list[Path]:
+    """Return the trees a build names as its own output.
+
+    The build records them in its ``result.json`` as the prefixes a runtime
+    would import from; that is the build's own statement of where its output
+    lives, so it is read rather than guessed at. A result that cannot be
+    read falls back to the candidate worktrees the layout puts them in --
+    still narrower than the attempt root, which also holds cloned
+    dependencies and any provisioned virtual environment.
+    """
+    result = attempt_root / "result.json"
+    try:
+        payload = json.loads(result.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload = {}
+    runtime = payload.get("runtime") if isinstance(payload, dict) else None
+    prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
+    trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
+    if trees:
+        return trees
+    return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
+
+
+def build_extensions_not_carried(
+    enablement: Any, framework_root: Path | None, *, specialist_task_id: str = ""
+) -> list[str] | None:
+    """Return the build's compiled extensions the framework root does not have.
+
+    A build does not install itself: its outputs reach the framework root
+    only as artifacts a specialist declared, one by one. Declare two of
+    three and the round still boots, benchmarks, and is kept -- the gap
+    surfaces hours later as an op the loaded extension does not export, on
+    whichever code path first needs it.
+
+    Only the extensions built *for this framework package* are judged, and
+    only inside the tree the build itself names as its output. An attempt
+    root also holds the other repositories a build cloned and, where one was
+    provisioned, a virtual environment with its own installed copy of this
+    same package -- comparing against those would refuse a recipe over files
+    the framework root was never meant to carry. Compared by
+    content, so an extension the base image already shipped under the same
+    name counts as not carried.
+
+    Every shared object anywhere in the package is considered, not only
+    ``.abi3.so`` directly beneath it: an extension built without the
+    stable-ABI tag carries an interpreter-specific suffix instead, and one
+    belonging to a subpackage sits below the package root. Each is compared
+    at its path relative to the package, so a nested module is matched
+    against the nested module rather than against a same-named file at the
+    top, and the name reported is that relative path.
+
+    Returns:
+        The names left behind, ``[]`` only after at least one of the linked
+        build's output trees was scanned and nothing was missing (or when no
+        build is linked, there being nothing to carry), and ``None`` when a
+        build is linked whose outputs could not be read -- an absent tree, a
+        cleaned-up worktree or an unreadable file. None of those are
+        evidence that anything was carried.
+    """
+    if framework_root is None:
+        return []
+    rounds = list(getattr(enablement, "kept_rounds", None) or [])
+    current = str(specialist_task_id or "").strip()
+    if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
+        rounds.append({"task_id": current})
+    state = {
+        "build_manifest": list(getattr(enablement, "build_manifest", None) or []),
+        "last_specialist_task_id": str(getattr(enablement, "last_specialist_task_id", "") or ""),
+        "kept_rounds": rounds,
+    }
+    _sentinel, row = select_linked_build(state)
+    # Validated as text first: ``Path("")`` is ``Path(".")``, whose
+    # ``is_dir()`` is true, so an absent attempt root would otherwise scan
+    # the working directory and report whatever it found there.
+    attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
+    if not attempt_root_text:
+        return []
+    attempt_root = Path(attempt_root_text)
+    if not attempt_root.is_dir():
+        return None
+    missing: list[str] = []
+    try:
+        package_roots = [
+            d for d in (prefix / framework_root.name for prefix in _build_output_trees(attempt_root)) if d.is_dir()
+        ]
+        if not package_roots:
+            # The build named output trees that are gone, or named none and
+            # the candidate worktrees have been cleaned up. Either way this
+            # scanned nothing, which is not the same as finding nothing.
+            return None
+        built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
+    except OSError:
+        return None
+    for package, built in built_files:
+        relative = built.relative_to(package)
+        installed = framework_root / relative
+        try:
+            if not installed.is_file() or installed.read_bytes() != built.read_bytes():
+                missing.append(str(relative))
+        except OSError:
+            return None
+    return missing

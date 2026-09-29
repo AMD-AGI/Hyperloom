@@ -167,16 +167,125 @@ def probe_environment_closure(
     return closure, assertions
 
 
-def keep_probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
-    """Return the inherited environment with the graded override applied.
-
-    Exposed because resolving *which* interpreter the graded launch used has to
-    happen under the same environment the launch ran in -- an override that
-    rewrites ``PATH`` selects a different executable than the ambient one does.
-    """
+def _keep_probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
+    """Return the inherited environment with the graded override applied."""
     from ...actions.executors._grid_runner import apply_runtime_override
 
     env = dict(os.environ)
     if override:
         apply_runtime_override(env, dict(override))
     return env
+
+
+def graded_framework(params: Mapping[str, Any], materialized_config: str) -> str:
+    """Return the framework the graded launch served, config first.
+
+    The materialized config is what the launch read, so its own
+    ``benchmark.framework`` outranks the round's params and the ambient
+    ``$FRAMEWORK``; those remain the fallback for a round whose config could
+    not be read.
+    """
+    if materialized_config:
+        from ...actions.executors._server_argv import _benchmark_envs
+
+        try:
+            declared, _envs = _benchmark_envs(materialized_config)
+        except (OSError, ValueError):
+            declared = None
+        if declared:
+            return str(declared).strip().lower()
+    from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
+
+    return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()
+
+
+def graded_launch_env(override: Mapping[str, Any] | None, materialized_config: str) -> dict[str, str]:
+    """Return the environment the graded server was launched into.
+
+    The override is applied first and the config's ``benchmark.envs`` over
+    it, matching the order the launch itself composes them in. Resolving
+    *which* interpreter the graded launch used has to happen under this same
+    environment -- an override or a config that rewrites ``PATH`` selects a
+    different executable than the ambient one does.
+    """
+    env = _keep_probe_env(override)
+    if not materialized_config:
+        return env
+    from ...actions.executors._server_argv import config_launch_env
+
+    try:
+        return config_launch_env(materialized_config, env)
+    except (OSError, ValueError):
+        return env
+
+
+def probe_keep_environment(
+    params: Mapping[str, Any],
+    *,
+    framework: str,
+    build_manifest: Sequence[Any],
+    specialist_task_id: str,
+    provision_result: Any,
+    materialized_config: str = "",
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Observe the closure and assertion set under the accepted runtime.
+
+    The runtime is the round's own provisioning result when it provisioned
+    one, else the override the round was dispatched with -- a KEEP reached
+    through a build's launch-only probe has no provisioning stage at all, so
+    keying on it would leave every accepted build permanently unobserved.
+    An enablement that patches the framework tree in place has neither, and
+    is graded under the *serving framework's* interpreter with no override
+    applied; the probe runs there too, because a closure observed only when
+    some runtime was provisioned is absent for exactly the topology whose
+    replay most needs it. The composed launch environment is what both the
+    interpreter resolution and the probe itself run under. That fallback is
+    ``_resolve_probe_python``, the
+    same resolver the accuracy probes use, and not the benchmark backend's
+    own interpreter -- on a split-venv host Magpie runs from one venv while
+    the server it launches runs from another, and recording Magpie's
+    distributions against that KEEP would be a confidently wrong closure,
+    which is worse than an absent one. The bypass backend is the one case
+    where the backend's interpreter is what launched the server, so it keeps
+    resolving through the backend.
+
+    Both the framework and the environment that fallback resolves against
+    come from the accepted round's own materialized config -- the same
+    artifact the launch read -- overlaid with the runtime override, because
+    a config's ``benchmark.envs`` can itself set ``PATH`` and decide which
+    executable the graded server was. Resolving against the ambient process
+    environment instead names whichever interpreter this coordinator happens
+    to see. ``framework`` is therefore the caller's ``graded_framework``.
+    The packages named in the assertion set are sourced the same way, from
+    the build attempt this round's probe was opened for when no provisioning
+    stage ran; their versions are the probe's observation either way.
+    """
+    from ...actions.executors._benchmark_interpreter import _resolve_probe_python
+    from ...actions.executors.benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
+
+    override: dict[str, Any] = {}
+    if provision_result is not None and getattr(provision_result, "ok", False):
+        override = provision_result.runtime.to_runtime_override()
+    if not override:
+        raw = params.get("runtime_override")
+        override = dict(raw) if isinstance(raw, dict) else {}
+    graded_env = graded_launch_env(override, materialized_config)
+    backend = resolve_backend_name()
+    if backend == "bypass":
+        fallback = resolve_benchmark_interpreter()
+    else:
+        fallback = _resolve_probe_python(framework, env=graded_env)
+    interpreter = resolve_keep_interpreter(
+        override,
+        backend_name=backend,
+        backend_interpreter=fallback,
+    )
+    provision_versions = (
+        None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
+    )
+    packages = keep_assertion_packages(
+        provision_versions=provision_versions,
+        build_manifest=build_manifest,
+        specialist_task_id=specialist_task_id,
+    )
+    return probe_environment_closure(interpreter, env=graded_env, packages=packages)
