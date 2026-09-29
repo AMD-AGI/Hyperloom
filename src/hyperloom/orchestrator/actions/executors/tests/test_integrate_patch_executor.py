@@ -1228,6 +1228,21 @@ async def test_a_keep_whose_materialized_config_is_not_utf8_records_no_keep_evid
 
 
 @pytest.mark.asyncio
+async def test_a_keep_whose_materialized_config_holds_an_invalid_value_records_no_keep_evidence(
+    tmp_path: Path, monkeypatch
+):
+    config = tmp_path / "bad_date.yaml"
+    config.write_text("benchmark: {framework: vllm}\nstamp: 2001-13-01\n", encoding="utf-8")
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
+    )
+
+    assert result["status"] == "kept"
+    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
+
+
+@pytest.mark.asyncio
 async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
     assert result["status"] == "reverted"

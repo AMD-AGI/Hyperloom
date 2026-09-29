@@ -3663,7 +3663,7 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, UnicodeDecodeError, subprocess.SubprocessError, yaml.YAMLError):
+        except (OSError, ValueError, subprocess.SubprocessError, yaml.YAMLError):
             # Every field this fills is one the decision refuses the replay for
             # when absent, so a capture that cannot read the tree or the graded
             # config, spawn the probe, or see the durable stack leaves the
