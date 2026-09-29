@@ -33,10 +33,12 @@ set -euo pipefail
 source "$(dirname "$0")/../../benchmark_lib.sh"
 export VLLM_ROCM_USE_AITER=1
 PARALLEL_ARGS=(--tensor-parallel-size "$TP")
+SPEC_CONFIG='{"method": "eagle3", "rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2.78}'
 VLLM_CMD=(
     vllm serve "$MODEL_PATH"
     --block-size 128
     --gpu-memory-utilization 0.90 --max-num-seqs "$((2 * CONC))"
+    --speculative-config "$SPEC_CONFIG"
     "${PARALLEL_ARGS[@]}"
 )
 printf '%s\\n' "${VLLM_CMD[@]}" > "$ARGV_OUT"
@@ -158,15 +160,64 @@ def test_a_flag_set_inside_a_spliced_array_is_refused(checkout):
 @pytest.mark.parametrize(
     "levers",
     [
-        {"server_args": '--speculative-config {"method":"eagle3","num_speculative_tokens":4}'},
+        {"server_args": '--speculative-config {"num_speculative_tokens":4}'},
+        {"server_args": '--speculative-config {"synthetic_acceptance_length":3.5}'},
+        {"server_args": "--speculative-config.attention_backend TRITON_MLA"},
+        {"remove_args": ["--speculative-config"]},
         {"remove_args": ["--spec-decode-acceptance-length"]},
+        {"server_args": "--num-speculative-tokens 7"},
         {"env_levers": {"SGLANG_SIMULATE_ACC_LEN": "6"}},
     ],
-    ids=["speculative-config", "spec-decode-acceptance", "sglang-simulate-acc"],
+    ids=[
+        "config-draft-length",
+        "config-acceptance",
+        "config-dotted",
+        "config-removed",
+        "atom-acceptance",
+        "atom-draft-length",
+        "sglang-simulated-acceptance",
+    ],
 )
-def test_a_lever_on_synthetic_acceptance_is_refused(checkout, levers):
-    with pytest.raises(RecipeLeverUnavailableError, match="synthetic speculative acceptance"):
+def test_a_lever_on_the_draft_or_its_simulated_acceptance_is_refused(checkout, levers):
+    with pytest.raises(RecipeLeverUnavailableError, match="simulated acceptance"):
         _levers(**levers)
+
+
+def test_a_draft_length_lever_on_an_sglang_recipe_is_refused(checkout):
+    sglang = "single_node/agentic/glm_sglang_mtp.sh"
+    (checkout / sglang).write_text(
+        "export SGLANG_SIMULATE_ACC_LEN=3.61\n"
+        "SGLANG_CMD=(\n    python3 -m sglang.launch_server\n"
+        "    --speculative-num-steps 5\n    --speculative-num-draft-tokens 6\n)\n"
+        '"${SGLANG_CMD[@]}" &\n',
+        encoding="utf-8",
+    )
+    bench = {"benchmark_script": "aiperf_client.sh", "framework": "sglang", "envs": {"AGENTX_SERVER_SCRIPT": sglang}}
+
+    with pytest.raises(RecipeLeverUnavailableError, match="speculative-num-steps"):
+        apply_recipe_levers(
+            bench,
+            inherited_script="",
+            server_args="--speculative-num-steps 3 --speculative-num-draft-tokens 4",
+            remove_args=[],
+            env_levers={},
+        )
+
+
+def test_a_draft_compute_key_merges_into_the_recipe_speculative_config(checkout, tmp_path):
+    first = _levers(server_args='--speculative-config {"attention_backend":"ROCM_AITER_MLA"}')
+    both = _levers(inherited_script=first, server_args='--speculative-config {"kv_cache_dtype":"fp8"}')
+
+    argv, _ = _run(checkout, both, tmp_path)
+
+    assert argv.count("--speculative-config") == 1
+    assert json.loads(argv[argv.index("--speculative-config") + 1]) == {
+        "method": "eagle3",
+        "rejection_sample_method": "synthetic",
+        "synthetic_acceptance_length": 2.78,
+        "attention_backend": "ROCM_AITER_MLA",
+        "kv_cache_dtype": "fp8",
+    }
 
 
 def test_the_copy_is_content_addressed_beside_the_recipe(checkout):

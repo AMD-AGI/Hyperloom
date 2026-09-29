@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -30,9 +31,37 @@ _AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 _SPLICE_RE = re.compile(r'^"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?$')
 _COPY_SUFFIX_RE = re.compile(r"\.hl-[0-9a-f]{12}(?=\.sh$)")
 
-# The recipe pins speculative acceptance so candidate and baseline are measured alike.
-_ACCEPTANCE_FLAGS = ("speculative-config", "spec-decode-acceptance")
+# The recipe simulates acceptance for its own draft, so what is drafted and how
+# acceptance is simulated stay pinned; how fast the draft runs stays open.
+_PINNED_DRAFT_FLAGS = frozenset(
+    {
+        "speculative-num-steps",
+        "speculative-num-draft-tokens",
+        "speculative-eagle-topk",
+        "speculative-algorithm",
+        "speculative-draft-model-path",
+        "speculative-dspark-block-size",
+        "num-speculative-tokens",
+        "method",
+        "draft-model",
+    }
+)
+_PINNED_DRAFT_PREFIXES = ("spec-decode-acceptance", "speculative-config")
+_PINNED_SPEC_CONFIG_KEYS = frozenset(
+    {
+        "method",
+        "model",
+        "num_speculative_tokens",
+        "rejection_sample_method",
+        "synthetic_acceptance_length",
+        "draft_sample_method",
+    }
+)
 _ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC_"
+
+_SPEC_CONFIG = "speculative-config"
+_SPEC_CONFIG_VAR = "HYPERLOOM_SPECULATIVE_CONFIG"
+_JSON_MERGE = "import json,sys; c=json.loads(sys.argv[1]); c.update(json.loads(sys.argv[2])); print(json.dumps(c))"
 
 
 class RecipeLeverUnavailableError(ValueError):
@@ -182,6 +211,17 @@ def _flag_groups(tokens: Sequence[str]) -> list[list[str]]:
     return groups
 
 
+def _spec_config_overlay(group: Sequence[str]) -> dict[str, Any]:
+    """The JSON object a ``--speculative-config`` lever merges into the recipe's own."""
+    try:
+        overlay = json.loads(group[1]) if len(group) == 2 else None
+    except json.JSONDecodeError:
+        overlay = None
+    if not isinstance(overlay, dict):
+        raise RecipeLeverUnavailableError(f"{' '.join(group)!r} is not one --speculative-config JSON object")
+    return overlay
+
+
 def _render(
     text: str,
     framework: str,
@@ -194,29 +234,42 @@ def _render(
     lines = text.splitlines(keepends=True)
     start, end = _array_span(lines, name)
     groups = _flag_groups(tokens)
+    overlays = [_spec_config_overlay(g) for g in groups if _flag_key(g[0]) == _SPEC_CONFIG]
+    groups = [g for g in groups if _flag_key(g[0]) != _SPEC_CONFIG]
     drop = {_flag_key(g[0]) for g in groups} | {_flag_key(r.split()[0]) for r in remove_args if r.strip()}
-    pinned = sorted(k for k in drop if k.startswith(_ACCEPTANCE_FLAGS))
+    pinned = sorted(k for k in drop if k in _PINNED_DRAFT_FLAGS or k.startswith(_PINNED_DRAFT_PREFIXES))
+    pinned += sorted(k for overlay in overlays for k in overlay if k in _PINNED_SPEC_CONFIG_KEYS)
     pinned += sorted(k for k in env_levers if k.startswith(_ACCEPTANCE_ENV_PREFIX))
     if pinned:
-        raise RecipeLeverUnavailableError(f"{pinned} set the recipe's synthetic speculative acceptance")
+        raise RecipeLeverUnavailableError(f"{pinned} pin the recipe's draft and its simulated acceptance")
 
     words = [(i, w) for i in range(start + 1, end) for w in _words(lines[i])]
+    edited = drop | ({_SPEC_CONFIG} if overlays else set())
     for _, word in words:
         splice = _SPLICE_RE.match(word)
-        if splice and (clash := drop & _array_flags(lines, splice.group(1))):
+        if splice and (clash := edited & _array_flags(lines, splice.group(1))):
             raise RecipeLeverUnavailableError(f"{sorted(clash)} are set inside {splice.group(1)}, not in {name}")
 
     kept: dict[int, list[str]] = {i: [] for i in range(start + 1, end)}
     value_pending = False
+    spec_value_next = False
+    spec_value: str | None = None
     for i, word in words:
         if value_pending:
             value_pending = False
             if not word.startswith("-") and not _SPLICE_RE.match(word):
                 continue
-        if word.startswith("--") and _flag_key(word) in drop:
+        if spec_value_next:
+            spec_value_next = False
+            spec_value, word = word, f'"${_SPEC_CONFIG_VAR}"'
+        elif word.startswith("--") and _flag_key(word) in drop:
             value_pending = "=" not in word
             continue
+        elif overlays and word == f"--{_SPEC_CONFIG}":
+            spec_value_next = True
         kept[i].append(word)
+    if overlays and spec_value is None:
+        raise RecipeLeverUnavailableError(f"{name} has no --{_SPEC_CONFIG} <value> to merge the lever into")
 
     indent = re.match(r"\s*", lines[start + 1]).group(0)
     body: list[str] = []
@@ -240,6 +293,15 @@ def _render(
             for key, value in env_levers.items()
         ]
         lines[launch:launch] = block
+
+    # Merged at launch, so the recipe's own value (often built from shell variables) keeps its pinned keys.
+    lead = re.match(r"\s*", lines[start]).group(0)
+    merges: list[str] = []
+    for overlay in overlays:
+        patch = shlex.quote(json.dumps(overlay, separators=(",", ":")))
+        merges.append(f'{lead}{_SPEC_CONFIG_VAR}="$(python3 -c {shlex.quote(_JSON_MERGE)} {spec_value} {patch})"\n')
+        spec_value = f'"${_SPEC_CONFIG_VAR}"'
+    lines[start:start] = merges
     return "".join(lines)
 
 
@@ -261,7 +323,8 @@ def apply_recipe_levers(
     Args:
         bench: Benchmark mapping whose ``AGENTX_SERVER_SCRIPT`` names the session's recipe.
         inherited_script: ``AGENTX_SERVER_SCRIPT`` the loaded config declared.
-        server_args: Declared lever string; each flag replaces the recipe's own.
+        server_args: Declared lever string; each flag replaces the recipe's own,
+            except a ``--speculative-config`` object, which merges into it.
         remove_args: Flags deleted from the recipe's server array.
         env_levers: Env name to value, or ``None`` to unset, applied in order.
 
