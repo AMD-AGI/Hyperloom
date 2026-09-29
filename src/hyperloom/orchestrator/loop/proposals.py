@@ -15,6 +15,7 @@ from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -193,14 +194,8 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
-class ProposalsCollaborator:
+class ProposalsCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
