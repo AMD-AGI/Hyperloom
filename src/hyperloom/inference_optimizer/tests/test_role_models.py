@@ -93,6 +93,7 @@ def test_a_route_elsewhere_never_carries_the_launch_credential():
     assert "launch-secret" not in json.dumps(env)
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3-flash"
     assert env["PATH"] == "/usr/bin"
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env, "it hides the SDK MCP tools"
 
 
 def test_a_named_key_variable_is_used_and_must_be_set():

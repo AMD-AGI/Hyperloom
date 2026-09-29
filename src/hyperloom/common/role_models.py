@@ -90,8 +90,9 @@ class RoleModel:
             env["OPENAI_API_KEY"] = key
             return env
         if self.base_url:
+            # Not CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: with it Claude Code 2.1.197 leaves the SDK MCP
+            # tools (emit_intent, the context tools) out of every request.
             env["ANTHROPIC_BASE_URL"] = self.base_url
-            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
             for name in _CLAUDE_MODEL_ENVS:
                 env[name] = self.model
         env["ANTHROPIC_API_KEY"] = key
