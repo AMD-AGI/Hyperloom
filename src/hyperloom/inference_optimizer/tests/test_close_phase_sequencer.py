@@ -595,14 +595,19 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started",
+        "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
     ]
     by_step = {r["step"]: r for r in rows}
+    assert by_step["stack_revalidation"]["status"] == "done"
+    assert by_step["post_opt_roofline"]["status"] == "done"
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
     # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
@@ -611,6 +616,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert by_step["fact_finalize"]["status"] == "done"
     assert "status=written" in by_step["fact_finalize"]["detail"]
     assert "backend=local" in by_step["fact_finalize"]["detail"]
+    assert by_step["langfuse_flush"]["status"] == "done"
     assert by_step["ndjson_drain"]["status"] == "skipped"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
@@ -647,9 +653,12 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     assert recorded["stop_reason"] == "sweep_done"
     assert [row["step"] for row in recorded["steps"]] == [
         "sequencer_started",
+        "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",
+        "langfuse_flush",
         "artifact_package",
         "ndjson_drain",
         "done",
