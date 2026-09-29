@@ -16,8 +16,6 @@ from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskNotFound
-from hyperloom.orchestrator.phases.framework import FrameworkPhase
-
 from ._optimize_fixtures import FakeCoordinator, optimize_state
 
 
@@ -545,8 +543,7 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
                 "lever_kind": LEVER_UPSTREAM_PR,
             },
         )
-        FrameworkPhase._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
-            stub,
+        stub.phase_framework._record_framework_agent_authored_outcome(
             task=task,
             result=result,
         )
