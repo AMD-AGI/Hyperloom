@@ -220,6 +220,23 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
+def test_reset_claude_config_uses_config_dir_without_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.cli import credentials
+
+    config_dir = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def unavailable_home():
+        raise AssertionError("The container home must not be accessed")
+
+    monkeypatch.setattr(Path, "home", unavailable_home)
+    credentials._reset_claude_config_to_upstream("test-key", "https://anthropic.example")
+    config_path = config_dir / "config.json"
+    assert json.loads(config_path.read_text())["customApiUrl"] == "https://anthropic.example"
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """primaryApiKey is API-credits billing; with only a subscription token there is no key to write, so the installers' no-op behaviour applies here too."""
     from hyperloom.inference_optimizer.cli import credentials

@@ -194,7 +194,8 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
         # CLI away from the endpoint that accepts it.
         print("Preflight: subscription token in use; ~/.claude/config.json left alone")
         return
-    claude_config_path = Path.home() / ".claude" / "config.json"
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    claude_config_path = (Path(config_dir).expanduser() if config_dir else Path.home() / ".claude") / "config.json"
     config_data: dict = {}
     if claude_config_path.exists():
         try:
