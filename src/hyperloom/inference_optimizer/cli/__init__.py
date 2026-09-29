@@ -1392,6 +1392,14 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         print(f"Final summary     : {final_json}")
     except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
+    try:
+        from ..trace.meta_rsi_ledger import write_ledger
+
+        with timed_teardown_step(state, "meta_rsi_ledger"):
+            ledger_path = write_ledger(session_dir)
+        print(f"Meta-RSI ledger   : {ledger_path}")
+    except Exception:
+        log.exception("meta-RSI ledger write failed (non-fatal)")
     if state.close_sequence_done:
         print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
     else:

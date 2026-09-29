@@ -180,6 +180,18 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
     return {**targets[0], "objectives": targets}
 
 
+def _harness_fingerprint(args: argparse.Namespace | None) -> dict[str, Any] | None:
+    """Text / code / model set this session runs with; ``None`` when it cannot be read."""
+    try:
+        from .harness_fingerprint import build_harness_fingerprint
+
+        return build_harness_fingerprint(role_models=getattr(args, "role_models_resolved", None) if args else None)
+    except Exception:
+        # Provenance must never block a session from starting.
+        log.warning("harness fingerprint unavailable", exc_info=True)
+        return None
+
+
 def build_session_id(model_name: str = "") -> str:
     """Derive an internal session_id label for manifest / SharedState / report metadata (not used for path computation)."""
     stem = (model_name or "session").strip().replace("/", "_") or "session"
@@ -289,6 +301,7 @@ def build_manifest(
         "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
         "code_revision": _git_revision(),
+        "harness_fingerprint": _harness_fingerprint(args),
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
