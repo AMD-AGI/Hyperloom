@@ -205,6 +205,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+# Deploys the global Experience KB that workspaces push to and pull from.
+".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]

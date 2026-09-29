@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,6 +30,8 @@ from hyperloom_kb import (
     LocalServiceError,
     ObjectiveDeclaration,
     ObjectiveDirection,
+    RemoteClient,
+    RemoteClientError,
     RemoteConfig,
     ServiceSettings,
     create_http_server,
@@ -114,6 +117,19 @@ def _other_declaration() -> ExperienceDeclaration:
     )
 
 
+def test_a_loopback_service_is_reached_directly_despite_an_environment_proxy(monkeypatch, tmp_path: Path) -> None:
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.setenv(name, f"http://127.0.0.1:{_free_port()}")
+
+    with _serving(tmp_path, load_declaration(PACKAGED_DECLARATION), TOKEN) as port:
+        # ``urlopen`` caches its first opener; a fresh one reads the proxy the way a process started with it does.
+        with pytest.raises(RemoteClientError):
+            RemoteClient(_config(port, tmp_path), opener=urllib.request.build_opener().open).health()
+        assert RemoteClient(_config(port, tmp_path)).health()["status"] == "ok"
+
+
 def test_a_stale_service_inside_this_process_is_refused_rather_than_signalled(tmp_path: Path) -> None:
     with _serving(tmp_path, _other_declaration(), TOKEN) as port:
         with pytest.raises(LocalServiceError, match="no process to restart"):
@@ -163,8 +179,8 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
     declaration.write_text(yaml.safe_dump(_other_declaration().to_dict(), sort_keys=False), encoding="utf-8")
     env = _env_without_planner_gateway(tmp_path)
     older = subprocess.Popen(
-        [sys.executable, "-c", "from hyperloom_kb.http_service import main; raise SystemExit(main())"]
-        + ["--declaration", str(declaration), "--home", str(tmp_path / "older"), "--port", str(port)],
+        [sys.executable, "-m", "hyperloom_kb", "--declaration", str(declaration)]
+        + ["--home", str(tmp_path / "older"), "--port", str(port)],
         env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(hyperloom_kb.__file__).parent.parent)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

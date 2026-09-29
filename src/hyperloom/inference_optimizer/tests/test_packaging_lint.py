@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.experience_kb_service import AUTO_PUSH_ENV
+from hyperloom_kb import GLOBAL_TOKEN_ENV, GLOBAL_URL_ENV
+
 # Directory names whose contents never ship.
 _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 
@@ -102,7 +105,16 @@ def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None
     assert "[kb]" not in setup
     assert "--require-experience-kb" in optimizer
     assert "experience_kb_injections" in optimizer
-    for text in (setup, optimizer):
+    global_kb = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
+    # The skills name the global KB by the variables the service actually reads.
+    for name in (GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV, AUTO_PUSH_ENV):
+        for text in (setup, optimizer, global_kb):
+            assert name in text
+    for command in ("push", "pull"):
+        assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in setup
+        assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in optimizer
+    assert "python3 -m hyperloom_kb --host 0.0.0.0" in global_kb
+    for text in (setup, optimizer, global_kb):
         assert "HYPERLOOM_FLEET_KB" not in text
         assert "HYPERLOOM_KB_ENABLE" not in text
         assert "HYPERLOOM_KB_DECL" not in text

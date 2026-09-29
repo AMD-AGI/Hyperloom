@@ -575,6 +575,26 @@ or writes.
 No enable flag, declaration path, service identity, Run scope, worker identity,
 job identity, or spool path is required.
 
+The service keeps every schema written to it, so a workspace whose declaration
+changed keeps its older Experiences; a run's reads search only the schema that
+run writes.
+
+A global Experience KB, named by `HYPERLOOM_GLOBAL_KB_URL` and
+`HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`, is shared through the local service;
+runs never read or write it directly. When the user asks to share or fetch
+Experiences, run in the optimizer's environment, with `.env` loaded:
+
+```bash
+python -m hyperloom.inference_optimizer.experience_kb_service push   # this workspace's Experiences not pushed yet
+python -m hyperloom.inference_optimizer.experience_kb_service pull   # the global KB's Experiences of this workspace's schemas
+```
+
+Report the one summary line each prints (global URL; `created`, `unchanged`,
+`skipped`, `rejected`) and never the token. A push resumes where an earlier one
+stopped and never sends back what was pulled. With `HYPERLOOM_KB_AUTO_PUSH=1`,
+every run pushes after its Experiences are written locally; a failed automatic
+push is only a warning, and the next push sends what it missed.
+
 During FRAMEWORK_AGENT the service is read at two points and the returned block
 is injected into the prompt:
 
