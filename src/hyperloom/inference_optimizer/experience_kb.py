@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig
+
 log = logging.getLogger(__name__)
 
 _FRAMEWORK_DECISION = "Select the next framework optimization to benchmark."
@@ -78,9 +80,6 @@ class ExperienceKBIntegration:
         values = os.environ if env is None else env
         if not str(values.get("HYPERLOOM_KB_URL") or "").strip():
             return None
-        # The SDK ships in the optional ``kb`` extra; CLI startup rejects a configured URL without it.
-        from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig
-
         try:
             config = RemoteConfig.from_env(values)
         except RemoteClientError:

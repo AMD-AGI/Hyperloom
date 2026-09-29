@@ -1512,6 +1512,21 @@ def _persist_preflight_failure_artifacts(
     return session_dir
 
 
+def _start_experience_kb() -> None:
+    """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
+    from hyperloom_kb import LocalServiceError
+
+    from ..experience_collect import validate_config as validate_experience_collection
+    from ..experience_kb_service import ensure_service
+
+    try:
+        ensure_service()
+    except LocalServiceError as exc:
+        # The run must not depend on the service: reads come back empty and writes wait in the spool.
+        log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
+    validate_experience_collection()
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
@@ -1629,9 +1644,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
-    from ..experience_collect import validate_config as validate_experience_collection
-
-    validate_experience_collection()
     try:
         resolved_urls = _preflight(args)
     except Exception as exc:
@@ -1647,6 +1659,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
+    _start_experience_kb()
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)

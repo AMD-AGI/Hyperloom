@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, choosing direct baremetal or Docker execution, writing .env, validating authenticated Experience KB connectivity when the user has KB access, and running the setup backend directly only in baremetal mode.
+description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, choosing direct baremetal or Docker execution, writing .env, deploying the workspace's local Experience KB service, and running the setup backend directly only in baremetal mode.
 ---
 
 # Hyperloom Setup
@@ -12,15 +12,8 @@ directory in the agent, and installs Hyperloom into the current directory:
 pip install your_package.whl --target .
 ```
 
-Experience KB is optional. A user who was given Experience KB access — the KB
-SDK wheel plus a KB URL and token — installs both wheels in one command instead;
-the `kb` extra requires the KB wheel:
-
-```bash
-pip install "your_package.whl[kb]" your_kb_package.whl --target .
-```
-
-Without KB access, Hyperloom runs without Experience KB reads or writes.
+The Experience KB service ships inside Hyperloom. Setup deploys one local
+service per workspace; every optimize run reads from and writes to it.
 
 The current directory is the Hyperloom workspace and install target. It is normal
 for this directory to contain many Python package folders; users do not need to
@@ -61,9 +54,8 @@ required values. Ask the user each question, collect the answer, warn before
 writing `.env`, write `.env`, read it back for validation, and continue to the
 setup command. If setup already completed for this workspace and the user is not
 changing provider, model, `USER_DATA_PATH`, run mode, Docker target host, or
-bare-metal framework setup choice, reuse the existing setup. When Experience KB
-is enabled for the workspace, still run its connection gate before handing off
-to a demo.
+bare-metal framework setup choice, reuse the existing setup, but still run the
+Experience KB service step before handing off to a demo.
 
 ## Step 1: Confirm Workspace
 
@@ -77,8 +69,6 @@ and install Hyperloom into that current directory:
 
 ```bash
 pip install hyperloom-inference-optimizer==1.1.3 --target .
-# With Experience KB access:
-pip install "hyperloom-inference-optimizer[kb]==1.1.3" your_kb_package.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -211,20 +201,6 @@ value.
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
 
-9. Experience KB is optional. Resolve whether it is enabled for this workspace:
-   - It is enabled when `HYPERLOOM_KB_URL` is already set to a non-placeholder
-     value in the shell or the workspace `.env`.
-   - Otherwise ask with the structured UI, using exactly these option labels:
-     `I have Experience KB access (URL and token)` / `No Experience KB`.
-   - `No Experience KB`: write no KB keys and skip the Experience KB gate;
-     Hyperloom runs without Experience KB reads or writes.
-   - Enabled: the workspace must have been installed with the KB wheel (see the
-     top of this skill). Do not ask the user to paste the KB token into chat. In
-     Step 3, preserve existing non-placeholder values; otherwise write
-     placeholders and ask the user to edit `.env` directly. `HYPERLOOM_KB_URL`
-     and `HYPERLOOM_KB_TOKEN` must both be set before setup can complete. Read
-     both values from the workspace `.env`; do not invent either value.
-
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
@@ -250,9 +226,17 @@ Before writing, explicitly tell the user:
 Write the Anthropic keys plus the common keys:
 
 - `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
-- `Experience KB` (only when enabled in Step 2): `HYPERLOOM_KB_URL`,
-  `HYPERLOOM_KB_TOKEN`. Preserve each existing non-placeholder value; otherwise
-  write `<PLEASE_FILL_IN>`.
+- `Experience KB`: do not write `HYPERLOOM_KB_URL` or `HYPERLOOM_KB_TOKEN` by
+  hand. After writing the other keys, run:
+
+  ```bash
+  PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service init-env
+  ```
+
+  It points `HYPERLOOM_KB_URL` at the local service (`http://127.0.0.1:8787`)
+  and generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
+  still `<PLEASE_FILL_IN>`; it keeps every other value. It prints only whether
+  each key was `written` or `kept`, never the token.
 
 Common keys:
 
@@ -296,11 +280,10 @@ Then read `.env` back and confirm:
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
-- when Experience KB is enabled, the KB URL and token are both set and neither
-  equals `<PLEASE_FILL_IN>`.
+- `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` are both set.
 
-If any required secret, or an enabled Experience KB value, is missing or still a
-placeholder, stop and ask the user to edit `.env` again.
+If any required secret is missing or still a placeholder, stop and ask the user
+to edit `.env` again.
 
 ## Step 4: Run Setup Backend
 
@@ -430,43 +413,33 @@ the demo skill runs setup inside the container. Read
   the failure. Offer SGLang/vLLM/ATOM installation only for the framework the user
   intends to run. Do not invent a `FRAMEWORK` value or silently switch frameworks.
 
-## Experience KB capability (setup gate when enabled)
+## Experience KB service
 
-Skip this section when Experience KB is not enabled for the workspace (Step 2).
+The workspace's Experience KB service runs wherever the optimizer runs. Its
+data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and every
+optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
 
-Read `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` from the workspace `.env`.
-They are the complete client connection contract. The `hyperloom_kb` SDK comes
-from the KB wheel of the Step 1 install. If the check below cannot import it,
-the workspace was installed without that wheel: ask the user to rerun the Step 1
-install with both wheels, then retry this gate.
+In `docker` mode, skip this step: the service starts inside the container at
+the first optimize launch.
 
-Load `.env` without printing any values, then perform an authenticated
-connection check:
+In `baremetal` mode, start it now and check its health, loading `.env` without
+printing any values:
 
 ```bash
 set -a
 . "$PWD/.env"
 set +a
-: "${HYPERLOOM_KB_URL:?missing from workspace .env}"
-: "${HYPERLOOM_KB_TOKEN:?missing from workspace .env}"
-
-PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 - <<'PY'
-from hyperloom_kb import RemoteClient, RemoteConfig
-
-config = RemoteConfig.from_env()
-if config is None:
-    raise SystemExit("HYPERLOOM_KB_URL is missing")
-health = RemoteClient(config).health()
-if health.get("status") != "ok":
-    raise SystemExit("Experience KB health check did not return ok")
-print("Experience KB connection ok")
-PY
+PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
 ```
 
-This check must use the URL and token loaded from `.env`; never echo the token.
-If the SDK import, authentication, or the health request fails, setup fails.
-Report the non-secret error, ask the user to correct `.env`, and retry the gate.
-Do not continue to a demo until this check succeeds.
+It prints whether the service was started or already running, never the token.
+If it fails, report its message; when another process already serves that port
+with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
+and rerun this step. Do not continue to a demo until it succeeds.
+
+The service keeps the environment it was started with. After changing the
+Anthropic settings in `.env`, stop the `hyperloom_kb.http_service` process and
+rerun this step.
 
 ## Step 6: Report Result
 
@@ -478,19 +451,18 @@ Report:
 - The setup command that was run (or that host setup was skipped in `docker` mode).
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
-- Experience KB status: `disabled` when it is not enabled for the workspace;
-  otherwise `ready` only after the authenticated health check succeeds, and
-  `failed` when it does not.
+- Experience KB service: in `baremetal` mode, `ready` with its URL once the
+  service step succeeds, or `failed`; in `docker` mode, that it starts inside
+  the container at the first optimize launch.
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.
 
 ## Step 7: Hand Off to a Demo Skill
 
-When setup completed in `baremetal` mode, or when `.env` is written in `docker`
-mode, and the Experience KB gate succeeded or Experience KB is disabled, ask the
-user whether they
-want to run a demo optimization now, and if so which option:
+When setup and the Experience KB service step completed in `baremetal` mode, or
+when `.env` is written in `docker` mode, ask the user whether they want to run a
+demo optimization now, and if so which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `12h` — medium-length Qwen3-14B-FP8 run on SGLang, vLLM or ATOM; the demo

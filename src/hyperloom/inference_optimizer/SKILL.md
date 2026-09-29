@@ -557,16 +557,24 @@ produces a measured baseline.
 
 ### Experience KB service
 
-Experience KB is optional. For a user with KB access, `hyperloom-setup` writes
-`HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` to the workspace `.env` and
-validates authenticated health; the `hyperloom_kb` SDK comes from Hyperloom's
-`kb` extra. Load `.env` before launching; do not ask the user for these values
-again. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads or
-writes and needs no SDK.
+Every workspace runs its own local Experience KB service; it ships inside
+Hyperloom. `hyperloom-setup` writes the loopback `HYPERLOOM_KB_URL` and a
+generated `HYPERLOOM_KB_TOKEN` to the workspace `.env`. Load `.env` before
+launching; do not ask the user for these values again.
+
+Each optimize launch starts the service when nothing serves that URL, in the
+same environment as the optimizer (inside the container in docker mode). Its
+data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
+running after the run for the next one. When it cannot be started, the launch
+logs a warning and continues: reads return nothing and writes wait in
+`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
+service this workspace does not run; Hyperloom connects to it without starting
+anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads
+or writes.
 
 No enable flag, declaration path, service identity, Run scope, worker identity,
-job identity, or spool path is required. The URL enables the integration; the
-SDK owns its packaged declaration and local retry spool.
+job identity, or spool path is required.
 
 During FRAMEWORK_AGENT the service is read at two points and the returned block
 is injected into the prompt:
