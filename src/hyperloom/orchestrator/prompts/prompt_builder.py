@@ -949,20 +949,35 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
+# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
+# so a synthetic run never lists a doc it should not act on.
+_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
-def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+def _section_reference_index(
+    *,
+    references_dir: Path,
+    phase: str = "",
+    benchmark_mode: str = "",
+) -> list[str]:
     """Build ``## 8.`` from the reference docs that apply to *phase*.
 
     Args:
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
+        benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
+            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
+            the AgentX workload. ``""`` (unscoped) still lists every doc.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
+    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
+    mode_set = bool(str(benchmark_mode or "").strip())
+    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -981,6 +996,8 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
                 continue
             break
         if file_phases and not _renders_in(phase, file_phases):
+            continue
+        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
@@ -1115,7 +1132,11 @@ def build_orchestration_prompt(
     # The reference index is an index of documents ``read_reference`` pulls;
     # without that tool it is a list the model cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:
-        ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+        ref_index = _section_reference_index(
+            references_dir=references_dir,
+            phase=phase_norm,
+            benchmark_mode=benchmark_mode,
+        )
         if ref_index:
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))
