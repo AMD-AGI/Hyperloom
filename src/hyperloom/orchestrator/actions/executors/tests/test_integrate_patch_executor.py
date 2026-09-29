@@ -1105,6 +1105,7 @@ async def _run_enablement_integrate(
     accuracy_metric: str = "exact_match",
     extra_params: dict[str, Any] | None = None,
     bench_effective_config: dict[str, Any] | None = None,
+    bench_materialized_config: str = "",
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1128,6 +1129,7 @@ async def _run_enablement_integrate(
             "completed_requests": 12 if booted else 0,
             "error": bench_error,
             "effective_config": dict(bench_effective_config or {}),
+            "materialized_config": bench_materialized_config,
         }
         # The observation still records how far the boot climbed, for the
         # ladder arithmetic and for the failure it explains.
@@ -1172,6 +1174,44 @@ async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
     assert result["correctness_verified"] is False
     assert len(result["patches_applied"]) == 1
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+_KEEP_RECORD_KEYS = (
+    "enablement_roots",
+    "enablement_source_snapshots",
+    "enablement_environment_closure",
+    "enablement_installed_versions_at_keep",
+    "enablement_levers_without_readers",
+    "enablement_build_extensions_not_carried",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_keep_whose_materialized_config_is_gone_records_no_keep_evidence(tmp_path: Path, monkeypatch):
+    """The KEEP records are read against the config the graded launch read.
+
+    Filling them in from the coordinator's own environment instead describes a
+    launch that may never have happened; left absent, the decision refuses them.
+    """
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(tmp_path / "gone.yaml")
+    )
+
+    assert result["status"] == "kept"
+    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
+
+
+@pytest.mark.asyncio
+async def test_a_keep_whose_materialized_config_is_corrupt_records_no_keep_evidence(tmp_path: Path, monkeypatch):
+    config = tmp_path / "corrupt.yaml"
+    config.write_text("benchmark: {framework: vllm\n", encoding="utf-8")
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
+    )
+
+    assert result["status"] == "kept"
+    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
 
 
 @pytest.mark.asyncio

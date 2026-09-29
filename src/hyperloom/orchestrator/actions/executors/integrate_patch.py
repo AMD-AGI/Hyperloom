@@ -23,6 +23,8 @@ from collections.abc import Mapping
 from collections.abc import Callable
 from typing import Any
 
+import yaml
+
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
@@ -3661,11 +3663,11 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, yaml.YAMLError):
             # Every field this fills is one the decision refuses the replay for
-            # when absent, so a capture that cannot read the tree, spawn the
-            # probe, or see the durable stack leaves the recipe insufficient
-            # rather than failing the round.
+            # when absent, so a capture that cannot read the tree or the graded
+            # config, spawn the probe, or see the durable stack leaves the
+            # recipe insufficient rather than failing the round.
             log.exception("integrate_patch: enablement KEEP record capture failed")
         return kept_result
 
@@ -3910,11 +3912,12 @@ class IntegratePatchExecutor:
         one.
 
         Returns:
-            The lever names with no reader, ``[]`` when a scan found none, and
-            ``None`` when the tree could not be read -- which is not evidence
-            that every lever has one.
+            The lever names with no reader, ``[]`` when a scan found none or
+            there was nothing to scan for, and ``None`` when the tree was not
+            resolved or could not be read -- which is not evidence that every
+            lever has one.
         """
-        if framework_root is None or not framework.strip():
+        if not framework.strip():
             return []
         # This KEEP's own effective config first. The standing ``accepted_config``
         # is not replaced with it until the lane re-arms on the result, so a
@@ -3934,7 +3937,7 @@ class IntegratePatchExecutor:
         names = sorted({str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)})
         if not names:
             return []
-        if not framework_root.is_dir():
+        if framework_root is None or not framework_root.is_dir():
             # An empty walk over a tree that is not there would report every
             # lever as unread, which is a refusal built out of nothing.
             return None
@@ -4009,11 +4012,10 @@ class IntegratePatchExecutor:
             build's output trees was scanned and nothing was missing (or when no
             build is linked, there being nothing to carry), and ``None`` when a
             build is linked whose outputs could not be read -- an absent tree, a
-            cleaned-up worktree or an unreadable file. None of those are
-            evidence that anything was carried.
+            cleaned-up worktree, an unreadable file, or no framework root to
+            compare them against. None of those are evidence that anything was
+            carried.
         """
-        if framework_root is None:
-            return []
         from ...enablement.recipe.projections import select_linked_build
 
         rounds = list(getattr(enablement, "kept_rounds", None) or [])
@@ -4032,6 +4034,8 @@ class IntegratePatchExecutor:
         attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
         if not attempt_root_text:
             return []
+        if framework_root is None:
+            return None
         attempt_root = Path(attempt_root_text)
         if not attempt_root.is_dir():
             return None
@@ -4068,16 +4072,13 @@ class IntegratePatchExecutor:
 
         The materialized config is what the launch read, so its own
         ``benchmark.framework`` outranks the round's params and the ambient
-        ``$FRAMEWORK``; those remain the fallback for a round whose config could
-        not be read.
+        ``$FRAMEWORK``; those decide only for a round that named no config, or
+        whose config declares no framework.
         """
         if materialized_config:
             from ._server_argv import _benchmark_envs
 
-            try:
-                declared, _envs = _benchmark_envs(materialized_config)
-            except (OSError, ValueError):
-                declared = None
+            declared, _envs = _benchmark_envs(materialized_config)
             if declared:
                 return str(declared).strip().lower()
         from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
@@ -4098,10 +4099,7 @@ class IntegratePatchExecutor:
             return env
         from ._server_argv import config_launch_env
 
-        try:
-            return config_launch_env(materialized_config, env)
-        except (OSError, ValueError):
-            return env
+        return config_launch_env(materialized_config, env)
 
     def _probe_keep_environment(
         self,
