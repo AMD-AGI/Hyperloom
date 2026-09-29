@@ -51,7 +51,6 @@ from ...state.shared_state import (
     resolve_graded_comparison,
 )
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
@@ -62,22 +61,17 @@ from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 from ._accuracy_gate import (
     accuracy_keep_block,
-    accuracy_passed,
+    enablement_correctness,
     eval_probe_summary,
+    framework_run_eval_envs,
+    grade_accuracy,
+    is_eval_origin,
     parse_eval_results,
     read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._enablement_keep_evidence import (
-    build_extensions_not_carried,
-    enablement_correctness,
-    graded_framework,
-    is_eval_origin,
-    levers_without_readers,
-    probe_keep_environment,
-)
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -3650,12 +3644,15 @@ class IntegratePatchExecutor:
         reason: ``base_sha`` has to keep naming the tree the first accepted round
         applied to, because this round's HEAD already contains its predecessors.
         """
+        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
         from ...enablement.recipe.keep_records import (
             accepted_stack_artifacts,
+            build_extensions_not_carried,
             build_root_records,
             capture_root_snapshots,
             collect_contributions,
             declared_targets,
+            levers_without_readers,
         )
         from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
         from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
@@ -3792,12 +3789,15 @@ class IntegratePatchExecutor:
             dest_root=self.session_dir / "optimization_stack" / "enablement",
             session_dir=self.session_dir,
         )
+        materialized_config = str(bench_result.get("materialized_config") or "")
+        framework = graded_framework(params, materialized_config)
         closure, assertions = probe_keep_environment(
-            attempt,
             params,
+            framework=framework,
+            build_manifest=getattr(enablement, "build_manifest", None) or [],
             specialist_task_id=specialist_task_id,
             provision_result=provision_result,
-            materialized_config=str(bench_result.get("materialized_config") or ""),
+            materialized_config=materialized_config,
         )
         launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
         return {
@@ -3819,14 +3819,14 @@ class IntegratePatchExecutor:
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
             "enablement_build_extensions_not_carried": build_extensions_not_carried(
-                getattr(attempt.shared_state, "enablement", None),
+                enablement,
                 framework_root,
                 specialist_task_id=specialist_task_id,
             ),
             "enablement_levers_without_readers": levers_without_readers(
-                getattr(attempt.shared_state, "enablement", None),
+                enablement,
                 framework_root,
-                framework=graded_framework(params, str(bench_result.get("materialized_config") or "")),
+                framework=framework,
                 effective_config=bench_result.get("effective_config"),
             ),
         }
@@ -4955,7 +4955,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
-            extra_envs=self._framework_run_eval_envs(params),
+            extra_envs=framework_run_eval_envs(params),
             remove_args=params.get("base_remove_args"),
             unset_envs=params.get("base_unset_envs"),
             args_mode=str(params.get("base_args_mode") or "append"),
@@ -5054,7 +5054,7 @@ class IntegratePatchExecutor:
                     # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
                     "ttft_ms": r.ttft_mean_ms,
                     "itl_ms": r.tpot_mean_ms,
-                    # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
+                    # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
                     "workspace": r.workspace or "",
                     "error": r.error or "",
                     "error_class": r.error_class,
@@ -5104,7 +5104,7 @@ class IntegratePatchExecutor:
             str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
         )
         if bench.get("status") == "succeeded":
-            accuracy_pass = self._grade_accuracy(
+            accuracy_pass = grade_accuracy(
                 eval_search_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
@@ -5179,75 +5179,6 @@ class IntegratePatchExecutor:
             output_dir=slot,
             attempt=open_bringup_attempt(slot),
         )
-
-    @staticmethod
-    def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
-        """Force ``RUN_EVAL=true`` for framework-authored source patches.
-
-        Two independent triggers:
-
-        * **Eval-origin enablement**: force ``RUN_EVAL=true`` so ``_bench_patch``
-          can obtain a raw accuracy for the runnable gate, which fails closed
-          without one. A boot-origin candidate is only ever provisional on a
-          missing accuracy, so it inherits the session's contract instead.
-        * **Perf framework authoring**: force only when a comparable baseline
-          accuracy exists (``accuracy_baseline > 0``); otherwise leave the
-          candidate's ``RUN_EVAL`` to the materializer's default handling.
-
-        A plain configuration integrate_patch is untouched (returns ``None``).
-
-        Args:
-            params: The integrate_patch task params.
-
-        Returns:
-            ``{"RUN_EVAL": "false"}`` when the session disabled evals,
-            ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
-            framework-authored perf patches with a positive baseline accuracy
-            to compare against; else ``None``.
-        """
-        # The session's opt-out outranks every force-on below.
-        if is_truthy(params.get("disable_run_eval")):
-            return {"RUN_EVAL": "false"}
-        if bool(params.get("enablement")):
-            return {"RUN_EVAL": "true"} if is_eval_origin(params) else None
-        fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
-        try:
-            baseline = float(params.get("accuracy_baseline") or 0.0)
-        except (TypeError, ValueError):
-            baseline = 0.0
-        return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
-
-    @staticmethod
-    def _grade_accuracy(
-        result_dir: str,
-        baseline_accuracy: Any,
-        framework: str | None = None,
-    ) -> bool | None:
-        """Grade a bench's accuracy against the baseline.
-
-        With a recorded baseline the measured drop is enforced; without one
-        (or no eval result) the check is skipped (``None``) and warned loudly.
-        For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
-        a missing quality gate instead of falling back to GSM8K.
-        """
-        # Accept numeric strings in addition to int/float; non-numeric / missing
-        # values fall back to 0.0 (skip).
-        try:
-            baseline_value = float(baseline_accuracy)
-        except (TypeError, ValueError):
-            baseline_value = 0.0
-        eval_results = parse_eval_results(result_dir, framework=framework)
-        new_accuracy = eval_results.get("accuracy")
-        if new_accuracy is not None and baseline_value > 0:
-            return accuracy_passed(baseline_value, float(new_accuracy))
-        if baseline_value <= 0:
-            log.warning(
-                "integrate_patch: no baseline accuracy; accuracy gate skipped "
-                "(throughput-only KEEP). Accuracy regressions will not be caught.",
-            )
-        else:
-            log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
-        return None
 
 
 __all__ = [
