@@ -139,6 +139,19 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
+#: ``all`` keeps every built-in tool loaded, as before ``tools=`` was passed.
+_TOOLS_ENV: str = "HYPERLOOM_REACTOR_TOOLS"
+
+
+def _builtin_tool_names(allowed: list[str]) -> list[str]:
+    """The built-in tools a permission list names; MCP and context tools are snake_case or qualified."""
+    return [name for name in dict.fromkeys(allowed) if name[:1].isupper() and "__" not in name]
+
+
+def _load_only_allowed_tools() -> bool:
+    return (os.environ.get(_TOOLS_ENV) or "").strip().lower() != "all"
+
+
 # Env-driven reasoning effort / extended thinking.
 _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
@@ -583,6 +596,9 @@ class ClaudeBackend:
             if disallowed_tools:
                 deny = list(dict.fromkeys(deny + disallowed_tools))
             kwargs["disallowed_tools"] = deny
+            if _load_only_allowed_tools():
+                # The deny list predates most of the CLI's built-ins; loading none is what this mode means.
+                kwargs["tools"] = []
             kwargs["stderr"] = self._stderr_sink
             return self._instantiate_options(kwargs)
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
@@ -596,6 +612,12 @@ class ClaudeBackend:
                     allowed.append(qname)
         if allowed:
             kwargs["allowed_tools"] = allowed
+        builtin = _builtin_tool_names(allowed)
+        if builtin and _load_only_allowed_tools():
+            # ``allowed_tools`` only pre-approves; every built-in would still be described in the prefix each
+            # request re-reads (KERNEL_AGENT orchestration: 39,775 first-turn tokens, 15,548 with two built-ins).
+            # A caller that names no built-in keeps the full set, as it may rely on the permission mode.
+            kwargs["tools"] = builtin
         if disallowed_tools:
             kwargs["disallowed_tools"] = disallowed_tools
         mcp_servers: dict[str, Any] = {}

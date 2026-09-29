@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import json
+import os
 import time
 from typing import Any
 from ..phases import machine_state as _phase_state
@@ -27,6 +28,26 @@ log = _logging.getLogger(__name__)
 # the turn.
 _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
+
+# The findings block is re-sent on every orchestration tick. Unbounded it reached 117k chars (81% of a
+# KERNEL prompt, ~55k tokens written to the cache per tick); get_specialist_findings serves the rest.
+_FINDINGS_CHARS_ENV = "HYPERLOOM_FINDINGS_PROMPT_CHARS"
+_FINDINGS_CHARS_DEFAULT = 16_000
+_FINDING_LINE_CHARS = 700
+_FINDINGS_QUESTIONS_SHARE = 0.2
+
+
+def _findings_prompt_chars() -> int:
+    """Character budget of the per-tick findings block; 0 renders every finding."""
+    try:
+        return max(0, int(os.environ.get(_FINDINGS_CHARS_ENV) or _FINDINGS_CHARS_DEFAULT))
+    except ValueError:
+        return _FINDINGS_CHARS_DEFAULT
+
+
+def _clip(line: str, limit: int) -> str:
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
 
 # Result keys surfaced in delegated_result inbox line; first match wins per group.
 _OUTCOME_GAIN_KEYS: tuple[str, ...] = (
@@ -210,6 +231,7 @@ class ConversationCollaborator:
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._coord.dispatcher._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
+                findings_reader=self._context_findings_reader,
             )
             setter(provider)
         except Exception:
@@ -899,43 +921,108 @@ class ConversationCollaborator:
         Rows are ordered by recency rather than by the round's self-reported
         ``confidence``: that field is an audit record of what the specialist
         claimed, never an input to a decision here.
+
+        Past the ``$HYPERLOOM_FINDINGS_PROMPT_CHARS`` budget the newest entries
+        are kept, each clipped, and a footer counts what ``get_specialist_findings``
+        still holds.
         """
+        hints, rounds, questions = self._specialist_findings_parts()
+        if not hints and not rounds and not questions:
+            return ""
+        groups = ([("Findings:", hints)] if hints else []) + [(f"[{d}] findings:", f) for d, f in rounds]
+        lines = ["=== Specialist findings ==="]
+        for header, items in groups:
+            lines.append(header)
+            lines.extend(items)
+        if questions:
+            lines.append("Residual questions:")
+            lines.extend(f"- {question}" for question in questions)
+        full = "\n".join(lines)
+        budget = _findings_prompt_chars()
+        if not budget or len(full) <= budget:
+            return full
+
+        question_room = min(sum(len(q) + 3 for q in questions), int(budget * _FINDINGS_QUESTIONS_SHARE))
+        lines = ["=== Specialist findings ==="]
+        used = 0
+        total = sum(len(items) for _, items in groups)
+        shown = 0
+        full_up = False
+        for header, items in groups:
+            for index, item in enumerate(items):
+                line = _clip(item, _FINDING_LINE_CHARS)
+                cost = len(line) + 1 + (len(header) + 1 if index == 0 else 0)
+                if used + cost > budget - question_room:
+                    full_up = True
+                    break
+                if index == 0:
+                    lines.append(header)
+                lines.append(line)
+                used += cost
+                shown += 1
+            if full_up:
+                break
+        shown_questions = 0
+        for question in questions:
+            line = "- " + _clip(question, _FINDING_LINE_CHARS)
+            cost = len(line) + 1 + (len("Residual questions:") + 1 if shown_questions == 0 else 0)
+            if used + cost > budget:
+                break
+            if shown_questions == 0:
+                lines.append("Residual questions:")
+            lines.append(line)
+            used += cost
+            shown_questions += 1
+        lines.append(
+            f"({total - shown} older findings and {len(questions) - shown_questions} residual questions not shown; "
+            "get_specialist_findings returns all of them, unclipped, filterable by domain)"
+        )
+        return "\n".join(lines)
+
+    def _specialist_findings_parts(self) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
+        """Research-hint lines, per-round finding lines newest round first, and de-duplicated residual questions."""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-        hints = _research_hints.load_hints(self.session_dir)
-        rounds = [
-            row
-            for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or [])
-            if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
-        ]
-        if not hints and not rounds:
-            return ""
-
-        lines = ["=== Specialist findings ==="]
-        if hints:
-            lines.append("Findings:")
-            for hint in hints:
-                lines.append(json.dumps(hint, sort_keys=True))
-
+        hints = [json.dumps(hint, sort_keys=True) for hint in _research_hints.load_hints(self.session_dir)]
+        rounds: list[tuple[str, list[str]]] = []
         questions: list[str] = []
         seen_questions: set[str] = set()
-        for row in rounds:
+        for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or []):
+            if not isinstance(row, dict) or not (row.get("new_findings") or row.get("residual_questions")):
+                continue
             domain_label = str(row.get("domain") or "").strip()
-            findings = row.get("new_findings") or []
+            findings = [
+                json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding)
+                for finding in row.get("new_findings") or []
+            ]
             if findings:
-                lines.append(f"[{domain_label}] findings:")
-                for finding in findings:
-                    lines.append(json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding))
+                rounds.append((domain_label, findings))
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
                     questions.append(f"[{domain_label}] {text}")
+        return hints, rounds, questions
 
-        if questions:
-            lines.append("Residual questions:")
-            lines.extend(f"- {question}" for question in questions)
-        return "\n".join(lines)
+    def _context_findings_reader(self, domain: str = "", offset: int = 0, limit: int = 10) -> str:
+        """Every specialist finding, unclipped and newest round first, for ``get_specialist_findings``."""
+        hints, rounds, questions = self._specialist_findings_parts()
+        want = str(domain or "").strip().lower()
+        items = [("research_hint", hint) for hint in hints] + [(d, f) for d, found in rounds for f in found]
+        if want:
+            items = [(d, f) for d, f in items if want in d.lower()]
+            questions = [q for q in questions if want in q[: q.find("]") + 1].lower()]
+        start = max(0, int(offset or 0))
+        page = items[start : start + max(1, min(int(limit or 10), 100))]
+        scope = f" in domains matching {domain!r}" if want else ""
+        out = [f"findings {start + 1}-{start + len(page)} of {len(items)}{scope}"]
+        out.extend(f"[{d}] {f}" for d, f in page)
+        if start + len(page) < len(items):
+            out.append(f"(more: offset={start + len(page)})")
+        if start == 0 and questions:
+            out.append("Residual questions:")
+            out.extend(f"- {question}" for question in questions)
+        return "\n".join(out)
 
     def _priors_match_advisory_block(self) -> str:
         """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""

@@ -34,6 +34,8 @@ class ContextProvider:
     action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
+    # Every persisted specialist finding, paged; ``None`` => unavailable.
+    findings_reader: Callable[[str, int, int], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable, never letting it crash the reactor."""
@@ -122,6 +124,12 @@ class ContextProvider:
             return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
+    def specialist_findings(self, domain: str = "", offset: int = 0, limit: int = 10) -> str:
+        """Return persisted specialist findings, newest round first, optionally one domain's."""
+        if self.findings_reader is None:
+            return "(specialist findings reader not wired)"
+        return self._safe(lambda: self.findings_reader(domain, offset, limit), "specialist_findings")
+
     def get_failure(self, failure_id: str = "") -> str:
         """Return one failure evidence packet as JSON."""
         fid = str(failure_id or "").strip()
@@ -196,6 +204,15 @@ _VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
     "properties": {
         "task_id": {"type": "string"},
         "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
+_FINDINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domain": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
     },
     "additionalProperties": False,
 }
@@ -334,6 +351,17 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
+    (
+        "get_specialist_findings",
+        "Return every persisted specialist finding and residual question, "
+        "unclipped, newest round first. The per-tick prompt keeps only the "
+        "newest ones within a size bound and says how many it left out. "
+        "Optional domain (substring of the specialist domain, e.g. "
+        "'serving'; 'research_hint' for research hints) plus offset / limit "
+        "(default 10) page the list.",
+        _FINDINGS_SCHEMA,
+        "specialist_findings",
+    ),
 )
 
 
@@ -376,6 +404,12 @@ def _make_handler(
                 kwargs["failure_id"] = str(args["failure_id"])
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
+            if "domain" in args:
+                kwargs["domain"] = str(args["domain"])
+            if "offset" in args:
+                kwargs["offset"] = int(args["offset"])
+            if "limit" in args:
+                kwargs["limit"] = int(args["limit"])
         try:
             if method_name == "run_action_now":
                 text = await method(**kwargs)

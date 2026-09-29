@@ -494,6 +494,33 @@ def clear_wall_budget_extension(task_id: str) -> None:
     _WALL_BUDGET_EXTENSIONS.pop(str(task_id or "").strip(), None)
 
 
+#: The built-in tools specialists call, a superset of the leaf sub-agent's. Without ``--tools`` the
+#: CLI describes all of its ~26 built-ins in the cached prefix every request re-reads: 32,541
+#: first-turn tokens against 6,309 with this list (Claude Code 2.1.197).
+SPECIALIST_BUILTIN_TOOLS: tuple[str, ...] = (
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch",
+    "Task",
+)
+SPECIALIST_TOOLS_ENV = "HYPERLOOM_SPECIALIST_TOOLS"
+
+
+def specialist_builtin_tools() -> tuple[str, ...]:
+    """The ``--tools`` list: ``$HYPERLOOM_SPECIALIST_TOOLS`` (comma list, ``all`` = the CLI's whole set), else the default."""
+    raw = (os.environ.get(SPECIALIST_TOOLS_ENV) or "").strip()
+    if not raw:
+        return SPECIALIST_BUILTIN_TOOLS
+    if raw.lower() == "all":
+        return ()
+    return tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+
+
 # Configuration
 @dataclass(frozen=True)
 class SpecialistSubprocessConfig:
@@ -553,6 +580,9 @@ class SpecialistSubprocessConfig:
 
     leaf_agents_json: str | None = None
     """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
+
+    builtin_tools: tuple[str, ...] | None = None
+    """claude-cli ``--tools``. None = :func:`specialist_builtin_tools`; ``()`` = no flag (every built-in)."""
 
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
@@ -1427,6 +1457,10 @@ class SpecialistSubprocessDispatcher:
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
+        builtin = specialist_builtin_tools() if cfg.builtin_tools is None else cfg.builtin_tools
+        builtin = tuple(name for name in builtin if name not in disallowed_tools)
+        if builtin:
+            cmd.extend(["--tools", ",".join(builtin)])
         if disallowed_tools:
             cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
         from .leaf import build_leaf_agents_json
