@@ -9,6 +9,7 @@ from hyperloom_kb.http_service import (
     ExperienceHTTPService,
     HTTPServiceConfig,
     HTTPServiceError,
+    ServiceSettings,
     create_http_server,
 )
 from hyperloom_kb.identity import (
@@ -148,6 +149,12 @@ from hyperloom_kb.storage import (
     canonical_schema_bytes,
     experience_content_hash,
 )
+from hyperloom_kb.sync import (
+    GLOBAL_TOKEN_ENV,
+    GLOBAL_URL_ENV,
+    SyncUnavailable,
+    global_config_from_env,
+)
 from hyperloom_kb.transitions import (
     ExperienceConflictError,
     TransitionKind,
@@ -179,6 +186,8 @@ __all__ = [
     "ExperienceStore",
     "FieldDeclaration",
     "FieldKind",
+    "GLOBAL_TOKEN_ENV",
+    "GLOBAL_URL_ENV",
     "GroupCandidate",
     "HTTPServiceConfig",
     "HTTPServiceError",
@@ -258,8 +267,10 @@ __all__ = [
     "SemanticCandidateProvider",
     "SemanticHit",
     "SemanticSearchBackend",
+    "ServiceSettings",
     "StorageContractError",
     "StoredExperience",
+    "SyncUnavailable",
     "TransitionKind",
     "UnknownSchemaRef",
     "UnsupportedSchemaVersion",
@@ -276,6 +287,7 @@ __all__ = [
     "ensure_local_service",
     "experience_content_hash",
     "experience_kb_from_env",
+    "global_config_from_env",
     "is_loopback",
     "load_declaration",
     "provider_refs",

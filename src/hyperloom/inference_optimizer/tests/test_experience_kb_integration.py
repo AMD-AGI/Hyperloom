@@ -8,6 +8,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
     ExperienceKBEvidence,
     ExperienceKBIntegration,
@@ -25,6 +26,7 @@ from hyperloom_kb import RemoteClient, RemoteConfig
 
 _FIRST = "exp-00000000000000000000000000000001"
 _SECOND = "exp-00000000000000000000000000000002"
+_SCHEMA = "schema:sha256:" + "a" * 64
 
 
 class FakeRef:
@@ -36,7 +38,8 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def read(self, decision, context):
+    def read(self, decision, context, *, schema_ref):
+        assert schema_ref == _SCHEMA
         self.calls.append((decision, context))
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
@@ -94,7 +97,7 @@ def _write_manifest(tmp_path) -> None:
 def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> None:
     _write_manifest(tmp_path)
     client = FakeClient()
-    integration = ExperienceKBIntegration(client, tmp_path)
+    integration = ExperienceKBIntegration(client, tmp_path, _SCHEMA)
     state = _state()
 
     first = integration.read_for_framework(state, untested_proposals="fp8 KV cache")
@@ -126,7 +129,7 @@ def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> 
 def test_specialist_read_context_describes_the_dispatch(tmp_path) -> None:
     _write_manifest(tmp_path)
     client = FakeClient()
-    integration = ExperienceKBIntegration(client, tmp_path)
+    integration = ExperienceKBIntegration(client, tmp_path, _SCHEMA)
     params = {
         "domain": "kernel_switch_specialist",
         "gap_symptom": "VLLM_ROCM_USE_AITER defaults False",
@@ -181,7 +184,7 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
         return _Response()
 
     config = RemoteConfig(base_url="https://kb.example", token="service-token")
-    integration = ExperienceKBIntegration(RemoteClient(config, opener=opener), tmp_path)
+    integration = ExperienceKBIntegration(RemoteClient(config, opener=opener), tmp_path, _SCHEMA)
 
     evidence = integration.read_for_specialist(_state(), {"domain": "serving_specialist"})
 
@@ -189,7 +192,8 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert request.full_url == "https://kb.example/v1/read"
     assert request.get_header("Authorization") == "Bearer service-token"
     body = json.loads(request.data)
-    assert set(body) == {"decision", "context"}
+    assert set(body) == {"decision", "context", "schema_ref"}
+    assert body["schema_ref"] == _SCHEMA
     assert evidence.status == "completed"
     assert evidence.read_id == response["read_id"]
     assert evidence.prompt_block == response["prompt_block"]
@@ -208,6 +212,8 @@ def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
     assert isinstance(integration.client, RemoteClient)
     assert integration.client.config.base_url == "https://kb.example"
     assert integration.client.config.token == "service-token"
+    # A run reads the schema its packaged mapping writes.
+    assert integration.schema_ref == mapping_schema_ref()
 
 
 def _evidence(*experience_ids: str, tick: int = 7) -> ExperienceKBEvidence:

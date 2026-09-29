@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.experience_kb_service import spool_root
+from hyperloom.inference_optimizer.experience_kb_service import auto_push, spool_root
 from hyperloom_kb import ConfigurationError, RemoteClientError, experience_kb_from_env
 from hyperloom_kb.collect import MappingError, SourceDocumentError, collect, load_mapping
 
@@ -68,6 +68,7 @@ def collect_session(session_dir: Path, breakdown: Mapping[str, Any]) -> None:
         )
         return
     log.info("Experience collection for %s: %s", session_dir, report.to_dict()["counts"])
+    auto_push()
 
 
 __all__ = ["MAPPING", "RECEIPT", "URL_ENV", "collect_session", "enabled", "mapping_schema_ref", "validate_config"]

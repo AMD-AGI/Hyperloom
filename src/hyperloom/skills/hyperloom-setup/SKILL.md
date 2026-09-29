@@ -437,9 +437,9 @@ If it fails, report its message; when another process already serves that port
 with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.
 
-The service keeps the environment it was started with. After changing the
-Anthropic settings in `.env`, stop the `hyperloom_kb.http_service` process and
-rerun this step.
+When the `.env` settings the service uses change (the Anthropic gateway, model,
+or global KB), the next run of this step or of an optimize launch restarts it
+with them.
 
 ## Step 6: Report Result
 

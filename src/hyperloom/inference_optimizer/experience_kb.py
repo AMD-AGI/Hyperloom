@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
 from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig
 
 log = logging.getLogger(__name__)
@@ -65,9 +66,11 @@ class ExperienceKBEvidence:
 class ExperienceKBIntegration:
     """One fail-open Experience service client and decision-context read cache."""
 
-    def __init__(self, client: Any, session_dir: Path) -> None:
+    def __init__(self, client: Any, session_dir: Path, schema_ref: str) -> None:
         self.client = client
         self.session_dir = Path(session_dir)
+        # The service may hold several schemas; a run reads the one it writes.
+        self.schema_ref = schema_ref
         self._cache_tick: int | None = None
         self._by_context: dict[str, ExperienceKBEvidence] = {}
 
@@ -87,7 +90,7 @@ class ExperienceKBIntegration:
             return None
         if config is None:
             return None
-        return cls(RemoteClient(config), Path(session_dir))
+        return cls(RemoteClient(config), Path(session_dir), mapping_schema_ref())
 
     def _manifest_context(self) -> dict[str, Any]:
         path = self.session_dir / "manifest.json"
@@ -223,7 +226,7 @@ class ExperienceKBIntegration:
         cached = self._by_context.get(context_hash)
         if cached is not None:
             return cached
-        result = self.client.read(decision, context)
+        result = self.client.read(decision, context, schema_ref=self.schema_ref)
         evidence = ExperienceKBEvidence(
             tick=tick,
             read_id=result.read_id,

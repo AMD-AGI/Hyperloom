@@ -1,30 +1,40 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The workspace's local Experience KB service: its ``.env`` entries, its data home, and its on-demand start."""
+"""The workspace's local Experience KB service: its ``.env`` entries, data home, on-demand start, and global sync."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import secrets
 import sys
 from pathlib import Path
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
+    GLOBAL_URL_ENV,
     LocalService,
     LocalServiceError,
+    RemoteClient,
     RemoteClientError,
     RemoteConfig,
+    SyncUnavailable,
     ensure_local_service,
+    global_config_from_env,
     is_loopback,
 )
+from hyperloom_kb.schema import JsonValue
+
+log = logging.getLogger(__name__)
 
 LOCAL_URL = "http://127.0.0.1:8787"
 SERVICE_DIR = "experience-kb"
+AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
@@ -75,18 +85,71 @@ def ensure_service() -> LocalService | None:
     return ensure_local_service(config, service_home(), env=env)
 
 
+def sync_with_global(direction: str) -> dict[str, JsonValue]:
+    """``push`` or ``pull`` through the workspace's local service, first bringing it to the current settings."""
+
+    if global_config_from_env(os.environ) is None:
+        raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
+    config = RemoteConfig.from_env(spool_root=spool_root())
+    if config is None or not is_loopback(config.base_url):
+        raise SyncUnavailable("HYPERLOOM_KB_URL does not name a local Experience KB service")
+    ensure_service()
+    client = RemoteClient(config)
+    if direction == "pull":
+        return client.pull()
+    # Writes spooled while the service was down belong to this workspace too; deliver them before pushing.
+    client.flush_spool()
+    return client.push()
+
+
+def auto_push() -> None:
+    """Push a run's newly written Experiences when the workspace opted in; a failed push never fails the run."""
+
+    if not env_bool(AUTO_PUSH_ENV):
+        return
+    try:
+        report = sync_with_global("push")
+    except (LocalServiceError, RemoteClientError, SyncUnavailable) as exc:
+        log.warning("Experience KB auto push failed; the next push sends these Experiences: %s", exc)
+        return
+    if report["status"] != "completed" or report["rejected"]:
+        log.warning("Experience KB auto push did not finish; the next push resumes it: %s", _summary("push", report))
+    else:
+        log.info("%s", _summary("push", report))
+
+
+def _summary(direction: str, report: dict[str, JsonValue]) -> str:
+    counts = ", ".join(f"{report[key]} {key}" for key in ("created", "unchanged", "skipped"))
+    rejected = report["rejected"] if isinstance(report["rejected"], list) else []
+    line = f"Experience KB {direction} with {report['global_url']}: {counts}, {len(rejected)} rejected"
+    return line if report["status"] == "completed" else f"{line}; stopped: {report.get('error', '')}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hyperloom.inference_optimizer.experience_kb_service")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
     init.add_argument("--env-file", type=Path, default=Path(".env"))
     commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
+    commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
+    commands.add_parser("pull", help="Store the global KB's Experiences of this declaration that are not held here.")
     args = parser.parse_args(argv)
 
     if args.command == "init-env":
         for key, status in init_env(args.env_file).items():
             print(f"{key}: {status}")
         return 0
+    if args.command in ("push", "pull"):
+        try:
+            report = sync_with_global(args.command)
+        except (LocalServiceError, RemoteClientError, SyncUnavailable) as exc:
+            print(f"Experience KB {args.command} failed: {exc}", file=sys.stderr)
+            return 1
+        print(_summary(args.command, report))
+        rejected = report["rejected"] if isinstance(report["rejected"], list) else []
+        for item in rejected:
+            print(f"  rejected: {item}", file=sys.stderr)
+        return 0 if report["status"] == "completed" and not rejected else 1
     try:
         service = ensure_service()
     except (LocalServiceError, RemoteClientError) as exc:
@@ -103,7 +166,18 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["LOCAL_URL", "SERVICE_DIR", "ensure_service", "init_env", "main", "service_home", "spool_root"]
+__all__ = [
+    "AUTO_PUSH_ENV",
+    "LOCAL_URL",
+    "SERVICE_DIR",
+    "auto_push",
+    "ensure_service",
+    "init_env",
+    "main",
+    "service_home",
+    "spool_root",
+    "sync_with_global",
+]
 
 
 if __name__ == "__main__":
