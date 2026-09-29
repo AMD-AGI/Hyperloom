@@ -84,7 +84,7 @@ async def test_pump_counts_lease_reaped_baseline_as_failure(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-1")
-        await c._pump_dispatcher_once()
+        await c.dispatcher._pump_dispatcher_once()
         assert (await c.tasks.get(task.task_id)).state == "failed"
         assert c.shared_state.baseline_failure_streak == 1
         assert c.shared_state.baseline_total_failures == 1
@@ -106,8 +106,8 @@ async def test_pump_accounts_for_the_reconcilers_confirmed_deaths(session_dir):
         task = await _running_task_with_dead_lease(c, key="reconciler-death")
         report = await c.reconciler.run(time.time())
         assert report.failed_tasks == [task.task_id]
-        await c._pump_dispatcher_once()
-        await c._pump_dispatcher_once()
+        await c.dispatcher._pump_dispatcher_once()
+        await c.dispatcher._pump_dispatcher_once()
         assert c.shared_state.baseline_total_failures == 1
     finally:
         await c.stop()
@@ -121,7 +121,7 @@ async def test_three_lease_reaped_baselines_trip_the_streak_stop(session_dir):
     try:
         for i in range(3):
             await _running_task_with_dead_lease(c, key=f"k-dead-streak-{i}")
-            await c._pump_dispatcher_once()
+            await c.dispatcher._pump_dispatcher_once()
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
@@ -133,8 +133,8 @@ async def test_accounting_is_idempotent_per_task(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-once")
-        await c._pump_dispatcher_once()
-        await c._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
+        await c.dispatcher._pump_dispatcher_once()
+        await c.dispatcher._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
         assert c.shared_state.baseline_failure_streak == 1
         assert len(c.shared_state.last_action_failures) == 1
     finally:

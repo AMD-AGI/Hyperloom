@@ -77,7 +77,7 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
         idempotency_key="t-integrate-revert",
     )
 
-    coord._record_intervention_for_task(
+    coord.writeback._record_intervention_for_task(
         task,
         {
             "status": "reverted",
@@ -103,7 +103,7 @@ def test_a_kept_patch_the_lift_refused_records_an_attempt_not_a_keep():
         idempotency_key="t-integrate-refused",
     )
 
-    coord._record_intervention_for_task(task, {"status": "kept", "delta_pct": 3.0}, Verdict.REFUSED)
+    coord.writeback._record_intervention_for_task(task, {"status": "kept", "delta_pct": 3.0}, Verdict.REFUSED)
 
     summary = coord.shared_state.to_intervention_mix_summary()
     assert "code_patch_keeps=0" in summary

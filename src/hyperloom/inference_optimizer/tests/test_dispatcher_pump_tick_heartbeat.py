@@ -60,7 +60,7 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
 
     coord.sub.register_executor("profile", execute)
     task = await coord.tasks.create(kind="profile", params={}, idempotency_key="long-profile")
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
+    pump = asyncio.create_task(coord.dispatcher._pump_dispatcher_once())
     try:
         await asyncio.wait_for(entered.wait(), 5)
         assert not pump.done()

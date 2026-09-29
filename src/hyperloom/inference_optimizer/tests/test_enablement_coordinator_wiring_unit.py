@@ -23,6 +23,7 @@ from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, create_in_cursor
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
 from hyperloom.orchestrator.enablement.lane import EnablementLane
@@ -347,7 +348,7 @@ def _enqueue_self(**state_kw):
     )
     # Real catalogue resolution, so a row enqueued without a TTL is visible here.
     fake.action_registry = ACTION_CATALOGUE
-    fake._registry_lanes_ttl = types.MethodType(Coordinator._registry_lanes_ttl, fake)
+    fake._registry_lanes_ttl = types.MethodType(DispatcherCollaborator._registry_lanes_ttl, fake)
     fake._maybe_record_enablement_human_review = types.MethodType(
         EnablementLane._maybe_record_enablement_human_review, fake
     )

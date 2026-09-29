@@ -1289,7 +1289,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         {"kernel_id": "k002", "integration_id": "integration-2"},
     ]
     coord.shared_state.pending_kernel_integration_records = lambda: [pending_queue.pop(0)] if pending_queue else []
-    coord._record_integrate_keep = AsyncMock()
+    coord.writeback._record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
     asyncio.run(KernelStackPhase._drain_pending_keep_integrates(coord))

@@ -129,7 +129,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
         task_id="t-keep-bc",
         params={},
     )
-    coord._record_fact_per_variant(
+    coord.writeback._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -154,7 +154,7 @@ def test_record_fact_per_variant_writes_no_lesson_for_an_unadopted_keep(tmp_path
 
     coord = _make_coordinator(tmp_path)
     task = SimpleNamespace(kind="explore", task_id="t-keep-refused", params={})
-    coord._record_fact_per_variant(
+    coord.writeback._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -189,7 +189,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
         best_throughput=7000.0,
     )
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
-    coord._record_fact_per_variant(
+    coord.writeback._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -346,7 +346,7 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
         stack_fingerprint={"vllm_version": "0.6.0"},
     )
     coord.shared_state.current_best = {}
-    coord.finalize_recipe_and_journal()
+    coord.writeback.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 1000.0, "empty CLOSE clobbered a better config"
     assert row["best_config"].get("name") == "good"
@@ -382,7 +382,7 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
     """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     assert kopts, "KEEP'd kernel k006 missing from recipe attrs"
     k = next((x for x in kopts if x.get("kernel_id") == "k006"), None)
@@ -400,7 +400,7 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     """After CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    coord.finalize_recipe_and_journal()
+    coord.writeback.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     kopts = row.get("kernel_optimizations") or []
@@ -436,7 +436,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
     ss.optimization_stack = []
     ss.cumulative_gain_validated = 0.0
-    coord.finalize_recipe_and_journal()
+    coord.writeback.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"
     assert row["best_config"].get("extra_server_args") == ("--schedule-policy lpm --page-size 16"), (
@@ -464,7 +464,7 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
@@ -501,7 +501,7 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     ]
     ss.cumulative_gain_validated = 10.0
     ss.cumulative_gain_validated_stack_len = 1
-    coord.finalize_recipe_and_journal()
+    coord.writeback.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
@@ -520,9 +520,9 @@ def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
     def _must_not_finalize_journal():
         raise AssertionError("an unvalidated working recipe reached journal finalization")
 
-    coord._ensure_journal = _must_not_finalize_journal
+    coord.writeback._ensure_journal = _must_not_finalize_journal
 
-    outcome = coord.finalize_recipe_and_journal()
+    outcome = coord.writeback.finalize_recipe_and_journal()
 
     assert outcome == {
         "status": "skipped",
@@ -541,7 +541,7 @@ def test_close_skips_a_same_length_lift_the_watermark_cannot_see(tmp_path: Path)
     state.working_recipe_generation = 2
     state.validated_recipe_generation = 1
 
-    outcome = coord.finalize_recipe_and_journal()
+    outcome = coord.writeback.finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
@@ -553,7 +553,7 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     state.baseline_tput = 1000.0
     state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
 
-    assert coord._lift_to_current_best(
+    assert coord.writeback._lift_to_current_best(
         "explore",
         1100.0,
         {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
@@ -561,10 +561,10 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
     assert state.optimization_stack_has_unvalidated_keeps()
 
-    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert coord.writeback._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
     assert state.validated_recipe_generation == state.working_recipe_generation == 1
 
-    outcome = coord.finalize_recipe_and_journal()
+    outcome = coord.writeback.finalize_recipe_and_journal()
 
     assert outcome["result_type"] == "written"
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
@@ -592,7 +592,7 @@ def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
             ],
         },
     }
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k007"), None)
     assert k is not None, f"k007 missing from {kopts}"
@@ -617,7 +617,7 @@ def test_kernel_e2e_decision_micro_only_when_not_integrated(
         },
     }
     ss.kernel_integrate_attempts = {}
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k009"), None)
     assert k is not None
@@ -644,7 +644,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ]
     ss.cumulative_gain_validated = 7.5
     ss.cumulative_gain_validated_stack_len = 2
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     sessions = attrs.get("sessions") or []
     assert sessions, "no session entry emitted"
     s = sessions[0]
@@ -663,7 +663,7 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
 
     coord = _make_coordinator(tmp_path)
     task = SimpleNamespace(kind="explore", task_id="t-1")
-    coord._record_fact_per_variant(
+    coord.writeback._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -719,7 +719,7 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
         _must_not_run,
     )
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
     assert out["reason"] == "agentx_local_store_unsupported"
 
@@ -759,7 +759,7 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
         lambda: _Remote(),
     )
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
     assert out["status"] == "written"
     assert calls and calls[0][0].startswith("agentx:")
     from hyperloom.inference_optimizer.session.session_paths import (
@@ -804,7 +804,7 @@ def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp
         _must_not_write,
     )
 
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
 
     assert out["reason"] == "unvalidated_recipe_stack"
     assert out["result_type"] == "unvalidated_recipe"
@@ -841,7 +841,7 @@ def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, mo
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
         lambda: _Remote(),
     )
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
 
     from hyperloom.inference_optimizer.session.session_paths import (
@@ -859,7 +859,7 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
     assert out["reason"] == "agentx_local_store_unsupported"
 
 
@@ -867,7 +867,7 @@ def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> Non
     """The gate must not cost the synthetic path its finalize."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.writeback.finalize_recipe_and_journal(source="close")
     assert out.get("reason") != "agentx"
 
 

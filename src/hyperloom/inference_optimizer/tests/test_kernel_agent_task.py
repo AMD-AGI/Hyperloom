@@ -155,14 +155,14 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
     st = c.shared_state
     _arm_kernel_phase(st)
 
-    await c._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
     first = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
-    await c._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel._on_enter_kernel(from_phase="resume")
     assert [t.task_id for t in await c.tasks.queued() if t.kind == "kernel_agent"] == [first[0].task_id]
 
     await c.tasks.transition(first[0].task_id, "running")
     await c.tasks.transition(first[0].task_id, "failed", evidence={"reason": "dead_holder"})
-    await c._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel._on_enter_kernel(from_phase="resume")
 
     requeued = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
     assert len(requeued) == 1
@@ -203,7 +203,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     c.sub.register_executor("kernel_agent", lambda _ctx: asyncio.sleep(0, result={"status": "ok"}))
     write_manifest(c.session_dir, session_id="kernel-dispatch-contract")
 
-    await c._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
     c.shared_state.phase = ps.PHASE_SWEEP
     c.shared_state.macro_cycle = 4
@@ -363,7 +363,7 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
     await asyncio.wait_for(c.dispatcher._pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
-    lanes, ttl = c._registry_lanes_ttl("roofline")
+    lanes, ttl = c.dispatcher._registry_lanes_ttl("roofline")
     roofline, _ = await c.tasks.create_or_return_existing(
         kind="roofline",
         params={"source": "coordinator_internal", "reason": "test"},
@@ -412,11 +412,11 @@ def test_the_time_budget_gate_admits_kernel_agent_while_one_baseline_round_fits(
     st.max_minutes = 120
     # 120-minute session: 120 s closing reserve, so 100 min spent leaves 18 usable minutes.
     st.elapsed_minutes = lambda **_kw: 100.0  # type: ignore[method-assign]
-    assert c._time_budget_denial_for_action("kernel_agent") is None
+    assert c.dispatcher._time_budget_denial_for_action("kernel_agent") is None
 
     # 112 min spent leaves 6 usable minutes: not even the 10-minute baseline round fits.
     st.elapsed_minutes = lambda **_kw: 112.0  # type: ignore[method-assign]
-    denied = c._time_budget_denial_for_action("kernel_agent")
+    denied = c.dispatcher._time_budget_denial_for_action("kernel_agent")
     assert denied is not None and denied.rule == "time_budget"
 
 

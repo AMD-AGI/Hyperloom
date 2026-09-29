@@ -403,13 +403,13 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     async def must_not_replay(**kwargs):
         pytest.fail("native rejection must settle the candidate before any favorable fallback can run")
 
-    coord._validate_geak_via_geak_harness = must_not_replay
+    coord.writeback._validate_geak_via_geak_harness = must_not_replay
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
     assert rejection["reason"].startswith("median_or_guard_failed")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
-    await coord._promote_to_shared_state("explore", produced, task=task)
+    await coord.writeback._promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["revalidation_error"] == rejection["reason"]

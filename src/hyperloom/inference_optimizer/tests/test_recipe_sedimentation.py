@@ -67,7 +67,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         },
     )
 
-    kept, kept_by_gap, reverted = coord._collect_attempt_provenance()
+    kept, kept_by_gap, reverted = coord.writeback._collect_attempt_provenance()
     assert kept == {"mtp_on": "https://pr/123"}
     assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
     assert len(reverted) == 1
@@ -106,7 +106,7 @@ def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     row = next(x for x in attrs["what_worked"] if x["name"] == "k007")
     assert row["source"] == "https://pr/777"
 
@@ -142,7 +142,7 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     ww = attrs["what_worked"]
     mtp = next(x for x in ww if x["name"] == "mtp_on")
     assert mtp["source"] == "https://pr/123"
@@ -174,7 +174,7 @@ def test_sediment_toggle_off_keeps_recipe_ephemeral(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     mtp = next(x for x in attrs["what_worked"] if x["name"] == "mtp_on")
     assert "source" not in mtp
 

@@ -329,7 +329,7 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     )
     await coord.tasks.transition(no_ttl.task_id, "running")
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
 
     assert (await coord.tasks.get(orphan.task_id)).state == "running", "age alone cannot establish worker death"
     assert (await coord.tasks.get(live.task_id)).state == "running", "in-window running task must not be reclaimed"
@@ -354,8 +354,8 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
         (stale_ts, orphan.task_id),
     )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
     assert (await coord.tasks.get(orphan.task_id)).state == "running"

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -174,9 +174,9 @@ def test_format_inbox_fallback():
 def test_skip_gemm_tuning_env(monkeypatch):
     """Env gate used before FP8 GEMM pre-kernel_opt scheduling."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "true")
-    assert Coordinator._skip_gemm_tuning() is True
+    assert DispatcherCollaborator._skip_gemm_tuning() is True
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "")
-    assert Coordinator._skip_gemm_tuning() is False
+    assert DispatcherCollaborator._skip_gemm_tuning() is False
 
 
 def test_gap_layer_for_action_mapping():
@@ -218,6 +218,6 @@ def test_task_id_from_specialist_source():
 
 
 def test_lanes_fit_headroom():
-    assert Coordinator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 2}) is True
-    assert Coordinator._lanes_fit(["lane_a"], {"lane_a": 2}, {"lane_a": 2}) is False
-    assert Coordinator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 0}) is False
+    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 2}) is True
+    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 2}, {"lane_a": 2}) is False
+    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 0}) is False

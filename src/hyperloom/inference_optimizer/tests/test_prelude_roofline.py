@@ -252,9 +252,9 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     coord.tasks._tasks[named.task_id].state = named_state
     state.auto_roofline_pending_task_id = named.task_id
     state.roofline_failure_streak = 1  # its trace analysis failed
-    assert coord._needs_roofline_for_watermark() is False
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False
 
-    enqueued = await coord._maybe_enqueue_watermark_roofline(
+    enqueued = await coord.phase_kernel._maybe_enqueue_watermark_roofline(
         reason="integrate_keep_watermark",
     )
 
@@ -275,10 +275,10 @@ def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
     state.auto_roofline_pending_task_id = ""
 
     state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES
-    assert coord._needs_roofline_for_watermark() is True
+    assert coord.phase_kernel._needs_roofline_for_watermark() is True
 
     state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES + 1
-    assert coord._needs_roofline_for_watermark() is False
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False
 
 
 @pytest.mark.asyncio
@@ -303,12 +303,12 @@ async def test_watermark_gate_closes_on_a_condemned_stack(coord: Coordinator):
     state.last_roofline_tput = 0.0
     state.auto_roofline_pending_task_id = ""
     state.roofline_failure_streak = 1  # anchors on baseline_tput, which is what arms the gate
-    assert coord._needs_roofline_for_watermark() is True
+    assert coord.phase_kernel._needs_roofline_for_watermark() is True
 
     state.gpu_trace_unsupported_reason = "no GPU kernels on this stack"
 
-    assert coord._needs_roofline_for_watermark() is False
-    assert await coord._maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False
+    assert await coord.phase_kernel._maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
 
 
 def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
@@ -372,7 +372,7 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
-    await coord._run_kernel_agent(_kernel_agent_ctx())
+    await coord.phase_kernel._run_kernel_agent(_kernel_agent_ctx())
 
     assert len(coord.sub.tasks_run) == 1
     # The reason carries a profile fingerprint suffix so repeated kernel entries at the same gain stack are
@@ -387,7 +387,7 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
     monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: True)
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.dispatcher._gemm_tuning_required_before_kernel_opt() is False
 
     fusion_calls = 0
 
@@ -401,7 +401,7 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
     monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
-    await coord._run_kernel_agent(_kernel_agent_ctx())
+    await coord.phase_kernel._run_kernel_agent(_kernel_agent_ctx())
 
     assert fusion_calls == 1
 
@@ -550,7 +550,7 @@ async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
     coord.shared_state.last_profile_workload = coord.shared_state.current_profile_workload_context()
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
 
@@ -565,7 +565,7 @@ async def test_kernel_entry_reprofiles_legacy_trace_without_runtime_fingerprint(
     coord.shared_state.last_profile_workload = {}
     coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
 
@@ -592,7 +592,7 @@ async def test_kernel_entry_reprofiles_when_backend_context_changes(coord: Coord
     }
     coord.sub = _StubSub(state, landed_tput=100.0)
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
     assert coord.sub.tasks_run[0].params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER_LINEAR": "1"}
@@ -605,7 +605,7 @@ async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordin
     coord.sub = _StubSub(coord.shared_state, landed_tput=150.0)
     coord.shared_state.cumulative_gain_validated = 50.0  # cur = 150
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
     assert coord.shared_state.last_roofline_tput == 150.0
@@ -624,7 +624,7 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     coord.shared_state.last_roofline_tput = 100.0
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != measured 100 → triggers
 
-    await coord._maybe_reprofile_for_kernel()  # must not raise
+    await coord.phase_kernel._maybe_reprofile_for_kernel()  # must not raise
 
     assert coord.shared_state.last_roofline_tput == 100.0
 
@@ -640,7 +640,7 @@ async def test_kernel_entry_reprofiles_when_workload_changed_at_same_tput(
     coord.shared_state.conc = 128
     coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
     assert coord.shared_state.last_profile_workload["conc"] == 128
@@ -676,7 +676,7 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     }
     coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
 
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
     # After the reprofile the recorded workload reflects the current config (aiter + the new env), so the next entry
@@ -687,7 +687,7 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     )
 
     coord.sub = _StubSub(coord.shared_state)
-    await coord._maybe_reprofile_for_kernel()
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
     assert coord.sub.tasks_run == []
 
 

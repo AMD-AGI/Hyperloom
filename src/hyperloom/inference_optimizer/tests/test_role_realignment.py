@@ -725,13 +725,13 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
         c.gpu_specialist_pool.extend = _boom  # type: ignore[method-assign]
 
         recorded: list[dict] = []
-        original = c._record_observation
+        original = c.writeback._record_observation
 
         async def _capture(agent, topic, payload):
             recorded.append(dict(payload))
             return await original(agent, topic, payload)
 
-        c._record_observation = _capture  # type: ignore[method-assign]
+        c.writeback._record_observation = _capture  # type: ignore[method-assign]
 
         await c._handle_intent(
             "orchestration",
@@ -812,13 +812,13 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
         original = _sub.grant_wall_budget_extension
         _sub.grant_wall_budget_extension = _boom  # type: ignore[assignment]
         recorded: list[dict] = []
-        original_record = c._record_observation
+        original_record = c.writeback._record_observation
 
         async def _capture(agent, topic, payload):
             recorded.append(dict(payload))
             return await original_record(agent, topic, payload)
 
-        c._record_observation = _capture  # type: ignore[method-assign]
+        c.writeback._record_observation = _capture  # type: ignore[method-assign]
         try:
             await c._handle_intent(
                 "orchestration",

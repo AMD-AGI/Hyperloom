@@ -212,7 +212,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
 
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
@@ -244,7 +244,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
 
     # All four eventually run (queue fully drained in one pump) ...
     assert len(probe.entries) == 4
@@ -274,7 +274,7 @@ async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
     assert len(probe.entries) == 3
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 1, f"expected serial execution (peak 1), got {peak}"
@@ -310,7 +310,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
             requires_lanes=["research_lane"],
         )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
 
     # Both ran (drained), but GPU concurrency never exceeded the pool cap of 1.
     assert len(probe.entries) == 2
@@ -365,7 +365,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
         lease_ttl_sec=5,
     )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher._pump_dispatcher_once()
 
     assert len(captured_ttls) == 1
     ttl = captured_ttls[0]
@@ -374,7 +374,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     # The lease was taken before the deadline was read back here, so the kill is
     # this many seconds away at most; the lease must still be held then.
     assert ttl >= deadline.remaining()
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)
+    budget = coord.dispatcher._specialist_wall_budget_sec(needs_gpu=True)
     assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
     assert probe.gpu_ids_by_task
 

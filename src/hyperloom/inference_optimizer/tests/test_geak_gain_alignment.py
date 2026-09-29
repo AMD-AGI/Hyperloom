@@ -194,7 +194,7 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
         _fake_sweep,
     )
 
-    out = await coord._validate_geak_via_geak_harness(reason="unit")
+    out = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
 
     assert out["validated"] is True
     ss = coord.shared_state
@@ -274,7 +274,7 @@ async def test_agentx_2a_refuses_before_launch(
         raise AssertionError("GEAK cannot replay the canonical AgentX workload")
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+    outcome = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
 
     assert outcome == {
         "validated": False,
@@ -310,7 +310,7 @@ async def test_persisted_legacy_mode_allows_existing_geak_replay(
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 200.0}}
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
-    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+    outcome = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
 
     assert outcome["validated"] is True
     assert len(calls) == 1
@@ -375,7 +375,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             "request_error_rate": 0.0,
         }
     result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
 
     assert not state.geak_pending
     attempt = state.explore_attempts[-1]
@@ -449,7 +449,7 @@ async def test_geak_harness_rejects_missing_or_failed_fresh_accuracy(
         }
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-    out = await coord._validate_geak_via_geak_harness(reason="inconclusive_orchestrator_rebench")
+    out = await coord.writeback._validate_geak_via_geak_harness(reason="inconclusive_orchestrator_rebench")
 
     assert out == {"validated": False, "status": "no_promote", "reason": expected_reason}
     assert (ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated) == before
@@ -483,7 +483,7 @@ async def test_geak_harness_accepts_fresh_accuracy_within_native_tolerance(
         }
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-    out = await coord._validate_geak_via_geak_harness(reason="unit")
+    out = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
     assert out["validated"] is True
     assert coord.shared_state.current_best["tput"] == 120.0
     assert coord.shared_state.cumulative_gain_validated == 20.0
@@ -573,7 +573,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run when 2b validates")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
@@ -590,7 +590,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
         },
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -623,14 +623,14 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
         called["n"] += 1
         return {"validated": False}
 
-    coord._validate_geak_via_geak_harness = _fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "DRIFTED"},  # != expected "abc"
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     # 2b did NOT stamp validated (still 0); it deferred to the GEAK harness (2a).
@@ -655,14 +655,14 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run for a measured no-promote")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
@@ -690,14 +690,16 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
     async def _must_not_fallback(**_kwargs):
         pytest.fail("native REVERT must not fall back to another harness")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback
     result = {
         "status": "succeeded",
         "output_throughput": None,
         "winners": [],
         "per_variant_outcomes": [{"outcome": "REVERT", "reason": reason, "fingerprint": "abc"}],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash=expected_hash))
+    await coord.writeback._promote_to_shared_state(
+        "explore", result, task=_revalidate_task(expected_hash=expected_hash)
+    )
 
     assert coord.shared_state.current_best["tput"] == 110.0
     assert coord.shared_state.cumulative_gain_validated == 0.0
@@ -719,8 +721,8 @@ async def test_structured_native_rejection_prevents_fresh_fallback(tmp_path, rea
     async def must_not_replay(**_kwargs):
         pytest.fail("a conclusive native graded-axis rejection must not invoke fallback")
 
-    coord._validate_geak_via_geak_harness = must_not_replay
-    await coord._promote_to_shared_state(
+    coord.writeback._validate_geak_via_geak_harness = must_not_replay
+    await coord.writeback._promote_to_shared_state(
         "explore",
         {
             "status": "succeeded",
@@ -763,7 +765,7 @@ async def test_complete_return_with_inherited_removals_cannot_credit_measurement
     }
     state.resume_pending_revalidation = True
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
-    await coord._promote_to_shared_state(
+    await coord.writeback._promote_to_shared_state(
         "explore",
         {
             "status": "succeeded",
@@ -795,8 +797,8 @@ async def test_2b_inconclusive_replay_still_allows_fallback(
         calls.append(kwargs)
         return {"validated": False, "reason": "no_fresh_accuracy"}
 
-    coord._validate_geak_via_geak_harness = _fallback
-    await coord._promote_to_shared_state(
+    coord.writeback._validate_geak_via_geak_harness = _fallback
+    await coord.writeback._promote_to_shared_state(
         "explore",
         {
             "output_throughput": None,
@@ -828,7 +830,7 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
     base = 2844.209
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
     before_best = dict(coord.shared_state.current_best)
-    coord._record_geak_candidate(_ok_result(final=3236.489))
+    coord.phase_kernel._record_geak_candidate(_ok_result(final=3236.489))
 
     ss = coord.shared_state
     # Headline is UNCHANGED — no premature promote.
@@ -851,9 +853,9 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
     result = _ok_result(final=3236.489)  # self-reported win
     coord.shared_state.geak_result = result
-    coord._record_geak_candidate(result)
+    coord.phase_kernel._record_geak_candidate(result)
     assert coord.shared_state.geak_pending.get("status") == "awaiting_rebench"
-    coord._promote_geak_from_candidate(
+    coord.phase_kernel._promote_geak_from_candidate(
         result,
         measured_tput=measured,
     )
@@ -880,7 +882,7 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["fused_moe"]
     coord.shared_state.geak_result = result
-    coord._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["lever_kind"] == "kernel"
@@ -933,7 +935,7 @@ def test_the_route_level_lift_is_claimed_once_from_the_anchor_it_beat(tmp_path: 
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
 
     with session_scope(tmp_path):
-        coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+        coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
         rows = [
             r
             for r in stack_event_parts().get("stack_adoption") or []
@@ -1006,14 +1008,14 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run for a no-material drop")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
@@ -1047,19 +1049,19 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
         "final_patch": "",
     }
     coord.shared_state.geak_result = result_blob
-    coord._record_geak_candidate(result_blob)
+    coord.phase_kernel._record_geak_candidate(result_blob)
 
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run when 2b validates a real delta")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -1084,14 +1086,14 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run for a no-material drop")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
@@ -1185,14 +1187,14 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run when 2b validates a resume win")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -1230,14 +1232,14 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
     async def _must_not_fallback(**_kwargs):
         raise AssertionError("2a fallback must not run when re-verifying a promoted win")
 
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+    coord.writeback._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+    await coord.writeback._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -1264,7 +1266,7 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     result["accepted_kernels"] = ["c0_triton"]
     result["accepted_heads"] = ["fused_moe_kernel"]
 
-    coord._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
+    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     # ``_lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
@@ -1280,7 +1282,7 @@ def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path:
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["c0_triton"]
 
-    coord._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["accepted_kernels"] == ["c0_triton"]
