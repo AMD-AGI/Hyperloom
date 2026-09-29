@@ -616,10 +616,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_watts_arg,
         default=None,
         help=(
-            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
-            "never changes power settings, which are privileged and card-wide. Set it with "
-            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
-            "different cap. The observed cap is recorded whether or not this flag is passed."
+            "Declare the power cap (W) the GPUs run at. By default an assertion: set it with "
+            "`amd-smi set --power-cap` before launch, and the session refuses to start if any card it uses is at a "
+            "different cap. With --apply-gpu-power-settings the session sets it itself. The observed cap is "
+            "recorded whether or not this flag is passed."
         ),
     )
     opt.add_argument(
@@ -628,8 +628,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="LEVEL",
         help=(
-            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
-            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
+            "Declare the DPM performance level the GPUs run at (e.g. auto, high, determinism). Asserted like "
+            "--gpu-power-cap-w, or set by the session with --apply-gpu-power-settings."
+        ),
+    )
+    opt.add_argument(
+        "--apply-gpu-power-settings",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit the session to set --gpu-power-cap-w / --gpu-perf-level on the cards it uses (its "
+            "visible-device mask), once at launch and for the whole session; the optimizer never changes them "
+            "afterwards. Needs amd-smi set privileges. The originals are recorded before anything is set and "
+            "restored at exit; a session that dies without restoring is restored by the next launch that passes "
+            "this flag. Refuses on multi-node, and on a card that already holds someone else's resident model, "
+            "since a cap is card-wide. Must be passed again on resume."
         ),
     )
     opt.add_argument(
