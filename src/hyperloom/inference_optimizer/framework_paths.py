@@ -464,6 +464,31 @@ def resolve_session_framework_root() -> str:
     return generic[0] if generic else ""
 
 
+def enclosing_checkout(path: str) -> Path | None:
+    """Return the git checkout that contains ``path``, or ``None``.
+
+    A framework is named by its package dir (``<checkout>/python/sglang``), not
+    the repo root, so the checkout is found by walking up from it. ``.git`` may
+    be a file (worktree) or a dir (repo).
+
+    Args:
+        path: Directory inside the checkout, or the checkout root itself.
+
+    Returns:
+        Path | None: The checkout root, or ``None`` when ``path`` is not a
+        directory inside one.
+    """
+    if not str(path or "").strip():
+        return None
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    for candidate in (p, *p.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def resolve_framework_tree(framework: str) -> str:
     """Return the source tree belonging to ``framework``, or ``""``.
 

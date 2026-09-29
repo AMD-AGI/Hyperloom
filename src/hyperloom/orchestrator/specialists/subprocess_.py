@@ -64,6 +64,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
+from hyperloom.inference_optimizer.framework_paths import enclosing_checkout
 from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -676,19 +677,8 @@ def _pick_worktree_base(
         # ``.git`` may be a file (worktree) or a dir (repo).
         return p if p.is_dir() and (p / ".git").exists() else None
 
-    def _enclosing_checkout(path: str) -> Path | None:
-        # The session names the framework's package dir (``<checkout>/python/sglang``), not the repo root, so the
-        # checkout is found by walking up from it.
-        p = Path(path)
-        if not p.is_dir():
-            return None
-        for candidate in (p, *p.parents):
-            if (candidate / ".git").exists():
-                return candidate
-        return None
-
     if preferred:
-        chosen = _enclosing_checkout(preferred)
+        chosen = enclosing_checkout(preferred)
         if chosen is not None:
             return chosen
     for r in roots:

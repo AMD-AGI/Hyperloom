@@ -179,6 +179,22 @@ def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
     assert ip._resolve_framework_root(None) == plain
 
 
+def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp_path, monkeypatch):
+    """An artifact-only integrate must not land on the first git root discovered (the InferenceX checkout)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / ".git").mkdir(parents=True)
+    checkout = tmp_path / "sglang"
+    (checkout / ".git").mkdir(parents=True)
+    package = checkout / "python" / "sglang"
+    package.mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(inferencex), str(package)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(package) if framework == "sglang" else "")
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    assert ip._resolve_framework_root(None, patch_paths=[]) == checkout
+
+
 def test_resolve_framework_root_none(monkeypatch):
     monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [])
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")

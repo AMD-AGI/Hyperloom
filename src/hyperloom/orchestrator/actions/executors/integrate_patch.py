@@ -36,6 +36,8 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.inference_optimizer.framework_paths import (
+    enclosing_checkout,
+    resolve_framework_tree,
     resolve_kernel_search_roots,
     resolve_session_framework_root,
 )
@@ -1036,6 +1038,11 @@ def _resolve_framework_root(
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
         return Path(session_root)
+    # The first git root in discovery order can be the InferenceX benchmark
+    # checkout, which the benchmark's runtime patcher dirties between stash and pop.
+    framework_checkout = enclosing_checkout(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
+    if framework_checkout is not None:
+        return framework_checkout
     for root in roots:
         if root.is_dir() and (root / ".git").exists():
             return root
