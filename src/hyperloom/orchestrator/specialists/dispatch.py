@@ -161,7 +161,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            _gap_notes = self._target_gap_advisory_block()
+            _gap_notes = self._coord.conversation._target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 

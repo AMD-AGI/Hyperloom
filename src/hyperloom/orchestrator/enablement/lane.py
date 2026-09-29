@@ -138,11 +138,11 @@ class EnablementLane(CoordinatorCollaborator):
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
         try:
-            await self._maybe_enqueue_specialist_requested_build()
-            await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
+            await self._coord.enablement_build._maybe_enqueue_specialist_requested_build()
+            await self._coord.enablement_build._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:
             log.exception("enablement: build escalation failed")
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
@@ -643,7 +643,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.
         for pump in (
-            self._maybe_route_build_outcomes,
+            self._coord.enablement_build._maybe_route_build_outcomes,
             self._coord.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation,
             self._maybe_enqueue_enablement_specialist,
         ):

@@ -107,7 +107,7 @@ async def test_sighup_takes_the_same_priority_as_other_stop_signals(session_dir)
         nonlocal finalize_calls
         finalize_calls += 1
 
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
         reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
@@ -142,7 +142,7 @@ async def test_the_final_signal_snapshot_makes_a_late_sigterm_terminal(session_d
         nonlocal close_calls
         close_calls += 1
 
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _noop_finalize
     try:
         reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
@@ -183,7 +183,7 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
 
     if cancelled:
         monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
         if cancelled:
@@ -390,7 +390,7 @@ async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(sessi
     async def _raise() -> None:
         raise RuntimeError("advance broke")
 
-    monkeypatch.setattr(c, "_advance_phase_if_needed", _raise)
+    monkeypatch.setattr(c.phase_machine, "_advance_phase_if_needed", _raise)
     try:
         # A resumed session carries its tick forward; the record uses that clock, not a per-run count.
         c.shared_state.tick = 41
@@ -947,7 +947,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation._compose_prompt("orchestration")
 
         assert "Execution checklist" not in prompt
     finally:

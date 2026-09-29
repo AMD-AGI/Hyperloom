@@ -376,7 +376,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         # Rearm, ledger append, and manifest ack must stay together: a failed
         # rearm leaves the build unrouted and the novelty ledger unchanged.
-        await self._maybe_rearm_enablement(res)
+        await self._coord.enablement_lane._maybe_rearm_enablement(res)
         if novelty_key is not None:
             ledger = list(state.enablement.build_novelty or [])
             ledger.append(novelty_key)
@@ -396,7 +396,7 @@ class EnablementBuild(CoordinatorCollaborator):
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            await self._maybe_rearm_enablement(
+            await self._coord.enablement_lane._maybe_rearm_enablement(
                 {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
             )
             self._note_build_routed(task_id)

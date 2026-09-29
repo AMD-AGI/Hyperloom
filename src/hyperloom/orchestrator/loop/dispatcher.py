@@ -1178,7 +1178,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # task and skip this attempt's bookkeeping. Semantic empties fall
         # through and are recorded.
         if task.kind == "specialist" and result.state != "cancelled":
-            if await self._maybe_auto_retry_specialist(task, result):
+            if await self._coord.specialist_dispatch._maybe_auto_retry_specialist(task, result):
                 return
         if isinstance(result.result, dict):
             reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")

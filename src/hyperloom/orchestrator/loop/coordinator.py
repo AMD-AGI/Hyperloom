@@ -191,7 +191,7 @@ class Coordinator:
         )
         self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
-        self._attach_orchestration_context_tools()
+        self.conversation._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self._resumed_from = self._detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
@@ -250,9 +250,9 @@ class Coordinator:
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self._ensure_phase_initialised(phase_budget_pct)
+        self.phase_machine._ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
-        self._ensure_recipe_kb_t0_anchored()
+        self.phase_machine._ensure_recipe_kb_t0_anchored()
 
     @property
     def router(self) -> IntentRouter:
@@ -285,40 +285,7 @@ class Coordinator:
         "_harvest_specialist_findings": "writeback",
         "_record_specialist_result": "writeback",
         "_drain_queued_baselines": "writeback",
-        # Phase handlers, grouped in the same call-chain order as the @property block above: machine
-        # -> prelude -> sweep -> close -> internal -> kernel_stack -> kernel -> explore -> framework (framework last:
-        # largest cluster).
-        "_ensure_phase_initialised": "phase_machine",
-        "_ensure_recipe_kb_t0_anchored": "phase_machine",
-        "_kernel_enabled": "phase_machine",
-        "_optimize_enabled": "phase_machine",
-        "_advance_phase_if_needed": "phase_machine",
-        "_on_phase_entered": "phase_machine",
-        "_reseed_orch_prompt_for_phase": "phase_machine",
-        "_record_phase_entry_evidence": "phase_machine",
-        "_internal_analysis_kind": "phase_prelude",
-        "_measured_analysis_cost_sec": "phase_prelude",
-        "_record_prelude_arm_dropped": "phase_prelude",
-        "_warm_recipe_proven_items": "phase_prelude",
-        "_inject_warm_recipe_history_into_ledger": "phase_prelude",
-        "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_promote_warm_replay": "phase_prelude",
-        "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
-        "_enqueue_internal_analysis_task": "phase_prelude",
-        "_internal_analysis_params": "phase_prelude",
-        "_derive_close_stop_reason": "phase_close",
-        "_session_integrated_kernel_patch": "phase_close",
-        "_maybe_run_close_post_opt_roofline": "phase_close",
-        "_revalidate_stack_for_close": "phase_close",
-        "_on_enter_close": "phase_close",
-        "_enqueue_runnable_internal_task": "phase_close",
-        "_enqueue_internal_report_task": "phase_close",
-        "_enqueue_internal_session_breakdown_task": "phase_close",
-        "_run_close_task": "phase_close",
-        "_record_close_step": "phase_close",
-        "_enter_closing_phase": "phase_close",
-        "_closing_report_terminal": "phase_close",
-        "ensure_close_sequence": "phase_close",
+        # Phase handlers: kernel cluster only (all others made explicit).
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
@@ -348,62 +315,8 @@ class Coordinator:
         "_needs_roofline_for_watermark": "phase_kernel",
         "_maybe_enqueue_watermark_roofline": "phase_kernel",
         "_cached_kernel_request": "phase_kernel",
-        "_maybe_force_stalled_domain_specialist": "specialist_dispatch",
-        "_fan_out_specialist_wave": "specialist_dispatch",
-        "_maybe_auto_retry_specialist": "specialist_dispatch",
-        "_record_specialist_retry_exhausted": "specialist_dispatch",
-        "_warm_specialist_params": "specialist_dispatch",
-        "_build_specialist_round_entry": "specialist_dispatch",
-        "_task_id_from_specialist_source": "specialist_dispatch",
-        "_enablement_admitted": "enablement_lane",
-        "_maybe_enqueue_enablement_specialist": "enablement_lane",
-        "_maybe_record_enablement_human_review": "enablement_lane",
-        "_enablement_in_flight": "enablement_lane",
-        "_round_has_live_work": "enablement_lane",
-        "_open_authoring_round": "enablement_lane",
-        "_renew_enablement_round": "enablement_lane",
-        "_handoff_enablement_round": "enablement_lane",
-        "_settle_enablement_round": "enablement_lane",
-        "_maybe_rearm_enablement": "enablement_lane",
-        "_maybe_escalate_to_targeted_build": "enablement_build",
-        "_maybe_enqueue_specialist_requested_build": "enablement_build",
-        "_maybe_route_build_outcomes": "enablement_build",
-        "_route_succeeded_build": "enablement_build",
-        "_route_failed_build": "enablement_build",
-        "_build_routing_record": "enablement_build",
-        "_note_build_routed": "enablement_build",
-        "_build_probe_was_cancelled": "enablement_build",
-        "_enqueue_build_launch_probe": "enablement_build",
-        "_pump_enablement_safely": "enablement_lane",
-        "_attach_orchestration_context_tools": "conversation",
-        "_context_inbox_reader": "conversation",
-        "_context_recent_outcomes_reader": "conversation",
-        "_context_running_tasks_reader": "conversation",
-        "_task_heartbeat_age_sec": "conversation",
-        "_context_analysis_reader": "conversation",
-        "_record_reactor_conversation": "conversation",
-        "_compose_prompt": "conversation",
-        "_load_system_prompt": "conversation",
-        "_plateau_advisory_block": "conversation",
-        "_dominant_roofline_direction": "conversation",
-        "_bottleneck_redirect_advisory_block": "conversation",
-        "_acceptance_threshold_advisory_block": "conversation",
-        "_target_gap_advisory_block": "conversation",
-        "_current_primary_gap": "conversation",
-        "_recent_proposed_variants": "conversation",
-        "_priors_match_advisory_block": "conversation",
-        "_discarded_escalate_hint_advisory_block": "conversation",
-        "_workload_canonical_id": "proposals",
-        "_read_local_recipe_row": "proposals",
-        "_extract_kept_best_config": "proposals",
-        "_kb_best_config_overrides_for_keep": "proposals",
-        "_kb_amend_recipe": "proposals",
-        "_inject_explore_runtime_params": "proposals",
-        "_materialize_approved_proposal": "proposals",
-        "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",
         "_cycle_idem_suffix": "dispatcher",
-        "_advance_rendered_cursor": "conversation",
         "_dispatch_paused_for_phase_budget": "dispatcher",
         "_pump_dispatcher_once": "dispatcher",
         "_spawn_fitting_queued": "dispatcher",
@@ -822,12 +735,12 @@ class Coordinator:
             # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK
             # returning no_gain -> skip_to_sweep).
             await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+                self.phase_machine._advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
             if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
                 await self._await_within_session_bound(
-                    self._advance_phase_if_needed,
+                    self.phase_machine._advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
         except Exception as exc:
@@ -849,11 +762,11 @@ class Coordinator:
             # FRAMEWORK_AGENT phase pump: enqueue the next candidate / fetch the next batch.
             await self.phase_framework.pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self._pump_enablement_safely()
+            await self.enablement_lane._pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
             await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+                self.phase_machine._advance_phase_if_needed,
                 stage="advance_phase",
             )
         except Exception as exc:
@@ -1060,13 +973,13 @@ class Coordinator:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
-                    closing_deadline = await self._enter_closing_phase(
+                    closing_deadline = await self.phase_close._enter_closing_phase(
                         grace_sec=grace_sec,
                     )
                     self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
-                    report_terminal = await self._closing_report_terminal()
+                    report_terminal = await self.phase_close._closing_report_terminal()
                     grace_blown = closing_deadline is not None and closing_deadline.expired()
                     if report_terminal or grace_blown:
                         if grace_blown and not report_terminal:
@@ -1122,7 +1035,7 @@ class Coordinator:
             )
             self.shared_state.save(self.session_dir)
             try:
-                await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
+                await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
             except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
@@ -1159,8 +1072,8 @@ class Coordinator:
     async def _reactor_pass(self, agent_name: str) -> None:
         """Run one reactor turn for ``agent_name`` and route its intents."""
         backend = self.backends[agent_name]
-        sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name)
+        sys_prompt = await self.conversation._load_system_prompt(agent_name)
+        prompt = await self.conversation._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1201,7 +1114,7 @@ class Coordinator:
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
-            await self._advance_rendered_cursor(agent_name)
+            await self.conversation._advance_rendered_cursor(agent_name)
             return
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
@@ -1227,10 +1140,10 @@ class Coordinator:
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self._record_reactor_conversation(agent_name, result)
+        self.conversation._record_reactor_conversation(agent_name, result)
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
-        await self._advance_rendered_cursor(agent_name)
+        await self.conversation._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:

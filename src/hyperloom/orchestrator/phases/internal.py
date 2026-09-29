@@ -54,7 +54,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "seen_pr_ids": seen,
             "mode": "research",
         }
-        proven = list(self._warm_recipe_proven_items())
+        proven = list(self._coord.phase_prelude._warm_recipe_proven_items())
         search = getattr(self.shared_state, "explore_search", None) or {}
         accepted = search.get("accepted") if isinstance(search, dict) else []
         if isinstance(accepted, list):
@@ -82,7 +82,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 if questions:
                     params["notes"] = "\n".join(f"- {question}" for question in questions)
                 break
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -181,7 +181,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 params["static_recon_checklist_entries"] = _dicts
         except Exception:
             log.exception("static-recon: checklist seeding failed")
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -217,7 +217,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if not env_bool("INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", default=True):
             return
         state = self.shared_state
-        plateau_active = bool(self._plateau_advisory_block())
+        plateau_active = bool(self._coord.conversation._plateau_advisory_block())
         if not plateau_active:
             return
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -230,7 +230,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             )
         except Exception:  # noqa: BLE001 — defensive
             digest = ""
-        direction, _pct = self._dominant_roofline_direction()
+        direction, _pct = self._coord.conversation._dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
@@ -252,7 +252,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         }
         if digest:
             params["gap_evidence"] = {"trajectory_review": digest}
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
