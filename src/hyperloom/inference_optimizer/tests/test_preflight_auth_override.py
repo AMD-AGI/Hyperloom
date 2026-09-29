@@ -1978,23 +1978,6 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
     assert seen["base_url"] == "https://api.openai.com/v1"
 
 
-def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
-    """--critic-mock → no probe / no warn (Codex is only needed for the critic-agent path)."""
-    args = _make_args(
-        codex_model="gpt-totally-fake",
-        critic_mock=True,
-    )
-
-    def _no_probe(**kw):
-        raise AssertionError("probe should not run when Codex is unused")
-
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
-    out = capsys.readouterr().out
-    assert "WARNING" not in out
-    assert "gpt-totally-fake" not in out
-
-
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
@@ -2093,19 +2076,87 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     assert "unreachable" in out
 
 
-def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, capsys):
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str, str]]:
+    """Stub both review transports and return the ``(protocol, model)`` each probe sent."""
+    sent: list[tuple[str, str]] = []
 
-    def _no_probe(**kw):
-        raise AssertionError("Anthropic-only fallback does not use CodexBackend")
+    def _anthropic(**kw):
+        sent.append(("anthropic", kw["model"]))
+        if fail:
+            raise RuntimeError("AuthenticationError")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
-    args = _make_args(codex_model="claude-sonnet-4-5-20250929", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://api.anthropic.com", ""))
+    def _chat(client, **kw):
+        sent.append(("openai", kw["model"]))
+        if fail:
+            raise RuntimeError("AuthenticationError")
 
-    assert capsys.readouterr().out == ""
+    monkeypatch.setattr(cli.llm_config, "anthropic_completion", _anthropic)
+    monkeypatch.setattr(cli.llm_config, "chat_completion", _chat)
+    monkeypatch.setattr(cli.llm_config, "get_openai_client", lambda **kw: object())
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    return sent
+
+
+def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
+    """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("anthropic", "glm-5-3")]
+    assert "critic model 'glm-5-3' answered" in capsys.readouterr().out
+
+
+def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: True)
+    args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("openai", "gpt-5.5")]
+
+
+def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("openai", "gpt-5.6-sol")]
+
+
+def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
+    sent = _record_critic_probes(monkeypatch, fail=True)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert exc_info.value.code == 2
+    # Transient errors get the catalog retries, but every attempt asks the one configured model.
+    assert set(sent) == {("anthropic", "glm-5-3")}
+    assert len(sent) == 1 + len(cli._CATALOG_RETRY_DELAYS_SEC)
+    assert args.claude_model == "glm-5-3"
+    assert args.codex_model == "gpt-5.4"
+    err = capsys.readouterr().err
+    assert "no fallback model" in err
+    assert "Refusing to start" in err
+
+
+def test_a_mock_critic_sends_no_probe(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    args = _make_args(critic_mock=True, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == []
 
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):

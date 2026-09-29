@@ -38,6 +38,7 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    task_id: str | None = None
 
 
 def apply_critic_grid_filter(
@@ -555,6 +556,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        pending.task_id = task.task_id
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
 

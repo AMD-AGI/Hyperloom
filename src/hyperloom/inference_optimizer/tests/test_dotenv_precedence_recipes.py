@@ -36,6 +36,7 @@ RECIPE_DOCS = (
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md",
     ATOM_DOC,
+    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom-forge" / "SKILL.md",
 )
 CREDENTIAL_ONLY_DOC = REPO_ROOT / "docs" / "how-to" / "optimize-custom-workload.md"
 

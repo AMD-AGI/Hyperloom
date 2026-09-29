@@ -81,7 +81,20 @@ from .proposals import ProposalsCollaborator
 from .conversation import ConversationCollaborator
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    EVENT_PROPOSAL,
+    EVENT_SESSION,
+    STATUS_CANCELLED,
+    TERMINAL_STATUSES,
+    llm_call_summary,
+    load_events,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
@@ -292,6 +305,7 @@ class Coordinator(
 
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
@@ -707,7 +721,87 @@ class Coordinator(
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+
+        The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
+        session dir and the live phase / tick.
+        """
+        with (
+            trajectory_scope(
+                session_dir=self.session_dir,
+                component="coordinator",
+                phase_tick_source=self._trajectory_phase_tick,
+            ),
+            trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
+        ):
+            stop_reason = await self._run_ticks(
+                objective=objective,
+                max_minutes=max_minutes,
+                tick_interval_sec=tick_interval_sec,
+                max_ticks=max_ticks,
+                stop_when=stop_when,
+                install_signal_handlers=install_signal_handlers,
+                crash_emergency_threshold=crash_emergency_threshold,
+                closing_grace_sec=closing_grace_sec,
+            )
+            self._close_undecided_proposals(stop_reason)
+            span.finish(stop_reason=stop_reason)
+            return stop_reason
+
+    def _close_undecided_proposals(self, stop_reason: str) -> None:
+        """Close the trajectory span of every proposal the session ends without a verdict on.
+
+        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
+        session may end again over proposals an earlier leg already closed, so those are skipped.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+
+        if stop_reason == SUPERVISOR_RESTART_REASON:
+            return
+        undecided = [p for p in self.state.pending_proposals.values() if not p.decided]
+        if not undecided:
+            return
+        try:
+            closed = {
+                row.get("span_id")
+                for row in load_events(self.session_dir)
+                if row.get("event_type") == EVENT_PROPOSAL and row.get("status") in TERMINAL_STATUSES
+            }
+            for pending in undecided:
+                if pending.proposal_msg_id in closed:
+                    continue
+                record_event(
+                    EVENT_PROPOSAL,
+                    status=STATUS_CANCELLED,
+                    span_id=pending.proposal_msg_id,
+                    attributes={
+                        "name": pending.action_name,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "reason": "session_ended_undecided",
+                        "stop_reason": stop_reason,
+                    },
+                )
+        except Exception:  # trace must never mask the stop reason
+            log.warning("trajectory: closing undecided proposals failed", exc_info=True)
+
+    def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
+        """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
+        return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
+
+    async def _run_ticks(
+        self,
+        *,
+        objective: Objective | None,
+        max_minutes: float | None,
+        tick_interval_sec: float,
+        max_ticks: int | None,
+        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
+        install_signal_handlers: bool,
+        crash_emergency_threshold: int,
+        closing_grace_sec: float | None,
+    ) -> str:
+        """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
@@ -922,7 +1016,12 @@ class Coordinator(
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents."""
+        """Run one reactor turn for ``agent_name`` and route its intents, scoped as that agent on the trajectory."""
+        with trajectory_scope(component=agent_name, agent=agent_name):
+            await self._reactor_turn(agent_name)
+
+    async def _reactor_turn(self, agent_name: str) -> None:
+        """Body of :meth:`_reactor_pass`."""
         backend = self.backends[agent_name]
         sys_prompt = await self._load_system_prompt(agent_name)
         prompt = await self._compose_prompt(agent_name)
@@ -938,19 +1037,30 @@ class Coordinator(
             )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
+        call_id = new_call_id()
         try:
-            result: BackendTurnResult = await backend.run(
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                max_turns=0,
-            )
+            with trajectory_span(
+                EVENT_LLM_CALL,
+                call_id=call_id,
+                attributes={"name": agent_name, "model": getattr(backend, "model", None)},
+            ) as call_span:
+                record_prompt_snapshot(
+                    self._prompt_snapshots.observe(agent_name, prompt=prompt, system_prompt=sys_prompt, tools=tools)
+                )
+                result: BackendTurnResult = await backend.run(
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    tools=tools,
+                    max_turns=0,
+                )
+                call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
+                    call_id=call_id,
                 )
             await self._record_observation(
                 "coordinator",
@@ -993,8 +1103,9 @@ class Coordinator(
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        for intent in result.intents:
-            await self._handle_intent(agent_name, intent)
+        with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
+            for intent in result.intents:
+                await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
         self.shared_state.agent_last_active[agent_name] = time.time()
 
@@ -1055,6 +1166,7 @@ class Coordinator(
         error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
@@ -1063,6 +1175,8 @@ class Coordinator(
                 component=agent_name,
                 role=agent_name,
                 error=error,
+                call_id=call_id,
+                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
                 latency_ms=latency_ms,
