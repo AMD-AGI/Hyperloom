@@ -1425,10 +1425,7 @@ def aggregate_by_source_function(
         group["all_pitem_prose"] = [
             e
             for e in group["all_pitem_prose"]
-            if e["rank"]
-            or e["identification"]
-            or e["reasoning_for_slowdown"]
-            or e["resolution"]
+            if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]
         ]
         # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
         group.pop("_pitem_prose_seen", None)
