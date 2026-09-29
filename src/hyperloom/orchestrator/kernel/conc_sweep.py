@@ -360,59 +360,6 @@ def _arm_status(results: list[VariantResult]) -> str:
     return "failed"
 
 
-def _close_arm(recorder: Any, arm_name: str, results: list[VariantResult], *, exc: BaseException | None) -> None:
-    """Close one arm's row, whichever of its ladder's paths it leaves by.
-
-    An arm leaves by three: the restart ladder it was delegated to, the restart
-    retry after every boot failed, and the reuse ladder. Closing here means an
-    arm that raised mid-ladder says so once, rather than each path reporting a
-    ladder it never finished as the status its own results happen to add up to.
-    """
-    if recorder is None:
-        return
-    if exc is None:
-        recorder.finish_arm(arm_name, status=_arm_status(results))
-    else:
-        recorder.fail_arm(arm_name, exc)
-
-
-def _record_rung(
-    recorder: Any,
-    arm_name: str,
-    result: VariantResult,
-    *,
-    stage: str,
-    committed: bool = True,
-    start_time: str = "",
-    wall_duration_sec: float | None = None,
-    granted_cap_sec: float | None = None,
-    budget_remaining_sec: float | None = None,
-) -> None:
-    """Record one rung on the sweep's event, if the sweep is being recorded.
-
-    The result is flattened into the same point the report writes, so the
-    recorded curve and the written one cannot differ. ``stage`` is a
-    ``STAGE_*`` value naming how the rung came to run, ``committed`` says
-    whether it is part of the published curve, and the seconds fields are
-    wall clock.
-    """
-    if recorder is None:
-        return
-    point = _point_from_variant(result, arm=arm_name)
-    recorder.record_variant(
-        arm_name,
-        stage=stage,
-        conc=point.get("conc"),
-        point=point,
-        committed=committed,
-        num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
-        start_time=start_time,
-        wall_duration_sec=wall_duration_sec,
-        granted_cap_sec=granted_cap_sec,
-        budget_remaining_sec=budget_remaining_sec,
-    )
-
-
 def _order_concs_desc(concs: list[int]) -> list[int]:
     """Return a strictly descending, deduplicated copy of the CONC ladder."""
     return sorted(set(concs), reverse=True)
@@ -459,12 +406,14 @@ _SESSION_RESERVE = "session_deadline_reserve"
 class _Budget:
     """Whether the sweep's time has run out, and why."""
 
-    exhausted: bool = False
     skip_reason: str = ""
-    remaining_sec: float | None = None
+    remaining_sec: float = 0.0
+
+    @property
+    def exhausted(self) -> bool:
+        return bool(self.skip_reason)
 
     def exhaust(self, reason: str, remaining_sec: float) -> None:
-        self.exhausted = True
         self.skip_reason = reason
         self.remaining_sec = remaining_sec
 
@@ -522,6 +471,68 @@ class _SweepRun:
     def arm_results(self, arm_name: str) -> list[VariantResult]:
         prefix = f"{arm_name}_"
         return [result for result in self.results if result.name.startswith(prefix)]
+
+    def record_rung(
+        self,
+        arm_name: str,
+        result: VariantResult,
+        *,
+        stage: str,
+        committed: bool = True,
+        start_time: str = "",
+        wall_duration_sec: float | None = None,
+        budget_remaining_sec: float | None = None,
+    ) -> None:
+        """Record one rung on the sweep's event, if the sweep is being recorded.
+
+        The result is flattened into the same point the report writes, so the
+        recorded curve and the written one cannot differ. ``stage`` is a
+        ``STAGE_*`` value naming how the rung came to run, ``committed`` says
+        whether it is part of the published curve, and the seconds fields are
+        wall clock.
+        """
+        if self.recorder is None:
+            return
+        point = _point_from_variant(result, arm=arm_name)
+        self.recorder.record_variant(
+            arm_name,
+            stage=stage,
+            conc=point.get("conc"),
+            point=point,
+            committed=committed,
+            num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
+            start_time=start_time,
+            wall_duration_sec=wall_duration_sec,
+            granted_cap_sec=self.benchmark_timeout_sec,
+            budget_remaining_sec=budget_remaining_sec,
+        )
+
+    def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
+        """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
+        for failed in boots:
+            self.results.append(failed)
+            if self.recorder is not None:
+                self.recorder.commit_variant(
+                    arm_name,
+                    stage=STAGE_BOOT_ATTEMPT,
+                    conc=variant_conc(failed),
+                    point=_point_from_variant(failed, arm=arm_name),
+                )
+
+    def close_arm(self, arm_name: str, exc: BaseException | None) -> None:
+        """Close one arm's row, whichever of its ladder's paths it leaves by.
+
+        An arm leaves by three: the restart ladder it was delegated to, the restart
+        retry after every boot failed, and the reuse ladder. Closing here means an
+        arm that raised mid-ladder says so once, rather than each path reporting a
+        ladder it never finished as the status its own results happen to add up to.
+        """
+        if self.recorder is None:
+            return
+        if exc is None:
+            self.recorder.finish_arm(arm_name, status=_arm_status(self.arm_results(arm_name)))
+        else:
+            self.recorder.fail_arm(arm_name, exc)
 
     async def run_rung(
         self,
@@ -624,8 +635,7 @@ class _SweepRun:
             payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
         if self.budget.exhausted:
             payload["budget_skip_reason"] = self.budget.skip_reason
-            if self.budget.remaining_sec is not None:
-                payload["budget_remaining_sec"] = round(self.budget.remaining_sec, 2)
+            payload["budget_remaining_sec"] = round(self.budget.remaining_sec, 2)
         return payload
 
     def write(self, payload: dict[str, Any]) -> Exception | None:
@@ -730,7 +740,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         finally:
             if arm_lease is not None:
                 arm_lease.close()
-            _close_arm(recorder, arm_name, run.arm_results(arm_name), exc=arm_failure)
+            run.close_arm(arm_name, arm_failure)
 
     if not lc_eligible:
         # Framework does not support server_lifecycle — fall through to Option B (per-variant server restart via
@@ -796,33 +806,19 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         boot_elapsed = round(time.time() - boot_started_at, 3)
 
         if br is not None and br.error_class == run.deadline_stop.error_class:
-            for failed in failed_boots:
-                run.results.append(failed)
-                if recorder is not None:
-                    recorder.commit_variant(
-                        arm_name,
-                        stage=STAGE_BOOT_ATTEMPT,
-                        conc=variant_conc(failed),
-                        point=_point_from_variant(failed, arm=arm_name),
-                    )
+            run.commit_failed_boots(arm_name, failed_boots)
             stopped_results = [br, *[_deadline_skip_result(v, run.deadline_stop) for v in grid[boot_idx + 1 :]]]
             for stopped in stopped_results:
                 run.results.append(stopped)
-                _record_rung(
-                    recorder,
-                    arm_name,
-                    stopped,
-                    stage=STAGE_BUDGET_SKIP,
-                    budget_remaining_sec=run.budget.remaining_sec,
-                    granted_cap_sec=run.benchmark_timeout_sec,
+                run.record_rung(
+                    arm_name, stopped, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec
                 )
             try:
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             finally:
                 if arm_lease is not None:
                     arm_lease.close()
-                if recorder is not None:
-                    recorder.finish_arm(arm_name, status=_arm_status(run.arm_results(arm_name)))
+                run.close_arm(arm_name, None)
             return
 
         if boot_failed:
@@ -843,15 +839,13 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             # Recorded now and uncommitted: a concurrency the server would not
             # come up at is the finding, and whether it counts toward the curve
             # is not known until a lower rung either boots or does not.
-            _record_rung(
-                recorder,
+            run.record_rung(
                 arm_name,
                 failed,
                 stage=STAGE_BOOT_ATTEMPT,
                 committed=False,
                 start_time=boot_started_iso,
                 wall_duration_sec=boot_elapsed,
-                granted_cap_sec=run.benchmark_timeout_sec,
             )
             boot_idx += 1
             continue
@@ -861,26 +855,10 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         boot_succeeded = True
         boot_only = str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
         # Commit the higher-CONC failed boots (genuine capacity failures) first.
-        for fb in failed_boots:
-            run.results.append(fb)
-            if recorder is not None:
-                recorder.commit_variant(
-                    arm_name,
-                    stage=STAGE_BOOT_ATTEMPT,
-                    conc=variant_conc(fb),
-                    point=_point_from_variant(fb, arm=arm_name),
-                )
+        run.commit_failed_boots(arm_name, failed_boots)
         if not boot_only:
             run.results.append(br)
-        _record_rung(
-            recorder,
-            arm_name,
-            br,
-            stage=STAGE_BOOT,
-            start_time=boot_started_iso,
-            wall_duration_sec=boot_elapsed,
-            granted_cap_sec=run.benchmark_timeout_sec,
-        )
+        run.record_rung(arm_name, br, stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
         if recorder is not None:
             recorder.record_arm_boot(
                 arm_name,
@@ -940,14 +918,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 for v in reuse_grid[r_idx:]:
                     skip_r = _budget_skip_result(v)
                     run.results.append(skip_r)
-                    _record_rung(
-                        recorder,
-                        arm_name,
-                        skip_r,
-                        stage=STAGE_BUDGET_SKIP,
-                        budget_remaining_sec=0.0,
-                        granted_cap_sec=run.benchmark_timeout_sec,
-                    )
+                    run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
                 break
 
             is_last = r_idx == len(reuse_grid) - 1
@@ -987,14 +958,12 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             for rr in reuse_results:
                 run.results.append(rr)
                 stopped = rr.error_class == run.deadline_stop.error_class
-                _record_rung(
-                    recorder,
+                run.record_rung(
                     arm_name,
                     rr,
                     stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
                     start_time=reuse_started_iso,
                     wall_duration_sec=reuse_elapsed,
-                    granted_cap_sec=run.benchmark_timeout_sec,
                     budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
                 )
             # Incremental flush after each reuse point.
@@ -1014,7 +983,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
         if arm_lease is not None:
             arm_lease.close()
-        _close_arm(recorder, arm_name, run.arm_results(arm_name), exc=reuse_failure)
+        run.close_arm(arm_name, reuse_failure)
 
 
 async def _sweep_arm_option_b(
@@ -1031,21 +1000,13 @@ async def _sweep_arm_option_b(
     deadline covers both arms and all retries. ``serving_lease`` is ``None``
     when the arm runs on the local (non-Ray) path.
     """
-    recorder = run.recorder
     for variant in grid:
         _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
         if run.session_closing():
             run.budget.spend_on_session_reserve()
             skip_r = _budget_skip_result(variant)
             run.results.append(skip_r)
-            _record_rung(
-                recorder,
-                arm_name,
-                skip_r,
-                stage=STAGE_BUDGET_SKIP,
-                budget_remaining_sec=0.0,
-                granted_cap_sec=run.benchmark_timeout_sec,
-            )
+            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
             continue
         rung_started_iso = now_iso("seconds")
         rung_started_at = time.time()
@@ -1066,14 +1027,12 @@ async def _sweep_arm_option_b(
         for r in sub:
             run.results.append(r)
             stopped = r.error_class == run.deadline_stop.error_class
-            _record_rung(
-                recorder,
+            run.record_rung(
                 arm_name,
                 r,
                 stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
                 start_time=rung_started_iso,
                 wall_duration_sec=rung_elapsed,
-                granted_cap_sec=run.benchmark_timeout_sec,
                 budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
             )
         run.flush_progress()
@@ -1141,7 +1100,6 @@ async def run_conc_sweep(
     concs: list[int] | None = None,
     total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
-    write_reports: bool = True,
     recorder: Any = None,
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
@@ -1356,7 +1314,7 @@ async def run_conc_sweep(
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
-    report_error = run.write(payload) if write_reports else None
+    report_error = run.write(payload)
 
     if recorder is not None:
         if report_error is not None:
