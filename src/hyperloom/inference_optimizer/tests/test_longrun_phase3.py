@@ -288,7 +288,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
         session_dir=sd,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
