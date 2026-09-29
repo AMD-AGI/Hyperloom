@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -93,8 +93,8 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert cli_model_gate._gpu_runner_type("mi325x") == "mi300x"
-    assert cli_model_gate._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -123,7 +123,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert cli_model_gate._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,

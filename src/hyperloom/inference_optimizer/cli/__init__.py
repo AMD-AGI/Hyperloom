@@ -36,17 +36,19 @@ from .backends import (
     orchestration_runs_on_codex,
 )
 from .model_gate import (
-    _autodetect_gpu_type,
-    _gpu_runner_type,
     _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
+)
+from ..gpu_types import (
+    _autodetect_gpu_type,
+    _gpu_runner_type,
+    _resolve_gpu_type,
 )
 from ..model_config_utils import (
     summarize_model_config,

@@ -14,7 +14,7 @@ import pytest
 
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 _OAUTH_ENV = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
@@ -477,27 +477,27 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
 # _resolve_gpu_type
 def test_resolve_gpu_type_probe_only():
     """No --gpu-type passed; probe wins."""
-    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="", probed="mi355x")
+    gpu, warns = gpu_types._resolve_gpu_type(user_specified="", probed="mi355x")
     assert gpu == "mi355x"
     assert warns == []
 
 
 def test_resolve_gpu_type_user_only():
     """Probe failed (CPU sandbox); user value is used as-is, no warn."""
-    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="mi300x", probed="")
+    gpu, warns = gpu_types._resolve_gpu_type(user_specified="mi300x", probed="")
     assert gpu == "mi300x"
     assert warns == []
 
 
 def test_resolve_gpu_type_agreement_silent():
-    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="mi355x", probed="mi355x")
+    gpu, warns = gpu_types._resolve_gpu_type(user_specified="mi355x", probed="mi355x")
     assert gpu == "mi355x"
     assert warns == []
 
 
 def test_resolve_gpu_type_disagreement_probe_always_wins():
     """On disagreement the probe wins unconditionally and warns loudly."""
-    gpu, warns = cli_model_gate._resolve_gpu_type(
+    gpu, warns = gpu_types._resolve_gpu_type(
         user_specified="mi300x",
         probed="mi355x",
     )
@@ -509,7 +509,7 @@ def test_resolve_gpu_type_disagreement_probe_always_wins():
 
 def test_resolve_gpu_type_no_inputs_returns_empty():
     """No probe, no user value → empty gpu_type."""
-    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="", probed="")
+    gpu, warns = gpu_types._resolve_gpu_type(user_specified="", probed="")
     assert gpu == ""
     assert warns == []
 
