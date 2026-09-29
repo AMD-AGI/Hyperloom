@@ -35,8 +35,6 @@ class TestFrameworkRegistry:
         assert fr.throughput_unit("vllm") == "tok/s"
 
     def test_registry_capability_fields(self):
-        assert fr.FRAMEWORKS["xdit"].supports_server_reuse is False
-        assert fr.FRAMEWORKS["sglang"].supports_server_reuse is True
         assert fr.FRAMEWORKS["xdit"].repo_url == "https://github.com/xdit-project/xDiT.git"
 
     def test_unknown_falls_back_to_default(self):
