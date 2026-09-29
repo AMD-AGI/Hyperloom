@@ -180,7 +180,7 @@ def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -
 
 # -- _context_inbox_reader --------------------------------------------------
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
-    out = coord._context_inbox_reader()
+    out = coord.conversation._context_inbox_reader()
     assert out == "(no inbox events)"
 
 
@@ -202,14 +202,14 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "observation", {"body_md": "hi"}))
-    out = coord._context_inbox_reader()
+    out = coord.conversation._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
 
 
 # -- _context_recent_outcomes_reader ----------------------------------------
 def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
-    assert coord._context_recent_outcomes_reader() == "(no recent outcomes)"
+    assert coord.conversation._context_recent_outcomes_reader() == "(no recent outcomes)"
 
 
 @pytest.mark.asyncio
@@ -217,13 +217,13 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(
         Message.new("kernel_agent", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
     )
-    out = coord._context_recent_outcomes_reader(top_k=4)
+    out = coord.conversation._context_recent_outcomes_reader(top_k=4)
     assert "Recent action outcomes" in out
 
 
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
-    assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
-    assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
+    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=999), str)
+    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=0), str)
 
 
 @pytest.mark.asyncio
@@ -1424,7 +1424,7 @@ def test_context_analysis_reader_falls_back_to_the_recorded_path(
     md.write_text("# roofline snapshot\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
     monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
-    out = coord._context_analysis_reader()
+    out = coord.conversation._context_analysis_reader()
     assert "roofline snapshot" in out
 
 
@@ -1434,7 +1434,7 @@ def test_context_analysis_reader_unreadable_path(
 ) -> None:
     coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
     monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
-    out = coord._context_analysis_reader()
+    out = coord.conversation._context_analysis_reader()
     assert "unreadable" in out or "no analysis.md" in out
 
 
@@ -1541,7 +1541,7 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = await coord._compose_prompt("orchestration")
+    out = await coord.conversation._compose_prompt("orchestration")
     assert "Specialist health" not in out
     assert "stale" not in out.lower()
 
@@ -1573,7 +1573,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         type=IntentType.DELEGATE,
         payload={"idempotency_key": "wave", "action_name": "specialist"},
     )
-    await coord._fan_out_specialist_wave(
+    await coord.specialist_dispatch._fan_out_specialist_wave(
         "orchestration",
         intent,
         {
@@ -1627,7 +1627,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
 
     params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
     assert params["framework_version"] == "0.4.1"
     assert params["target_gap_notes"] == "GAP-NOTES"
     assert params["research_hints"] == "HINTS-TEXT"
@@ -1721,7 +1721,7 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1751,7 +1751,7 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation._plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" in out
 
@@ -1782,7 +1782,7 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
             },
         ),
     )
-    out = coord._plateau_advisory_block()
+    out = coord.conversation._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out
     assert "Only one arm is dry" not in out
@@ -1795,7 +1795,7 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
 
     coord.shared_state.phase = ps.PHASE_KERNEL_AGENT
     monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
-    out = coord._plateau_advisory_block()
+    out = coord.conversation._plateau_advisory_block()
     assert "KERNEL_AGENT plateau detected" in out
 
 
@@ -1990,7 +1990,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_intent("orchestration", _idle_intent())
+    await coord.router._handle_intent("orchestration", _idle_intent())
     assert recorded
 
 
@@ -2002,7 +2002,7 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
         raise RuntimeError("handler boom")
 
     monkeypatch.setattr(coord, "_handle_send_message", _boom)
-    await coord._handle_intent("orchestration", _idle_intent())
+    await coord.router._handle_intent("orchestration", _idle_intent())
 
 
 @pytest.mark.asyncio
@@ -2022,7 +2022,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 
         monkeypatch.setattr(coord, attr, _h)
     for it in routes:
-        await coord._handle_intent("orchestration", Intent(type=it, payload={}))
+        await coord.router._handle_intent("orchestration", Intent(type=it, payload={}))
     assert len(seen) == len(routes)
 
 
@@ -2038,7 +2038,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
         return None
 
     monkeypatch.setattr(coord.phase_internal, "_maybe_enqueue_explore_research_scout", _scout)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
 
 
 @pytest.mark.asyncio
@@ -2056,7 +2056,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
 
@@ -2074,7 +2074,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
 
 
@@ -2091,7 +2091,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
 
@@ -2109,7 +2109,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "SWEEP"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
@@ -2135,7 +2135,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == ""
@@ -2173,7 +2173,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
         "_admission_denial_for_action",
         lambda _action: None,
     )
-    await coord._handle_propose_action(
+    await coord.router._handle_propose_action(
         "orchestration",
         Intent(
             type=IntentType.PROPOSE_ACTION,
@@ -2233,7 +2233,7 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
             }
         },
     )
-    await coord._materialize_approved_proposal(
+    await coord.proposals._materialize_approved_proposal(
         pending,
         approved_variant_names={"v0"},
     )
@@ -2247,7 +2247,7 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
     coord.shared_state.baseline_config_path = "/tmp/base.yaml"
     pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals._materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.kind == "sweep"
 
@@ -2263,7 +2263,7 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator)
         "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
     }
     pending = _pending("explore", {"params": {"grid": [{"name": "v0"}]}}, msg_id="prop-env")
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals._materialize_approved_proposal(pending)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
     assert task.params["base_extra_envs"] == {
@@ -2276,14 +2276,14 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator)
 async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     pending = _pending("profile", {"params": {}}, msg_id="prop-dup")
-    await coord._materialize_approved_proposal(pending)
-    await coord._materialize_approved_proposal(pending)
+    await coord.proposals._materialize_approved_proposal(pending)
+    await coord.proposals._materialize_approved_proposal(pending)
 
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
-    await coord._materialize_approved_proposal(
+    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
+    await coord.proposals._materialize_approved_proposal(
         _pending("baseline", {"params": {"tag": "x"}}, msg_id="prop-b1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -2294,8 +2294,8 @@ async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Co
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
-    await coord._materialize_approved_proposal(
+    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
+    await coord.proposals._materialize_approved_proposal(
         _pending("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}}, msg_id="prop-e1"),
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
@@ -2304,11 +2304,11 @@ async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
+    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
     first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     await coord.tasks.transition(first.task_id, "running")
     await coord.tasks.transition(first.task_id, "failed")
-    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
+    await coord.proposals._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
@@ -2325,7 +2325,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
+    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     assert await coord.tasks.queued()
 
 
@@ -2348,7 +2348,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-seq"))
+    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
 
@@ -2356,7 +2356,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
@@ -2364,7 +2364,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router._handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
 
 
@@ -2386,7 +2386,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -2409,7 +2409,7 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
     )
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -2432,7 +2432,7 @@ def _warm_task():
 def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.optimization_stack = [{"action": "replay_warm_recipe"}]
-    coord._promote_warm_replay(
+    coord.phase_prelude._promote_warm_replay(
         {"status": "succeeded", "output_throughput": 900.0},
         task=_warm_task(),
     )
@@ -2487,7 +2487,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
         return SubAgentResult(task_id=task.task_id, state="succeeded", result={}, error=None)
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason
 
@@ -2595,7 +2595,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
         payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
     )
     coord.state.pending_proposals["m1"] = pending
-    await coord._handle_single_verdict(
+    await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
         verdict="reject",
@@ -2629,7 +2629,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
         },
     )
     coord.state.pending_proposals["m2"] = pending
-    await coord._handle_single_verdict(
+    await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
         verdict="approve",
@@ -2646,24 +2646,24 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
 def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
     """Any kernel-level optimization gates the post-opt roofline on."""
     coord.shared_state.optimization_stack = [{"action": action}]
-    assert coord._session_integrated_kernel_patch() is True
+    assert coord.phase_close._session_integrated_kernel_patch() is True
 
 
 def test_post_opt_roofline_gate_false_for_param_search_only(coord: Coordinator) -> None:
     """Pure param-search does not trigger the extra profile."""
     coord.shared_state.optimization_stack = [{"action": "explore"}, {"action": "sweep"}]
-    assert coord._session_integrated_kernel_patch() is False
+    assert coord.phase_close._session_integrated_kernel_patch() is False
 
 
 def test_post_opt_roofline_gate_false_for_empty_stack(coord: Coordinator) -> None:
     coord.shared_state.optimization_stack = []
-    assert coord._session_integrated_kernel_patch() is False
+    assert coord.phase_close._session_integrated_kernel_patch() is False
 
 
 def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> None:
     """Malformed (non-dict) stack entries are skipped without raising."""
     coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
-    assert coord._session_integrated_kernel_patch() is True
+    assert coord.phase_close._session_integrated_kernel_patch() is True
 
 
 @pytest.mark.asyncio
@@ -2739,7 +2739,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2766,7 +2766,7 @@ async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator
     sid = "spec-plain-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2799,7 +2799,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
         params={"enablement": True},
         idempotency_key="kv-enablement",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2825,7 +2825,7 @@ async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordina
     sid = "spec-opt-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2860,7 +2860,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
         params={"enablement": True},
         idempotency_key="kv-inherit",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2888,7 +2888,7 @@ async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> Non
         params={"enablement": True},
         idempotency_key="kv-override",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2909,7 +2909,7 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
     sid = "spec-no-inherit"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )

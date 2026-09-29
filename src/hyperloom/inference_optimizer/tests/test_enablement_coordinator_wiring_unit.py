@@ -25,6 +25,9 @@ from hyperloom.orchestrator.state.task_registry import TaskRegistry, create_in_c
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
+from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.enablement.params import EnablementParams
+from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
 
 
 _MISSING_ARCH_LOG = (
@@ -68,7 +71,9 @@ def _fake_self(**state_kw):
     )
     fake = types.SimpleNamespace(shared_state=state)
     # Bind the real discovery method so the builder path is exercised.
-    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
+    fake._discover_enablement_candidate_refs = types.MethodType(
+        EnablementParams._discover_enablement_candidate_refs, fake
+    )
     # Stub source-context read to empty so the builder path stays pure.
     fake._read_enablement_source_context = lambda _sig: ""
     # Stub weight-facts derivation to empty so the builder path stays pure.
@@ -115,7 +120,7 @@ def test_enablement_discovery_honors_pr_monitor_gate(
         keywords=("scheduler",),
     )
 
-    assert Coordinator._discover_enablement_candidate_refs(fake, request, plan) == ()
+    assert EnablementParams._discover_enablement_candidate_refs(fake, request, plan) == ()
     assert seen[0].search_modes == expected_modes
 
 
@@ -123,7 +128,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
     fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["domain"] == "enablement_specialist"
     assert params["source_phase"] == "ENABLEMENT"
@@ -145,7 +150,7 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch):
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
     fake.shared_state.enablement.eval_contract_fingerprint = "abc123"
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
@@ -165,7 +170,7 @@ def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch):
     """An arch-miss round must NOT auto-seed ANY shared-venv mutation."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self(model_name="deepseek-ai/DeepSeek-V4-Flash")
-    params = Coordinator._build_enablement_specialist_params(fake, _TRANSFORMERS_UNRECOGNIZED_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _TRANSFORMERS_UNRECOGNIZED_LOG)
     assert params is not None
     assert params["enablement_failure_kind"] == "missing_model_arch"
     setup = params.get("enablement_setup_commands") or []
@@ -188,7 +193,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
     ]
     _stub_enumerate(monkeypatch, cands)
     fake = _fake_self()
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     # Enablement-intent PR ranks first and its html_url is threaded through.
     assert params["enablement_candidate_refs"][0] == "http://x/2"
@@ -197,7 +202,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch):
     _stub_enumerate(monkeypatch, RuntimeError("network down"))
     fake = _fake_self()
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     # Discovery failure -> repos-only mandate, no candidate refs.
     assert params["enablement_candidate_refs"] == []
@@ -207,7 +212,7 @@ def test_build_params_dispatches_even_for_unknown_failure(monkeypatch):
     """Q1: a non-blank UNKNOWN log still dispatches (kind is advisory, not a gate)."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
-    params = Coordinator._build_enablement_specialist_params(
+    params = EnablementParams._build_enablement_specialist_params(
         fake, "some brand-new failure the rule table has never seen xyz"
     )
     assert params is not None
@@ -218,7 +223,7 @@ def test_build_params_dispatches_even_for_unknown_failure(monkeypatch):
 
 def test_build_params_none_for_blank_log():
     fake = _fake_self()
-    assert Coordinator._build_enablement_specialist_params(fake, "   ") is None
+    assert EnablementParams._build_enablement_specialist_params(fake, "   ") is None
 
 
 # ---- _maybe_enqueue_enablement_specialist (one-shot gate) ----
@@ -326,8 +331,12 @@ def _enqueue_self(**state_kw):
         observations=observations,
     )
     # Bind the real param builder + discovery so the gate exercises the full path.
-    fake._build_enablement_specialist_params = types.MethodType(Coordinator._build_enablement_specialist_params, fake)
-    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
+    fake._build_enablement_specialist_params = types.MethodType(
+        EnablementParams._build_enablement_specialist_params, fake
+    )
+    fake._discover_enablement_candidate_refs = types.MethodType(
+        EnablementParams._discover_enablement_candidate_refs, fake
+    )
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # No GPU pool, so dispatch stays on research_lane only.
@@ -340,19 +349,19 @@ def _enqueue_self(**state_kw):
     fake.action_registry = ACTION_CATALOGUE
     fake._registry_lanes_ttl = types.MethodType(Coordinator._registry_lanes_ttl, fake)
     fake._maybe_record_enablement_human_review = types.MethodType(
-        Coordinator._maybe_record_enablement_human_review, fake
+        EnablementLane._maybe_record_enablement_human_review, fake
     )
-    fake._maybe_rearm_enablement = types.MethodType(Coordinator._maybe_rearm_enablement, fake)
+    fake._maybe_rearm_enablement = types.MethodType(EnablementLane._maybe_rearm_enablement, fake)
     fake._maybe_enqueue_enablement_baseline_revalidation = types.MethodType(
-        Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
+        EnablementRevalidation._maybe_enqueue_enablement_baseline_revalidation, fake
     )
-    fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
-    fake._open_round_past_spent_generations = types.MethodType(Coordinator._open_round_past_spent_generations, fake)
+    fake._open_revalidation_row = types.MethodType(EnablementRevalidation._open_revalidation_row, fake)
+    fake._open_round_past_spent_generations = types.MethodType(
+        EnablementRevalidation._open_round_past_spent_generations, fake
+    )
     # Admission on the session wall-clock is exercised in test_coordinator_runtime
     # against a real coordinator; here nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
-    from hyperloom.orchestrator.enablement.lane import EnablementLane
-
     for name in (
         "_enablement_admitted",
         "_enablement_in_flight",
@@ -401,7 +410,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self()
-    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert tid
     # The round was acquired by the specialist itself, and both landed.
     held = await fake.rounds.held()
@@ -432,7 +441,7 @@ async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, orig
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(enablement_mode=mode, enablement_origin=origin)
-    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert bool(tid) is dispatched
     assert (await fake.rounds.held() is not None) is dispatched
 
@@ -443,7 +452,7 @@ async def test_enqueue_noop_when_already_succeeded(monkeypatch):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(enablement_succeeded=True)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
     assert await _queued_of_kind(fake, "specialist") == []
 
 
@@ -456,7 +465,7 @@ async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     # Deadline already in the past -> no new enablement work is opened.
     fake = _enqueue_self(run_deadline=Deadline.after(-1.0))
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
     assert await _queued_of_kind(fake, "specialist") == []
 
 
@@ -473,7 +482,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self()
     # First dispatch.
-    tid1 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid1 = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert tid1
     first_params = (await fake.tasks.get(tid1)).params
 
@@ -483,7 +492,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     assert fake.shared_state.enablement.succeeded is False
 
     # Next tick re-dispatches (round mutex prevents stacking; second round is new).
-    tid2 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid2 = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert tid2 and tid2 != tid1
     second = await fake.tasks.get(tid2)
     # The settled failed round bumps the dispatch ordinal from 0 -> 1.
@@ -506,7 +515,7 @@ async def test_the_lane_leaves_a_silently_finished_round_to_the_repair_pass(monk
     fake = _enqueue_self()
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
 
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
 
     assert (await fake.rounds.get("enablement-spec-stuck")).state == "open"
 
@@ -553,7 +562,7 @@ async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self()
     await _hold_round(fake, "spec-running", holder_state="running")
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
 
 
 def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
@@ -615,7 +624,7 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
     fake = _enqueue_self()
     await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
     held = await fake.rounds.held()
     assert held is not None and held.holder_task_id == "spec-done"
     assert await _queued_of_kind(fake, "specialist") == []
@@ -639,7 +648,7 @@ async def test_rearm_kept_opens_revalidation_window(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
 
 
 @pytest.mark.asyncio
@@ -967,7 +976,7 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
     fake.shared_state.enablement.setup_commands = ["pip install -U transformers"]
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
@@ -981,7 +990,7 @@ def test_build_params_notes_prior_patches_for_mandate(monkeypatch):
     fake.shared_state.enablement.kept_patches = [
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
     ]
-    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    params = EnablementParams._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "001_qk_rope.patch" in params["notes"]
@@ -995,7 +1004,7 @@ async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(enablement_launch_log="some totally unrelated noise line")
-    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert tid
     rows = await _queued_of_kind(fake, "specialist")
     assert [r.task_id for r in rows] == [tid]
@@ -1013,7 +1022,7 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
     fake = _enqueue_self()
     # Simulate the round's holder being actively running in the registry.
     await _hold_round(fake, "spec-1", holder_state="running")
-    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    tid = await EnablementLane._maybe_enqueue_enablement_specialist(fake)
     assert tid == ""
     assert await _queued_of_kind(fake, "specialist") == []
 
@@ -1025,7 +1034,7 @@ async def test_enqueue_noop_when_not_in_enablement_phase(monkeypatch):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(phase="PRELUDE")
-    assert await Coordinator._pump_enablement_safely(fake, caller="test") is None
+    assert await EnablementLane._pump_enablement_safely(fake, caller="test") is None
     assert await _queued_of_kind(fake, "specialist") == []
 
 
@@ -1035,7 +1044,7 @@ async def test_enqueue_noop_on_multi_node(monkeypatch):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     fake = _enqueue_self()
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert await EnablementLane._maybe_enqueue_enablement_specialist(fake) == ""
     assert await _queued_of_kind(fake, "specialist") == []
 
 
@@ -1063,26 +1072,28 @@ def _write_index(model_dir, weight_map):
 
 def test_derive_weight_facts_blank_log_returns_empty():
     fake = _facts_self()
-    assert Coordinator._derive_checkpoint_weight_facts(fake, "") == ""
-    assert Coordinator._derive_checkpoint_weight_facts(fake, None) == ""
+    assert EnablementParams._derive_checkpoint_weight_facts(fake, "") == ""
+    assert EnablementParams._derive_checkpoint_weight_facts(fake, None) == ""
 
 
 def test_derive_weight_facts_no_trigger_returns_empty():
     """A log with no weight-init phrase and no weighty names does not fire."""
     fake = _facts_self()
-    out = Coordinator._derive_checkpoint_weight_facts(fake, "ValueError: Model architecture 'Foo' is not supported")
+    out = EnablementParams._derive_checkpoint_weight_facts(
+        fake, "ValueError: Model architecture 'Foo' is not supported"
+    )
     assert out == ""
 
 
 def test_derive_weight_facts_no_model_path_returns_empty():
     fake = _facts_self(model_path="")
-    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+    assert EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
 
 
 def test_derive_weight_facts_missing_index_returns_empty(tmp_path):
     # Directory exists but has no *.index.json → degrades to empty.
     fake = _facts_self(model_path=str(tmp_path))
-    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+    assert EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
 
 
 def test_derive_weight_facts_reports_present_and_missing_layers(tmp_path):
@@ -1096,7 +1107,7 @@ def test_derive_weight_facts_reports_present_and_missing_layers(tmp_path):
         },
     )
     fake = _facts_self(model_path=str(tmp_path))
-    out = Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
+    out = EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
     assert "CHECKPOINT WEIGHT FACTS" in out
     assert "PRESENT in checkpoint for layers [0, 3]" in out
     assert "MISSING" in out
@@ -1112,7 +1123,7 @@ def test_derive_weight_facts_family_absent_from_checkpoint(tmp_path):
         {"model.layers.0.self_attn.q_proj.weight": "a.safetensors"},
     )
     fake = _facts_self(model_path=str(tmp_path))
-    out = Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
+    out = EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
     assert "NOT present in the checkpoint for ANY layer" in out
 
 
@@ -1128,7 +1139,7 @@ def test_derive_weight_facts_fires_on_missing_key_phrase(tmp_path):
         "Missing key(s) in state_dict: "
         "'model.layers.5.self_attn.indexer.k_norm.weight'."
     )
-    out = Coordinator._derive_checkpoint_weight_facts(fake, log)
+    out = EnablementParams._derive_checkpoint_weight_facts(fake, log)
     assert "CHECKPOINT WEIGHT FACTS" in out
 
 
@@ -1136,7 +1147,7 @@ def test_derive_weight_facts_exception_guarded(monkeypatch, tmp_path):
     # An unreadable index (invalid JSON) must degrade to "" rather than raise.
     (tmp_path / "model.safetensors.index.json").write_text("{not valid json")
     fake = _facts_self(model_path=str(tmp_path))
-    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+    assert EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
 
 
 # ---- _read_enablement_source_context (best-effort grounding snippet) ----
@@ -1148,13 +1159,13 @@ def _sig(offending_file="", offending_symbol=""):
 
 def test_read_source_context_empty_when_no_file():
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
-    assert Coordinator._read_enablement_source_context(fake, _sig()) == ""
+    assert EnablementParams._read_enablement_source_context(fake, _sig()) == ""
 
 
 def test_read_source_context_empty_when_file_absent(tmp_path):
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
     missing = str(tmp_path / "nope.py")
-    assert Coordinator._read_enablement_source_context(fake, _sig(missing)) == ""
+    assert EnablementParams._read_enablement_source_context(fake, _sig(missing)) == ""
 
 
 def test_read_source_context_returns_window_around_symbol(tmp_path):
@@ -1162,7 +1173,7 @@ def test_read_source_context_returns_window_around_symbol(tmp_path):
     body = "\n".join(f"line{i}" for i in range(20))
     src.write_text(body.replace("line10", "def NEEDLE(): pass"))
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
-    out = Coordinator._read_enablement_source_context(fake, _sig(str(src), "NEEDLE"), window=6)
+    out = EnablementParams._read_enablement_source_context(fake, _sig(str(src), "NEEDLE"), window=6)
     assert str(src) in out
     assert "NEEDLE" in out
     # The header carries the resolved line window.
@@ -1173,7 +1184,7 @@ def test_read_source_context_head_when_symbol_absent(tmp_path):
     src = tmp_path / "model.py"
     src.write_text("\n".join(f"line{i}" for i in range(20)))
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
-    out = Coordinator._read_enablement_source_context(fake, _sig(str(src), "not_there"), window=4)
+    out = EnablementParams._read_enablement_source_context(fake, _sig(str(src), "not_there"), window=4)
     # Symbol absent → snippet starts at file head.
     assert "line0" in out
 
@@ -1182,7 +1193,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
     src = tmp_path / "empty.py"
     src.write_text("")
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
-    assert Coordinator._read_enablement_source_context(fake, _sig(str(src))) == ""
+    assert EnablementParams._read_enablement_source_context(fake, _sig(str(src))) == ""
 
 
 # _maybe_rearm_authored_lane

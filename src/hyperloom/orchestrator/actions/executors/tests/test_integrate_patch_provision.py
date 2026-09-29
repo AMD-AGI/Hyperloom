@@ -23,6 +23,8 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     ProvisionResult,
 )
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.enablement.params import EnablementParams
+from hyperloom.orchestrator.enablement.lane import EnablementLane
 
 
 def _attempt(task_id: str = "t-1"):
@@ -271,11 +273,8 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
         "enablement_active_runtime": runtime_state,
     }
 
-    # Bind the real method to our fake coordinator (SimpleNamespace has no save-to-disk).
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
     monkeypatch.setattr(state, "save", lambda *a, **k: None, raising=False)
-    await Coordinator._maybe_rearm_enablement(coord, res)
+    await EnablementLane._maybe_rearm_enablement(coord, res)
 
     assert state.enablement.kept_stack_action == action_state
     assert state.enablement.active_runtime == runtime_state
@@ -285,7 +284,6 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
 def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
     """A prior KEEP'd stack action is re-attached as runtime_candidate next round."""
     import hyperloom.agents.framework.sources as src
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     monkeypatch.setattr(src, "enumerate_candidates", lambda _req: [])
 
@@ -303,11 +301,13 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
         ),
     )
     fake = types.SimpleNamespace(shared_state=state)
-    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
+    fake._discover_enablement_candidate_refs = types.MethodType(
+        EnablementParams._discover_enablement_candidate_refs, fake
+    )
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     fake._framework_gpu_params = lambda: {}
-    params = Coordinator._build_enablement_specialist_params(fake, "Model architecture 'Foo' is not supported")
+    params = EnablementParams._build_enablement_specialist_params(fake, "Model architecture 'Foo' is not supported")
     assert params is not None
     # The prior KEEP'd runtime is re-attached for the next round.
     assert params.get("runtime_candidate") == kept

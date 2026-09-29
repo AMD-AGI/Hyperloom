@@ -191,7 +191,7 @@ def _close_phase_history_row() -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_record_close_step_appends_to_evidence_close_steps(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._record_close_step("report", status="done", task_id="t-1")
+    await coord.phase_close._record_close_step("report", status="done", task_id="t-1")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     assert len(rows) == 1
     assert rows[0]["step"] == "report"
@@ -205,7 +205,7 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 @pytest.mark.asyncio
 async def test_record_close_step_optional_detail(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._record_close_step(
+    await coord.phase_close._record_close_step(
         "recipe_kb_commit",
         status="failed",
         detail="recipe kb unreachable",
@@ -220,7 +220,7 @@ async def test_record_close_step_creates_missing_evidence_dict(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "sweep_done"},
     ]
-    await coord._record_close_step("done", status="done")
+    await coord.phase_close._record_close_step("done", status="done")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert "close_steps" in evidence
 
@@ -234,19 +234,19 @@ async def test_record_close_step_replaces_non_list_close_steps(coord):
             "evidence": {"close_steps": "broken"},
         }
     ]
-    await coord._record_close_step("report", status="done")
+    await coord.phase_close._record_close_step("report", status="done")
     assert isinstance(coord.shared_state.phase_history[-1]["evidence"]["close_steps"], list)
 
 
 @pytest.mark.asyncio
 async def test_record_close_step_no_op_when_history_empty(coord):
     coord.shared_state.phase_history = []
-    await coord._record_close_step("report", status="done")
+    await coord.phase_close._record_close_step("report", status="done")
 
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_fresh(coord):
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
     assert task.kind == "report"
     assert task.idempotency_key == "internal-report-close_phase_entry"
     assert task.params["source"] == "coordinator_internal"
@@ -267,7 +267,7 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     coord.tasks._by_id["wallclock-report"] = existing
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
     assert task is existing
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
 
@@ -285,7 +285,7 @@ async def test_enqueue_internal_report_task_replaces_a_cancelled_one(coord):
     coord.tasks._by_id["wallclock-report"] = dead
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
 
     assert task is not dead
     assert task.state == "queued"
@@ -303,7 +303,7 @@ async def test_enqueue_internal_report_task_retries_past_a_dead_idempotent_row(c
         idempotency_key="internal-report-close_phase_entry",
     )
 
-    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
 
     assert task.task_id != "dead-idempotent"
     assert task.idempotency_key == "internal-report-close_phase_entry-retry"
@@ -323,7 +323,7 @@ async def test_close_sequencer_still_reports_when_the_first_report_task_was_canc
     )
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     by_step = {r["step"]: r for r in rows}
@@ -342,7 +342,7 @@ async def test_a_terminal_task_is_reported_not_run(coord):
         idempotency_key="internal-report-close_phase_entry",
     )
 
-    state = await coord._run_close_task(done, step="1 (report)")
+    state = await coord.phase_close._run_close_task(done, step="1 (report)")
 
     assert state == "succeeded"
     assert coord.sub.run_calls == []
@@ -404,7 +404,7 @@ async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: st
     coord._dispatcher_poll_sec = 0.01
     coord.shared_state.max_minutes = 60
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == terminal_state
     assert coord.sub.run_calls == []
@@ -420,7 +420,7 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
     coord.shared_state.max_minutes = 60
     _clock_advancing_by(monkeypatch, step_sec=30.0)
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == "running"
     assert coord.sub.run_calls == []
@@ -452,7 +452,7 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
     try:
         started = time.monotonic()
-        state = await coord._run_close_task(queued, step="1 (report)")
+        state = await coord.phase_close._run_close_task(queued, step="1 (report)")
         elapsed = time.monotonic() - started
 
         assert state == "running"
@@ -490,7 +490,7 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
     # report at.
     _clock_advancing_by(monkeypatch, step_sec=5.0)
 
-    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+    state = await coord.phase_close._run_close_task(_running_report_row(coord), step="1 (report)")
 
     assert state == "succeeded"
     assert coord.sub.run_calls == []
@@ -534,7 +534,7 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     _running_report_row(coord)
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     report = next(r for r in rows if r["step"] == "report")
@@ -544,7 +544,7 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_session_breakdown_task(coord):
-    task = await coord._enqueue_internal_session_breakdown_task(
+    task = await coord.phase_close._enqueue_internal_session_breakdown_task(
         reason="close_phase_entry",
     )
     assert task.kind == "session_breakdown"
@@ -564,7 +564,7 @@ async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path
         coord.tasks._by_id[row.task_id] = row
     coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
     assert ran == [
@@ -589,7 +589,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     steps = [r["step"] for r in rows]
@@ -639,7 +639,7 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "succeeded"
@@ -678,7 +678,7 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     write_back = assemble_parts(tmp_path, warnings=[])["close"]["kb_write_back"]
     assert write_back["status"] == "written"
@@ -712,7 +712,7 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
 
     coord.sub = _FailingRunner()
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "degraded"
@@ -739,7 +739,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
         },
     )
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
@@ -755,7 +755,7 @@ async def test_close_sequencer_falls_back_to_time_exhausted(coord):
     ]
     assert coord.shared_state.stop_reason == ""
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "time_exhausted"
 
@@ -768,7 +768,7 @@ async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
     ]
     assert coord.shared_state.stop_reason == ""
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "sweep_done"
 
@@ -781,7 +781,7 @@ async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
     ]
     assert coord.shared_state.stop_reason == ""
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "sweep_failed"
 
@@ -810,7 +810,7 @@ async def test_close_sequencer_does_not_mark_budgeted_sweep_without_pairs_done(c
     ]
     assert coord.shared_state.stop_reason == ""
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "sweep_failed"
 
@@ -823,7 +823,7 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.stop_reason = "signal"
 
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "signal"
 
@@ -832,7 +832,7 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
 async def test_close_sequencer_report_before_session_breakdown(coord):
     """Report task MUST be enqueued before session_breakdown."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
     insertion = coord.tasks.insertion_order
     report_idx = insertion.index("internal-report-close_phase_entry")
     bd_idx = insertion.index("internal-session_breakdown-close_phase_entry")
@@ -843,7 +843,7 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     """``--degraded-kb`` runs (recipe_kb=None): NDJSON drain recorded 'skipped', not silent."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord._on_enter_close(from_phase="SWEEP")
+    await coord.phase_close._on_enter_close(from_phase="SWEEP")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "skipped"
@@ -919,7 +919,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         reason="sweep_done",
         evidence={"trigger": "test_e2e"},
     )
-    await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 
     rows_report = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
@@ -999,10 +999,10 @@ class TestEveryTerminalReachesAWrittenReport:
             reason="sweep_done",
             evidence={"trigger": "test"},
         )
-        await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+        await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
         assert coord.shared_state.close_sequence_done is True
 
-        assert await coord.ensure_close_sequence(reason="terminal") is False
+        assert await coord.phase_close.ensure_close_sequence(reason="terminal") is False
 
     @pytest.mark.asyncio
     async def test_a_closing_phase_with_no_report_task_does_not_wait_on_one(self, tmp_path: Path):
@@ -1012,7 +1012,7 @@ class TestEveryTerminalReachesAWrittenReport:
 
         # Absence is finished, not pending: waiting on a task nobody created is
         # how a session sat in CLOSE until its grace ran out with no report.
-        assert await coord._closing_report_terminal() is True
+        assert await coord.phase_close._closing_report_terminal() is True
         await coord.stop()
 
 
@@ -1052,7 +1052,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
     machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
 
-    await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 
     zips = sorted((dest_root / "hyperloom-session-packages").glob("*.zip"))
     assert len(zips) == 1

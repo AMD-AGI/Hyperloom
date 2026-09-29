@@ -39,6 +39,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
 
 
 # Fixtures
@@ -1291,9 +1292,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     coord._record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
+    asyncio.run(KernelStackPhase._drain_pending_keep_integrates(coord))
 
     assert fake_integrate.await_count == 2, fake_integrate.await_args_list
     assert coord.shared_state.save.call_count >= 2

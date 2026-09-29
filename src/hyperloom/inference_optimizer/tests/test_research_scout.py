@@ -152,7 +152,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         knowledge_plane=None,
     )
 
-    task = await coord._enqueue_internal_research_scout_task(
+    task = await coord.phase_internal._enqueue_internal_research_scout_task(
         reason="test",
         round_id=0,
     )
@@ -169,11 +169,11 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         tmp_path,
         [{"what": "enable aiter", "source": "https://example.test/aiter"}],
     )
-    coord._seed_gaps_from_research_hints()
+    coord.gap_refresh._seed_gaps_from_research_hints()
     first_id = next(row["canonical_id"] for row in coord.shared_state.gaps if row.get("symptom") == "enable aiter")
     research_hints.append_hints(
         tmp_path,
         [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],
     )
-    coord._seed_gaps_from_research_hints()
+    coord.gap_refresh._seed_gaps_from_research_hints()
     assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)
