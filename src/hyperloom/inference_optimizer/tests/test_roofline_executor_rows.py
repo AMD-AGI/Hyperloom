@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -77,23 +78,36 @@ async def _run(
     analyses: list[Any],
     *,
     multi_node: bool = False,
+    disable_cuda_graph: str | None = None,
+    profile_params: list[dict[str, Any]] | None = None,
+    analysis_payloads: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run one roofline action against scripted sub-steps; return its result and its recorded action."""
+    """Run one roofline action against scripted sub-steps; return its result and its recorded action.
+
+    ``profile_params`` and ``analysis_payloads``, when given, collect what each sub-step was called with.
+    """
     profiles, analyses = list(profiles), list(analyses)
 
     async def fake_profile(ctx: RunnerContext) -> Any:
+        if profile_params is not None:
+            profile_params.append(dict(ctx.task.params or {}))
         out = profiles.pop(0)
         if isinstance(out, BaseException):
             raise out
         return out
 
     async def fake_ta(payload: dict[str, Any], *, session_dir: Path) -> Any:
+        if analysis_payloads is not None:
+            analysis_payloads.append(dict(payload))
         out = analyses.pop(0)
         if isinstance(out, BaseException):
             raise out
         return out
 
-    monkeypatch.delenv("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", raising=False)
+    if disable_cuda_graph is None:
+        monkeypatch.delenv("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", disable_cuda_graph)
     monkeypatch.delenv("HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND", raising=False)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.profile.profile_executor", fake_profile)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", fake_ta)
@@ -224,13 +238,31 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
     assert result["profile_warning"] == {"status": "failed", "error_class": "stop_profile", "error": "dup stop"}
 
 
+@pytest.mark.parametrize(
+    ("fatal", "error_class"),
+    [
+        (
+            {"status": "failed", "error_class": "primary_rank_trace_missing", "error": "no primary rank trace"},
+            "primary_rank_trace_missing",
+        ),
+        (
+            {
+                "status": "failed",
+                "error_class": "capture_failed",
+                "error": "no primary rank trace",
+                "trace_capture": {"reason": "api_port_allocation_failed"},
+            },
+            "capture_failed",
+        ),
+    ],
+    ids=["error_class", "capture_reason"],
+)
 @pytest.mark.asyncio
-async def test_a_non_retryable_failure_rows_one_attempt_and_stops(tmp_path, monkeypatch):
-    fatal = {"status": "failed", "error_class": "primary_rank_trace_missing", "error": "no primary rank trace"}
+async def test_a_non_retryable_failure_rows_one_attempt_and_stops(tmp_path, monkeypatch, fatal, error_class):
     result, action = await _run(tmp_path, monkeypatch, [fatal], [])
 
     assert _rows(action, "profile") == [
-        (1, PROFILE_ATTEMPT_INITIAL, "failed", False, "profile", "primary_rank_trace_missing"),
+        (1, PROFILE_ATTEMPT_INITIAL, "failed", False, "profile", error_class),
     ]
     assert result["phase"] == "profile"
     assert result["error"] == "no primary rank trace"
@@ -353,6 +385,13 @@ async def test_a_compute_bound_reprofile_that_stays_host_bound_leaves_the_first_
     ("profiles", "analyses", "profile_row", "analysis_row", "reason"),
     [
         (
+            [RuntimeError("cb boot")],
+            [],
+            ("failed", "profile", "RuntimeError"),
+            None,
+            "re-profile raised: RuntimeError('cb boot')",
+        ),
+        (
             [{"status": "succeeded"}],
             [],
             ("failed", "profile_no_trace", "no_trace"),
@@ -399,4 +438,132 @@ async def test_a_compute_bound_reprofile_that_fails_still_rows_its_attempts(
     assert _rows(action, "analysis") == expected_analysis
     assert action["analysis"]["compute_bound_reprofile"] == {"attempted": True, "adopted": False, "reason": reason}
     assert result["status"] == "succeeded"
+    assert result["last_profile_trace"] == TRACE
+
+
+@pytest.mark.asyncio
+async def test_a_capture_marker_only_in_the_server_log_fails_the_attempt(tmp_path, monkeypatch):
+    """The engine's server.log is evidence too: a marker found only there still ends the action."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "server.log").write_text(
+        "boot\nRuntimeError: operation not permitted when stream is capturing\n", encoding="utf-8"
+    )
+    failed = {
+        "status": "failed",
+        "error_class": "server_crashed",
+        "error": "engine exited",
+        "workspace": str(workspace),
+    }
+    result, action = await _run(tmp_path, monkeypatch, [failed], [])
+
+    assert _rows(action, "profile") == [(1, PROFILE_ATTEMPT_INITIAL, "failed", False, "profile", "server_crashed")]
+    assert result["error_class"] == "profile_cuda_graph_capture_config_failed"
+    diagnosis = tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-rows_attempt1.json"
+    assert "server_log_tail" in json.loads(diagnosis.read_text(encoding="utf-8"))["sources"]
+
+
+@pytest.mark.asyncio
+async def test_an_occupied_gpu_is_reclaimed_before_every_retry_but_not_after_the_last(tmp_path, monkeypatch):
+    """Both evidence routes -- a raise and a failed result -- reclaim, and only when another attempt follows."""
+    reclaimed: list[int] = []
+
+    async def fake_reclaim(session_dir: Any, *, attempt: int) -> None:
+        reclaimed.append(attempt)
+
+    monkeypatch.setattr(roofline_mod, "_reclaim_gpus_for_retry", fake_reclaim)
+    occupied = "Not enough memory. Please try to increase --mem-fraction-static."
+    failed = {"status": "failed", "error_class": "boot_failed", "error": occupied}
+    result, action = await _run(tmp_path, monkeypatch, [RuntimeError(occupied), failed, failed], [])
+
+    assert reclaimed == [1, 2]
+    assert [row[2] for row in _rows(action, "profile")] == ["failed", "failed", "failed"]
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_the_graph_capture_override_reaches_the_profiled_args_and_every_row(tmp_path, monkeypatch):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    seen: list[dict[str, Any]] = []
+    zero_ops = _profile_ok(trace_health={"zero_ops": True})
+    result, action = await _run(
+        tmp_path,
+        monkeypatch,
+        [zero_ops, _profile_ok()],
+        [_ta_ok(md, hot=1)],
+        disable_cuda_graph="1",
+        profile_params=seen,
+    )
+
+    assert result["status"] == "succeeded"
+    assert [row["disable_cuda_graph"] for row in action["profile"]["runs"]] == [True, True]
+    assert action["profile"]["graph_capture_disabled"] is True
+    assert all("--disable-cuda-graph" in params["base_extra_args"] for params in seen)
+
+
+@pytest.mark.asyncio
+async def test_under_the_graph_capture_override_a_capture_marker_is_retried_not_failed(tmp_path, monkeypatch):
+    """With capture already off, a capture marker says nothing about this run."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    capture = RuntimeError("operation not permitted when stream is capturing")
+    result, action = await _run(
+        tmp_path, monkeypatch, [capture, _profile_ok()], [_ta_ok(md, hot=1)], disable_cuda_graph="1"
+    )
+
+    assert _rows(action, "profile") == [
+        (1, PROFILE_ATTEMPT_INITIAL, "failed", False, "profile", "RuntimeError"),
+        (2, PROFILE_ATTEMPT_AFTER_EXCEPTION, "succeeded", True, None, None),
+    ]
+    assert result["status"] == "succeeded"
+    assert not (tmp_path / "diagnostics").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_n26_retry_reissues_the_initial_request_with_only_the_mode_and_markers_added(tmp_path, monkeypatch):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    payloads: list[dict[str, Any]] = []
+    result, _action = await _run(
+        tmp_path,
+        monkeypatch,
+        [_profile_ok()],
+        [_ta_empty_chunk(), _ta_ok(md, hot=1)],
+        analysis_payloads=payloads,
+    )
+
+    assert result["status"] == "succeeded"
+    initial, retry = payloads
+    assert initial["roofline_arm"] == "current_best"
+    assert initial["roofline_output_name"] == "kernel_roofline_current.json"
+    assert retry == {
+        **initial,
+        "steady_state_mode": "decode_only",
+        "_n26_auto_retry": True,
+        "_n26_retry_from_mode": "mixed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_compute_bound_reanalysis_that_returns_no_dict_rows_why(tmp_path, monkeypatch):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    result, action = await _run(
+        tmp_path,
+        monkeypatch,
+        [_profile_ok(), _profile_ok(CB_TRACE)],
+        [_ta_ok(md, host_bound=True), "nope"],
+        multi_node=True,
+    )
+
+    assert _rows(action, "analysis")[-1] == (
+        2,
+        ANALYSIS_ATTEMPT_COMPUTE_BOUND,
+        "failed",
+        False,
+        "trace_analyze",
+        "compute_bound_reanalyze",
+    )
+    assert _messages(action, "analysis")[-1] == "non-dict result: str"
     assert result["last_profile_trace"] == TRACE
