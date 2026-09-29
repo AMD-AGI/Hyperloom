@@ -159,11 +159,11 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
         "kernel_switch_specialist": {"saturated": True, "within_pct": 98.0},
         "comm_specialist": {"saturated": False},
     }
-    c._record_cycle_strategy_for_current_cycle()
+    c.phase_macro_cycle._record_cycle_strategy_for_current_cycle()
     row = st.cycle_strategy_log[-1]
     assert row["cycle"] == 2
     assert row["focus"] != "kernel_switch_specialist"
-    strategy = c._plan_cycle_focus()
+    strategy = c.phase_macro_cycle._plan_cycle_focus()
     assert strategy["focus"] != "kernel_switch_specialist"
     assert "focus" in strategy
 

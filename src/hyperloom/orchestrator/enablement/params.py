@@ -322,7 +322,7 @@ class EnablementParams(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._framework_gpu_params(),
+            **self._coord.gpu_lanes._framework_gpu_params(),
             # eval-origin trigger context (empty for boot-origin enablement).
             **_enablement_carrier_params(state),
         }

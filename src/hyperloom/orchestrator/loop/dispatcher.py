@@ -1307,15 +1307,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
         if task.kind == "explore":
             result_dict = result.result if isinstance(result.result, dict) else {}
-            self._record_explore_round_gaps(
+            self._coord.gap_refresh._record_explore_round_gaps(
                 task=task,
                 result=result_dict,
             )
-            self._record_explore_variant_failures(
+            self._coord.gap_refresh._record_explore_variant_failures(
                 task=task,
                 result=result_dict,
             )
-            await self._refresh_gaps(reason="explore_round")
+            await self._coord.gap_refresh._refresh_gaps(reason="explore_round")
 
     @staticmethod
     def _lanes_fit(
@@ -1543,7 +1543,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
         # would idle. Stamp the skip here so the phase machine closes on sweep_done.
         if str(task.kind or "") == "conc_sweep":
-            self._record_session_budget_conc_sweep_skip(denied=denied)
+            self._coord.phase_sweep._record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
     def _sequence_denial_for_request(

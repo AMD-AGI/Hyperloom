@@ -3003,7 +3003,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # benchmarked explore task. No-op single-node (LLM drives explore
         # directly there) and no-op when the proposal_set is empty / has
         # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        await self._maybe_materialize_mn_explore(
+        await self._coord.phase_framework._maybe_materialize_mn_explore(
             task=task,
             domain=domain,
             proposals=proposals,
@@ -3036,21 +3036,21 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "proposals_total": len(proposals),
                 },
             )
-        await self._refresh_gaps(reason="specialist_done")
+        await self._coord.gap_refresh._refresh_gaps(reason="specialist_done")
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        await self._maybe_autosubmit_specialist_patches(
+        await self._coord.phase_framework._maybe_autosubmit_specialist_patches(
             task=task,
             done_payload=done_payload,
         )
         # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
         # but a proposal_set of serving flags / env vars) is routed through the
         # same integrate_patch gate via its config_changes channel.
-        await self._maybe_autosubmit_framework_config(
+        await self._coord.phase_framework._maybe_autosubmit_framework_config(
             task=task,
             done_payload=done_payload,
         )
@@ -3121,7 +3121,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         pr_ids.extend(refs)
         self.shared_state.register_seen_pr_ids(pr_ids)
         # Seed high-priority hints as gaps[] so the config arm tries them early.
-        self._seed_gaps_from_research_hints()
+        self._coord.gap_refresh._seed_gaps_from_research_hints()
         log.info(
             "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -3814,7 +3814,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline.
-        await self._refresh_gaps(reason="baseline_done")
+        await self._coord.gap_refresh._refresh_gaps(reason="baseline_done")
         if self.shared_state.baseline_tput > 0:
             await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
@@ -3840,10 +3840,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 baseline_tput=float(tput),
             )
             # Research scout (parallel, read-only, CPU-only).
-            await self._maybe_enqueue_prelude_research_scout()
+            await self._coord.phase_internal._maybe_enqueue_prelude_research_scout()
             # Static-recon (parallel, read-only, CPU-only): seed bridge
             # candidates as gaps[] before the optimisation phase starts.
-            await self._maybe_enqueue_prelude_static_recon()
+            await self._coord.phase_internal._maybe_enqueue_prelude_static_recon()
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
@@ -5610,7 +5610,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         ):
             return
         try:
-            recovered = await self._recover_interrupted_stack_validation()
+            recovered = await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
         except ValueError as exc:
             # The checkpoint cannot be bound to the ledger rows it was written
             # from, so which patches are on the tree is unknown. Halting says

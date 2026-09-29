@@ -73,7 +73,7 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         new_prompt = rebuild(
             macro_cycle=cycle,
             cycle_directive=directive,
-            cycle_strategy=self._plan_cycle_focus(),
+            cycle_strategy=self._coord.phase_macro_cycle._plan_cycle_focus(),
             phase=state.phase,
         )
         overrides = getattr(self, "system_prompt_overrides", None)

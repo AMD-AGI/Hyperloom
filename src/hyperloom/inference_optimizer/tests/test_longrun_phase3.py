@@ -142,11 +142,11 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     st.macro_cycle = 1
-    summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
+    summary = await c.phase_macro_cycle._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert summary is not None
     assert summary["new_cycle"] == 1
     assert summary["memory_captured"] is True
-    again = await c._run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
+    again = await c.phase_macro_cycle._run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
     assert again["running_tasks_reclaimed"] == 0
 
 

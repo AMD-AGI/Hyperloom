@@ -1750,7 +1750,7 @@ async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir,
         st.max_minutes = 60
         st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
 
-        assert await c._maybe_enqueue_enablement_baseline_revalidation() == ""
+        assert await c.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation() == ""
 
         # The window survives the stop: same generation, still pending, and no row for the key a resume with budget
         # left will need.
@@ -1773,7 +1773,7 @@ async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(se
         st.enablement.revalidation_generation = 3
         spent = await _cancelled_revalidation_row(c, gen=3)
 
-        tid = await c._maybe_enqueue_enablement_baseline_revalidation()
+        tid = await c.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation()
 
         assert tid and tid != spent.task_id, "the window resolved to the cancelled row"
         assert st.enablement.revalidation_generation == 4

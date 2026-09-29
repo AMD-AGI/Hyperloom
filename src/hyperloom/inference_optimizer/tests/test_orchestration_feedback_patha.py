@@ -732,7 +732,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
             }
         ],
     }
-    c._record_explore_variant_failures(task=task, result=result)
+    c.gap_refresh._record_explore_variant_failures(task=task, result=result)
 
     # 1. Failure evidence was recorded.
     assert len(c.shared_state.failures) == 1
@@ -746,7 +746,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
     assert laf["error_class"] == "killed_overtime"
 
     # 3. _extract_gaps_from_attempts mints a gap with the expected canonical_id.
-    gaps = c._extract_gaps_from_attempts()
+    gaps = c.gap_refresh._extract_gaps_from_attempts()
     cids = [g["canonical_id"] for g in gaps]
     assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
 

@@ -657,7 +657,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             from_phase or "<unknown>",
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
-        await self._on_cycle_start_reprofile(from_phase=from_phase)
+        await self._coord.phase_macro_cycle._on_cycle_start_reprofile(from_phase=from_phase)
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
@@ -912,14 +912,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
-            **self._framework_gpu_params(),
+            **self._coord.gpu_lanes._framework_gpu_params(),
         }
         await self._warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -1190,12 +1190,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            **self._framework_gpu_params(),
+            **self._coord.gpu_lanes._framework_gpu_params(),
         }
         await self._warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
         idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._cycle_idem_suffix()}"
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -1425,10 +1425,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
+            **self._coord.gpu_lanes._framework_gpu_params(),
         }
         await self._warm_specialist_params(params)
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
             "kind": "specialist",
             "params": params,
@@ -2398,7 +2398,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
         }
         await self._warm_specialist_params(params)
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
+        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
