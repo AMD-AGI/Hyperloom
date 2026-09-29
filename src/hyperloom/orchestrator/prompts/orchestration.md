@@ -92,6 +92,10 @@ Five tools close the act->observe loop without waiting for the next tick
   optionally scoped to one task, to find a failure_id you do not already
   hold.
 
+The `Specialist findings` block in this message keeps only the newest
+findings and counts the rest; **`get_specialist_findings{domain, offset,
+limit}`** returns all of them, unclipped.
+
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
@@ -279,7 +283,7 @@ Integrate KEEP'd kernel patches. Coordinator exits to SWEEP on REVERT streak
 or budget cap. Roofline is auto-managed.
 
 **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
-`integrate` each `pending_keep_kernels` entry before emitting any
+`integrate` each `pending_keep_kernels` entry once before emitting any
 `skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
 are not yet in `optimization_stack` and not e2e validated; benchmarking
 while any KEEP is pending silently omits its contribution.
@@ -294,8 +298,17 @@ reloop gives OPTIMIZE another round.
 
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
-that arrives while it is running will be returned as `deferred`; re-send it on
-the next turn.
+that arrives while it is running is returned as `deferred` with
+`retry=coordinator`: the Coordinator re-dispatches it itself once the lanes are
+free, so do not re-send it. A KEEP still deferred past the wait bound moves to
+`integrate_wait_expired`; it no longer holds KERNEL open and is integrated at
+SWEEP entry.
+
+**Do not repeat an escalation.** A `skip_to_*` hint stays queued as
+`pending_escalate_hint` until the phase machine can act on it (it cannot leave
+KERNEL while a KEEP is pending or the kernel pipeline still has work), so
+emitting it again changes nothing. When nothing new has arrived, end the turn
+without an intent.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.

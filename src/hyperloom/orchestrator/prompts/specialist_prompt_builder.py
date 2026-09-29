@@ -1399,20 +1399,48 @@ def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
         f"- Hard wall-clock budget for this entire dispatch: **{inp.wall_budget_sec:.0f}s (~{mins:.0f} min)**.",
     ]
     if inp.started_at_iso:
-        rows.append(f"- Dispatch started at: {inp.started_at_iso} (UTC).")
+        deadline = _deadline_iso(inp.started_at_iso, inp.wall_budget_sec)
+        rows.append(
+            f"- Dispatch started at: {inp.started_at_iso} (UTC)"
+            + (f"; hard deadline **{deadline}** (UTC)." if deadline else ".")
+        )
+    workspace = inp.workspace_path or "<workspace>"
     rows.extend(
         [
             "- The Coordinator hard-kills your subprocess when this budget is "
             + "exhausted — turns are NOT the stop signal. Scope your work to "
-            + "reach a deliverable conclusion inside the budget.",
-            "- Self-throttle: check elapsed wall-clock with Bash "
-            + "(``date -u +%s`` vs the start above), keep your "
+            + "reach a deliverable conclusion inside the budget, keep your "
             + "``specialist_done.partial.json`` checkpoint current, and write "
-            + "the final ``specialist_done.json`` before the budget runs out so "
+            + "the final ``specialist_done.json`` before the deadline so "
             + "your best work is never lost to a kill.",
+            "- Every turn re-reads your whole context, so a turn that only "
+            + "checks status is the costliest thing you can do. Read the clock "
+            + "by appending ``date -u +%s`` to a command you run anyway, never "
+            + "in a turn of its own.",
+            "- To wait for a server, a benchmark or a file, run ONE blocking "
+            + "Bash command that polls until the condition holds and refreshes "
+            + "the heartbeat, with a Bash timeout that covers the wait, e.g. "
+            + "``until grep -q READY server.log; do printf "
+            + '\'{"ts": "%s", "status": "running", "note": "waiting"}\' '
+            + f'"$(date -u +%FT%TZ)" > {workspace}/heartbeat.json; sleep 15; done``. '
+            + "Do not wait with a ``sleep`` turn followed by a ``tail`` / ``cat`` turn.",
         ]
     )
     return rows
+
+
+def _deadline_iso(started_at_iso: str, budget_sec: float) -> str:
+    """``started_at_iso`` plus the budget, as ISO-8601 UTC; ``""`` when the start does not parse."""
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        started = datetime.fromisoformat(started_at_iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    deadline = started.astimezone(timezone.utc) + timedelta(seconds=float(budget_sec))
+    return deadline.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # Section 3 — Gap statement
