@@ -39,6 +39,45 @@ class PendingProposal:
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
 
 
+async def _record_proposal(
+    coord: Any,
+    *,
+    from_agent: str,
+    action_name: str,
+    predicted_gain_pct: float,
+    payload: dict[str, Any],
+) -> PendingProposal:
+    """Create one PendingProposal, write it to the bus, and record it on the phase timeline.
+
+    This is the single path for both LLM-originated and coordinator-originated
+    proposals. Every proposal that goes through here gets a phase timeline row
+    so the Critic's ruling is always filed.
+
+    Returns the PendingProposal that was inserted into ``coord.state.pending_proposals``.
+    """
+    msg = Message.new(
+        from_agent,
+        "*",
+        "proposal",
+        {**payload, "needs_review": True},
+    )
+    await coord.bus.append_and_seq(msg)
+    pending = PendingProposal(
+        proposal_msg_id=msg.msg_id,
+        from_agent=from_agent,
+        action_name=action_name,
+        predicted_gain_pct=predicted_gain_pct,
+        payload=payload,
+    )
+    coord.state.pending_proposals[msg.msg_id] = pending
+    # Import here to keep the module importable without the orchestrator runtime.
+    from .intent_router import _record_phase_proposal, _record_config_proposal
+
+    _record_phase_proposal(coord, pending)
+    _record_config_proposal(coord, pending)
+    return pending
+
+
 def apply_critic_grid_filter(
     params: dict[str, Any],
     *,

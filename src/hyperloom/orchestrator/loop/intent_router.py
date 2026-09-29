@@ -551,25 +551,15 @@ class IntentRouter:
                 )
                 return
             payload["params"] = params
-        msg = Message.new(
-            source,
-            "*",
-            "proposal",
-            {**payload, "needs_review": True},
-        )
-        await self.bus.append_and_seq(msg)
-        from .proposals import PendingProposal
+        from .proposals import _record_proposal
 
-        pending = PendingProposal(
-            proposal_msg_id=msg.msg_id,
+        await _record_proposal(
+            self,
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=payload,
         )
-        self.state.pending_proposals[msg.msg_id] = pending
-        _record_phase_proposal(self, pending)
-        _record_config_proposal(self, pending)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Apply a Critic ``review_verdict`` to its target proposal."""
@@ -709,6 +699,7 @@ class IntentRouter:
         """
         pending.decided = True
         pending.verdict = verdict
+        self.state.pending_proposals.pop(pending.proposal_msg_id, None)
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._record_observation(
                 "coordinator",

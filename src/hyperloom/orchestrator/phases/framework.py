@@ -14,14 +14,13 @@ from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
-from ..bus.message_bus import Message
 from ..state.attempt_ledger import record_patch_attempt
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
-from ..loop.proposals import PendingProposal
+from ..loop.proposals import PendingProposal, _record_proposal
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
@@ -1734,15 +1733,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "audit_step": str(audit_step or ""),
             "priors": self._collect_framework_agent_candidate_priors(),
         }
-        msg = Message.new(
-            "coordinator",
-            "*",
-            "proposal",
-            {**propose_payload, "needs_review": True},
-        )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
-            proposal_msg_id=msg.msg_id,
+        pending = await _record_proposal(
+            self,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
@@ -1755,11 +1747,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             cand_id,
             step="routed",
             outcome=str(audit_step or ""),
-            reason=f"submitted_for_review:{msg.msg_id}",
+            reason=f"submitted_for_review:{pending.proposal_msg_id}",
         )
         log.info(
             "FRAMEWORK: candidate submitted for Critic review msg_id=%s candidate=%s batch=%s audit_step=%s",
-            msg.msg_id,
+            pending.proposal_msg_id,
             cand_id,
             batch_id,
             audit_step or "<unknown>",
@@ -1769,7 +1761,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "observation",
             {
                 "kind": "framework_agent_candidate_submitted_for_review",
-                "proposal_msg_id": msg.msg_id,
+                "proposal_msg_id": pending.proposal_msg_id,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
                 "audit_step": str(audit_step or ""),
@@ -2763,15 +2755,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "predicted_gain_pct": 0.0,
             "params": integrate_params,
         }
-        msg = Message.new(
-            "coordinator",
-            "*",
-            "proposal",
-            {**propose_payload, "needs_review": True},
-        )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
-            proposal_msg_id=msg.msg_id,
+        pending = await _record_proposal(
+            self,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
@@ -2783,7 +2768,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             {
                 "kind": "specialist_patch_autosubmitted_for_review",
                 "specialist_task_id": sid,
-                "proposal_msg_id": msg.msg_id,
+                "proposal_msg_id": pending.proposal_msg_id,
                 "patch_name": patch_name,
                 "patches": [str(x) for x in patches][:8],
                 # Artifact-only deliverables: record their install targets.
@@ -2915,15 +2900,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "predicted_gain_pct": 0.0,
             "params": integrate_params,
         }
-        msg = Message.new(
-            "coordinator",
-            "*",
-            "proposal",
-            {**propose_payload, "needs_review": True},
-        )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
-            proposal_msg_id=msg.msg_id,
+        pending = await _record_proposal(
+            self,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
@@ -2935,7 +2913,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             {
                 "kind": "framework_config_autosubmitted_for_review",
                 "specialist_task_id": sid,
-                "proposal_msg_id": msg.msg_id,
+                "proposal_msg_id": pending.proposal_msg_id,
                 "candidate_id": fa_cand,
                 "extra_server_args": integrate_params["extra_server_args"],
                 "extra_envs": dict(integrate_params["extra_envs"]),
