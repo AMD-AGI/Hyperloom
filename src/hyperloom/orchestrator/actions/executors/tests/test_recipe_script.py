@@ -19,6 +19,7 @@ from hyperloom.orchestrator.actions.executors._recipe_script import (
     apply_recipe_levers,
     launcher_overwritten_envs,
     recipe_owns_argv,
+    resolve_launch_server_script,
 )
 from hyperloom.orchestrator.actions.executors._server_argv import reseal_config_argv
 from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
@@ -50,7 +51,8 @@ def checkout(tmp_path, monkeypatch) -> Path:
     (benchmarks / "benchmark_lib.sh").write_text("", encoding="utf-8")
     (benchmarks / _RECIPE).write_text(_AGENTIC, encoding="utf-8")
     (benchmarks / "vllm_mi355x.sh").write_text(
-        "export HSA_NO_SCRATCH_RECLAIM=1\nvllm serve $MODEL $EXTRA_VLLM_ARGS\n", encoding="utf-8"
+        'export HSA_NO_SCRATCH_RECLAIM=1\nexport PORT="${PORT:-8000}"\nvllm serve $MODEL $EXTRA_VLLM_ARGS\n',
+        encoding="utf-8",
     )
     monkeypatch.setenv("INFERENCEX_PATH", str(benchmarks.parent))
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", _RECIPE)
@@ -82,9 +84,42 @@ def test_only_an_agentic_recipe_owns_the_argv(checkout):
     assert recipe_owns_argv(_bench("absent.sh")) is False
 
 
-def test_only_a_generic_launcher_reports_overwritten_envs(checkout):
+def test_an_agentic_ancestor_of_the_checkout_does_not_make_a_launcher_own_the_argv(tmp_path, monkeypatch):
+    benchmarks = tmp_path / "agentic" / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    (benchmarks / "benchmark_lib.sh").write_text("", encoding="utf-8")
+    (benchmarks / "vllm_mi355x.sh").write_text("vllm serve $MODEL $EXTRA_VLLM_ARGS\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(benchmarks.parent))
+
+    assert recipe_owns_argv({"benchmark_script": "vllm_mi355x.sh", "framework": "vllm"}) is False
+    assert recipe_owns_argv(_bench("vllm_mi355x.sh")) is False
+
+
+def test_the_agentx_client_resolves_to_the_script_beside_it_not_a_same_named_one_below(checkout):
+    (checkout / "single_node" / "agentic" / "vllm_mi355x.sh").write_text("# a different recipe\n", encoding="utf-8")
+
+    assert resolve_launch_server_script(_bench("vllm_mi355x.sh")) == str(checkout / "vllm_mi355x.sh")
+
+
+def test_only_unguarded_exports_of_a_generic_launcher_count_as_overwritten(checkout):
     assert launcher_overwritten_envs(_bench()) == frozenset()
+    # ``export PORT="${PORT:-8000}"`` defers to a caller-supplied value.
     assert launcher_overwritten_envs({"benchmark_script": "vllm_mi355x.sh"}) == {"HSA_NO_SCRATCH_RECLAIM"}
+
+
+def test_a_variant_env_the_generic_launcher_overwrites_is_dropped(checkout, tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX")
+    base = _config(tmp_path)
+    base_yaml = yaml.safe_load(base.read_text())
+    base_yaml["benchmark"]["benchmark_script"] = "vllm_mi355x.sh"
+    base.write_text(yaml.safe_dump(base_yaml), encoding="utf-8")
+    variant = GridVariant(name="v", extra_envs={"HSA_NO_SCRATCH_RECLAIM": "0", "VLLM_SOMETHING_ELSE": "1"})
+
+    out = _build_variant_yaml(base, "", variant, output_subdir=tmp_path / "slot")
+
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "HSA_NO_SCRATCH_RECLAIM" not in envs
+    assert envs["VLLM_SOMETHING_ELSE"] == "1"
 
 
 def test_no_lever_boots_the_official_recipe(checkout):
@@ -118,6 +153,20 @@ def test_env_levers_override_the_recipe_export(checkout, tmp_path):
 def test_a_flag_set_inside_a_spliced_array_is_refused(checkout):
     with pytest.raises(RecipeLeverUnavailableError, match="PARALLEL_ARGS"):
         _levers(server_args="--tensor-parallel-size 4")
+
+
+@pytest.mark.parametrize(
+    "levers",
+    [
+        {"server_args": '--speculative-config {"method":"eagle3","num_speculative_tokens":4}'},
+        {"remove_args": ["--spec-decode-acceptance-length"]},
+        {"env_levers": {"SGLANG_SIMULATE_ACC_LEN": "6"}},
+    ],
+    ids=["speculative-config", "spec-decode-acceptance", "sglang-simulate-acc"],
+)
+def test_a_lever_on_synthetic_acceptance_is_refused(checkout, levers):
+    with pytest.raises(RecipeLeverUnavailableError, match="synthetic speculative acceptance"):
+        _levers(**levers)
 
 
 def test_the_copy_is_content_addressed_beside_the_recipe(checkout):

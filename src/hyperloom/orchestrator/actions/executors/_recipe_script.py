@@ -30,6 +30,10 @@ _AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 _SPLICE_RE = re.compile(r'^"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?$')
 _COPY_SUFFIX_RE = re.compile(r"\.hl-[0-9a-f]{12}(?=\.sh$)")
 
+# The recipe pins speculative acceptance so candidate and baseline are measured alike.
+_ACCEPTANCE_FLAGS = ("speculative-config", "spec-decode-acceptance")
+_ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC_"
+
 
 class RecipeLeverUnavailableError(ValueError):
     """Raised when a lever or run mode cannot be expressed on the recipe that boots the server."""
@@ -87,9 +91,16 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
 
 
 def recipe_owns_argv(bench: Mapping[str, Any]) -> bool:
-    """Whether the resolved server script is an agentic recipe, which hardcodes its own argv and env."""
-    path = resolve_launch_server_script(bench)
-    return bool(path) and "agentic" in Path(path).parent.parts
+    """Whether the AgentX client boots an agentic recipe, which hardcodes its own argv and env.
+
+    Same rule as ``aiperf_client.sh``: the ``AGENTX_SERVER_SCRIPT`` path relative
+    to ``benchmarks/`` sits under an ``agentic/`` directory.
+    """
+    if Path(str(bench.get("benchmark_script") or "")).name != _AGENTX_CLIENT_SCRIPT:
+        return False
+    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+    return "agentic" in Path(script).parent.parts and bool(resolve_launch_server_script(bench))
 
 
 def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
@@ -184,6 +195,10 @@ def _render(
     start, end = _array_span(lines, name)
     groups = _flag_groups(tokens)
     drop = {_flag_key(g[0]) for g in groups} | {_flag_key(r.split()[0]) for r in remove_args if r.strip()}
+    pinned = sorted(k for k in drop if k.startswith(_ACCEPTANCE_FLAGS))
+    pinned += sorted(k for k in env_levers if k.startswith(_ACCEPTANCE_ENV_PREFIX))
+    if pinned:
+        raise RecipeLeverUnavailableError(f"{pinned} set the recipe's synthetic speculative acceptance")
 
     words = [(i, w) for i in range(start + 1, end) for w in _words(lines[i])]
     for _, word in words:
