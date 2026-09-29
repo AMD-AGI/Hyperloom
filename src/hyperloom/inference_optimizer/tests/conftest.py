@@ -239,6 +239,39 @@ class _BuildFakeCoordinator:
         self.tasks = TaskRegistry(db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(db))
         self.shared_state = SharedState()
+        # Collaborator back-reference so methods bound directly to this fake coordinator can still reach
+        # peer collaborators via self._coord.<collab>.
+        self._coord = self
+
+    @property
+    def enablement_revalidation(self):
+        from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
+
+        obj = self.__dict__.get("_enablement_revalidation")
+        if obj is None:
+            obj = EnablementRevalidation(self)
+            self.__dict__["_enablement_revalidation"] = obj
+        return obj
+
+    @property
+    def gpu_lanes(self):
+        from hyperloom.orchestrator.gpu_lanes import GpuLanes
+
+        obj = self.__dict__.get("_gpu_lanes")
+        if obj is None:
+            obj = GpuLanes(self)
+            self.__dict__["_gpu_lanes"] = obj
+        return obj
+
+    @property
+    def build_lifecycle(self):
+        from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
+
+        obj = self.__dict__.get("_build_lifecycle_collab")
+        if obj is None:
+            obj = BuildLifecycleCollaborator(self)
+            self.__dict__["_build_lifecycle_collab"] = obj
+        return obj
 
 
 @pytest.fixture

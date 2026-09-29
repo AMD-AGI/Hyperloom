@@ -124,7 +124,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
-            lambda: self._build_enablement_specialist_params(launch_log, attempt=stalled),
+            lambda: self._coord.enablement_params._build_enablement_specialist_params(launch_log, attempt=stalled),
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC).tightened_to(deadline),
             label="enablement specialist params",
         )
@@ -144,7 +144,7 @@ class EnablementLane(CoordinatorCollaborator):
             log.exception("enablement: build escalation failed")
         await self._warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
             params=params,
             lanes=lanes,
@@ -644,7 +644,7 @@ class EnablementLane(CoordinatorCollaborator):
         # one that dispatches the next authoring round is the last of them.
         for pump in (
             self._maybe_route_build_outcomes,
-            self._maybe_enqueue_enablement_baseline_revalidation,
+            self._coord.enablement_revalidation._maybe_enqueue_enablement_baseline_revalidation,
             self._maybe_enqueue_enablement_specialist,
         ):
             try:

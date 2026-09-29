@@ -217,9 +217,9 @@ class MachinePhase(CoordinatorCollaborator):
             kernel_work_in_flight=in_kernel and await self._kernel_agent_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._maybe_enqueue_explore_research_scout()
+            await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
-        await self._maybe_enqueue_trajectory_reviewer()
+        await self._coord.phase_internal._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -301,8 +301,8 @@ class MachinePhase(CoordinatorCollaborator):
         is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
         if is_loopback:
             prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
-            self._apply_macro_cycle_reloop(evidence)
-            await self._run_cycle_soft_restart(
+            self._coord.phase_macro_cycle._apply_macro_cycle_reloop(evidence)
+            await self._coord.phase_macro_cycle._run_cycle_soft_restart(
                 prior_cycle=prior_cycle,
                 new_cycle=int(getattr(state, "macro_cycle", 0) or 0),
             )
@@ -406,7 +406,7 @@ class MachinePhase(CoordinatorCollaborator):
         # that reading is what the phase acted on.
         if (from_phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             try:
-                self._close_framework_timeline(
+                self._coord.phase_framework._close_framework_timeline(
                     exit_reason=str(reason or ""),
                     evidence=evidence if isinstance(evidence, dict) else None,
                 )
@@ -415,11 +415,11 @@ class MachinePhase(CoordinatorCollaborator):
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._on_enter_framework(from_phase=from_phase)
+            await self._coord.phase_framework._on_enter_framework(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:
-            await self._on_enter_sweep(from_phase=from_phase)
+            await self._coord.phase_sweep._on_enter_sweep(from_phase=from_phase)
         elif target == _phase_state.PHASE_CLOSE:
             await self._on_enter_close(from_phase=from_phase)
 
@@ -436,7 +436,7 @@ class MachinePhase(CoordinatorCollaborator):
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
             cycle_directive=str(state.orchestration_memory.get("next_cycle_directive", "") or ""),
-            cycle_strategy=self._plan_cycle_focus(),
+            cycle_strategy=self._coord.phase_macro_cycle._plan_cycle_focus(),
             phase=phase,
         )
         overrides["orchestration"] = scoped

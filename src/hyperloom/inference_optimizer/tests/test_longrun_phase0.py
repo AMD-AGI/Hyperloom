@@ -322,7 +322,7 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
         for i in range(30):
             await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
 
-        summary = await c._run_maintenance(tick=10)
+        summary = await c.maintenance._run_maintenance(tick=10)
         assert summary is not None
         assert "gpu_leases_reaped" not in summary
         assert "events_pruned" in summary and "tasks_pruned" in summary

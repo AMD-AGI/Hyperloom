@@ -168,7 +168,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
-            task_id = await self.enqueue_targeted_build(action)
+            task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
             if task_id:
                 from hyperloom.common.bringup import failure_digest
 
@@ -275,7 +275,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
-            build_task_id = await self.enqueue_targeted_build(action)
+            build_task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
             if build_task_id:
                 _consume_marker()
                 log.info(
@@ -515,7 +515,7 @@ class EnablementBuild(CoordinatorCollaborator):
             # watched this failure persisted.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
+            **self._coord.gpu_lanes._framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
         # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to
@@ -528,7 +528,7 @@ class EnablementBuild(CoordinatorCollaborator):
         lanes, ttl = self._registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")
-        probe_task, generation = await self._open_row_past_spent_generations(
+        probe_task, generation = await self._coord.enablement_revalidation._open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
             key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",

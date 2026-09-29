@@ -169,7 +169,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
     )
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c._drain_pending_keep_integrates()
+    await c.phase_kernel_stack._drain_pending_keep_integrates()
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
@@ -313,7 +313,7 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "REVERT"
     assert result["gain_pct"] == pytest.approx(9.0)
@@ -331,7 +331,7 @@ async def test_stack_validation_partial_revert_becomes_failed(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "REVERT"
     # partial -> failed at the aggregate level: patch still live on remote pod
@@ -351,7 +351,7 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=112.0)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "KEEP"
     assert result["gain_pct"] == pytest.approx(12.0)
@@ -597,7 +597,7 @@ async def test_stack_validation_preserves_actual_measurement(
 
     monkeypatch.setattr(baseline_mod.BaselineExecutor, "__call__", _benchmark)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert len(calls) == 1
     assert result["status"] == "ok", result
@@ -678,7 +678,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c._maybe_validate_positive_needs_review_stack()
+    await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
 
     expected_members = ["k004", "k001"]
     expected_display_id = "+".join(expected_members)
@@ -696,7 +696,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
 
     # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
-    await c._maybe_validate_positive_needs_review_stack()
+    await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
 
     assert validation_calls == calls_before_recall
     stack_entries = [
@@ -731,7 +731,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
             }
         )
     stack = _build_validation_stack(c, ["k001", "k004"])
-    c._mark_stack_validation_in_progress(stack, "k001+k004")
+    c.phase_kernel_stack._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
         **c.shared_state.pending_stack_validation_result,
         "status": "ok",
@@ -762,7 +762,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _should_not_run
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c._recover_interrupted_stack_validation()
+    await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     assert validation_calls == 0
     assert c.shared_state.current_best["variant_name"] == "k001+k004"
@@ -797,7 +797,7 @@ def test_positive_needs_review_integrates_skip_in_progress_entries():
         },
     }
 
-    eligible = c._positive_needs_review_integrates()
+    eligible = c.phase_kernel_stack._positive_needs_review_integrates()
     assert len(eligible) == 1
     assert eligible[0]["kernel_id"] == "k004"
 
@@ -857,7 +857,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c._on_enter_sweep(from_phase="KERNEL")
+    await c.phase_sweep._on_enter_sweep(from_phase="KERNEL")
 
     assert validation_calls == [["k004", "k001"]]
     assert c.shared_state.current_best["variant_name"] == "+".join(validation_calls[0])
@@ -910,7 +910,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
     )
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c._drain_pending_keep_integrates()
+    await c.phase_kernel_stack._drain_pending_keep_integrates()
 
     assert len(captured_payloads) == 1
     # use current_best.tput (110.0), not baseline (100.0)
@@ -1376,7 +1376,7 @@ async def test_stack_validation_failed_revert_sets_status_failed(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "REVERT"
     assert result["status"] == "failed"
@@ -1415,7 +1415,7 @@ async def test_stack_validation_keep_calls_finalize(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
@@ -1451,7 +1451,7 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "KEEP"
     assert result["status"] == "ok"
@@ -1491,7 +1491,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
-    result = await c._run_kernel_stack_validation_e2e(stack)
+    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "NEEDS_REVIEW"
     assert "server_args" in seen
@@ -1642,7 +1642,7 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
     c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
 
     with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
-        await c._recover_interrupted_stack_validation()
+        await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     revert.assert_not_called()
     c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
@@ -1714,7 +1714,7 @@ async def test_stack_members_selected_patch_ignores_other_patch_history(historic
 
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = validate
     with session_scope(c.session_dir):
-        await c._maybe_validate_positive_needs_review_stack()
+        await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
 
     assert selected == [("a", "new-a.patch"), ("b", "b.patch")]
     assert historical == original_history
@@ -1728,7 +1728,7 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
     c = historical_stack_coord
-    selected = c._positive_needs_review_integrates()
+    selected = c.phase_kernel_stack._positive_needs_review_integrates()
     started = "2026-01-01T00:00:00+00:00"
     for entry in selected:
         entry.update(
@@ -1759,7 +1759,7 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
     monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
 
     with session_scope(c.session_dir):
-        assert await c._recover_interrupted_stack_validation() is True
+        assert await c.phase_kernel_stack._recover_interrupted_stack_validation() is True
 
     apply.assert_not_called()
     revert.assert_not_called()
@@ -1771,12 +1771,12 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
 
 def test_stack_members_same_selected_identity_is_still_ambiguous(historical_stack_coord):
     c = historical_stack_coord
-    selected = c._positive_needs_review_integrates()
+    selected = c.phase_kernel_stack._positive_needs_review_integrates()
     c.shared_state.kernel_integrate_attempts["duplicate"] = deepcopy(selected[0])
     before = deepcopy(c.shared_state.to_dict())
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
-        c._mark_stack_validation_in_progress(selected, "a+b")
+        c.phase_kernel_stack._mark_stack_validation_in_progress(selected, "a+b")
 
     assert c.shared_state.to_dict() == before
 
@@ -1785,7 +1785,7 @@ def test_stack_members_same_selected_identity_is_still_ambiguous(historical_stac
 async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_validation_stamp(tmp_path, monkeypatch):
     c = _stack_validation_coordinator(tmp_path)
     stack = _build_validation_stack(c, ["k001", "k004"])
-    c._mark_stack_validation_in_progress(stack, "k001+k004")
+    c.phase_kernel_stack._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result.update(
         status="ok",
         decision="KEEP",
@@ -1799,7 +1799,7 @@ async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_valid
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
-        await c._recover_interrupted_stack_validation()
+        await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     assert c.shared_state.to_dict() == before
     c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
@@ -1836,7 +1836,7 @@ async def test_stack_members_invalid_direct_run_refuses_before_apply(tmp_path, m
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", bench)
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
-        await c._run_kernel_stack_validation_e2e(entries)
+        await c.phase_kernel_stack._run_kernel_stack_validation_e2e(entries)
 
     apply.assert_not_called()
     revert.assert_not_called()
@@ -1857,7 +1857,7 @@ async def test_stack_members_legacy_display_id_is_not_split_during_selection(tmp
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", Mock(side_effect=AssertionError("unexpected benchmark")))
     before = deepcopy(c.shared_state.to_dict())
     with pytest.raises(ValueError, match="(?i)stack|member"):
-        await c._maybe_validate_positive_needs_review_stack()
+        await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
     assert c.shared_state.to_dict() == before
 
 
@@ -1957,7 +1957,7 @@ async def _halt_a_stack_revert(tmp_path: Path, monkeypatch) -> Path:
         _stub_stack_benchmark(mp, new_tput=105.0)
         _break_backup_restore(mp, target=stuck)
         with session_scope(tmp_path), pytest.raises(RuntimeError, match="revert incomplete"):
-            await c._maybe_validate_positive_needs_review_stack()
+            await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
     return stuck
 
 
@@ -1988,7 +1988,7 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
     c = _resumed_stack_coordinator(tmp_path)
 
     with session_scope(tmp_path):
-        assert await c._recover_interrupted_stack_validation() is True
+        assert await c.phase_kernel_stack._recover_interrupted_stack_validation() is True
 
     assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
     assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
@@ -1997,7 +1997,10 @@ async def test_stack_revert_recovery_retries_the_unwind_and_clears(tmp_path: Pat
     assert not reloaded.pending_stack_validation_result
     assert not reloaded.pending_stack_validation_apply_results
     assert _stack_member_guards(reloaded) == {"k001": False, "k004": False}
-    assert {entry["kernel_id"] for entry in c._positive_needs_review_integrates()} == {"k001", "k004"}
+    assert {entry["kernel_id"] for entry in c.phase_kernel_stack._positive_needs_review_integrates()} == {
+        "k001",
+        "k004",
+    }
 
 
 def _age_checkpoint_to_the_previous_release(session_dir: Path) -> None:
@@ -2034,7 +2037,7 @@ async def test_a_checkpoint_written_before_this_build_still_unwinds(tmp_path: Pa
     c = _resumed_stack_coordinator(tmp_path)
 
     with session_scope(tmp_path):
-        assert await c._recover_interrupted_stack_validation() is True
+        assert await c.phase_kernel_stack._recover_interrupted_stack_validation() is True
 
     assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
     assert (tmp_path / "k004.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
@@ -2088,7 +2091,7 @@ async def test_stack_revert_recovery_that_fails_again_halts_again(tmp_path: Path
     _break_backup_restore(monkeypatch, target=stuck)
 
     with session_scope(tmp_path), pytest.raises(RuntimeError, match="revert incomplete"):
-        await c._recover_interrupted_stack_validation()
+        await c.phase_kernel_stack._recover_interrupted_stack_validation()
 
     assert stuck.read_text(encoding="utf-8") == _STACK_PATCHED_SOURCE
     reloaded = SharedState.load_or_init(tmp_path)
@@ -2111,7 +2114,7 @@ async def test_stack_revert_success_clears_checkpoints(tmp_path: Path, monkeypat
     _materialize_stack_sources(tmp_path, stack)
 
     with session_scope(tmp_path):
-        await c._maybe_validate_positive_needs_review_stack()
+        await c.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
 
     assert all(
         (tmp_path / f"{kid}.py").read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE for kid in ("k001", "k004")

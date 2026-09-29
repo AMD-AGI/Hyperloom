@@ -34,12 +34,12 @@ class SweepPhase(CoordinatorCollaborator):
         state = self.shared_state
         # An unwind a previous leg left owed still has the stack's patches on the
         # tree, so settle it before the drain below applies anything on top.
-        await self._recover_interrupted_stack_validation()
+        await self._coord.phase_kernel_stack._recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
-            await self._drain_pending_keep_integrates()
+            await self._coord.phase_kernel_stack._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
-        await self._maybe_validate_positive_needs_review_stack()
+        await self._coord.phase_kernel_stack._maybe_validate_positive_needs_review_stack()
         if not getattr(state, "conc_sweep_enabled", False):
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
