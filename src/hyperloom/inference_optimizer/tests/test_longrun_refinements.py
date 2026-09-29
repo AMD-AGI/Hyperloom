@@ -49,12 +49,18 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
         cumulative_gain_validated=5.0 + cycle_delta,
         no_gain_cycle_streak=no_gain_streak,
     )
+    st.last_conc_sweep = {"status": "succeeded"}
     return st
+
+
+def _reloop(st):
+    target, _reason, evidence = ps.compute_next_phase(st)
+    return target == ps.PHASE_FRAMEWORK_AGENT, evidence
 
 
 def test_subthreshold_gain_does_not_reset_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
-    reloop, ev = ps.should_open_macro_cycle(st)
+    reloop, ev = _reloop(st)
     assert ev["min_gain_pct"] == pytest.approx(0.40)
     assert ev["cycle_gained"] is False
     assert ev["no_gain_cycle_streak_effective"] == 2
@@ -63,14 +69,14 @@ def test_subthreshold_gain_does_not_reset_streak():
 
 def test_three_subthreshold_cycles_converge():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
-    reloop, ev = ps.should_open_macro_cycle(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "global_converged"
 
 
 def test_suprathreshold_gain_resets_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
-    reloop, ev = ps.should_open_macro_cycle(st)
+    reloop, ev = _reloop(st)
     assert ev["cycle_gained"] is True
     assert ev["no_gain_cycle_streak_effective"] == 0
     assert reloop is True
@@ -82,7 +88,7 @@ def test_all_saturated_directions_stop_reloop():
         "kernel_switch_specialist": {"saturated": True},
         "comm_specialist": {"saturated": True},
     }
-    reloop, ev = ps.should_open_macro_cycle(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
@@ -90,7 +96,7 @@ def test_all_saturated_directions_stop_reloop():
 def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
-    reloop, ev = ps.should_open_macro_cycle(st)
+    reloop, ev = _reloop(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 

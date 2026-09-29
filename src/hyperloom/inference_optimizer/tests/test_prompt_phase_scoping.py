@@ -499,11 +499,15 @@ def test_reloop_is_a_projection_before_sweep():
     assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
-def test_reloop_feasibility_matches_the_transition_decision():
+def test_reloop_feasibility_at_sweep_is_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
-    reloop, _ = _ps.should_open_macro_cycle(s)
-    expected = "true" if reloop else "false"
-    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+    s.last_conc_sweep = {"status": "succeeded"}
+    s.target_reached_at = " "
+    now = datetime.now(timezone.utc).timestamp()
+    target, _reason, _evidence = _ps.compute_next_phase(s, now_unix=now)
+    expected = "true" if target == _ps.PHASE_FRAMEWORK_AGENT else "false"
+    line = next(line for line in _ps.phase_status_summary(s, now_unix=now).splitlines() if line.startswith("reloop"))
+    assert f"cycle_reloop_feasible={expected}" in line
 
 
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
