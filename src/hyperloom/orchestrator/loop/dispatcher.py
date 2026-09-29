@@ -780,10 +780,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
             # false positive. Dispatch is unchanged.
-            _execs = getattr(getattr(self, "sub", None), "executor_registry", None)
+            _execs = self.sub.executor_registry
             if (
-                isinstance(_execs, dict)
-                and _execs
+                _execs
                 and task.kind not in _execs
                 and task.kind != "specialist"
                 and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
@@ -1681,10 +1680,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             A frozenset of action names eligible for inline execution.
         """
-        coord = self
-        executors = getattr(coord.sub, "executor_registry", {}) or {}
+        executors = self.sub.executor_registry
         allowed: set[str] = set()
-        for name in coord.action_registry:
+        for name in self.action_registry:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:
