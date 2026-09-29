@@ -86,10 +86,14 @@ class SweepPhase(CoordinatorCollaborator):
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
             )
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="enqueue_failed",
-                auto_conc_sweep_error=repr(exc)[:240],
+            self._record_phase_entry_evidence(auto_conc_sweep_error=repr(exc)[:240])
+            self.shared_state.record_conc_sweep(
+                {
+                    "status": "failed",
+                    "skip_reason": "enqueue_failed",
+                }
             )
+            self.shared_state.save(self.session_dir)
             return
         # The only None is the helper's own budget decline, which records its terminal skip before returning.
         if task is None:
