@@ -64,6 +64,8 @@ def assess_integrate_performance(
         # Fail closed: the axis the session asked for did not apply, so the output figure is a diagnostic, not a
         # verdict, and promoting or discarding a native integration on it is a call for a human.
         decision = "NEEDS_REVIEW"
+    elif graded.veto_reason:
+        decision = "REVERT"
     elif graded.graded_on_intvty:
         decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
     else:

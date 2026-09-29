@@ -110,6 +110,25 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
+def latency_budget_scope_error(framework: str | None, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` does not apply to *framework*, or ``\"\"``.
+
+    Scriptable workloads grade on output throughput alone and are the only frameworks compute partitioning places
+    work for, so they are the only place a throughput-only gate can buy throughput with per-request latency. AgentX
+    serving sessions already REVERT that trade on interactivity, and the fixed ISL/OSL serving mode takes no new
+    capability, so the budget is refused there rather than silently doing nothing.
+    """
+    from .. import framework_registry
+
+    if requested_ms is None or framework_registry.is_scriptable(framework):
+        return ""
+    name = str(framework or "").strip() or framework_registry.DEFAULT_FRAMEWORK
+    return (
+        f"--max-latency-ms applies only to scriptable frameworks (xdit, custom); {name!r} is a serving framework. "
+        "On AgentX the interactivity objective already refuses a throughput gain bought with per-request latency"
+    )
+
+
 def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
     """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
 

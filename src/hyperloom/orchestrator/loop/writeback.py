@@ -3152,29 +3152,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             len(self.shared_state.research_scout_seen_pr_ids or []),
         )
 
-    def _record_latency_refusal(self, task_kind: str, bv: Any, best_tput: float, reason: str) -> None:
-        """Log and record a winner the latency budget refused."""
-        observed = bv.get("e2el_mean_ms") if isinstance(bv, dict) else None
-        log.warning(
-            "current_best held: %s winner measured %.1f tput but %s (budget %.1f ms, measured %s)",
-            task_kind,
-            float(best_tput),
-            reason,
-            float(self.shared_state.latency_budget_ms),
-            f"{float(observed):.1f} ms" if isinstance(observed, (int, float)) else "nothing",
-        )
-        self.shared_state.latency_refusals.append(
-            {
-                "action": task_kind,
-                "variant_name": str((bv.get("name") if isinstance(bv, dict) else "") or ""),
-                "tput": float(best_tput),
-                "e2el_mean_ms": observed if isinstance(observed, (int, float)) else None,
-                "budget_ms": float(self.shared_state.latency_budget_ms),
-                "reason": reason,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
     def _lift_to_current_best(
         self,
         task_kind: str,
@@ -3238,7 +3215,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
                 return False
             if graded.veto_reason:
-                self._record_latency_refusal(task_kind, bv, best_tput, graded.veto_reason)
+                log.warning(
+                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                )
                 return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(

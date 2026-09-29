@@ -584,9 +584,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_ms_arg,
         default=None,
         help=(
-            "Refuse any KEEP whose mean end-to-end latency exceeds N ms. Off by "
-            "default. A candidate that reported no end-to-end latency is refused "
-            "too, since an unmeasured constraint is not a satisfied one."
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
         ),
     )
     opt.add_argument(

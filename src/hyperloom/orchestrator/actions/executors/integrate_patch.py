@@ -4364,7 +4364,13 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        gate_pass = (
+            graded.comparable
+            and delta_pct is not None
+            and delta_pct >= keep_threshold_pct
+            and not graded.veto_reason
+            and not acc_block
+        )
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -4494,6 +4500,8 @@ class IntegratePatchExecutor:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
+            elif graded.veto_reason:
+                reasons.append(graded.veto_reason)
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
             _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))

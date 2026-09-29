@@ -63,6 +63,7 @@ from .bootstrap import (
     _snapshot_system_prompts,
     agentx_state_is_stale,
     latency_budget_resume_conflict,
+    latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -1652,6 +1653,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
@@ -1730,7 +1738,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _latency_conflict = latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
         if _latency_conflict:
             session_lock.release()
             print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
