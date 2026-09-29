@@ -97,6 +97,7 @@ def integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, An
             for key in (
                 "ttft_mean_ms",
                 "e2el_mean_ms",
+                "gpu_power_avg_w",
                 "tpot_mean_ms",
                 "workspace",
                 "raw_result_path",

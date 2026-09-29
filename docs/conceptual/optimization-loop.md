@@ -219,6 +219,29 @@ than spending its whole budget refusing every candidate to learn what was
 knowable at launch. Off by default, leaving KEEP behaviour unchanged when
 unset.
 
+### Power budget (constraint on KEEP)
+
+`--max-power-w` sets a ceiling on per-GPU mean power over a measured round, for
+every framework. It rides the same verdict as `--max-latency-ms`: a candidate
+that would otherwise KEEP and draws more than the ceiling is a REVERT with
+`veto_reason` `power_budget_exceeded`, or `power_unmeasured` when its round
+reported no GPU power (fail closed). Every KEEP decision point reads that
+verdict, so a lane reverts its own over-budget change. The reading is the
+round's `gpu_metrics.json` `avg_power_w`, carried as `gpu_power_avg_w` on the
+measurement. If the baseline itself is over the ceiling, or reported no power,
+the run stops with `baseline_over_power_budget`.
+
+The optimizer never changes power settings. The power cap and DPM performance
+level decide how much of the card's throughput is available at what power, so
+they are part of the measurement contract, and setting them is privileged and
+card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
+launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
+`--compute-partition-mode` asserts a partition mode: the session refuses to
+start (and to resume) if a card it uses is at a different value. The observed
+cap and perf level are recorded in the platform fingerprint whether or not
+they are asserted. Neither can be checked on a multi-node session, so asserting
+one there refuses.
+
 ### Runnable gate (earned KEEP)
 
 A verified build does not KEEP on artifact verification alone. After a

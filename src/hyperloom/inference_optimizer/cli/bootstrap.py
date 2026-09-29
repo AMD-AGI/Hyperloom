@@ -142,6 +142,18 @@ def latency_budget_scope_error(framework: str | None, requested_ms: float | None
     )
 
 
+def _budget_resume_conflict(flag: str, unit: str, archived: float, requested: float | None) -> str:
+    """Why a resume-time budget differs from the archived one, or ``\"\"``; omitting the flag keeps the archive."""
+    if requested is None or float(requested) == archived:
+        return ""
+    recorded = f"{archived:g} {unit}" if archived > 0 else "no budget"
+    return (
+        f"{flag} {float(requested):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
+
+
 def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
     """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
 
@@ -149,17 +161,75 @@ def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> st
     value would leave them judged against a constraint the new one does not
     state. Omitting the flag keeps the archived budget.
     """
-    if requested_ms is None:
-        return ""
-    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
-    if float(requested_ms) == archived:
-        return ""
-    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
-    return (
-        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
-        "graded under; its KEEPs would be judged against a constraint they were never measured "
-        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    return _budget_resume_conflict(
+        "--max-latency-ms", "ms", float(getattr(state, "latency_budget_ms", 0.0) or 0.0), requested_ms
     )
+
+
+def power_budget_resume_conflict(state: Any, requested_w: float | None) -> str:
+    """Return why ``--max-power-w`` cannot apply to a resumed session, or ``\"\"``."""
+    return _budget_resume_conflict(
+        "--max-power-w", "W", float(getattr(state, "power_budget_w", 0.0) or 0.0), requested_w
+    )
+
+
+def resolve_gpu_power_settings(
+    *,
+    power_cap_w: float | None,
+    perf_level: str | None,
+    nodes: int,
+    read: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Read the cards' power settings and check the declared ones; ``(record, error)``.
+
+    ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
+    reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
+    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    """
+    from hyperloom.common.gpu_power_settings import (
+        GpuPowerSettingsError,
+        declared_setting_problems,
+        normalize_perf_level,
+        read_gpu_power_settings,
+        visible_gpu_indices,
+    )
+
+    declared: dict[str, Any] = {}
+    if power_cap_w is not None:
+        declared["power_cap_w"] = float(power_cap_w)
+    if perf_level:
+        declared["perf_level"] = normalize_perf_level(perf_level)
+    if nodes >= 2:
+        if declared:
+            return {}, (
+                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
+                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
+                "satisfied one"
+            )
+        return {}, ""
+    try:
+        observed = (read or read_gpu_power_settings)()
+    except GpuPowerSettingsError as exc:
+        if declared:
+            return {"declared": declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        return {}, ""
+    gpus = visible_gpu_indices()
+    record = {
+        "declared": declared,
+        "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
+    }
+    problems = declared_setting_problems(
+        observed,
+        power_cap_w=declared.get("power_cap_w"),
+        perf_level=declared.get("perf_level"),
+        gpus=gpus,
+    )
+    if problems:
+        return record, (
+            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
+            + "; ".join(problems)
+        )
+    return record, ""
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
@@ -199,6 +269,7 @@ def _seed_shared_state(
     *,
     session_id: str,
     compute_partition: dict[str, Any] | None = None,
+    gpu_power_settings: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
@@ -310,6 +381,8 @@ def _seed_shared_state(
         # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores it without a second source to reconcile.
         latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
+        power_budget_w=float(getattr(args, "max_power_w", None) or 0.0),
+        gpu_power_settings=dict(gpu_power_settings or {}),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),

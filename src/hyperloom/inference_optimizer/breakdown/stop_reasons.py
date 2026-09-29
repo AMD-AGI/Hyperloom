@@ -88,6 +88,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # The baseline is over ``--max-latency-ms``, or reported no end-to-end latency: every candidate is graded
         # against it, so there is no configuration the run could reach that would satisfy the constraint.
         "baseline_over_latency_budget",
+        # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
+        "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",

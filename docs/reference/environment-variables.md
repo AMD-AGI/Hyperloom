@@ -88,7 +88,12 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   target composes with the others: whichever is met first ends the run.
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
-  serving framework, including on resume.
+  serving framework, including on resume. `--max-power-w` is the same kind of
+  constraint on per-GPU mean power, for every framework.
+- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
+  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
+  refuses to start or resume if a card it uses differs, and records what the
+  cards report either way.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning

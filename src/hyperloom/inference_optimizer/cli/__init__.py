@@ -63,6 +63,8 @@ from .bootstrap import (
     _snapshot_system_prompts,
     agentx_state_is_stale,
     latency_budget_resume_conflict,
+    power_budget_resume_conflict,
+    resolve_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
@@ -1310,6 +1312,16 @@ def _export_partition_shape(
     return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
 
 
+def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
+    """Expose the recorded power settings to the platform fingerprint, the way the partition shape is."""
+    from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV
+
+    if record:
+        os.environ[GPU_POWER_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
+    else:
+        os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
+
+
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     """Fill the partition flags from the archive when this resume omitted them."""
     archived = dict(getattr(state, "compute_partition", None) or {})
@@ -1742,9 +1754,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _latency_conflict = latency_budget_scope_error(
-            state.framework, getattr(args, "max_latency_ms", None)
-        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        _latency_conflict = (
+            latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
+            or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+            or power_budget_resume_conflict(state, getattr(args, "max_power_w", None))
+        )
         if _latency_conflict:
             session_lock.release()
             print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
@@ -1854,6 +1868,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
         # path as the paths above.
         _restore_partition_shape_from_state(args, state)
+        # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
+        _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
+            perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+        )
+        if _gpu_power_error:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
+        state.gpu_power_settings = gpu_power
         state.compute_partition = _export_partition_shape(
             declared_mode=getattr(args, "compute_partition_mode", None),
             streams_per_partition=getattr(args, "streams_per_partition", None),
@@ -2182,11 +2209,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None),
+            perf_level=getattr(args, "gpu_perf_level", None),
+            nodes=nodes_resolved,
+        )
+        if _gpu_power_error:
+            print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
             compute_partition=compute_partition,
+            gpu_power_settings=gpu_power,
         )
         _start_model_gate(args, session_dir)
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).

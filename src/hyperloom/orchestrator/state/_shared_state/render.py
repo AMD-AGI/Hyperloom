@@ -209,6 +209,24 @@ class _RenderMixin:
             "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
 
+    def to_power_budget_summary(self) -> str:
+        """One line stating the power budget and the cap the cards are at; empty when no budget is set."""
+        budget = float(getattr(self, "power_budget_w", 0.0) or 0.0)
+        if budget <= 0:
+            return ""
+        caps = sorted(
+            {
+                float(row["power_cap_w"])
+                for row in ((getattr(self, "gpu_power_settings", None) or {}).get("observed") or {}).values()
+                if isinstance(row, dict) and isinstance(row.get("power_cap_w"), (int, float))
+            }
+        )
+        cap = f", cards capped at {'/'.join(f'{c:g}' for c in caps)} W" if caps else ""
+        return (
+            f"{budget:g} W per-GPU mean power{cap}: a KEEP over it, or with no GPU power reported, is refused "
+            "(reason power_budget_exceeded / power_unmeasured in explore_search and the journal)"
+        )
+
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
         """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
 
