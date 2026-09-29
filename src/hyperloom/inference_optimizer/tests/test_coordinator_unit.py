@@ -11,6 +11,8 @@ from hyperloom.orchestrator.loop.conversation import _first_present, _format_inb
 from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
+from hyperloom.orchestrator.state.gaps import GapRefreshCollaborator
 
 
 def test_first_present_non_dict_and_branches():
@@ -178,37 +180,37 @@ def test_skip_gemm_tuning_env(monkeypatch):
 
 
 def test_gap_layer_for_action_mapping():
-    assert Coordinator._gap_layer_for_action("kernel_opt") == (
+    assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt") == (
         "kernel_agent",
         "kernel_switch_specialist",
     )
-    assert Coordinator._gap_layer_for_action("PROFILE")[0] == "kernel_agent"
-    assert Coordinator._gap_layer_for_action("sweep")[0] == "framework"
-    assert Coordinator._gap_layer_for_action("baseline")[0] == "system"
-    assert Coordinator._gap_layer_for_action("  ") == ("framework", "serving_specialist")
+    assert GapRefreshCollaborator._gap_layer_for_action("PROFILE")[0] == "kernel_agent"
+    assert GapRefreshCollaborator._gap_layer_for_action("sweep")[0] == "framework"
+    assert GapRefreshCollaborator._gap_layer_for_action("baseline")[0] == "system"
+    assert GapRefreshCollaborator._gap_layer_for_action("  ") == ("framework", "serving_specialist")
 
 
 def test_gap_layer_for_action_follows_framework_kind():
     # A framework-layer gap on a scriptable workload must name the rewrite specialist: seeding it with
     # serving_specialist is what steered a custom workload back onto the serving surface once EXPLORE picked the gap
     # up.
-    assert Coordinator._gap_layer_for_action("sweep", "custom") == (
+    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "custom") == (
         "framework",
         "framework_rewrite_specialist",
     )
-    assert Coordinator._gap_layer_for_action("sweep", "xdit")[1] == "framework_rewrite_specialist"
-    assert Coordinator._gap_layer_for_action("sweep", "sglang")[1] == "serving_specialist"
+    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "xdit")[1] == "framework_rewrite_specialist"
+    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "sglang")[1] == "serving_specialist"
     # Kernel and system rows are framework-independent.
-    assert Coordinator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
-    assert Coordinator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"
+    assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
+    assert GapRefreshCollaborator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"
 
 
 def test_task_id_from_specialist_source():
-    assert Coordinator._task_id_from_specialist_source("") == ""
-    assert Coordinator._task_id_from_specialist_source("orch") == ""
+    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("") == ""
+    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("orch") == ""
     tid = "abc-123"
     assert (
-        Coordinator._task_id_from_specialist_source(
+        SpecialistDispatchCollaborator._task_id_from_specialist_source(
             f"{SPECIALIST_FROM_AGENT_PREFIX}{tid}",
         )
         == tid

@@ -95,7 +95,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
 
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "kernel_switch_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
 
     assert "roofline_evidence" in params
     ev = params["roofline_evidence"]
@@ -115,7 +115,7 @@ async def test_warm_specialist_params_noop_when_no_snapshot(tmp_path):
     state = _BareState(last_trace_analyze={})
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
     assert "roofline_evidence" not in params
 
 
@@ -130,7 +130,7 @@ async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path)
     )
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "kernel_switch_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
     assert "roofline_evidence" not in params
 
 
@@ -155,7 +155,7 @@ async def test_warm_specialist_params_packs_hot_kernels_without_analysis_md(tmp_
     )
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "framework_rewrite_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
 
     ev = params["roofline_evidence"]
     assert ev["roofline_snapshot_id"] == 4
@@ -181,7 +181,7 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
         "domain": "comm_specialist",
         "roofline_evidence": {"sentinel": True},
     }
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch._warm_specialist_params(params)
     assert params["roofline_evidence"] == {"sentinel": True}
 
 

@@ -312,13 +312,13 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
     task = types.SimpleNamespace(task_id="x", params={})
-    await coord._maybe_autosubmit_framework_config(task=task, done_payload={})
+    await coord.phase_framework._maybe_autosubmit_framework_config(task=task, done_payload={})
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework._maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
@@ -327,7 +327,7 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework._maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
@@ -338,7 +338,7 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
@@ -354,7 +354,7 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
@@ -378,7 +378,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
         "setup_commands": ["pip install -U aiter"],
     }
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -393,7 +393,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -414,7 +414,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework._maybe_autosubmit_framework_config(
         task=_enablement_authoring_task(),
         done_payload=done,
     )

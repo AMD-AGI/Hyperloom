@@ -924,7 +924,7 @@ async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     assert task.kind == "conc_sweep"
@@ -947,7 +947,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     assert "internal-sweep-phase_entry" not in coord.tasks._tasks
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -962,7 +962,7 @@ async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     coord.shared_state.conc_sweep_concs = []
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
 
     task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     assert task.params["concs"] is None
@@ -976,12 +976,12 @@ async def test_on_enter_sweep_idempotent_on_reentry(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     task1 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     coord.shared_state.phase_history.append(
         {"to_phase": "SWEEP", "reason": "re_entry_test", "evidence": {}},
     )
-    await coord._on_enter_sweep(from_phase="SWEEP")
+    await coord.phase_sweep._on_enter_sweep(from_phase="SWEEP")
     task2 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     assert task1 is task2
     assert len(coord.tasks._tasks) == 1
@@ -999,7 +999,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     # Should not raise
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert "auto_conc_sweep_error" in evidence
     assert "simulated DB outage" in evidence["auto_conc_sweep_error"]
@@ -1018,7 +1018,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     ]
     coord.shared_state.remaining_minutes = lambda: 1.0
 
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
 
     assert coord.tasks._tasks == {}
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
@@ -1106,7 +1106,7 @@ async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence["auto_conc_sweep_skipped"] == "disabled"
@@ -1128,7 +1128,7 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence["auto_conc_sweep_skipped"] == "no_validated_gain_since_last_conc_sweep"
@@ -1145,7 +1145,7 @@ async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_swee
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence["auto_conc_sweep_skipped"] == "session_time_budget"
@@ -1161,7 +1161,7 @@ async def test_on_enter_sweep_still_enqueues_when_the_session_budget_fits(coord)
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     assert coord.shared_state.last_conc_sweep == {}
 
@@ -1177,7 +1177,7 @@ async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence["auto_conc_sweep_enqueued"] is True
@@ -1191,7 +1191,7 @@ async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    await coord._on_enter_sweep(from_phase="KERNEL")
+    await coord.phase_sweep._on_enter_sweep(from_phase="KERNEL")
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
 
 
@@ -1229,7 +1229,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         reason="plateau_kernel",
         evidence={"trigger": "test_e2e"},
     )
-    await coord._on_phase_entered(from_phase="KERNEL", to_phase="SWEEP")
+    await coord.phase_machine._on_phase_entered(from_phase="KERNEL", to_phase="SWEEP")
 
     rows = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
@@ -1266,7 +1266,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "evidence": {}, "reason": "test_forced"},
     ]
-    await coord._on_phase_entered(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP")
+    await coord.phase_machine._on_phase_entered(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP")
     rows = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
         ("internal-conc_sweep-phase_entry",),
