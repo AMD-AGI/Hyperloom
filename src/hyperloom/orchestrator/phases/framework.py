@@ -4,13 +4,15 @@
 """FRAMEWORK_AGENT phase handler: authoring specialist dispatch, enablement repair, deliverable routing, and Critic-review submission/reauthor."""
 
 from __future__ import annotations
+import hashlib
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.env_safety import redact_secret_values
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -336,6 +338,47 @@ def _source_action_reasoning(
     return "", ""
 
 
+_MAX_RECORDED_PATCH_BYTES = 128 * 1024
+
+
+def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, str]]:
+    """Each distinct session-local patch as ``{path, sha256, content}``, in the order given.
+
+    A patch outside the session, over the size cap, not UTF-8, or carrying a
+    credential is left out, so the session breakdown only ever holds patch text
+    that is safe to publish whole.
+    """
+    root = Path(session_dir).resolve()
+    material: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if not raw:
+            continue
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if relative in seen:
+            continue
+        try:
+            if not resolved.is_file() or resolved.stat().st_size > _MAX_RECORDED_PATCH_BYTES:
+                continue
+            payload = resolved.read_bytes()
+        except OSError:
+            continue
+        try:
+            content = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if redact_secret_values(content) != content:
+            continue
+        seen.add(relative)
+        material.append({"path": relative, "sha256": hashlib.sha256(payload).hexdigest(), "content": content})
+    return material
+
+
 def _record_source_attempt(
     coord: Any,
     *,
@@ -411,6 +454,7 @@ def _record_source_attempt(
         # not recoverable from the single primary path.
         patches_applied=patches_applied,
         patches_reverted=patches_reverted,
+        patch_material=_patch_material(Path(coord.session_dir), [patch_path, *patches_applied, *patches_reverted]),
         target_files=result.get("target_files") or [],
         source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
         measurement={

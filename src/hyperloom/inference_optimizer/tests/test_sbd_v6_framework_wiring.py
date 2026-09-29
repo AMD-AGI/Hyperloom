@@ -666,34 +666,16 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
     assert ("attempted", "t-auth-1") in [(s["step"], s["run_ref"]) for s in proposal["lifecycle"]]
     assert proposal["terminal"]["disposition"] == "attempted"
 
-    from hyperloom.inference_optimizer import experience_v1
+    import hashlib
 
-    projected, skipped = experience_v1._project_all(
-        session_dir,
+    content = patch.read_text()
+    assert attempt["patch_material"] == [
         {
-            "metadata": {
-                "session": {"session_id": "source-run"},
-                "task_config": {
-                    "model_name": "qwen3-8b",
-                    "gpu_type": "mi355x",
-                    "framework_name": "sglang",
-                    "framework_version": "0.5.18",
-                    "precision": "bf16",
-                    "architecture": {
-                        "model_type": "qwen3",
-                        "model_class": "Qwen3ForCausalLM",
-                    },
-                },
-                "grading": {"benchmark_mode": "synthetic"},
-            },
-            "timeline": _events(session_dir),
-        },
-    )
-    assert skipped == []
-    assert projected[0].change_family == "source_patch"
-    assert projected[0].resource_refs == ("artifacts/source.patch",)
-    assert "optimized = True" in projected[0].change_content
-    assert projected[0].baseline_configuration["extra_server_args"] == "--already-kept 1"
+            "path": "artifacts/source.patch",
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "content": content,
+        }
+    ]
 
 
 def _authored_outcome(coord, result: dict) -> dict:

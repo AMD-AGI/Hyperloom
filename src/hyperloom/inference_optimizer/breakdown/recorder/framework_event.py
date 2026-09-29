@@ -666,6 +666,16 @@ class FrameworkEventRecorder:
                 "value": _float_or_none(accuracy.get("value")),
                 "passed": None if accuracy.get("passed") is None else bool(accuracy.get("passed")),
             }
+        if "patch_material" in fields:
+            row["patch_material"] = [
+                {
+                    "path": str(patch.get("path") or ""),
+                    "sha256": str(patch.get("sha256") or ""),
+                    "content": str(patch.get("content") or ""),
+                }
+                for patch in (fields.get("patch_material") or [])
+                if isinstance(patch, Mapping)
+            ]
         if "failure" in fields:
             failure = _as_dict(fields.get("failure"))
             row["failure"] = {

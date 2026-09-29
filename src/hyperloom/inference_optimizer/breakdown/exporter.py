@@ -296,16 +296,9 @@ def write_breakdown_json(
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
-    try:
-        from ..experience_v1 import publish_framework_experiences
+    from ..experience_collect import collect_session
 
-        publish_framework_experiences(sd, breakdown)
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-        log.warning(
-            "Framework Experience publication failed for %s; breakdown remains authoritative",
-            sd,
-            exc_info=True,
-        )
+    collect_session(sd, breakdown)
     return target
 
 

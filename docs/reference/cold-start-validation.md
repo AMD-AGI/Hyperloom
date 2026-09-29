@@ -64,9 +64,9 @@ Do not promote the environment to a long campaign until all of these are true:
 - at least one Framework attempt reaches a terminal KEEP, REVERT, or FAILED
   outcome;
 - CLOSE writes `session_breakdown.json` and
-  `reports/experience_v1_publish.json`;
-- the publish receipt accounts for every terminal Framework attempt as either
-  selected or skipped.
+  `reports/experience_collect.json`;
+- the collection receipt accounts for every terminal Framework attempt as
+  collected, skipped, or errored.
 
 For a live status check, resolve the session only from the launch-info JSON:
 

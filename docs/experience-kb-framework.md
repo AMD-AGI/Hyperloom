@@ -3,67 +3,74 @@
 Framework Experience publication is an opt-in side effect of SBD V6 export.
 It is separate from Recipe KB reads and writes.
 
-## Source of truth
+Hyperloom owns two ends of it: recording each Framework attempt's facts on the
+SBD V6 timeline, and handing the written `session_breakdown.json` to the
+`hyperloom_kb` SDK. The projection from attempts to Experiences -- which fields
+become identity, baseline, change, and outcome, and which attempts are fit to
+publish -- is the `hyperloom-sbd-v6` mapping packaged with that SDK.
 
-The producer reads:
+## What Hyperloom records
+
+Every Experience comes from one row of:
 
 ```text
 session_breakdown.timeline[type=framework_agent].ext
-  ├── proposals
-  └── attempts
+  ├── proposals   reasoning, kb_read_id, rendered_refs
+  └── attempts    measured_against, measurement, config_delta, gates, accuracy,
+                  failure.attribution, reasoning, reasoning_origin,
+                  patch_path, patches_applied, patches_reverted, patch_material
 ```
 
-It does not revive the removed pre-V6 `optimizations.attempts` projection.
+plus the workload identity in `metadata.task_config`. These fields are
+declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
 
-## Fidelity gate
+- **Measured-against stack.** Both arms record the exact configuration an
+  attempt was judged on, not the session's current configuration.
+- **Failure attribution.** Unmeasured attempts are classified as
+  `candidate_caused`, `environment`, `harness`, or `unknown`; only
+  `candidate_caused` failures become Experiences.
+- **Patch material.** Source attempts record each session-local patch they
+  applied or reverted as `{path, sha256, content}`, in the order `patch_path`,
+  `patches_applied`, `patches_reverted`. A patch outside the session, over
+  128 KiB, not UTF-8, or carrying a credential is left out, and an attempt with
+  no recorded patch is not published.
 
-A complete Experience is emitted only when the V6 record proves:
+## Reasoning provenance
 
-- all required workload identity fields, with optional EP, compute-partition,
-  and max-model-length dimensions retained when present;
-- an exact per-attempt measured baseline and measured-against runtime
-  configuration;
-- a measured keep/revert outcome, or a terminal failure deterministically
-  attributed to the candidate rather than the environment or benchmark
-  harness;
-- a concrete config delta or verifiable source-patch fingerprint;
-- non-generic decision reasoning traceable to an action-time proposal field;
-- a measured outcome or candidate-specific failure class;
-- required accuracy success for a kept result;
-- valid Framework-event and attempt timestamps.
+Configuration variants preserve their authored action-time `reasoning` (and
+record which payload field supplied it in `reasoning_origin`) on the measured
+attempt. Their materialized tasks retain the proposal message id so attempts
+join the right proposal. Source candidates preserve discovery reasoning. Gap
+context and post-action result text are recorded when present but are not
+accepted as original decision reasoning, and a provenance label such as
+`llm_direct` is not a substitute for reasoning.
 
-Attempts that fail any condition remain in the authoritative SBD V6 timeline
-and appear in `reports/experience_v1_publish.json` with an exact skip reason.
-The producer does not fill missing identity, measurements, reasoning, or patch
-content with placeholders.
+`rendered_refs` records the Experiences the service injected into the decision
+that produced the proposal. Whether the LLM relied on them requires a separate
+usage-trace design.
 
-Failed attempts are classified as `candidate_caused`, `environment`,
-`harness`, or `unknown`. Only `candidate_caused` failures become Experiences.
-The other classes remain available as run evidence and rerun candidates
-without entering KB outcome statistics.
+## Publication
 
-The normalized measured-against configuration is preserved in Experience
-preconditions alongside its `baseline_fingerprint`. Map order and remove/unset
-list order do not change the fingerprint. Credential-shaped args, environment
-names, or values fail the publication fidelity gate rather than being
-persisted. This is the accepted tuning stack, not the process's unbounded
-ambient environment.
+When `HYPERLOOM_KB_URL` is set, every SBD V6 export calls:
 
-Configuration changes retain add/remove/unset/replace controls. Source changes
-retain UTF-8 patch bytes (up to 128 KiB per patch and 256 KiB total) inside
-`change.content`, not only a workspace path or hash; a source attempt without
-durable patch material is skipped. Source and config attempts both retain the
-exact measured-against stack and throughput/accuracy gates.
+```python
+collect("hyperloom-sbd-v6", breakdown, receipt=session_dir / "reports" / "experience_collect.json")
+```
 
-An existing session can be reviewed without configuring or writing a KB:
+The receipt lists each attempt as collected (with its Experience id and write
+status), skipped (with the mapping's reason), or errored. Export failures never
+replace or invalidate `session_breakdown.json`; a network failure spools the
+write for retry. Re-exporting a session is idempotent.
+
+An existing session can be reviewed without writing anything:
 
 ```bash
-python scripts/review_framework_experience_fidelity.py /path/to/session
+hyperloom-kb-collect --mapping hyperloom-sbd-v6 \
+  --document /path/to/session/session_breakdown.json --dry-run
 ```
 
-AgentX publication is blocked until benchmark mode and real workload identity
-can be represented by the Experience Schema. Recipe KB and Experience gates
-remain separate.
+AgentX sessions are skipped until the Experience declaration can represent
+their benchmark mode and workload identity.
 
 ## Configuration
 
@@ -74,27 +81,8 @@ export HYPERLOOM_KB_URL=https://kb.example
 export HYPERLOOM_KB_TOKEN=...
 ```
 
-The URL enables publication; the `hyperloom_kb` SDK, installed by Hyperloom's
-`kb` extra, owns the Experience declaration. CLI startup validates the SDK configuration before the normal
-optimizer preflight. A written Experience is readable by the next read. Export
-failures never replace or invalidate `session_breakdown.json`; a network
-failure spools the write for retry.
-
-## Reasoning provenance
-
-Configuration variants preserve their authored action-time `reasoning` (and
-record which legacy payload field supplied it) on the measured attempt. Their
-materialized tasks retain the proposal message id so attempts join the right
-proposal; internally generated work retains its task as `action_ref`. Source
-candidates preserve discovery reasoning. Gap context and post-action result
-text are recorded in SBD when present but are not accepted as original
-decision reasoning. A provenance label such as `llm_direct` is not a
-substitute for reasoning.
-
-The current producer generates a deterministic factual reflection from the
-recorded outcome and marks its source in provenance. This does not impersonate
-an LLM-authored post-outcome explanation.
-
-`rendered_refs` records the Experiences the service injected into the
-FRAMEWORK_AGENT orchestration decision that produced the attempt. Whether the
-LLM actually relied on them requires the separate usage-trace design.
+The `hyperloom_kb` SDK is installed by Hyperloom's `kb` extra. CLI startup
+fails before the optimizer preflight when the URL is set but the SDK cannot
+load the packaged mapping or validates a different declaration than the mapping
+produces; `cold_start_check.py --require-experience-kb` also checks the
+service's health and declaration.

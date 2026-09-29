@@ -1629,9 +1629,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
-    from ..experience_v1 import validate_experience_config
+    from ..experience_collect import validate_config as validate_experience_collection
 
-    validate_experience_config()
+    validate_experience_collection()
     try:
         resolved_urls = _preflight(args)
     except Exception as exc:
