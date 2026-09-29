@@ -183,7 +183,6 @@ def run_benchmark(
         osl=osl,
         rrr=rrr,
         workspace=workspace,
-        output_dir=output_dir,
     )
 
     # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+ MAGPIE_RUN_PHASE=client) so the benchmark
@@ -196,7 +195,7 @@ def run_benchmark(
 
     if phase == "server":
         if not pid_dir:
-            _emit_failure(output_dir, framework, model, "phase=server requires pid_dir", workspace=workspace)
+            r.report_failure(time.time(), "phase=server requires pid_dir")
             return 2
         return _run_server_phase(r, pid_dir=pid_dir)
 
@@ -220,18 +219,14 @@ def run_benchmark(
         return _run_lifecycle_all(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup)
 
     # phase == "all": start server, run client, always teardown.
-    server_cmd = r.server_command()
-    if server_cmd is None:
-        return 2
     start = time.time()
-    server_proc = _launch_server(server_cmd, r.server_env(), r.server_log)
+    proc = r.boot(start)
+    if isinstance(proc, int):
+        return proc
     try:
-        if not r.wait_ready(server_proc):
-            r.report_failure(start, "server did not become ready")
-            return 1
         rc = r.run_client()
     finally:
-        _terminate_server(server_proc)
+        _terminate_server(proc)
     return r.finalize(start, rc)
 
 
@@ -257,15 +252,11 @@ class _Round:
     osl: int
     rrr: float
     workspace: Path
-    output_dir: Path
 
-    def server_env(self) -> dict[str, str]:
-        return _server_env(self.profile, self.profile_dir, self.bench_envs)
-
-    def server_command(self) -> list[str] | None:
-        """The server launch command, or ``None`` after reporting why it cannot be built."""
+    def boot(self, start: float) -> subprocess.Popen | int:
+        """Launch the server and wait until it serves; on failure, report it and return the exit code."""
         try:
-            return bypass_engine.build_server_command(
+            cmd = bypass_engine.build_server_command(
                 framework=self.framework,
                 model=self.model,
                 tp=self.tp,
@@ -277,13 +268,16 @@ class _Round:
                 framework_python=str(self.bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
             )
         except ValueError as exc:
-            _emit_failure(self.output_dir, self.framework, self.model, str(exc), workspace=self.workspace)
-            return None
-
-    def wait_ready(self, proc: subprocess.Popen) -> bool:
-        return bypass_engine.wait_for_server_ready(
+            self.report_failure(start, str(exc))
+            return 2
+        proc = _launch_server(cmd, _server_env(self.profile, self.profile_dir, self.bench_envs), self.server_log)
+        if not bypass_engine.wait_for_server_ready(
             self.base_url, timeout_s=self.server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
-        )
+        ):
+            _terminate_server(proc)
+            self.report_failure(start, "server did not become ready")
+            return 1
+        return proc
 
     def record_lifecycle(self, proc: subprocess.Popen, pid_dir: str) -> None:
         """Write the pid/meta files a later round needs to recognise and reuse this server."""
@@ -301,19 +295,50 @@ class _Round:
         )
 
     def run_client(self) -> int:
-        return _run_client_and_eval(
+        """Run the InferenceX client, then optional eval; return client rc."""
+        bench_envs = self.bench_envs
+        # Honor materializer-computed request sizing (env then YAML envs) so the benchmark scale matches Magpie; fall
+        # back to build_client_command defaults (conc*10 / 2*conc) when unset.
+        num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
+        num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
+        client_cmd = bypass_engine.build_client_command(
             inferencex_root=self.inferencex_root,
+            python_exe=sys.executable,
             model=self.model,
             base_url=self.base_url,
             isl=self.isl,
             osl=self.osl,
             conc=self.conc,
-            rrr=self.rrr,
+            random_range_ratio=self.rrr,
+            result_dir=str(self.workspace),
+            result_filename="inferencex_result",
+            num_prompts=num_prompts,
+            num_warmups=num_warmups,
             profile=self.profile,
-            bench_envs=self.bench_envs,
-            workspace=self.workspace,
-            timeout_s=self.timeout_s,
+            trust_remote_code=True,
         )
+        rc = _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")
+        if rc == 0 and _run_eval_enabled(bench_envs):
+            _ensure_eval_deps(sys.executable)
+            eval_cmd = bypass_engine.build_eval_command(
+                python_exe=sys.executable,
+                model=self.model,
+                base_url=self.base_url,
+                conc=self.conc,
+                out_dir=str(self.workspace / "lm_eval"),
+                tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
+                or "gsm8k",
+                limit=(
+                    str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None
+                ),
+            )
+            eval_rc = _run_subprocess(eval_cmd, self.timeout_s, self.workspace, "eval")
+            # Magpie's ``run_eval ... || exit $?`` aborts the benchmark when the accuracy pass fails, so a healthy
+            # client run with a failed eval is a failed run - not a silently-passing one.
+            if eval_rc != 0:
+                _write_eval_returncode(self.workspace, eval_rc)
+                return eval_rc
+        return rc
 
     def report_failure(self, start: float, reason: str) -> None:
         _write_report(
@@ -321,28 +346,47 @@ class _Round:
         )
 
     def finalize(self, start: float, rc: int) -> int:
-        return _finalize_report(
+        """Parse raw result, build analysis, write report; return exit code."""
+        raw = _load_raw_result(self.workspace)
+        eval_rc = _read_eval_returncode(self.workspace)
+        success = rc == 0 and eval_rc == 0 and raw is not None
+        errors: list[str] = []
+        if eval_rc != 0:
+            # Mirror InferenceX's benchmark_lib.sh message so baseline's _is_eval_rooted_failure recognizes a bypass
+            # eval failure too.
+            errors.append(f"run_eval failed with exit code {eval_rc}")
+        elif rc != 0:
+            errors.append(f"benchmark client exited {rc}")
+        if raw is None:
+            errors.append("inferencex_result.json not produced")
+        analysis = bypass_analysis.build_analysis(
             workspace=self.workspace,
-            framework=self.framework,
-            model=self.model,
             server_log=self.server_log,
-            bench_envs=self.bench_envs,
-            start=start,
-            rc=rc,
-            profile=self.profile,
+            success=success,
+            stderr_text=_read_log(self.workspace / "client_stderr.log"),
+            run_eval=_run_eval_enabled(self.bench_envs),
         )
+        _write_report(
+            self.workspace,
+            self.framework,
+            self.model,
+            success,
+            start,
+            errors,
+            raw=raw,
+            analysis=analysis,
+            profiling_enabled=self.profile,
+        )
+        if success:
+            return 0
+        return rc or eval_rc or 1
 
 
 def _run_server_phase(r: _Round, *, pid_dir: str) -> int:
     """Start a persistent server, write pid/meta, and exit without teardown."""
-    server_cmd = r.server_command()
-    if server_cmd is None:
-        return 2
-    proc = _launch_server(server_cmd, r.server_env(), r.server_log)
-    if not r.wait_ready(proc):
-        _terminate_server(proc)
-        r.report_failure(time.time(), "server did not become ready")
-        return 1
+    proc = r.boot(time.time())
+    if isinstance(proc, int):
+        return proc
     r.record_lifecycle(proc, pid_dir)
     # Do NOT terminate: the server stays up for the reuse client phase.
     return 0
@@ -374,15 +418,10 @@ def _run_client_phase(r: _Round, *, pid_dir: str | None, cleanup: bool, start: f
 
 def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
     """Start + persist a server, run this round's client, teardown iff cleanup."""
-    server_cmd = r.server_command()
-    if server_cmd is None:
-        return 2
     start = time.time()
-    proc = _launch_server(server_cmd, r.server_env(), r.server_log)
-    if not r.wait_ready(proc):
-        _terminate_server(proc)
-        r.report_failure(start, "server did not become ready")
-        return 1
+    proc = r.boot(start)
+    if isinstance(proc, int):
+        return proc
     r.record_lifecycle(proc, pid_dir)
     rc = r.run_client()
     if cleanup:
@@ -457,101 +496,6 @@ def _ensure_eval_deps(python_exe: str) -> None:
         [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", "lm_eval"],
         check=False,
     )
-
-
-def _run_client_and_eval(
-    *,
-    inferencex_root,
-    model,
-    base_url,
-    isl,
-    osl,
-    conc,
-    rrr,
-    profile,
-    bench_envs,
-    workspace,
-    timeout_s,
-) -> int:
-    """Run the InferenceX client, then optional eval; return client rc."""
-    # Honor materializer-computed request sizing (env then YAML envs) so the benchmark scale matches Magpie; fall back
-    # to build_client_command defaults (conc*10 / 2*conc) when unset.
-    num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
-    num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
-    client_cmd = bypass_engine.build_client_command(
-        inferencex_root=inferencex_root,
-        python_exe=sys.executable,
-        model=model,
-        base_url=base_url,
-        isl=isl,
-        osl=osl,
-        conc=conc,
-        random_range_ratio=rrr,
-        result_dir=str(workspace),
-        result_filename="inferencex_result",
-        num_prompts=num_prompts,
-        num_warmups=num_warmups,
-        profile=profile,
-        trust_remote_code=True,
-    )
-    rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
-    if rc == 0 and _run_eval_enabled(bench_envs):
-        _ensure_eval_deps(sys.executable)
-        eval_cmd = bypass_engine.build_eval_command(
-            python_exe=sys.executable,
-            model=model,
-            base_url=base_url,
-            conc=conc,
-            out_dir=str(workspace / "lm_eval"),
-            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
-            or "gsm8k",
-            limit=(str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None),
-        )
-        eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
-        # Magpie's ``run_eval ... || exit $?`` aborts the benchmark when the accuracy pass fails, so a healthy client
-        # run with a failed eval is a failed run - not a silently-passing one.
-        if eval_rc != 0:
-            _write_eval_returncode(workspace, eval_rc)
-            return eval_rc
-    return rc
-
-
-def _finalize_report(*, workspace, framework, model, server_log, bench_envs, start, rc, profile=False) -> int:
-    """Parse raw result, build analysis, write report; return exit code."""
-    raw = _load_raw_result(workspace)
-    eval_rc = _read_eval_returncode(workspace)
-    success = rc == 0 and eval_rc == 0 and raw is not None
-    errors: list[str] = []
-    if eval_rc != 0:
-        # Mirror InferenceX's benchmark_lib.sh message so baseline's _is_eval_rooted_failure recognizes a bypass eval
-        # failure too.
-        errors.append(f"run_eval failed with exit code {eval_rc}")
-    elif rc != 0:
-        errors.append(f"benchmark client exited {rc}")
-    if raw is None:
-        errors.append("inferencex_result.json not produced")
-    client_stderr = _read_log(workspace / "client_stderr.log")
-    analysis = bypass_analysis.build_analysis(
-        workspace=workspace,
-        server_log=server_log,
-        success=success,
-        stderr_text=client_stderr,
-        run_eval=_run_eval_enabled(bench_envs),
-    )
-    _write_report(
-        workspace,
-        framework,
-        model,
-        success,
-        start,
-        errors,
-        raw=raw,
-        analysis=analysis,
-        profiling_enabled=profile,
-    )
-    if success:
-        return 0
-    return rc or eval_rc or 1
 
 
 def _server_env(
@@ -664,13 +608,13 @@ def _load_raw_result(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# Sentinel file carrying a failed eval's exit code from _run_client_and_eval to _finalize_report (which only receives
-# the client rc).
+# Sentinel file carrying a failed eval's exit code from _Round.run_client to _Round.finalize (which only receives the
+# client rc).
 _EVAL_RC_FILE = "eval_returncode"
 
 
 def _write_eval_returncode(workspace: Path, rc: int) -> None:
-    """Persist a failed eval's exit code for _finalize_report (best-effort)."""
+    """Persist a failed eval's exit code for _Round.finalize (best-effort)."""
     try:
         (workspace / _EVAL_RC_FILE).write_text(str(int(rc)), encoding="utf-8")
     except OSError:
@@ -720,17 +664,9 @@ def _read_log(path: Path) -> str:
         return ""
 
 
-def _emit_failure(
-    output_dir: Path,
-    framework: str,
-    model: str,
-    error: str,
-    *,
-    workspace: Path | None = None,
-) -> None:
-    """Emit a failing report + workspace for a pre-launch error."""
-    ws = workspace or bypass_report.create_workspace(output_dir, framework)
-    _write_report(ws, framework, model, False, time.time(), [error])
+def _emit_failure(output_dir: Path, framework: str, model: str, error: str) -> None:
+    """Emit a failing report + workspace for an error found before the round's workspace exists."""
+    _write_report(bypass_report.create_workspace(output_dir, framework), framework, model, False, time.time(), [error])
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
