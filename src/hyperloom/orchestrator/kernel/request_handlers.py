@@ -4214,13 +4214,10 @@ _TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
 def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
     """One per-tuner entry for the audit row, keeping why it ended as it did.
 
-    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
-    cannot separate a tuner that crashed from one that ran and found nothing --
-    the single question the audit trail exists to answer. Across one campaign 38
-    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
-    none of them; one of those was 82 runs rejected by argparse in 11 seconds
-    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
-    for three weeks because this row had nowhere to put it.
+    ``tuner``/``best_micro_speedup``/``kept`` alone cannot separate a tuner that
+    crashed from one that ran and found nothing -- the single question the audit
+    trail exists to answer. Without the reason, a tuner whose runs argparse
+    rejected in seconds reads as a clean ``no_improvement`` (#1211).
     """
     error = tuner.get("error")
     if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:

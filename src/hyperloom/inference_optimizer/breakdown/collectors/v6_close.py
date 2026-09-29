@@ -218,11 +218,10 @@ def _unclosed() -> dict[str, Any]:
     omitting the key: no step happened, so there is nothing to summarize and
     ``failed`` is the whole of what can be said.
 
-    The export used to derive a verdict here by re-reading ``phase_history``
-    and probing the reports directory, and could not tell a step that had not
-    happened yet from one that never would -- so it called a healthy
-    mid-sequence session ``degraded``, which is why the sequencer records its
-    own verdict now.
+    The export does not derive a verdict by re-reading ``phase_history`` and
+    probing the reports directory: that cannot tell a step that has not
+    happened yet from one that never will, and calls a healthy mid-sequence
+    session ``degraded``. The sequencer records its own verdict instead.
 
     Returns:
         dict[str, Any]: The ``close`` object for a session with no close-out.

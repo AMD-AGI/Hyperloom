@@ -291,9 +291,8 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     a subdirectory whose name matches the shared capture-directory shape, so a
     layout that ranking already demotes is also a layout discovery can find.
     Matching by shape rather than by two hard-coded names is what lets an
-    unpatched SGLang's ``graph_capture_profile/`` through: it was previously
-    missed here, so the capture folder went unpassed even on runs that had
-    correctly picked the workload trace.
+    unpatched SGLang's ``graph_capture_profile/`` through, so the capture folder
+    is passed on whenever the workload trace was picked.
 
     Args:
         trace_input (Path): The trace input path (file or directory).

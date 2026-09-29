@@ -535,7 +535,7 @@ class RooflineEventRecorder:
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
 
-        These were previously log lines or nothing at all. They are facts about the starting state -- leftover
+        They are facts about the starting state -- leftover
         servers, free disk, trace files already sitting in this task's own output directory -- and they change
         how a later reader should read the result, so the event has to carry them whether or not the run
         succeeded.

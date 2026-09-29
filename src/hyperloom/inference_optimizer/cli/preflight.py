@@ -72,7 +72,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_CUSTOM_HEADERS",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
-    # Legacy: not consumed anymore, still stripped if present.
+    # Legacy: nothing reads these, but they are stripped if present.
     "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:

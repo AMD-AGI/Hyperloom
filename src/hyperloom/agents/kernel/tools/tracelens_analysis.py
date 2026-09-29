@@ -215,9 +215,8 @@ _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
 
 # Active-finder resolver: resolve a kernel to its editable source in the
 # *currently installed* framework tree by demangling its device symbol. This is
-# the deterministic op->source tier (it replaces the retired static op_to_source
-# map) and self-heals across file moves/renames and vLLM/aiter/sglang version
-# drift. On a miss the pipeline falls through to the trace-stack/grep/LLM tiers.
+# the deterministic op->source tier and self-heals across file moves/renames and
+# vLLM/aiter/sglang version drift. On a miss the pipeline falls through to the trace-stack/grep/LLM tiers.
 # Optional: if the finder modules are unavailable, tier-1 resolution is skipped.
 try:  # package import (TraceLens route / tests)
     from . import kernel_source_index as _kernel_source_index
@@ -1575,14 +1574,12 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
     splitter needs the large trace).
 
     Splitter output sorts last, and within a bucket the largest file leads.
-    Both parts exist because of the same bug: the fragments used to share the
-    default bucket with the raw capture, so alphabetical order decided, and
-    ``decode_only_steady_state_...`` beats ``rank_0.trace.json.gz`` on the first
-    letter. Every xDiT roofline attempt therefore analysed a 938-byte phase
-    fragment instead of the 910 KB capture beside it: runs whose fragment held
-    no GPU kernels failed the CPU-only preflight outright, and the one model
-    whose fragment happened to hold 512 produced a roofline computed from 2.6%
-    of its own trace, with no ceiling.
+    Both parts keep a phase fragment from outranking the raw capture: in one
+    bucket alphabetical order would decide, and ``decode_only_steady_state_...``
+    beats ``rank_0.trace.json.gz`` on the first letter. An xDiT roofline would
+    then analyse a 938-byte phase fragment instead of the 910 KB capture beside
+    it, failing the CPU-only preflight when the fragment holds no GPU kernels
+    and computing the roofline from a few percent of the trace when it does.
 
     Size is the part that does not depend on recognising a name. A real capture
     is orders of magnitude larger than a per-phase fragment or a sidecar like
@@ -2222,8 +2219,9 @@ def kernel_search_roots() -> tuple[str, ...]:
     PolicyGate and patch application on where framework source lives. Falls back
     to locating each known package itself, then to the pinned checkout layouts,
     both when that package is not importable (standalone CLI use) and when it
-    imported but resolved nothing -- an empty answer from the resolver used to
-    end the search, which is the same silent outcome as having no roots at all.
+    imported but resolved nothing -- an empty answer from the resolver must not
+    end the search, since that is the same silent outcome as having no roots at
+    all.
 
     Non-existent roots are dropped: grepping them returns nothing and is
     indistinguishable from a kernel that genuinely has no source here.

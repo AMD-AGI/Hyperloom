@@ -260,8 +260,8 @@ def _collect_recipe(
 def _lane_dispatched(state: dict[str, Any]) -> bool:
     """Whether the lane ever opened a round, over both state generations.
 
-    A round no longer parks its task id in the enablement state, so the
-    post-rework evidence that one ran is the specialist it settled onto, the
+    A round does not park its task id in the enablement state, so the
+    evidence that one ran is the specialist it settled onto, the
     per-round records it kept, and the setup rows a round stamped its own id
     onto. ``inflight_task_id`` / ``attempts`` are read for a document written
     before the rework, not as the primary signal -- reading only those would

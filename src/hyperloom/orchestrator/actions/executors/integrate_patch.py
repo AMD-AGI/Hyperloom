@@ -5005,9 +5005,9 @@ class IntegratePatchExecutor:
     def _upstream_pr_kb_proposal(params: Mapping[str, Any]) -> dict[str, Any] | None:
         """Present an upstream-PR candidate in the shape the KB writer reads.
 
-        The ``fa_pr_url`` / ``fa_pr_sha`` keys exist because the PR identity used
-        to reach this executor only by being smuggled through a specialist's
-        output. A candidate row carries it directly, so map rather than relay.
+        The KB writer reads the PR identity from ``fa_pr_url`` / ``fa_pr_sha``.
+        A candidate row carries it directly, so map rather than relay it through
+        a specialist's output.
 
         Args:
             params: Task params, read for ``candidate``.
