@@ -36,7 +36,6 @@ class _StubSharedState(SharedState):
     def __init__(self):
         super().__init__()
         self.specialist_rounds: list[dict[str, Any]] = []
-        self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0
 
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
@@ -48,9 +47,6 @@ class _StubSharedState(SharedState):
                     self.specialist_rounds[i] = dict(entry)
                     return
         self.specialist_rounds.append(dict(entry))
-
-    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        self.last_specialist = dict(snapshot)
 
     def save(self, _session_dir) -> None:
         self.saved += 1
@@ -123,7 +119,7 @@ def _done_payload(
 # 1. _record_specialist_result — direct bookkeeping unit tests
 @pytest.mark.asyncio
 async def test_record_specialist_result_non_empty_proposal_set(coord):
-    """Non-empty proposal_set: ledger +1 row, last_specialist mirrored, save called."""
+    """Non-empty proposal_set: ledger +1 row, save called."""
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
 
@@ -142,9 +138,6 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert row["gap_canonical_id"] == "gap.attention.fp8_kv"
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"
-    assert state.last_specialist["task_id"] == "task-1"
-    assert state.last_specialist["proposals_total"] == 1
-    assert state.last_specialist["domain"] == "serving_specialist"
     assert state.saved == 1
 
 
@@ -188,7 +181,6 @@ async def test_record_specialist_result_empty_proposal_set(coord):
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
     assert state.specialist_rounds[0]["proposals_total"] == 0
-    assert state.last_specialist["proposals_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -369,7 +361,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             session_dir=session_dir,
             backends=backends,
             role_registry=default_role_registry(),
-            recipe_kb=None,
             knowledge_plane=None,
         )
         executor = _build_specialist_executor(
@@ -409,7 +400,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     row = coord.shared_state.specialist_rounds[0]
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
-    assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()
     assert any(workspace.iterdir()), "specialist workspace should be non-empty"
