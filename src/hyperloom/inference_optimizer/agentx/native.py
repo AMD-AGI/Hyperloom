@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, MutableMapping
 
+from hyperloom.common.agentx_mode import native_agentx_enabled
+
 _AGENTIC_PREFIX = ("single_node", "agentic")
 _RESOLVER_SENTINEL = "HYPERLOOM_AGENTX_RECIPE="
 _NATIVE_CHECKOUT_PATH_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
@@ -628,20 +630,6 @@ def native_launch_environment_identity(
         "names": sorted(controls),
         "sha256": hashlib.sha256(encoded).hexdigest(),
     }
-
-
-def native_agentx_enabled(value: Any) -> bool:
-    """Return whether a serialized Magpie ``benchmark.agentx`` enables AgentX."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
-    if isinstance(value, dict):
-        raw = value.get("enabled", True)
-        if isinstance(raw, str):
-            return raw.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
-        return bool(raw)
-    return False
 
 
 def validate_native_launcher_name(script_name: str) -> PurePosixPath:

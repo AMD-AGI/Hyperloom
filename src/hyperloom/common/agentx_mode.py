@@ -13,6 +13,20 @@ from typing import Any
 import yaml
 
 
+def native_agentx_enabled(value: Any) -> bool:
+    """Return whether a serialized Magpie ``benchmark.agentx`` enables AgentX."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
+    if isinstance(value, dict):
+        raw = value.get("enabled", True)
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
+        return bool(raw)
+    return False
+
+
 def config_enables_native_agentx(path: str | Path) -> bool:
     """Read the explicit native AgentX selector from a benchmark YAML."""
     try:
@@ -20,11 +34,7 @@ def config_enables_native_agentx(path: str | Path) -> bool:
     except (OSError, yaml.YAMLError, TypeError, ValueError):
         return False
     benchmark = parsed.get("benchmark") if isinstance(parsed, Mapping) else None
-    if not isinstance(benchmark, Mapping) or benchmark.get("agentx") is None or benchmark.get("agentx") is False:
-        return False
-    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
-
-    return native_agentx_enabled(benchmark["agentx"])
+    return isinstance(benchmark, Mapping) and native_agentx_enabled(benchmark.get("agentx"))
 
 
 def native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = None) -> bool:

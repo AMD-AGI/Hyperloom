@@ -86,7 +86,7 @@ def test_preflight_does_not_promote_legacy_env_or_unreadable_resume(monkeypatch,
     assert _native_agentx_preflight_requested(argparse.Namespace(resume_from=str(tmp_path))) is False
 
 
-@pytest.mark.parametrize("selector", [None, False])
+@pytest.mark.parametrize("selector", [None, False, "disable", "off", {"enabled": False}, {"enabled": "false"}])
 def test_generic_config_keeps_native_package_lazy_in_fresh_process(tmp_path, selector):
     config = tmp_path / "generic.yaml"
     benchmark = {"framework": "sglang"}
