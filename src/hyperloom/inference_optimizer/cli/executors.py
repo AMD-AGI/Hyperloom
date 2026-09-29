@@ -99,9 +99,17 @@ def _build_specialist_executor(
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
     agent_backend = preferred_agent_backend()
+    role_models = getattr(args, "role_models", None)
+    route = role_models.resolve("specialist") if role_models else None
+    if route is not None and agent_backend == AGENT_BACKEND_CODEX:
+        raise RuntimeError(
+            "--role-models: specialists run on the codex CLI here, which an Anthropic route cannot drive"
+        )
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
-    selected_model = specialist_override or (
-        str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
+    selected_model = (
+        (route.model if route is not None else "")
+        or specialist_override
+        or (str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip())
     )
     codex_bin = ""
     claude_bin = ""
@@ -155,6 +163,8 @@ def _build_specialist_executor(
         }
         if specialist_permission_mode:
             sub_config_kwargs["permission_mode"] = specialist_permission_mode
+        if route is not None:
+            sub_config_kwargs["route"] = route
         sub_config = SpecialistSubprocessConfig(**sub_config_kwargs)
         runner = SpecialistRunner(
             subprocess_config=sub_config,
@@ -192,6 +202,8 @@ def _build_specialist_executor(
                 # modes does not move this spend between components.
                 attribution_component="specialist",
                 attribution_operation="run_agent",
+                role_models=role_models if route is not None else None,
+                route_role="specialist",
             )
 
         runner = SpecialistRunner(

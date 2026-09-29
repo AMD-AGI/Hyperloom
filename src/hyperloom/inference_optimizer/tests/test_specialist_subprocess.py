@@ -532,6 +532,49 @@ async def test_subprocess_path_injects_allocated_gpu_env(
 
 
 @pytest.mark.asyncio
+async def test_a_specialist_route_replaces_the_cli_endpoint_and_credential(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from hyperloom.common.role_models import PLACEHOLDER_KEY, RoleModel
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "launch-secret")
+    fake_claude = _make_fake_claude(tmp_path / "bin", behavior="done_only")
+    seen: list[dict[str, str]] = []
+    real_popen = subprocess.Popen
+
+    def _recording_popen(cmd, *args, **kwargs):
+        if cmd and str(cmd[0]) == str(fake_claude):
+            seen.append(dict(kwargs.get("env") or {}))
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _recording_popen)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(fake_claude),
+            model="glm-5.3-flash",
+            framework_source_roots=(str(fake_framework_repo),),
+            poll_interval_seconds=0.2,
+            route=RoleModel(model="glm-5.3-flash", base_url="http://127.0.0.1:4000"),
+        ),
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+
+    result = await runner.run(_make_runner_ctx("t-spec-route"))
+
+    assert result.status == "succeeded"
+    assert len(seen) == 1
+    assert seen[0]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
+    assert seen[0]["ANTHROPIC_API_KEY"] == PLACEHOLDER_KEY
+    assert "launch-secret" not in json.dumps(seen[0])
+
+
+@pytest.mark.asyncio
 async def test_subprocess_path_injects_llm_stability_env(
     tmp_path: Path,
     fake_framework_repo: Path,

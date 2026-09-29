@@ -1506,6 +1506,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 phase=(self.shared_state.phase or "") or None,
                 macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
+        _set_route_phase = getattr(backend, "set_route_phase", None)
+        if callable(_set_route_phase):
+            _set_route_phase(self.shared_state.phase or "")
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
@@ -1657,7 +1660,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 role=agent_name,
                 error=error,
                 call_id=call_id,
-                model=getattr(self.backends.get(agent_name), "model", None),
+                model=getattr(
+                    self.backends.get(agent_name), "turn_model", getattr(self.backends.get(agent_name), "model", None)
+                ),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
                 latency_ms=latency_ms,

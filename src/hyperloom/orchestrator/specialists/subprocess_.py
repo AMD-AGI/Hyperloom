@@ -60,6 +60,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom.common.role_models import RoleModel
 
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
@@ -584,6 +585,9 @@ class SpecialistSubprocessConfig:
     builtin_tools: tuple[str, ...] | None = None
     """claude-cli ``--tools``. None = :func:`specialist_builtin_tools`; ``()`` = no flag (every built-in)."""
 
+    route: RoleModel | None = None
+    """``--role-models`` route for the claude CLI: its endpoint and credential replace the launch ones."""
+
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
@@ -969,6 +973,8 @@ class SpecialistSubprocessDispatcher:
         # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
+        if self.config.route is not None:
+            env = self.config.route.env(env)
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
         from hyperloom.common.llm_stability_env import apply_llm_stability_env

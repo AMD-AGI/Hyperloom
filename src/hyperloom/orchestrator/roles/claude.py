@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import claude_sdk_env_options
+from hyperloom.common.role_models import RoleModel, RoleModels
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -198,6 +199,9 @@ class ClaudeBackend:
     # Attribution labels for the spend this backend's turns produce.
     attribution_component: str = "orchestration"
     attribution_operation: str = "orchestrate_turn"
+    # ``--role-models`` routes looked up for ``route_role`` in the phase last given to ``set_route_phase``.
+    role_models: RoleModels | None = None
+    route_role: str = ""
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
     # aborted.
     call_timeout_s: float = field(
@@ -229,6 +233,8 @@ class ClaudeBackend:
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
     _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
     _active_stderr: list[str] = field(default_factory=list, init=False)
+    _route_phase: str = field(default="", init=False)
+    _active_route: RoleModel | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""
@@ -405,7 +411,7 @@ class ClaudeBackend:
             raw_text=raw_text,
             metadata={
                 "tool_blocks": tool_block_count,
-                "model": self.model,
+                "model": self.turn_model,
                 # Pairs this turn's token row with its conversation row; both halves are written from this one
                 # metadata dict. A caller that opened an ``llm.call`` trajectory span owns the id.
                 "call_id": current_context().call_id or new_call_id(),
@@ -580,8 +586,13 @@ class ClaudeBackend:
         """Build the SDK options object for one turn."""
         # Stream events are what time each model request inside the call (see ``claude_requests``).
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
-        if self.model:
-            kwargs["model"] = self.model
+        self._active_route = (
+            self.role_models.resolve(self.route_role, self._route_phase)
+            if self.role_models and self.route_role
+            else None
+        )
+        if self.turn_model:
+            kwargs["model"] = self.turn_model
         cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
         if cli_path:
             kwargs["cli_path"] = cli_path
@@ -632,14 +643,25 @@ class ClaudeBackend:
         return self._instantiate_options(kwargs)
 
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
-        """Pin Claude Code subprocess auth to the current Hyperloom env."""
+        """Pin Claude Code subprocess auth to the current Hyperloom env, or to this turn's route."""
+        route = self._active_route
         kwargs.update(
             claude_sdk_env_options(
-                model=self.model,
+                model=self.turn_model,
+                env=route.env(os.environ) if route is not None else None,
                 component=self.attribution_component,
                 operation=self.attribution_operation,
             )
         )
+
+    @property
+    def turn_model(self) -> str | None:
+        """The model the current turn calls: its route's, else the launch model."""
+        return self._active_route.model if self._active_route is not None else self.model
+
+    def set_route_phase(self, phase: str) -> None:
+        """Record the phase the next turn runs in, for ``role@PHASE`` routes."""
+        self._route_phase = str(phase or "")
 
     def _resolve_effort(self) -> str:
         """Reasoning-effort tier for this backend's role.
@@ -775,7 +797,7 @@ class ClaudeBackend:
             else:
                 raise
         finally:
-            requests.record_trajectory(attempt=attempt, fallback_model=self.model)
+            requests.record_trajectory(attempt=attempt, fallback_model=self.turn_model)
             # Best-effort: close the (async-gen) stream so an idle-timeout abort doesn't leak a half-consumed
             # generator.
             aclose = getattr(stream, "aclose", None)

@@ -21,6 +21,7 @@ from hyperloom.common import llm_config
 from hyperloom.common.env import env_bool
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom.common.role_models import ROLE_MODELS_ENV, RoleModels, RoleModelsError, parse_role_models
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -285,6 +286,14 @@ def _enforce_expected_framework(
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+
+def _resolve_role_models(args: argparse.Namespace) -> RoleModels:
+    """``--role-models``, else ``$HYPERLOOM_ROLE_MODELS``; no routes when neither is set."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
+
+    spec = getattr(args, "role_models_spec", None) or os.environ.get(ROLE_MODELS_ENV)
+    return parse_role_models(spec, phases=PHASE_NAMES)
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
@@ -2285,6 +2294,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_kb_mode=critic_kb_mode,
         codex_follows_claude=codex_follows_claude,
         critic_protocol=args.critic_protocol,
+        role_models=getattr(args, "role_models", None),
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
     # paths.
@@ -2484,6 +2494,12 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        try:
+            args.role_models = _resolve_role_models(args)
+        except RoleModelsError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        args.role_models_resolved = args.role_models.describe() or None
         return asyncio.run(_run_optimize(args))
     if args.command == "recover-session":
         return _run_recover_session(args)

@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.llm_config import has_anthropic_credential
+from hyperloom.common.llm_config import get_async_openai_client, has_anthropic_credential
+from hyperloom.common.role_models import RoleModels
 from hyperloom.inference_optimizer.session.session_paths import agent_dir
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
@@ -104,14 +105,20 @@ def _build_backends(
     critic_kb_mode: str = "inmemory",
     codex_follows_claude: bool = False,
     critic_protocol: str = "auto",
+    role_models: RoleModels | None = None,
 ) -> dict[str, Any]:
-    """Construct all per-role backends."""
+    """Construct all per-role backends; ``role_models`` redirects the roles it names."""
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
+    role_models = role_models or RoleModels()
 
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
     # second reading of the endpoint shape.
     orchestration_on_codex = orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude)
+    if orchestration_on_codex and role_models.has_role("orchestration"):
+        raise ValueError(
+            "--role-models: orchestration runs on the Codex CLI here, which an Anthropic route cannot drive"
+        )
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
@@ -120,29 +127,40 @@ def _build_backends(
         # reviewed_msg_ids dedupe.
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
-        protocol = _resolve_critic_protocol(
-            critic_protocol,
-            orchestration_on_codex=orchestration_on_codex,
-        )
+        critic_route = role_models.resolve("critic")
+        critic_claude_model, critic_codex_model = claude_model, codex_model
+        if critic_route is not None:
+            # The route names its own endpoint and credential, so the launch side is not consulted.
+            protocol = critic_route.protocol
+            llm_env: dict[str, str] | None = critic_route.env(os.environ)
+            critic_claude_model = critic_codex_model = critic_route.model
+        else:
+            protocol = _resolve_critic_protocol(
+                critic_protocol,
+                orchestration_on_codex=orchestration_on_codex,
+            )
+            llm_env = None
         _policy = _load_action_verdict_policy()
         if protocol == "anthropic":
             critic_backend = CriticAgentBackend(
                 critic_agent_root=critic_agent_root,
                 session_dir=session_dir,
                 protocol="anthropic",
-                claude_model=claude_model,
-                codex_model=codex_model,
+                claude_model=critic_claude_model,
+                codex_model=critic_codex_model,
                 kb_mode=critic_kb_mode,
                 action_verdict_policy=_policy,
+                llm_env=llm_env,
             )
         else:
             critic_backend = CriticAgentBackend(
                 critic_agent_root=critic_agent_root,
                 session_dir=session_dir,
                 protocol="openai",
-                codex_model=codex_model,
+                codex_model=critic_codex_model,
                 kb_mode=critic_kb_mode,
                 action_verdict_policy=_policy,
+                llm_env=llm_env,
             )
 
     if orchestration_on_codex:
@@ -161,6 +179,8 @@ def _build_backends(
             effort_role="orchestration",
             capture_turn_diagnostics=True,
             allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+            role_models=role_models if role_models.has_role("orchestration") else None,
+            route_role="orchestration",
         )
 
     return {
@@ -176,6 +196,14 @@ def _build_proposal_scorer(
     """Construct the advisory specialist-proposal scorer, or ``None``."""
     if not getattr(args, "proposal_scoring", False):
         return None
+    route = (getattr(args, "role_models", None) or RoleModels()).resolve("scorer")
+    if route is not None:
+        env = route.env(os.environ)
+        return ProposalScorer(
+            models=(route.model,),
+            session_dir=session_dir,
+            client_factory=lambda: get_async_openai_client(env=env),
+        )
     if llm_config.is_anthropic_only():
         # ProposalScorer is OpenAI-compatible only.
         return None

@@ -893,6 +893,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
+    opt.add_argument(
+        "--role-models",
+        dest="role_models_spec",
+        type=str,
+        default=None,
+        help="Per-role model routes, as JSON inline or in a file: keys 'orchestration', "
+        "'orchestration@<PHASE>', 'critic', 'specialist', 'scorer'; values "
+        "{model, base_url, protocol, api_key_env} where api_key_env names the variable "
+        "holding the key. A role without a route keeps its launch model and endpoint. "
+        "Recorded in manifest.json. Default: $HYPERLOOM_ROLE_MODELS.",
+    )
     # Specialist model override; provider shape selects Claude or Codex.
     opt.add_argument(
         "--specialist-model",

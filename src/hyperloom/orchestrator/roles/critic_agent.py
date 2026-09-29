@@ -398,6 +398,8 @@ class CriticAgentBackend:
     protocol: Literal["openai", "anthropic"] = "openai"
     # Claude model id used when ``protocol == "anthropic"`` (falls back to ``codex_model`` when unset).
     claude_model: str | None = None
+    # Environment the review client authenticates from (a ``--role-models`` route); None = the process env.
+    llm_env: dict[str, str] | None = None
 
     # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a dataclass field) to avoid descriptor
     # binding as a method.
@@ -461,6 +463,7 @@ class CriticAgentBackend:
             connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
             try:
                 self._client = get_async_openai_client(
+                    env=self.llm_env,
                     timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 )
             except LLMConfigError as exc:
@@ -517,7 +520,7 @@ class CriticAgentBackend:
 
     def _require_anthropic_transport(self) -> None:
         """Fail fast when the Anthropic side cannot serve a review call."""
-        if anthropic_transport_ready():
+        if anthropic_transport_ready(self.llm_env):
             return
         raise BackendError(
             "CriticAgentBackend(protocol=anthropic) review reasoning requires a usable "
@@ -1108,6 +1111,7 @@ class CriticAgentBackend:
                 model=self._review_model,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
+                env=self.llm_env,
                 max_tokens=max_tokens,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
