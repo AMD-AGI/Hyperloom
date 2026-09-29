@@ -49,6 +49,7 @@ from ..state.shared_state import (
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
@@ -94,21 +95,6 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
 # as a back-reference and the annotation below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
-
-
-# IntentType -> the ``Coordinator`` handler method it dispatches to.
-_INTENT_DISPATCH: dict[IntentType, str] = {
-    IntentType.PROPOSE_ACTION: "_handle_propose_action",
-    IntentType.REVIEW_VERDICT: "_handle_review_verdict",
-    IntentType.DELEGATE: "_handle_delegate",
-    IntentType.REQUEST: "_handle_request",
-    IntentType.EXTEND_LEASE: "_handle_extend_lease",
-    IntentType.PRUNE_BRANCH: "_handle_prune_branch",
-    IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
-    IntentType.SEND_MESSAGE: "_handle_send_message",
-    IntentType.ALERT: "_handle_alert",
-    IntentType.UPDATE_STATE: "_handle_update_state",
-}
 
 
 def _record_config_proposal(router: Any, pending: Any) -> None:
@@ -390,15 +376,8 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
-class IntentRouter:
+class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
-
-    def __init__(self, coordinator: Any) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str) -> Any:
-        # Attributes not defined on the router resolve onto the coordinator.
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
@@ -476,9 +455,21 @@ class IntentRouter:
 
         try:
             it = intent.type
-            handler_name = _INTENT_DISPATCH.get(it)
-            if handler_name is not None:
-                await getattr(self._coord, handler_name)(source, intent)
+            handlers: dict[IntentType, Any] = {
+                IntentType.PROPOSE_ACTION: self._handle_propose_action,
+                IntentType.REVIEW_VERDICT: self._handle_review_verdict,
+                IntentType.DELEGATE: self._handle_delegate,
+                IntentType.REQUEST: self._handle_request,
+                IntentType.EXTEND_LEASE: self._handle_extend_lease,
+                IntentType.PRUNE_BRANCH: self._handle_prune_branch,
+                IntentType.ESCALATE_STRATEGY_CHANGE: self._handle_escalate_strategy_change,
+                IntentType.SEND_MESSAGE: self._handle_send_message,
+                IntentType.ALERT: self._handle_alert,
+                IntentType.UPDATE_STATE: self._handle_update_state,
+            }
+            handler = handlers.get(it)
+            if handler is not None:
+                await handler(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
                 await self._record_observation(
@@ -598,7 +589,7 @@ class IntentRouter:
                 str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
             self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
-        await self._coord._handle_single_verdict(
+        await self._handle_single_verdict(
             source=source,
             pending=pending,
             verdict=verdict,
@@ -784,7 +775,7 @@ class IntentRouter:
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                await self._coord._maybe_rearm_enablement(
+                await self._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:
@@ -916,7 +907,7 @@ class IntentRouter:
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     # Shared with the GPU-pool lease so the two TTLs never drift.
-                    ttl = self._coord._gpu_lease_ttl_sec(
+                    ttl = self._gpu_lease_ttl_sec(
                         int(ttl or 0),
                         params=params,
                     )

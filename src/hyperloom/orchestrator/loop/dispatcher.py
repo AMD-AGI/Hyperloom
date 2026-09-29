@@ -60,6 +60,7 @@ from .coordinator_helpers import (
 )
 
 from .conversation import _format_inbox_event
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -136,13 +137,13 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator:
+class DispatcherCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+        super().__init__(coordinator)
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
@@ -154,9 +155,6 @@ class DispatcherCollaborator:
         # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.

@@ -84,51 +84,8 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
-class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods."""
-
-    def __getattr__(cls, name):
-        prop = cls._DELEGATED.get(name)
-        if prop is not None:
-            import importlib
-
-            mod, clsname = cls._COLLAB_MODULES[prop]
-            module = importlib.import_module(f"hyperloom.orchestrator.{mod}")
-            return getattr(getattr(module, clsname), name)
-        raise AttributeError(f"type object {cls.__name__!r} has no attribute {name!r}")
-
-
-class Coordinator(metaclass=_CoordinatorMeta):
+class Coordinator:
     """The single Coordinator instance per session."""
-
-    # property name -> (module, collaborator class) for class-level delegation.
-    _COLLAB_MODULES = {
-        # Phase handlers in call-chain order.
-        "phase_machine": ("phases.machine", "MachinePhase"),
-        "phase_prelude": ("phases.prelude", "PreludePhase"),
-        "phase_sweep": ("phases.sweep", "SweepPhase"),
-        "phase_close": ("phases.close", "ClosePhase"),
-        "phase_internal": ("phases.internal", "InternalTasksPhase"),
-        "phase_kernel_stack": ("phases.kernel_stack", "KernelStackPhase"),
-        "phase_kernel": ("phases.kernel", "KernelPhase"),
-        "phase_macro_cycle": ("phases.macro_cycle", "MacroCycleCollaborator"),
-        "cycle_memory": ("loop.cycle_memory", "CycleMemoryCollaborator"),
-        "specialist_dispatch": ("specialists.dispatch", "SpecialistDispatchCollaborator"),
-        "gap_refresh": ("state.gaps", "GapRefreshCollaborator"),
-        "phase_framework": ("phases.framework", "FrameworkPhase"),
-        "gpu_lanes": ("gpu_lanes", "GpuLanes"),
-        "enablement_params": ("enablement.params", "EnablementParams"),
-        "enablement_lane": ("enablement.lane", "EnablementLane"),
-        "enablement_build": ("enablement.build", "EnablementBuild"),
-        "enablement_revalidation": ("enablement.revalidation", "EnablementRevalidation"),
-        "router": ("loop.intent_router", "IntentRouter"),
-        "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
-        "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
-        "writeback": ("loop.writeback", "WritebackCollaborator"),
-        "dispatcher": ("loop.dispatcher", "DispatcherCollaborator"),
-        "proposals": ("loop.proposals", "ProposalsCollaborator"),
-        "conversation": ("loop.conversation", "ConversationCollaborator"),
-    }
 
     def __init__(
         self,
@@ -328,7 +285,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_harvest_specialist_findings": "writeback",
         "_record_specialist_result": "writeback",
         "_drain_queued_baselines": "writeback",
-        # Phase handlers, grouped in the same call-chain order as _COLLAB_MODULES/the @property block above: machine
+        # Phase handlers, grouped in the same call-chain order as the @property block above: machine
         # -> prelude -> sweep -> close -> internal -> kernel_stack -> kernel -> explore -> framework (framework last:
         # largest cluster).
         "_ensure_phase_initialised": "phase_machine",

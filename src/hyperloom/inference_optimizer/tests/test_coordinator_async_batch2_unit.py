@@ -2001,7 +2001,7 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
     async def _boom(source, intent):
         raise RuntimeError("handler boom")
 
-    monkeypatch.setattr(coord, "_handle_send_message", _boom)
+    monkeypatch.setattr(coord.router, "_handle_send_message", _boom)
     await coord.router._handle_intent("orchestration", _idle_intent())
 
 
@@ -2020,7 +2020,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
         async def _h(source, intent, _n=attr):
             seen.append(_n)
 
-        monkeypatch.setattr(coord, attr, _h)
+        monkeypatch.setattr(coord.router, attr, _h)
     for it in routes:
         await coord.router._handle_intent("orchestration", Intent(type=it, payload={}))
     assert len(seen) == len(routes)

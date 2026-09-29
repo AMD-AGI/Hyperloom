@@ -101,6 +101,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -577,16 +578,10 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
-class WritebackCollaborator:
+class WritebackCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _emit_lifecycle(
         self,

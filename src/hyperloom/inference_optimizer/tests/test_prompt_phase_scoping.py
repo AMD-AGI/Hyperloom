@@ -382,7 +382,6 @@ def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
-    assert "phase_machine" in Coordinator._COLLAB_MODULES
 
 
 # Snapshot paths: one artefact per scope the model ran under

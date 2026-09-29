@@ -6,6 +6,7 @@
 from __future__ import annotations
 from typing import Any
 from ..state.shared_state import SharedState
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 
 import logging as _logging
 
@@ -62,19 +63,13 @@ async def run_lease_and_db_reclaim(
         log.exception("%s: DB retention failed", reason)
 
 
-class MaintenanceCollaborator:
+class MaintenanceCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def _run_maintenance(
         self,

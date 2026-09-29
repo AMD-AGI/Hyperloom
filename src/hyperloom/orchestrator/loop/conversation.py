@@ -19,6 +19,7 @@ from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_in
 from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from hyperloom.orchestrator.collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -184,14 +185,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     return f"{head} payload={payload}"
 
 
-class ConversationCollaborator:
+class ConversationCollaborator(CoordinatorCollaborator):
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
