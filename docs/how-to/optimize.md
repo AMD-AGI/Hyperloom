@@ -79,8 +79,8 @@ automatically selects Hyperloom's AgentX session and grading mode. Do not export
 `HYPERLOOM_AGENTX` for this path. That environment variable remains only as a
 legacy mode switch for callers that do not supply a source YAML. This
 integration is pinned to Magpie
-[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) commit
-`5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
+[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus the generic
+eval source-path hotfix at commit `a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
 `3d5581562f643f9bdeb8410cd924e2c70906c966`.
 
 Native AgentX is opt-in through `benchmark.agentx: enable`. Existing
@@ -126,7 +126,7 @@ two-hour default is commonly shorter than model load, warmup, drain, and the
 `--benchmark-config` is for a fresh launch. A resume rejects it. Once a baseline
 has been accepted, resume restores its materialized config and runtime pins;
 before that point it restores the session's snapshotted source YAML and pins.
-The installer defaults must still resolve to the tested Magpie and InferenceX
+The installer defaults must still resolve to the pinned Magpie and InferenceX
 revisions above; changing either pin is a coordinated compatibility change.
 
 The source and resolved fields have different owners:

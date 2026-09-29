@@ -278,10 +278,16 @@ _MAGPIE_EXECUTION_SUFFIXES = (".py", ".sh", ".yaml", ".yaml.example", ".json")
 # and clean editable/source installs have one canonical identity.
 _MAGPIE_UNPUBLISHED_PATHS = frozenset({"mcp/config.json"})
 _AUDITED_MAGPIE_EXECUTION_TREES = {
+    # Keep the release identity for native sessions resuming their accepted pin.
     "5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0": {
         "file_count": 79,
         "tree_sha256": "afea9b95e992e0b715c955f5e72a7e92aca48d2c171ddff0e3d3e9082406e689",
-    }
+    },
+    # v0.3.0 plus the generic eval source-path hotfix, independently audited from its wheel.
+    "a3339dc2776ee0c977fb3313fe89f56da7a91555": {
+        "file_count": 79,
+        "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
+    },
 }
 
 

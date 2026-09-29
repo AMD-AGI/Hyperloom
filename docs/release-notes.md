@@ -27,10 +27,12 @@ it.
   revalidation, patch integration, and concurrency sweeps unless the source or
   accepted config enables `benchmark.agentx`. Legacy epoch-1 sessions remain
   resumable; native epoch-2 results cannot be mixed with legacy measurements. The
-  tested pair is Magpie v0.3.0 release commit
-  `5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
+  pinned pair is Magpie v0.3.0 plus the generic eval source-path hotfix at commit
+  `a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
   `3d5581562f643f9bdeb8410cd924e2c70906c966`. Both dependencies are pinned by
-  immutable commit for reproducible AgentX measurements. Install preserves the
+  immutable commit for reproducible AgentX measurements. The upstream hotfix
+  keeps generic GSM8K evaluation and its probe files reachable after benchmark
+  directory changes. Install preserves the
   audited package and launcher trees; preflight repairs Magpie files changed by an
   earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
   `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.

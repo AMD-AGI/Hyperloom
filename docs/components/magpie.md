@@ -40,8 +40,12 @@ cmd = [
 
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. Hyperloom pins the Magpie
-[v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) to its
-immutable commit. A source configuration with
+[v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus its
+generic eval source-path hotfix to immutable commit
+`a3339dc2776ee0c977fb3313fe89f56da7a91555`. The hotfix keeps evaluation scripts
+bound to their intended InferenceX source after directory changes. Native GPU
+validation used the v0.3.0 release commit; the hotfix pin has a separately audited
+published execution tree. A source configuration with
 `benchmark.agentx: enable` selects Magpie's native InferenceX launcher, preserving
 the recipe's radix/prefix-cache settings and trace-replay protocol. The native
 path validates the installed package and launcher files before running.

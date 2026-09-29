@@ -902,8 +902,8 @@ does not enable it, and explicit `--enable-conc-sweep` fails preflight.
 
 ### Native Magpie AgentX contract
 
-Use the tested Magpie v0.3.0 release commit
-`5d6aaa29f2ee78e53ec35c8bc2e082d8a10c47f0` and InferenceX commit
+Use the pinned Magpie v0.3.0 plus generic eval source-path hotfix commit
+`a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
 `3d5581562f643f9bdeb8410cd924e2c70906c966`. Create a source Magpie YAML with
 the public model identity, framework, launcher, effective image pin, and fixed
 concurrency. Leave recipe internals in InferenceX:
