@@ -187,7 +187,8 @@ def test_orphan_warning_names_the_card_and_its_original(tmp_path, monkeypatch):
     lease.record({4: {"power_cap_w": 1400, "perf_level": "auto"}}, applied={"power_cap_w": 900}, owner="dead")
     lease.release()
     warning = orphaned_power_settings_warning(tmp_path)
-    assert "GPU 4" in warning and "1400" in warning and "--apply-gpu-power-settings" in warning
+    assert "GPU 4 at cap 900 W from session dead, originally cap 1400 W, perf level auto" in warning
+    assert "--apply-gpu-power-settings" in warning
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "5")
     assert orphaned_power_settings_warning(tmp_path) == ""
 

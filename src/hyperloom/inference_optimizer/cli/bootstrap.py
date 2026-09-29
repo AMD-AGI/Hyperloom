@@ -12,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
@@ -336,7 +336,7 @@ def apply_declared_gpu_power_settings(
             )
         originals = _originals_of(observed)
         declared = {"power_cap_w": power_cap_w, "perf_level": level}
-        lease.record(originals, applied=declared, owner=owner)
+        lease.record(originals, applied={key: declared[key] for key in touched}, owner=owner)
     except GpuPowerSettingsError as exc:
         lease.release()
         return None, {}, f"cannot apply the declared GPU power settings: {exc}"
@@ -378,13 +378,18 @@ def orphaned_power_settings_warning(ledger_dir: Path | None = None) -> str:
     orphans = orphaned_power_records(ledger_dir or gpu_power_ledger_dir(), visible_gpu_indices())
     if not orphans:
         return ""
-    parts = []
-    for gpu, record in sorted(orphans.items()):
-        original = record.get("original") or {}
-        parts.append(
-            f"GPU {gpu} (session {record.get('owner') or '?'} applied {record.get('applied') or {}}, "
-            f"original cap {original.get('power_cap_w')} W, perf level {original.get('perf_level') or '?'})"
+
+    def _describe(values: Mapping[str, Any]) -> str:
+        cap, level = values.get("power_cap_w"), values.get("perf_level")
+        return ", ".join(
+            ([f"cap {cap:g} W"] if isinstance(cap, (int, float)) else []) + ([f"perf level {level}"] if level else [])
         )
+
+    parts = [
+        f"GPU {gpu} at {_describe(record.get('applied') or {}) or '?'} from session {record.get('owner') or '?'}, "
+        f"originally {_describe(record.get('original') or {}) or '?'}"
+        for gpu, record in sorted(orphans.items())
+    ]
     return (
         "these cards were left at power settings a Hyperloom session applied and never restored: "
         + "; ".join(parts)
