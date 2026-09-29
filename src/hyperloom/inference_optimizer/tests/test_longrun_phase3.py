@@ -110,17 +110,31 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
-async def test_soft_restart_can_be_disabled(cyclic_coordinator, monkeypatch):
-    c = cyclic_coordinator
+async def test_soft_restart_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv(SOFT_RESTART_DISABLE_ENV, "1")
-    # Flip the in-memory toggle to emulate a disabled run.
-    c._cycle_soft_restart = False
+    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from .conftest import seed_target_analysis_marker
+
+    sd = _msd()
+    seed_target_analysis_marker(sd)
+    backends = {
+        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+        "critic": MockCriticBackend(),
+    }
+    c = Coordinator(sd, backends=backends)
+    assert c._cycle_soft_restart is False
+
     st = c.shared_state
     _arm_sweep_loopback(st)
+    memory_before = dict(st.orchestration_memory or {})
 
     await c._advance_phase_if_needed()
 
     assert st.macro_cycle == 1
+    assert st.orchestration_memory == memory_before
 
 
 @pytest.mark.asyncio
