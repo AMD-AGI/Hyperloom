@@ -1390,7 +1390,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": _positive_number(getattr(state, "baseline_runtime_sec", 0.0)),
         "post_ready_runtime_sec": _positive_number(getattr(state, "baseline_post_ready_runtime_sec", 0.0)),
         "warm_runtime_sec": _positive_number(getattr(state, "baseline_warm_runtime_sec", 0.0)),
-        "double_run": bool(getattr(state, "baseline_double_run", False)),
+        "double_run": True,
     }
 
 

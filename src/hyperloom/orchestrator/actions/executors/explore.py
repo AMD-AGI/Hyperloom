@@ -788,7 +788,8 @@ class ExploreExecutor:
         lifecycle_port = int(lifecycle.get("port") or 0)
 
         # Warm-decision mode.
-        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
+        _double_run = is_truthy(params["baseline_double_run"]) if "baseline_double_run" in params else True
+        use_warm_decision = lifecycle_eligible and _double_run
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec

@@ -383,9 +383,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
-    # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase warm-decision
-    # apples-to-apples with the baseline measurement basis.
-    baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
     # ``--no-eval``: no accuracy eval anywhere.
     eval_disabled: bool = False
@@ -457,7 +454,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_launch_controls: dict[str, Any] = field(default_factory=dict)
     reference_model: str = ""
-    reference_source: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
@@ -530,7 +526,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # ``0.0`` means unset or unbounded.
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
-    budget_extensions: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock seconds spent in post-deadline teardown, keyed by step.
     teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
@@ -550,8 +545,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
-    # Per-kernel GPU time breakdown JSON from the most recent profile.
-    last_profile_kernel_breakdown: str = ""
     # Merged host-side rewrite evidence document from the most recent profile (see ``_framework_rewrite_evidence``).
     last_framework_rewrite_evidence: str = ""
     # Why the field above is empty, when it is. "No candidates" and "the probe never ran" both render as no evidence,
@@ -594,8 +587,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates (empty_discovery).
     framework_consecutive_empty_discoveries: int = 0
-    # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
-    framework_agent_authoring_enabled: bool = True
     # Default True: when PR discovery is empty/exhausted (or the ranker prefers it), the FRAMEWORK pump dispatches a
     # candidate-free authoring specialist that authors a throughput patch from the live source + profile evidence
     # instead of skipping the phase.
@@ -675,8 +666,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
-    last_specialist: dict[str, Any] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
@@ -703,10 +692,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
     pending_escalate_hint: str = ""
-    # last hint that actually drove a phase transition (audit only) for the breakdown.
-    last_consumed_escalate_hint: str = ""
-    last_consumed_escalate_hint_ts: str = ""
-    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown. Distinct from last_consumed_escalate_hint: that field means "this drove a transition", which a discarded hint never did.
+    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown.
     last_discarded_escalate_hint: str = ""
     last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
@@ -789,10 +775,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
-
-    # Bounded ring (cap 10) of prior ``orchestration_memory`` records, so a cycle that captures nothing usable can fall
-    # back to an earlier one.
-    orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Non-field instance attr (set in load_or_init / save): session dir for breakdown instrumentation.
     _session_dir = None
@@ -1448,8 +1430,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not hint:
             return ""
         self.pending_escalate_hint = ""
-        self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = now_iso()
         return hint
 
     def bump_phase_budget(self, hint: str) -> None:
@@ -1461,8 +1441,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
         }[hint]
         self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
-        self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = now_iso()
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
@@ -2596,14 +2574,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return max(0.0, now_dt.timestamp() - started) / 60.0
 
     def extend_budget_minutes(self, minutes: float, *, reason: str = "") -> float:
-        """Grant more wall-clock budget to this session, on the record.
-
-        The grant raises :attr:`max_minutes` and is appended to
-        :attr:`budget_extensions`; elapsed time is untouched.
+        """Grant more wall-clock budget to this session.
 
         Args:
             minutes: Minutes to add; non-positive is a no-op.
-            reason: Operator's stated reason, recorded with the grant.
+            reason: Operator's stated reason (recorded in logs).
 
         Returns:
             float: The session's budget in minutes after the grant; ``0.0``
@@ -2616,14 +2591,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             # Granting an unbounded session a budget would bound it.
             return 0.0
         self.max_minutes = int(float(self.max_minutes) + added)
-        self.budget_extensions.append(
-            {
-                "granted_unix": float(time.time()),
-                "minutes": added,
-                "max_minutes_after": int(self.max_minutes),
-                "reason": reason,
-            }
-        )
         return float(self.max_minutes)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:

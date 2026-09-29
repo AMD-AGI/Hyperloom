@@ -255,7 +255,6 @@ class _PhaseStateMixin:
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
         self.last_conc_sweep = {}
@@ -292,11 +291,6 @@ class _PhaseStateMixin:
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
-
-    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
-        if isinstance(snapshot, dict):
-            self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
         """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""

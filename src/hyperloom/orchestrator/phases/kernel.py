@@ -382,7 +382,7 @@ class KernelPhase(CoordinatorCollaborator):
             route=route,
             route_reason=route_reason,
             resumed=str(from_phase or "") == "resume",
-            code_revision=str(getattr(state, "code_revision", "") or ""),
+            code_revision="",
         )
         self._kernel_timeline_recorder = recorder
         if recorder is None:
@@ -1226,9 +1226,7 @@ class KernelPhase(CoordinatorCollaborator):
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
-            "mem_fraction": float(
-                getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)
-            ),
+            "mem_fraction": float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0),
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.

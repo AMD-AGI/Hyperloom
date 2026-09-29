@@ -52,7 +52,6 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
                 record["parse_error"],
             )
         state.orchestration_memory = record
-        state.orchestration_memory_history = [*(state.orchestration_memory_history or []), record][-10:]
         return True
 
     def _reseed_orch_prompt_for_cycle(self) -> bool:

@@ -39,7 +39,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     stamp_server_ready,
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
-from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (
@@ -158,12 +157,14 @@ def _executor(
     *,
     baseline_double_run: bool = True,
 ) -> BaselineExecutor:
-    return BaselineExecutor(
+    ex = BaselineExecutor(
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
-        shared_state=SimpleNamespace(baseline_double_run=baseline_double_run),
+        shared_state=SimpleNamespace(),
     )
+    ex._baseline_double_run_default = baseline_double_run
+    return ex
 
 
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
@@ -1500,23 +1501,6 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
-def test_baseline_double_run_loads_persisted_session_opt_out(tmp_path):
-    """A fresh executor process can recover a session-level opt-out from SharedState."""
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    state = SharedState.load_or_init(session_dir)
-    state.baseline_double_run = False
-    state.save(session_dir)
-
-    executor = BaselineExecutor(
-        magpie_python=sys.executable,
-        session_dir=session_dir,
-        shared_state=None,
-    )
-
-    assert executor._double_run_enabled() is False
-
-
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The shared grid runner reports the HOT measured round when lifecycle reuse is eligible."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
@@ -2438,13 +2422,14 @@ def _run_baseline_under_budget(
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / _MEASURED_ROUND_SLOT),
-            "timeout_sec": timeout_sec,
-            "gpu_type": "mi300x",
-        }
-    )
+    ctx_params: dict = {
+        "output_dir": str(tmp_path / _MEASURED_ROUND_SLOT),
+        "timeout_sec": timeout_sec,
+        "gpu_type": "mi300x",
+    }
+    if not double_run:
+        ctx_params["baseline_double_run"] = False
+    ctx = _make_ctx(ctx_params)
     # The live state arrives on the context, the way the coordinator passes it.
     ctx.extra["shared_state"] = state
     with patch(
