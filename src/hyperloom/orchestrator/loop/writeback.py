@@ -88,6 +88,7 @@ from ..policy.gate import (
 from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors.integrate_patch import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -205,34 +206,6 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
-def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep performance axes and launch evidence on the same E2E measurement."""
-    from hyperloom.common.perf_metric import graded_axes_of
-
-    return {
-        **graded_axes_of(measurement),
-        **{
-            key: measurement[key]
-            for key in (
-                "ttft_mean_ms",
-                "e2el_mean_ms",
-                "tpot_mean_ms",
-                "workspace",
-                "raw_result_path",
-                "report_path",
-                "materialized_config",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            )
-            if key in measurement
-        },
-    }
-
-
-_INTEGRATE_KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
-
-
 def _integrate_marker_verdict(status: str, phase: str) -> str:
     """Classify one integrate window from its verdict and its durable phase.
 
@@ -247,9 +220,9 @@ def _integrate_marker_verdict(status: str, phase: str) -> str:
         still waiting for its benchmark, and ``"incomplete"`` when the two
         disagree and no obligation can be discharged from them.
     """
-    if phase == "accepted" and status in _INTEGRATE_KEEP_STATUSES:
+    if phase == "accepted" and status in KEEP_STATUSES:
         return "retained"
-    if phase == "restored" and status not in _INTEGRATE_KEEP_STATUSES and status != "applied_no_bench":
+    if phase == "restored" and status not in KEEP_STATUSES and status != "applied_no_bench":
         return "settled"
     if status == "applied_no_bench" and phase in {"applied", "applied_with_restored_stash"}:
         return "inflight"

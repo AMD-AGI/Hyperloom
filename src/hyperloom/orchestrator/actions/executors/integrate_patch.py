@@ -193,6 +193,9 @@ PATCH_SOURCE_SPECIALIST = "specialist_authored"
 PATCH_SOURCE_UPSTREAM_PR = "upstream_pr"
 PATCH_SOURCES = (PATCH_SOURCE_SPECIALIST, PATCH_SOURCE_UPSTREAM_PR)
 
+#: Verdicts that accept the candidate, so the attempt leaves it in the tree.
+KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
+
 
 def resolve_patch_source(params: Mapping[str, Any]) -> str:
     """Return the declared patch source, defaulting to the specialist lane.
@@ -2265,7 +2268,7 @@ class IntegratePatchExecutor:
     def _finish_attempt(self, attempt: IntegrateAttempt, result: dict[str, Any]) -> dict[str, Any]:
         """Discharge the attempt's restore obligations exactly once before returning."""
         applied_only = result.get("status") == "applied_no_bench"
-        accepted = result.get("status") in ("kept", "advanced", "kept_inert")
+        accepted = result.get("status") in KEEP_STATUSES
         summary = (
             restore_pending_integrate(attempt.pending, keep=accepted or applied_only)
             if attempt.pending
@@ -5605,6 +5608,7 @@ class IntegratePatchExecutor:
 __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "IntegratePatchExecutor",
+    "KEEP_STATUSES",
     "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",
