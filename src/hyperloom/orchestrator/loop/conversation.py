@@ -565,9 +565,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """Render the plateau-judgment advisory block for the current phase."""
         state = self.shared_state
         phase = (getattr(state, "phase", "") or "").strip().upper()
-        overrides = getattr(state, "plateau_overrides", None) or {}
-        if not isinstance(overrides, dict):
-            overrides = {}
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The advisory reads the same predicate the exit rule does, so the
@@ -608,54 +605,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 )
             if config_dry != source_dry:
                 lines.append("  Only one arm is dry: the other lever is still live, and the phase stays open.")
-        elif phase == _phase_state.PHASE_KERNEL_AGENT:
-            triggered, evidence = _phase_state.compute_plateau_kernel(
-                state,
-                lookback=int(
-                    overrides.get(
-                        "kernel_lookback",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-                    )
-                ),
-                revert_streak_threshold=int(
-                    overrides.get(
-                        "kernel_revert_streak",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-                    )
-                ),
-                keep_gain_threshold_pct=float(
-                    overrides.get(
-                        "kernel_keep_gain_pct",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-                    )
-                ),
-            )
-            if triggered:
-                lines.append("KERNEL_AGENT plateau detected: REVERT streak or low recent KEEP gain.")
-                lines.append(
-                    "  revert_streak="
-                    f"{evidence.get('revert_streak', 0)} "
-                    f"threshold={evidence.get('revert_streak_threshold', 0)} "
-                    f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
-                    f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
-                )
         if not lines:
             return ""
-        if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            lines.append(
-                "Note: OPTIMIZE advances to KERNEL_AGENT only when BOTH arms are dry "
-                "(reason=optimize_no_more_leverage) -- a non-terminal lever switch, not "
-                "the end of the run. Either arm going quiet also flags the next "
-                "macro-cycle to steer off this bottleneck. You may request an earlier "
-                "advance with an escalate_strategy_change hint, or keep working the live "
-                "arm until the plateau / budget gate fires."
-            )
-        else:
-            lines.append(
-                "Phase advance is driven only by hard limits (phase budget, "
-                "terminal stop_reason) or explicit escalate_strategy_change "
-                "hints; this block is informational."
-            )
+        lines.append(
+            "Note: OPTIMIZE advances to KERNEL_AGENT only when BOTH arms are dry "
+            "(reason=optimize_no_more_leverage) -- a non-terminal lever switch, not "
+            "the end of the run. Either arm going quiet also flags the next "
+            "macro-cycle to steer off this bottleneck. You may request an earlier "
+            "advance with an escalate_strategy_change hint, or keep working the live "
+            "arm until the plateau / budget gate fires."
+        )
         return "\n".join(lines)
 
     def _record_advisory_plateau(

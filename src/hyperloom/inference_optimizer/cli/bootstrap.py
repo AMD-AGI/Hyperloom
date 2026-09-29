@@ -168,12 +168,6 @@ def _seed_shared_state(
         plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
     if getattr(args, "plateau_explore_lookback", None) is not None:
         plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
-    if getattr(args, "plateau_kernel_revert_streak", None) is not None:
-        plateau_overrides["kernel_revert_streak"] = int(args.plateau_kernel_revert_streak)
-    if getattr(args, "plateau_kernel_keep_gain", None) is not None:
-        plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
-    if getattr(args, "plateau_kernel_lookback", None) is not None:
-        plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:

@@ -195,9 +195,6 @@ PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 5
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
-DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
-DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
-DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
 
 from hyperloom.common.env import env_float as _env_float, env_int as _env_int  # noqa: E402
@@ -767,84 +764,6 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
         return dict_rows
     cycle = _current_macro_cycle(state)
     return [row for row in dict_rows if _row_cycle(row) == cycle]
-
-
-def compute_plateau_kernel(
-    state: Any,
-    *,
-    lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-    revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-    keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_kernel → ``(triggered, evidence)``."""
-    lookback = int(lookback or 0)
-    revert_streak_threshold = int(revert_streak_threshold or 0)
-    keep_gain_threshold_pct = float(keep_gain_threshold_pct or 0.0)
-    if lookback <= 0 or revert_streak_threshold <= 0:
-        return False, {"reason": "thresholds_disabled"}
-
-    integ_attempts = getattr(state, "kernel_integrate_attempts", None) or {}
-    if not isinstance(integ_attempts, dict):
-        integ_attempts = {}
-
-    # Flatten the integrate attempt log into a time-ordered list, take the last ``lookback`` rows.
-    has_cycle = any(
-        isinstance(attempt, dict) and "cycle" in attempt
-        for entry in integ_attempts.values()
-        if isinstance(entry, dict)
-        for attempt in (entry.get("attempts") or [])
-    )
-    flat: list[tuple[str, str, float]] = []  # (decision, ts, gain_pct)
-    for ent in integ_attempts.values():
-        if not isinstance(ent, dict):
-            continue
-        for a in ent.get("attempts") or []:
-            if not isinstance(a, dict):
-                continue
-            if has_cycle and _row_cycle(a) != _current_macro_cycle(state):
-                continue
-            decision = str(a.get("decision") or "").upper().strip()
-            if not decision:
-                continue
-            ts = str(a.get("ts") or "")
-            try:
-                gain = float(a.get("gain_pct") or a.get("validated_gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                gain = 0.0
-            flat.append((decision, ts, gain))
-    # Sort by ts (lexicographic on ISO works); fall back to insertion order.
-    flat.sort(key=lambda r: r[1])
-    recent = flat[-lookback:]
-
-    # Empty-data guard: empty ledger (KERNEL just entered) must NOT auto-trigger plateau (would skip kernel phase).
-    if not recent:
-        return False, {
-            "reason": "no_kernel_attempts_yet",
-            "revert_streak_threshold": int(revert_streak_threshold),
-            "keep_gain_threshold_pct": keep_gain_threshold_pct,
-            "lookback": int(lookback),
-            "attempts_seen": 0,
-        }
-
-    # REVERT streak from the tail.
-    revert_streak = 0
-    for decision, _ts, _g in reversed(recent):
-        if decision in ("REVERT", "NEEDS_REVIEW"):
-            revert_streak += 1
-        else:
-            break
-    # KEEP-gain sum across the same lookback window.
-    recent_keep_gain = sum(g for d, _t, g in recent if d == "KEEP")
-
-    triggered = revert_streak >= revert_streak_threshold or recent_keep_gain < keep_gain_threshold_pct
-    return triggered, {
-        "revert_streak": int(revert_streak),
-        "revert_streak_threshold": int(revert_streak_threshold),
-        "recent_keep_gain_pct": round(recent_keep_gain, 4),
-        "keep_gain_threshold_pct": keep_gain_threshold_pct,
-        "lookback": int(lookback),
-        "attempts_seen": len(recent),
-    }
 
 
 # Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
@@ -2199,9 +2118,6 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT",
-    "DEFAULT_PLATEAU_KERNEL_LOOKBACK",
-    "DEFAULT_PLATEAU_KERNEL_REVERT_STREAK",
     "ESCALATE_HINT_BUDGET_BUMP_CAP",
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "LIFECYCLE_STATUS_END",
@@ -2238,7 +2154,6 @@ __all__ = [
     "replay_next_phase",
     "workflow_predicate_inputs",
     "coordinator_reserved_in_phase",
-    "compute_plateau_kernel",
     "per_lever_dryness",
     "append_phase_evidence_row",
     "append_phase_history_event",

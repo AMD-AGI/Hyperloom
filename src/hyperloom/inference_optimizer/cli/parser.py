@@ -1076,30 +1076,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
-    opt.add_argument(
-        "--plateau-kernel-revert-streak",
-        dest="plateau_kernel_revert_streak",
-        type=int,
-        default=None,
-        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
-        "attempts to count as plateau (one half of the OR). "
-        "Default 3.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-keep-gain",
-        dest="plateau_kernel_keep_gain",
-        type=float,
-        default=None,
-        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
-        "lookback window below which the OR fires. Default 0.5.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-lookback",
-        dest="plateau_kernel_lookback",
-        type=int,
-        default=None,
-        help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
         "--max-minutes-prelude-pct",

@@ -38,9 +38,6 @@ def _args(**overrides):
         plateau_explore_keep_gain=1.5,
         plateau_explore_empty_streak=2,
         plateau_explore_lookback=4,
-        plateau_kernel_revert_streak=3,
-        plateau_kernel_keep_gain=2.5,
-        plateau_kernel_lookback=5,
         enable_roofline=False,
         no_framework_agent=True,
         research_scout=False,
@@ -107,7 +104,6 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.research_lane_capacity == 16
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
-    assert state.plateau_overrides["kernel_keep_gain_pct"] == 2.5
     # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
