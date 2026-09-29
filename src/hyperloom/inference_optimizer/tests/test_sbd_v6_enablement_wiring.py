@@ -700,12 +700,12 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
         _maybe_enqueue_enablement_specialist=_ok,
         _record_coordinator_exception=_record,
     )
-    await EnablementLane._pump_enablement_safely(fake, caller="tick")
+    await EnablementLane._pump_enablement_safely(fake)
     enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
 
     event = _events(_bound_session)[0]
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom:tick"
+    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom"
     assert event["ext"]["failure"]["error_class"] == "RuntimeError"
     assert "task store went away" in event["ext"]["failure"]["message"]
     assert len(crashes) == 1

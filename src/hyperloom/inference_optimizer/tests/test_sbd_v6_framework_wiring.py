@@ -358,12 +358,12 @@ async def test_a_raising_pump_is_named_on_the_event(session_dir: Path, monkeypat
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
 
-    await coord.phase_framework.pump(caller="tick")
+    await coord.phase_framework.pump()
     coord._close_framework_timeline(exit_reason="optimize_budget_cap")
 
     event = _events(session_dir)[0]
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stage"] == "framework_pump:tick"
+    assert event["ext"]["failure"]["stage"] == "framework_pump"
     assert event["ext"]["failure"]["error_class"] == "RuntimeError"
     assert "task store went away" in event["ext"]["failure"]["message"]
     # The exit evidence still stands: the fault did not close the entry.

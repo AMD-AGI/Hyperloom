@@ -584,7 +584,7 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
 def test_a_fault_the_lane_survived_is_named_on_the_event(_bound_session):
     _boot_trigger()
     enablement_event.record_fault(
-        stage="enablement_pump:_maybe_enqueue_enablement_specialist:tick",
+        stage="enablement_pump:_maybe_enqueue_enablement_specialist",
         error_class="RuntimeError",
         message="task store went away",
     )
@@ -593,7 +593,7 @@ def test_a_fault_the_lane_survived_is_named_on_the_event(_bound_session):
     event = _event(_bound_session)
     assert event["status"] == "failed"
     assert event["ext"]["failure"] == {
-        "stage": "enablement_pump:_maybe_enqueue_enablement_specialist:tick",
+        "stage": "enablement_pump:_maybe_enqueue_enablement_specialist",
         "error_class": "RuntimeError",
         "message": "task store went away",
     }
@@ -610,7 +610,7 @@ def test_only_the_first_fault_is_kept(_bound_session):
 
 
 def test_a_fault_before_the_lane_opens_is_dropped(_bound_session):
-    enablement_event.record_fault(stage="enablement_pump:tick", exc=RuntimeError("premature"))
+    enablement_event.record_fault(stage="enablement_pump", exc=RuntimeError("premature"))
 
     assert _events(_bound_session) == []
 
