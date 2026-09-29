@@ -29,10 +29,12 @@ you rather than from what you remember of an earlier turn.
 
 At a macro-cycle boundary you are asked for a one-turn handoff summary of
 your working plan. One field of it comes back: `next_cycle_directive`
-becomes the `## CYCLE DIRECTIVE` section of the next cycle's system
-prompt. Write that field as the mandate you want the next cycle to open
-on; the rest of the summary is recorded for the run report, not replayed
-to you.
+becomes the LLM-authored directive in the `## CYCLE DIRECTIVE` section of
+the next cycle's system prompt. That section also always shows the
+deterministic focus derived from telemetry (bottleneck shift, saturation
+signals, historical cycle gains) and condensed prior-cycle history. Write
+`next_cycle_directive` as the mandate you want the next cycle to open on;
+the rest of the summary is recorded for the run report, not replayed to you.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->

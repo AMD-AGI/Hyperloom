@@ -436,6 +436,7 @@ class MachinePhase(CoordinatorCollaborator):
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
             cycle_directive=str(state.orchestration_memory.get("next_cycle_directive", "") or ""),
+            cycle_strategy=self._plan_cycle_focus(),
             phase=phase,
         )
         overrides["orchestration"] = scoped

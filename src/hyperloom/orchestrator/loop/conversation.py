@@ -393,9 +393,6 @@ class ConversationCollaborator:
             self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            cycle_strategy_block = self._cycle_strategy_block()
-            if cycle_strategy_block:
-                sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
                 remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
                 elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
@@ -738,11 +735,9 @@ class ConversationCollaborator:
             for k, v in (sat.items() if isinstance(sat, dict) else [])
             if isinstance(v, dict) and bool(v.get("saturated"))
         }
-        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        focus_row = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cycle), {})
         has_switch = bool(getattr(state, "pending_bottleneck_switch", False))
-        if not has_switch and not saturated and not focus_row:
+        if not has_switch and not saturated:
             return ""
         prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
         cur_top = state.current_top_bottleneck()
@@ -760,11 +755,6 @@ class ConversationCollaborator:
                     f"  saturated_domain={domain} direction={row.get('direction')} "
                     f"within={row.get('within_pct')}% threshold={row.get('threshold_pct')}%"
                 )
-        if focus_row:
-            lines.append(
-                f"  suggested_cycle_focus={focus_row.get('focus')} "
-                f"score={focus_row.get('score')} rationale={focus_row.get('rationale')}"
-            )
         if prev:
             lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
         if cur_top:

@@ -312,6 +312,7 @@ def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
+        _plan_cycle_focus=lambda: {"focus": "serving_specialist", "score": 1.0},
     )
     return MachinePhase(coord), coord, rebuild_calls
 
@@ -321,13 +322,11 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
     assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
-    assert calls == [
-        {
-            "macro_cycle": 3,
-            "cycle_directive": "keep pushing MoE dispatch",
-            "phase": "KERNEL_AGENT",
-        }
-    ]
+    assert len(calls) == 1
+    assert calls[0]["macro_cycle"] == 3
+    assert calls[0]["cycle_directive"] == "keep pushing MoE dispatch"
+    assert calls[0]["phase"] == "KERNEL_AGENT"
+    assert calls[0].get("cycle_strategy") is not None
 
 
 def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
