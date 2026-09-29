@@ -42,8 +42,10 @@ def test_plane_enabled_pr_returns_mcp_url():
 async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     coord = Coordinator.__new__(Coordinator)
+    coord.phase_framework = FrameworkPhase(coord)
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
     coord.session_dir = tmp_path

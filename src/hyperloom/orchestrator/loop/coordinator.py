@@ -167,6 +167,7 @@ class Coordinator(
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
         self._init_dispatch_state()
+        self.phase_framework = FrameworkPhase(self)
         # KernelStackPhase's per-kernel in-flight integrate guard, keyed on the recorded integrate-attempt count.
         self._attempt_marks: dict[str, int] = {}
         # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
@@ -344,14 +345,6 @@ class Coordinator(
         self._ensure_phase_initialised()
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self._ensure_recipe_kb_t0_anchored()
-
-    @property
-    def phase_framework(self) -> FrameworkPhase:
-        """The FRAMEWORK-phase handler, a separate object reached only through its public hooks."""
-        phase = self.__dict__.get("_phase_framework")
-        if phase is None:
-            phase = self.__dict__["_phase_framework"] = FrameworkPhase(self)
-        return phase
 
     @property
     def reconciler(self):
