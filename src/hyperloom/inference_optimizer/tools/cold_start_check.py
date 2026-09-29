@@ -111,7 +111,7 @@ def _check_framework(framework: str) -> CheckResult:
         )
     try:
         module = importlib.import_module(framework)
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError) as exc:
         return _result("framework_import", started, status="failed", detail=f"{type(exc).__name__}: {exc}")
     version = str(getattr(module, "__version__", "") or "unknown")
     return _result("framework_import", started, status="passed", detail=f"{framework}={version}")
@@ -156,31 +156,32 @@ def _check_gateway_tls(timeout: float) -> CheckResult:
 
 def _check_experience_kb(require_experience_kb: bool) -> CheckResult:
     started = time.perf_counter()
-    from hyperloom.inference_optimizer.experience_v1 import enabled, validate_experience_config
+    from hyperloom.inference_optimizer.experience_collect import MAPPING, enabled, mapping_schema_ref, validate_config
 
     if not enabled():
         status = "failed" if require_experience_kb else "skipped"
         return _result("experience_kb", started, status=status, detail="HYPERLOOM_KB_URL is not configured")
     try:
-        validate_experience_config()
-        from hyperloom_kb import experience_kb_from_env
+        validate_config()
+        from hyperloom_kb import RemoteClient, RemoteConfig
 
-        configured = experience_kb_from_env()
-        if not configured.enabled:
-            raise RuntimeError("configured Experience KB is disabled")
-        remote_client = getattr(configured, "client", None)
-        if remote_client is not None:
-            health = remote_client.health()
-            if str(health.get("status") or "") != "ok":
-                raise RuntimeError("Experience KB health check did not return ok")
-    except Exception as exc:
+        config = RemoteConfig.from_env()
+        if config is None:
+            raise RuntimeError("HYPERLOOM_KB_URL is not configured")
+        health = RemoteClient(config).health()
+        if str(health.get("status") or "") != "ok":
+            raise RuntimeError("Experience KB health check did not return ok")
+        expected = mapping_schema_ref()
+        if health.get("schema_ref") != expected:
+            raise RuntimeError(f"the service validates {health.get('schema_ref')}, but {MAPPING} produces {expected}")
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
         return _result("experience_kb", started, status="failed", detail=f"{type(exc).__name__}: {exc}")
-    detail = (
-        "Experience KB bootstrap and health check succeeded"
-        if getattr(configured, "client", None) is not None
-        else "collector bootstrap succeeded"
+    return _result(
+        "experience_kb",
+        started,
+        status="passed",
+        detail=f"Experience KB health check succeeded; {MAPPING} matches the service declaration",
     )
-    return _result("experience_kb", started, status="passed", detail=detail)
 
 
 async def _check_llm_round_trip(
@@ -221,7 +222,7 @@ async def _check_llm_round_trip(
             result = await asyncio.wait_for(backend.run(prompt, tools=[], max_turns=1), timeout=timeout + 5)
         if not result.raw_text.strip():
             raise RuntimeError("agent backend returned an empty response")
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
         return _result("llm_round_trip", started, status="failed", detail=f"{type(exc).__name__}: {exc}")
     finally:
         closer = getattr(backend, "aclose", None)

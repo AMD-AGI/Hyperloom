@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from hyperloom.inference_optimizer import experience_v1
+from hyperloom.inference_optimizer import experience_collect
 from hyperloom.inference_optimizer.tools import cold_start_check as check
 from hyperloom.orchestrator.roles.base import BackendTurnResult
 
@@ -38,7 +38,7 @@ def test_dotenv_allows_commented_placeholders(tmp_path: Path) -> None:
 
 
 def test_required_experience_kb_fails_when_collection_is_disabled(monkeypatch) -> None:
-    monkeypatch.setattr(experience_v1, "enabled", lambda: False)
+    monkeypatch.setattr(experience_collect, "enabled", lambda: False)
 
     result = check._check_experience_kb(require_experience_kb=True)
 
@@ -46,28 +46,47 @@ def test_required_experience_kb_fails_when_collection_is_disabled(monkeypatch) -
     assert result.detail == "HYPERLOOM_KB_URL is not configured"
 
 
-def test_experience_kb_cold_start_checks_remote_health(monkeypatch) -> None:
+_SCHEMA_REF = "schema:sha256:" + "a" * 64
+
+
+def _fake_service(monkeypatch, health: dict[str, str]) -> dict[str, int]:
     seen = {"health": 0}
 
     class Client:
+        def __init__(self, config):
+            self.config = config
+
         def health(self):
             seen["health"] += 1
-            return {"status": "ok"}
+            return health
 
     module = ModuleType("hyperloom_kb")
-    module.experience_kb_from_env = lambda: SimpleNamespace(
-        enabled=True,
-        client=Client(),
-    )
+    module.RemoteClient = Client
+    module.RemoteConfig = SimpleNamespace(from_env=lambda: object())
     monkeypatch.setitem(sys.modules, "hyperloom_kb", module)
-    monkeypatch.setattr(experience_v1, "enabled", lambda: True)
-    monkeypatch.setattr(experience_v1, "validate_experience_config", lambda: None)
+    monkeypatch.setattr(experience_collect, "enabled", lambda: True)
+    monkeypatch.setattr(experience_collect, "validate_config", lambda: None)
+    monkeypatch.setattr(experience_collect, "mapping_schema_ref", lambda: _SCHEMA_REF)
+    return seen
+
+
+def test_experience_kb_cold_start_checks_remote_health(monkeypatch) -> None:
+    seen = _fake_service(monkeypatch, {"status": "ok", "schema_ref": _SCHEMA_REF})
 
     result = check._check_experience_kb(require_experience_kb=True)
 
     assert result.status == "passed"
     assert "health check succeeded" in result.detail
     assert seen["health"] == 1
+
+
+def test_experience_kb_cold_start_rejects_a_service_with_another_declaration(monkeypatch) -> None:
+    _fake_service(monkeypatch, {"status": "ok", "schema_ref": "schema:sha256:other"})
+
+    result = check._check_experience_kb(require_experience_kb=True)
+
+    assert result.status == "failed"
+    assert "hyperloom-sbd-v6 produces" in result.detail
 
 
 def test_llm_round_trip_uses_production_claude_backend(monkeypatch) -> None:

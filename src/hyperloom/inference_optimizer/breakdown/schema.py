@@ -1780,6 +1780,24 @@ class V6FrameworkLifecycleStep(TypedDict, total=False):
     reason: str
 
 
+class V6FrameworkRenderedRef(TypedDict, total=False):
+    """One Experience a KB read placed in the prompt that raised a proposal.
+
+    Exposure, not evidence of use: the read rendered it, which says nothing
+    about whether the model relied on it."""
+
+    id: str
+    purpose: str
+
+
+class V6FrameworkPatch(TypedDict, total=False):
+    """One session-local patch an authored attempt applied or reverted, verbatim."""
+
+    path: str
+    sha256: str
+    content: str
+
+
 class V6FrameworkProposal(TypedDict, total=False):
     """One thing this entry pursued, whichever producer raised it.
 
@@ -1806,6 +1824,9 @@ class V6FrameworkProposal(TypedDict, total=False):
     route: str
     changed_files: list[str]
     confidence: float | None
+    reasoning: str
+    kb_read_id: str
+    rendered_refs: list[V6FrameworkRenderedRef]
     critic_review: V6FrameworkCriticReview
     terminal: V6FrameworkProposalTerminal
     lifecycle: list[V6FrameworkLifecycleStep]
@@ -1869,6 +1890,7 @@ class V6FrameworkAttemptFailure(TypedDict, total=False):
 
     error_class: str
     error_excerpt: str
+    attribution: str
 
 
 class V6FrameworkArtifacts(TypedDict, total=False):
@@ -1928,6 +1950,10 @@ class V6FrameworkAttempt(TypedDict, total=False):
     patch_source: str
     patch_path: str
     patches_applied: list[str]
+    patches_reverted: list[str]
+    patch_material: list[V6FrameworkPatch]
+    reasoning: str
+    reasoning_origin: str
     target_files: list[str]
     accepted_kernels: list[str]
     measured_against: V6FrameworkStack
@@ -2638,12 +2664,14 @@ __all__ = [
     "V6FrameworkGate",
     "V6FrameworkLifecycleStep",
     "V6FrameworkMeasurement",
+    "V6FrameworkPatch",
     "V6FrameworkPlateauReading",
     "V6FrameworkPolicy",
     "V6FrameworkPolicyConfigArm",
     "V6FrameworkPolicySourceArm",
     "V6FrameworkProposal",
     "V6FrameworkProposalTerminal",
+    "V6FrameworkRenderedRef",
     "V6FrameworkRun",
     "V6FrameworkStack",
     "V6GeakCandidate",
