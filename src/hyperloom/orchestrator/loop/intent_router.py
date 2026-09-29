@@ -765,7 +765,7 @@ class IntentRouter(CoordinatorCollaborator):
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):
-            await self._materialize_approved_proposal(
+            await self._coord.proposals._materialize_approved_proposal(
                 pending,
                 approved_variant_names=approved_variant_names,
             )
@@ -775,7 +775,7 @@ class IntentRouter(CoordinatorCollaborator):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                await self._maybe_rearm_enablement(
+                await self._coord.enablement_lane._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:
@@ -842,7 +842,7 @@ class IntentRouter(CoordinatorCollaborator):
         if action_name in ("sweep", "explore"):
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
-            self._inject_explore_runtime_params(params)
+            self._coord.proposals._inject_explore_runtime_params(params)
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
         # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
@@ -853,11 +853,11 @@ class IntentRouter(CoordinatorCollaborator):
             )
             and params["tasks"]
         ):
-            await self._fan_out_specialist_wave(source, intent, params)
+            await self._coord.specialist_dispatch._fan_out_specialist_wave(source, intent, params)
             return
         # Specialist pre-dispatch warmup via KnowledgePlane.
         if action_name == "specialist":
-            await self._warm_specialist_params(params)
+            await self._coord.specialist_dispatch._warm_specialist_params(params)
             from ..specialists.runner import specialist_patch_preflight_error
 
             preflight_error = specialist_patch_preflight_error(

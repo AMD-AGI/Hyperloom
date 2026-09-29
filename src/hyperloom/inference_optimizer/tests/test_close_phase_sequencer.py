@@ -976,7 +976,7 @@ class TestEveryTerminalReachesAWrittenReport:
         async def _cannot_advance() -> None:
             raise RuntimeError("the phase machine has no next phase")
 
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _cannot_advance)
+        monkeypatch.setattr(coord.phase_machine, "_advance_phase_if_needed", _cannot_advance)
         try:
             reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
         finally:

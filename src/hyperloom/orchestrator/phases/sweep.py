@@ -86,7 +86,7 @@ class SweepPhase(CoordinatorCollaborator):
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
             )
-            self._record_phase_entry_evidence(auto_conc_sweep_error=repr(exc)[:240])
+            self._coord.phase_machine._record_phase_entry_evidence(auto_conc_sweep_error=repr(exc)[:240])
             self.shared_state.record_conc_sweep(
                 {
                     "status": "failed",
@@ -105,7 +105,7 @@ class SweepPhase(CoordinatorCollaborator):
             task.params.get("concs"),
             task.params.get("total_budget_sec"),
         )
-        self._record_phase_entry_evidence(
+        self._coord.phase_machine._record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
@@ -192,7 +192,7 @@ class SweepPhase(CoordinatorCollaborator):
         **evidence: Any,
     ) -> None:
         """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
-        self._record_phase_entry_evidence(**evidence)
+        self._coord.phase_machine._record_phase_entry_evidence(**evidence)
         self.shared_state.record_conc_sweep(
             {
                 "status": "skipped",

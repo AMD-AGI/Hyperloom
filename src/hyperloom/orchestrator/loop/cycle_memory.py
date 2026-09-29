@@ -34,8 +34,8 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         if backend is None:
             return False
         result = await backend.run(
-            prompt=f"{await self._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
-            system_prompt=await self._load_system_prompt("orchestration"),
+            prompt=f"{await self._coord.conversation._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
+            system_prompt=await self._coord.conversation._load_system_prompt("orchestration"),
             tools=[],
             max_turns=0,
             allow_no_intent=True,

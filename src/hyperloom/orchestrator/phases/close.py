@@ -121,10 +121,10 @@ class ClosePhase(CoordinatorCollaborator):
             # the reading to a baseline that is not on disk.
             log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
             return
-        if self._internal_analysis_kind() != "roofline":
+        if self._coord.phase_prelude._internal_analysis_kind() != "roofline":
             # Roofline disabled for this run; nothing to profile.
             return
-        task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
+        task = await self._coord.phase_prelude._enqueue_internal_analysis_task(reason="close_post_opt")
         if task is None:
             return
         log.info(

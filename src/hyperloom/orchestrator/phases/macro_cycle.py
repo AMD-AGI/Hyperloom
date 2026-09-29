@@ -254,7 +254,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             getattr(self.shared_state, "macro_cycle", 0) or 0
         ) > 0:
             try:
-                task = await self._enqueue_internal_analysis_task(
+                task = await self._coord.phase_prelude._enqueue_internal_analysis_task(
                     reason="cycle_start",
                 )
                 if task is None:

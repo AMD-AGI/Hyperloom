@@ -176,7 +176,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
             return gaps
-        anchor = self._workload_canonical_id()
+        anchor = self._coord.proposals._workload_canonical_id()
         target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
         if target_gap > 0.0:
             severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
@@ -211,7 +211,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             an explore-plateau signal.
         """
         state = self.shared_state
-        anchor = self._workload_canonical_id()
+        anchor = self._coord.proposals._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
 
         # Already capped by ``record_action_failure``; read the whole log.
@@ -359,7 +359,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if not isinstance(per_variant, list) or not per_variant:
             return
         params = dict(task.params or {})
-        canonical = str(params.get("gap_canonical_id") or "").strip() or self._workload_canonical_id()
+        canonical = str(params.get("gap_canonical_id") or "").strip() or self._coord.proposals._workload_canonical_id()
         state = self.shared_state
         existing = state.find_gap(canonical)
         if existing is None:

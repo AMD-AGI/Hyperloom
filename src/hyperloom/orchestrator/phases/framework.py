@@ -914,7 +914,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._coord.gpu_lanes._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
@@ -985,7 +985,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         status = str(res.get("status") or "")
 
         if lane == "enablement" or res.get("enablement"):
-            await self._maybe_rearm_enablement(res)
+            await self._coord.enablement_lane._maybe_rearm_enablement(res)
             return
 
         if status != "apply_failed":
@@ -1192,7 +1192,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "apply_retry_attempt": attempt,
             **self._coord.gpu_lanes._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
         idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._cycle_idem_suffix()}"
         lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
@@ -1427,7 +1427,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             **self._coord.gpu_lanes._framework_gpu_params(),
         }
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
             "kind": "specialist",
@@ -2397,7 +2397,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "reason": reason,
             "source": "coordinator_internal",
         }
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch._warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task = await self.tasks.create_or_return_existing(
             kind="specialist",

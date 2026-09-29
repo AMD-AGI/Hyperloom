@@ -74,7 +74,7 @@ class MachinePhase(CoordinatorCollaborator):
                         current_phase="",
                         kernel_enabled=self._kernel_enabled(),
                         optimize_enabled=self._optimize_enabled(),
-                        enablement_enabled=self._enablement_admitted(),
+                        enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
                     ),
                 },
             )
@@ -102,7 +102,7 @@ class MachinePhase(CoordinatorCollaborator):
                     current_phase=_phase_state.PHASE_CLOSE,
                     kernel_enabled=self._kernel_enabled(),
                     optimize_enabled=self._optimize_enabled(),
-                    enablement_enabled=self._enablement_admitted(),
+                    enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
                 ),
             },
         )
@@ -207,18 +207,18 @@ class MachinePhase(CoordinatorCollaborator):
         # Only asked inside the phase: the query renews the open round's lease.
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         in_kernel = str(state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
-        enablement_in_flight = in_enablement and await self._enablement_in_flight()
+        enablement_in_flight = in_enablement and await self._coord.enablement_lane._enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             optimize_enabled=optimize_enabled,
-            enablement_enabled=self._enablement_admitted(),
+            enablement_enabled=self._coord.enablement_lane._enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=in_kernel and await self._kernel_agent_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._coord.phase_internal._maybe_enqueue_explore_research_scout()
-            await self._maybe_force_stalled_domain_specialist()
+            await self._coord.specialist_dispatch._maybe_force_stalled_domain_specialist()
         await self._coord.phase_internal._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
@@ -421,7 +421,7 @@ class MachinePhase(CoordinatorCollaborator):
         elif target == _phase_state.PHASE_SWEEP:
             await self._coord.phase_sweep._on_enter_sweep(from_phase=from_phase)
         elif target == _phase_state.PHASE_CLOSE:
-            await self._on_enter_close(from_phase=from_phase)
+            await self._coord.phase_close._on_enter_close(from_phase=from_phase)
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""

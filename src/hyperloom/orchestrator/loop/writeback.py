@@ -1355,7 +1355,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
         state.enablement.revalidation_task_id = ""
-        await self._settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
+        await self._coord.enablement_lane._settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
 
     async def _record_revalidation_not_promoted(
         self,
@@ -1388,7 +1388,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            await self._settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
+            await self._coord.enablement_lane._settle_enablement_round(
+                FAILED, reason=err_class or "revalidation_failed"
+            )
         # A window the run stopped measured nothing, so recording it as a failed
         # revalidation would charge the lane for a clock.
         enablement_event.record_revalidation_outcome(
@@ -1863,13 +1865,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
-            live = self._read_local_recipe_row()
-            recipe_overrides = self._kb_best_config_overrides_for_keep(
+            live = self._coord.proposals._read_local_recipe_row()
+            recipe_overrides = self._coord.proposals._kb_best_config_overrides_for_keep(
                 live=live,
                 best_config_candidate=best_config_candidate,
                 throughput_after=throughput_after,
             )
-            self._kb_amend_recipe(
+            self._coord.proposals._kb_amend_recipe(
                 append_lesson={
                     "statement": statement,
                     "measured_impact": impact,
@@ -1886,7 +1888,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 severity=severity,
                 kind="pitfall",
             )
-            self._kb_amend_recipe(
+            self._coord.proposals._kb_amend_recipe(
                 append_pitfall={
                     "description": description,
                     "severity": severity,
@@ -1963,7 +1965,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._extract_kept_best_config(
+            best_config_candidate=self._coord.proposals._extract_kept_best_config(
                 task=task,
                 result_dict=result_dict,
             ),
@@ -2130,7 +2132,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._extract_kept_best_config(
+            best_config_candidate=self._coord.proposals._extract_kept_best_config(
                 task=task,
                 variant_attrs=change_attrs,
             ),
@@ -2704,7 +2706,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             try:
                 from ..knowledge.remote_recipe import HyperloomRemoteKB
 
-                remote_cid = self._workload_canonical_id()
+                remote_cid = self._coord.proposals._workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
                     self.shared_state,
@@ -2794,7 +2796,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
             if self.recipe_kb is not None:
-                cid = self._workload_canonical_id()
+                cid = self._coord.proposals._workload_canonical_id()
                 # Read exactly the local store's authority row.
                 try:
                     existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
@@ -2847,7 +2849,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
-            self._kb_amend_recipe(
+            self._coord.proposals._kb_amend_recipe(
                 recipe_overrides=overrides,
                 provenance_details={
                     "phase": "close_finalize",
@@ -2938,7 +2940,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             proposals = []
         is_empty = len(proposals) == 0
 
-        round_entry = self._build_specialist_round_entry(
+        round_entry = self._coord.specialist_dispatch._build_specialist_round_entry(
             task=task,
             done_payload=done_payload,
             source=source,
@@ -3038,7 +3040,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         await self._coord.gap_refresh._refresh_gaps(reason="specialist_done")
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
-            await self._maybe_enqueue_specialist_requested_build(
+            await self._coord.enablement_build._maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
@@ -3631,7 +3633,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         self.shared_state.enablement.revalidation_task_id = ""
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
-                        await self._settle_enablement_round(BOOTED, reason="revalidation_promoted")
+                        await self._coord.enablement_lane._settle_enablement_round(
+                            BOOTED, reason="revalidation_promoted"
+                        )
                         # This promote is the lane's terminal: the KEEP that
                         # preceded it was provisional, so the round that landed
                         # it did not close the lane.
@@ -3656,7 +3660,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         )
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
-                        await self._settle_enablement_round(FAILED, reason="revalidation_below_floor")
+                        await self._coord.enablement_lane._settle_enablement_round(
+                            FAILED, reason="revalidation_below_floor"
+                        )
                         enablement_event.record_revalidation_outcome(
                             generation=generation,
                             promoted=False,
@@ -3830,13 +3836,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # re-baseline must not re-fire replay / scout / recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
             # History injection (fires regardless of --no-warm-replay).
-            self._inject_warm_recipe_history_into_ledger()
+            self._coord.phase_prelude._inject_warm_recipe_history_into_ledger()
             # Warm-recipe replay, anchored on the hot baseline_tput contract.
-            await self._maybe_enqueue_warm_replay(
+            await self._coord.phase_prelude._maybe_enqueue_warm_replay(
                 baseline_tput=float(self.shared_state.baseline_tput or tput),
             )
             # Auto-analysis (roofline / profile); may defer.
-            await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
+            await self._coord.phase_prelude._maybe_enqueue_prelude_initial_analysis_after_baseline(
                 baseline_tput=float(tput),
             )
             # Research scout (parallel, read-only, CPU-only).
@@ -3907,9 +3913,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
-        outcome.verdict = self._promote_warm_replay(result, task=task)
+        outcome.verdict = self._coord.phase_prelude._promote_warm_replay(result, task=task)
         # PRELUDE initial roofline was deferred while replay ran.
-        await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
+        await self._coord.phase_prelude._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     async def _promote_profile(
         self,
@@ -6213,7 +6219,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             params_ps["config_path"] = self.shared_state.baseline_config_path
         if benchmark_script:
             params_ps["benchmark_script"] = benchmark_script
-        self._inject_explore_runtime_params(params_ps)
+        self._coord.proposals._inject_explore_runtime_params(params_ps)
         return params_ps
 
     async def _enqueue_internal_stack_rebench(
@@ -6281,7 +6287,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
         lanes, ttl = self._registry_lanes_ttl("explore")
-        self._inject_explore_runtime_params(params)
+        self._coord.proposals._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
@@ -6511,7 +6517,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._kernel_enabled() and self._geak_enabled()):
+        if not (self._coord.phase_machine._kernel_enabled() and self._geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}
