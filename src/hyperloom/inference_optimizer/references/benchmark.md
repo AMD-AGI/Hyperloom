@@ -6,7 +6,7 @@ Default configs live in
 framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The names come from
 `framework_registry.shipped_config_name()`: a framework registered in
 `src/hyperloom/inference_optimizer/framework_registry.py` must ship both files, and
-an unregistered name resolves to the sglang pair.
+an unset `$FRAMEWORK` resolves to the sglang pair.
 
 Two fields in each YAML are **fallback only** — the optimizer overrides them at
 runtime:

@@ -987,10 +987,11 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom}.yaml` and
-  `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks
-  the right file from `$FRAMEWORK`.
+  `baseline_<framework>.yaml` and `profile_<framework>.yaml`, one pair
+  per framework registered in `framework_registry`
+  (`sglang`, `vllm`, `atom`, `xdit`, `custom`).
+  `framework_registry.shipped_config_name()` names the file for
+  `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
