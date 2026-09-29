@@ -11,9 +11,6 @@ upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
 [`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md).
-For a new host or container, run the gates in
-[`cold-start-validation.md`](cold-start-validation.md) before committing a long
-campaign budget.
 
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
@@ -106,14 +103,12 @@ internal CA, or on self-hosted gateways with private certificates.
    curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
    ```
 2. For a self-hosted gateway with a private CA, configure the standard Python /
-   requests and Node certificate variables before launching:
+   requests certificate variables before launching:
    ```bash
-   export NODE_EXTRA_CA_CERTS=/path/to/ca-bundle.pem
    export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem
    export SSL_CERT_FILE=/path/to/ca-bundle.pem
    ```
-3. Run `cold_start_check.py` after updating certificates. It performs a real
-   production-backend request; a successful catalog probe alone is insufficient.
+3. Re-run preflight or the installer after updating certificates.
 
 ---
 

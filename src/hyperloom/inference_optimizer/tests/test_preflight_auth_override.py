@@ -1673,8 +1673,8 @@ def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monke
     assert "cannot verify" not in out
 
 
-def test_catalog_probe_aborts_without_retrying_other_side_when_gateway_is_flaky(monkeypatch, capsys):
-    """An unreachable Anthropic route cannot be validated by another protocol route."""
+def test_catalog_probe_does_not_retry_the_other_side_when_a_gateway_is_flaky(monkeypatch, capsys):
+    """An unreachable Anthropic side must degrade, not get answered by OpenAI."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.amd.example/Anthropic")
@@ -1693,15 +1693,14 @@ def test_catalog_probe_aborts_without_retrying_other_side_when_gateway_is_flaky(
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-5")
 
-    with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
-    assert exc_info.value.code == 2
+    assert cli._validate_and_resolve_claude_model(args, None) is None
     assert probed == ["https://llm.amd.example/Anthropic"]
-    assert "gateway catalog unreachable" in capsys.readouterr().err
+    assert args.claude_model == "claude-opus-5"
+    assert "cannot verify" in capsys.readouterr().out.lower()
 
 
-def test_validate_claude_model_custom_model_aborts_when_catalog_unreachable(monkeypatch, capsys):
-    """A custom model id does not make an unreachable transport usable."""
+def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
+    """ALLOW_CUSTOM=1 + catalog unreachable → WARN and proceed (no sys.exit)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -1709,12 +1708,13 @@ def test_validate_claude_model_custom_model_aborts_when_catalog_unreachable(monk
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
 
     args = _make_args(claude_model="my-org/custom-claude")
-    with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    assert "gateway catalog unreachable" in err
-    assert "Refusing to start" in err
+    result = cli._validate_and_resolve_claude_model(args, None)
+
+    assert result is None
+    assert args.claude_model == "my-org/custom-claude"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "cannot verify" in out.lower()
 
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):

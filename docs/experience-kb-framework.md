@@ -82,5 +82,4 @@ it can push to and pull from, and its HTTP API are in
 
 Publication is disabled only when `HYPERLOOM_KB_URL` is unset. CLI startup
 fails when the packaged mapping cannot load or validates a different
-declaration than the mapping produces; `cold_start_check.py
---require-experience-kb` also checks the service's health and declaration.
+declaration than the mapping produces.
