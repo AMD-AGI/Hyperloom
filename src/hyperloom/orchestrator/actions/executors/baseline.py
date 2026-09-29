@@ -2528,7 +2528,8 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
-        effective_inferencex_path, checkout_error = self._agentx_runtime_checkout(
+        effective_inferencex_path, checkout_error = await asyncio.to_thread(
+            self._agentx_runtime_checkout,
             config_path=config_path,
             output_dir=output_dir,
             inferencex_path=effective_inferencex_path,

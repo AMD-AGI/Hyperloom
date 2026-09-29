@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -2279,6 +2280,61 @@ async def test_agentx_profile_rejects_incompatible_topology_before_side_effects(
     assert result["trace_input_ready"] is False
     assert parent_called is False
     assert not output_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_checkout_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    source = tmp_path / "pinned-inferencex"
+    head = _init_profile_inferencex_checkout(source)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("INFERENCEX_PATH", str(source))
+    monkeypatch.setenv("INFERENCEX_REF", head)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    config = tmp_path / "profile.yaml"
+    config.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
+    monkeypatch.setattr(baseline_mod, "materialize_config_with_envs", lambda *args, **kwargs: config)
+    executor = ProfileExecutor(session_dir=tmp_path)
+    executor.shared_state = _agentx_profile_state(tmp_path)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            kind="profile",
+            task_id="profile-slow-checkout",
+            params={"config_path": str(config), "output_dir": str(tmp_path / "output")},
+        ),
+        extra={},
+    )
+    loop = asyncio.get_running_loop()
+    clone_started = asyncio.Event()
+    release_clone = threading.Event()
+    git_run = subprocess.run
+    loop_progressed_during_clone = False
+
+    def slow_clone(argv, **kwargs):
+        nonlocal loop_progressed_during_clone
+        if argv[:2] == ["git", "clone"]:
+            loop.call_soon_threadsafe(clone_started.set)
+            loop_progressed_during_clone = release_clone.wait(timeout=5)
+            return subprocess.CompletedProcess(argv, 1, "", "simulated clone failure")
+        return git_run(argv, **kwargs)
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.profile.subprocess.run", slow_clone)
+    profile_task = asyncio.create_task(executor(ctx))
+    try:
+        await asyncio.wait_for(clone_started.wait(), timeout=10)
+        release_clone.set()
+        result = await asyncio.wait_for(profile_task, timeout=10)
+    finally:
+        release_clone.set()
+        if not profile_task.done():
+            profile_task.cancel()
+        await asyncio.gather(profile_task, return_exceptions=True)
+
+    assert loop_progressed_during_clone, "the event loop was blocked until git clone returned"
+    assert result["status"] == "failed"
+    assert result["error_class"] == "agentx_profile_checkout_unavailable"
+    assert "simulated clone failure" in result["error"]
 
 
 def test_agentx_profile_checkout_rejects_symlink_to_pinned_source(tmp_path):

@@ -939,21 +939,12 @@ class KernelPhase(CoordinatorCollaborator):
 
     @staticmethod
     def _resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
-        """Resolve AgentX's server-only proxy for GEAK, failing closed for native recipes."""
+        """Resolve the server launcher named by a legacy AgentX client recipe."""
         from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
-        from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
 
-        native_agentx = native_agentx_enabled(bench.get("agentx"))
-        legacy_client = Path(str(bench.get("benchmark_script") or "").strip()).name == AGENTX_CLIENT_SCRIPT
-        if not native_agentx and not legacy_client:
+        if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
             return ""
-        script = resolve_launch_server_script(bench)
-        if native_agentx and not script:
-            raise RuntimeError(
-                "Native AgentX GEAK requires a server-only proxy plus benchmark_lib.sh "
-                "in the pinned InferenceX checkout; refusing to fall back to the full agentic launcher"
-            )
-        return script
+        return resolve_launch_server_script(bench)
 
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
@@ -1135,9 +1126,6 @@ class KernelPhase(CoordinatorCollaborator):
             reference_verification_status = "verified_declared_only"
         else:
             reference_verification_status = "unverified"
-        if agentx:
-            # Matching launch identities do not make AgentX and GEAK's proxy workload comparable.
-            reference_verification_status = "unverified_workload"
         reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
         if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
@@ -1219,8 +1207,7 @@ class KernelPhase(CoordinatorCollaborator):
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
-            # AgentX canonical throughput is not a reference for GEAK's proxy workload.
-            "raw_baseline_tput": 0.0 if agentx else float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             # Zero means no verified same-config reference.
             "orchestrator_best_tput_same_config": same_config_tput,
             "same_config_reference_status": "verified" if reference_verified else "unverified",
@@ -1245,7 +1232,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
             "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
-            # GEAK owns client selection; AgentX results are proposal proxies.
+            # GEAK owns client selection.
             "bench_client": "auto",
             "e2e_metric": e2e_metric,
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
@@ -1296,11 +1283,6 @@ class KernelPhase(CoordinatorCollaborator):
         # Full layered environment and its matching measurement identity.
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
-        if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
-            handoff["bench_launcher"] = "native"
-            log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
-
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
         handoff_path = out_dir / "handoff.json"
@@ -1324,7 +1306,7 @@ class KernelPhase(CoordinatorCollaborator):
         def _settled_replay(candidate: dict[str, Any]) -> bool:
             """Whether ``candidate`` is a result this session already settled."""
             prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
+            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=True)
 
         def _promote_recovered_result(
             result: dict[str, Any],
@@ -1440,12 +1422,8 @@ class KernelPhase(CoordinatorCollaborator):
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
-        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
-        # graded on total token throughput, so leaving this pinned to output aims
-        # GEAK's search at a number the session does not score -- on the AgentX
-        # corpus the two run ~140x apart, and a kernel that helps the decode-side
-        # output figure need not help the prefill-dominated total by the same
-        # margin. Synthetic runs resolve to "output" and are unaffected.
+        # Persisted grading determines the axis even when the session's metric
+        # override is absent from this process's environment.
         _geak_e2e_metric, _ = geak_metric_axis(
             benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
             grading=getattr(state, "grading", None),
@@ -1507,7 +1485,7 @@ class KernelPhase(CoordinatorCollaborator):
             # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
             # the phase as a timeout.
             recovered = _read_geak_result(result_path)
-            if recovered.get("status") == "ok" and not (agentx and _settled_replay(recovered)):
+            if recovered.get("status") == "ok":
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
@@ -1561,20 +1539,6 @@ class KernelPhase(CoordinatorCollaborator):
                 duration_sec=time.monotonic() - runner_started_monotonic,
                 runner_timeout_s=runner_timeout,
                 kill_timeout_s=kill_timeout,
-            )
-            return
-        if agentx and _settled_replay(result):
-            # The runner left the candidate this session already settled, so it
-            # shipped no product: recording it would retire the verdict and
-            # re-enqueue the revalidation that produced it. The file stays for
-            # the next run to overwrite.
-            _finish_skip(
-                {
-                    "status": "error",
-                    "error_class": "no_new_geak_product",
-                    "error": (f"runner rc={proc.returncode} left the already-adjudicated result.json at {result_path}"),
-                    "stderr_tail": stderr_tail,
-                }
             )
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.

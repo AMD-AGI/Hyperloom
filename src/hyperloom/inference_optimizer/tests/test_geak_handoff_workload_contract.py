@@ -139,11 +139,18 @@ async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
+@pytest.mark.parametrize("native_recipe", [False, True], ids=["legacy-client", "native"])
 @pytest.mark.asyncio
-async def test_native_agentx_skips_geak_before_writing_a_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
+async def test_agentx_skips_geak_before_writing_a_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str, native_recipe: bool
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
+    if native_recipe:
+        recipe_path = Path(coord.shared_state.baseline_config_path)
+        config = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+        config["benchmark"]["agentx"] = "enable"
+        config["benchmark"]["benchmark_script"] = "single_node/agentic/glm.sh"
+        recipe_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     monkeypatch.setenv("FRAMEWORK", "vllm" if framework == "sglang" else "sglang")
     monkeypatch.setenv("MODEL_PATH", "/models/wrong")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -151,7 +158,7 @@ async def test_native_agentx_skips_geak_before_writing_a_handoff(
     monkeypatch.setenv("CONC", "99")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         Mock(side_effect=AssertionError("native AgentX must not resolve or launch GEAK")),
     )
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
