@@ -234,10 +234,7 @@ class ConversationCollaborator:
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        try:
-            msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
-        except Exception as exc:  # noqa: BLE001
-            return f"(inbox unavailable: {exc!r})"
+        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
         if not msgs:
             return "(no inbox events)"
 
@@ -246,14 +243,8 @@ class ConversationCollaborator:
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
-        try:
-            k = max(1, min(int(top_k or 8), 50))
-        except (TypeError, ValueError):
-            k = 8
-        try:
-            newest_first = self.bus.recent_outcomes_context_sync(limit=k)
-        except Exception as exc:  # noqa: BLE001
-            return f"(recent outcomes unavailable: {exc!r})"
+        k = max(1, min(top_k or 8, 50))
+        newest_first = self.bus.recent_outcomes_context_sync(limit=k)
         if not newest_first:
             return "(no recent outcomes)"
         # Flip newest-first query to newest-last for chronological reading.
@@ -274,10 +265,7 @@ class ConversationCollaborator:
 
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources."""
-        try:
-            tasks = self.tasks.running_context_sync()
-        except Exception as exc:  # noqa: BLE001
-            return f"(running tasks unavailable: {exc!r})"
+        tasks = self.tasks.running_context_sync()
         if not tasks:
             return "(no tasks in flight)"
 
