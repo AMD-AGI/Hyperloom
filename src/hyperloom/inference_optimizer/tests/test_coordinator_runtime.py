@@ -710,8 +710,8 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
         )
         await c._handle_intent("critic", verdict)
 
-        approved = c.state.pending_proposals[proposal_id]
-        assert approved.decided and approved.verdict == "approve"
+        # Decided proposals are removed from pending_proposals on verdict.
+        # Verify via the decision bus event instead.
         decisions = await c.bus.tail(topic="decision")
         assert any(m.payload.get("kind") == "approved_proposal" for m in decisions)
     finally:
