@@ -37,8 +37,6 @@ class IntegrateAttempt:
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_result: dict[str, Any] = field(default_factory=dict)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
-    nogit_patch_backups: list[dict[str, Any]] | None = None
-    nogit_backup_root: Path | None = None
     pending: dict[str, Any] = field(default_factory=dict)
 
     @property

@@ -661,6 +661,31 @@ def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, h
     assert len(calls) == (1 if head == "base" else 0)
 
 
+def test_a_git_tree_that_lost_its_base_is_not_reported_as_restored(tmp_path):
+    """A git attempt takes no per-file backups, so without its HEAD nothing can undo it."""
+    from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+    root = tmp_path / "framework"
+    init_git_repo(root, seed_file="cfg.txt", seed_text="ORIGINAL\n")
+    (root / "cfg.txt").write_text("PATCHED\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pending = {
+        "framework_source_root": str(root),
+        "workspace": str(workspace),
+        "patches": [str(workspace / "p.diff")],
+        "artifacts": [],
+        "recovery": {"version": 1, "phase": "ready", "root": str(workspace), "git_head": ""},
+    }
+
+    summary = ip.restore_pending_integrate(pending)
+
+    assert summary["failed"]
+    assert summary["reversed"] == []
+    assert pending["recovery"]["phase"] != "restored"
+    assert (root / "cfg.txt").read_text(encoding="utf-8") == "PATCHED\n"
+
+
 class _Verdict:
     def __init__(self, verdict: str):
         self._v = verdict

@@ -1674,11 +1674,13 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
             # commits its whole plan's preimages and then records a witness
             # before it installs anything, so the witness tells "never started"
             # (nothing to undo) apart from "started, evidence now gone" (refuse
-            # loudly). The patch phase has no such witness and needs none: every
-            # backup record is written before the mutation it describes, so an
-            # absent patch ledger is proof that no patch reached the tree -- the
-            # first patch failing its dry-run leaves exactly that state, and
-            # refusing there would stop the session over an untouched tree.
+            # loudly). The patch phase has no such witness and needs none on a
+            # non-git tree: every backup record is written before the mutation
+            # it describes, so an absent patch ledger there is proof that no
+            # patch reached the tree -- the first patch failing its dry-run
+            # leaves exactly that state, and refusing would stop the session
+            # over an untouched tree. A git attempt takes no backups at all, so
+            # the same empty ledger proves nothing and is refused below.
             artifact_records: list[dict[str, Any]] = []
             if recovery.get("artifacts_prepared"):
                 artifact_records = load_prepared_records(workspace / "artifact_backups")
@@ -1686,10 +1688,15 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
                 recorded = {str(Path(row["target"]).resolve()) for row in artifact_records}
                 if not expected <= recorded:
                     raise ValueError("artifact recovery ledger does not cover the complete mutation plan")
+            base = str(recovery.get("git_head") or "")
+            git_attempt = bool(base) or (root is not None and _is_git_tree(root))
             patch_records = []
             if pending.get("patches"):
-                if recovery.get("git_head"):
-                    if root is None or _git_head_sha(root) != recovery["git_head"]:
+                if git_attempt:
+                    if not base:
+                        summary["failed"].append("git attempt recorded no base to restore to")
+                        return summary
+                    if root is None or _git_head_sha(root) != base:
                         raise ValueError("framework HEAD differs from the recorded attempt base")
                 else:
                     patch_records = load_prepared_records(workspace / "patch_backups")
@@ -1703,7 +1710,7 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
                 return summary
             summary["artifacts_reverted"] = [row.get("rel_target") or row["target"] for row in artifact_records]
             if pending.get("patches"):
-                if recovery.get("git_head"):
+                if git_attempt:
                     # Everything still untracked here was created by this
                     # attempt: the pre-candidate auto-stash took the operator's
                     # untracked files with ``push -u``, and ``clean`` without
@@ -2995,13 +3002,19 @@ class IntegratePatchExecutor:
         output_root.mkdir(parents=True, exist_ok=True)
 
         attempt.output_root = output_root
+        git_head = ""
+        if framework_root is not None and _is_git_tree(framework_root):
+            git_head = _git_head_sha(framework_root)
+            if patch_paths and not git_head:
+                # Patches on a git tree keep no per-file backups, so the recorded HEAD is their only way back.
+                raise OSError(f"cannot read the HEAD of {framework_root} to restore to")
         recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
         recovery_parent.mkdir(parents=True, exist_ok=True)
         recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
         recovery: dict[str, Any] = {
             "version": 1,
             "phase": "before_stash",
-            "git_head": "",
+            "git_head": git_head,
             "stash_oid": "",
             "root": str(recovery_root),
         }
@@ -3056,8 +3069,6 @@ class IntegratePatchExecutor:
         # ``__call__``'s undo has to be able to see both before anything writes.
         attempt.framework_root = framework_root
 
-        git_tree = _is_git_tree(framework_root) if framework_root is not None else False
-        recovery["git_head"] = _git_head_sha(framework_root) if git_tree else ""
         if stash_state == "stashed":
             cp = _run_git_cp(["-C", str(framework_root), "rev-parse", stash_note], timeout=30.0)
             if cp is None or cp.returncode != 0:
@@ -3066,8 +3077,7 @@ class IntegratePatchExecutor:
         recovery["phase"] = "ready"
         if shared_state is not None:
             shared_state.save(self.session_dir)
-        attempt.nogit_patch_backups: list[dict[str, Any]] = []
-        attempt.nogit_backup_root = recovery_root / "patch_backups" if not git_tree else None
+        nogit_patch_backups: list[dict[str, Any]] = []
 
         # An artifact preimage has to describe the tree as this attempt found
         # it, so it is taken before the patches run: a patch that creates the
@@ -3125,7 +3135,7 @@ class IntegratePatchExecutor:
             if escaping is not None:
                 apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
                 break
-            if git_tree:
+            if git_head:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
@@ -3136,10 +3146,10 @@ class IntegratePatchExecutor:
                 ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
-                    attempt.nogit_backup_root,
-                    seq_offset=len(attempt.nogit_patch_backups),
+                    recovery_root / "patch_backups",
+                    seq_offset=len(nogit_patch_backups),
                 )
-                attempt.nogit_patch_backups.extend(backups)
+                nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
                     if fb is not None:

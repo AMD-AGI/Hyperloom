@@ -2766,3 +2766,42 @@ async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: 
     assert result["status"] == "apply_failed"
     assert result["patches_applied"] == []
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_unreadable_head_refuses_before_the_operator_work_is_stashed(tmp_path: Path, monkeypatch):
+    """A git tree whose HEAD cannot be read is refused before anything moves.
+
+    Refused after the sentinel and the auto-stash instead, the operator's
+    uncommitted work stays parked in the stash behind a sentinel that blocks
+    every later round.
+    """
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    (repo / "notes.txt").write_text("operator work in progress\n", encoding="utf-8")
+    _write_specialist_workspace(session_dir, "t-spec-head")
+    # A HEAD that stays unreadable also fails the stash, so only a failed read
+    # that the stash survives reaches this path; the read alone is stubbed.
+    monkeypatch.setattr(ip, "_git_head_sha", lambda _root: "")
+    state = SharedState()
+    state.record_specialist_patch_verdict("t-spec-head", "approve")
+    ctx = _make_ctx(
+        "t-int-head",
+        {"specialist_task_id": "t-spec-head", "framework_source_root": str(repo), "apply_only": True},
+    )
+    ctx.extra["shared_state"] = state
+
+    with pytest.raises(OSError, match="HEAD"):
+        await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    assert (repo / "notes.txt").read_text(encoding="utf-8") == "operator work in progress\n"
+    stashes = subprocess.run(["git", "-C", str(repo), "stash", "list"], capture_output=True, text=True, check=True)
+    assert stashes.stdout == ""
+    assert state.pending_integrate == {}
+    assert state.stop_reason == ""
+    assert (repo / "src.py").read_text().endswith("return 1\n")
