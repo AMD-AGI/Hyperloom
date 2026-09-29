@@ -1131,6 +1131,7 @@ def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, m
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
     em.flush_session()
     assert em._flushed is True
 
@@ -1139,7 +1140,7 @@ def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, m
     _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"))
     em.flush_session()
 
-    assert [g.kwargs["metadata"]["phase"] for g in client.generations] == ["CLOSE"]
+    assert [g.kwargs["metadata"]["phase"] for g in client.generations] == ["KERNEL_AGENT", "CLOSE"]
     assert client.span_named("forge:iter:1") is not None
     assert _decision_task_ids(client) == ["k1"]
     # The SDK warns on ending a span twice, so a repeat flush ends only the spans opened since the last one.
