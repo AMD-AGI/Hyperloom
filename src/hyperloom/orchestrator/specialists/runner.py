@@ -649,6 +649,7 @@ class SpecialistRunner:
                 gap_layer=str(params.get("gap_layer") or ""),
                 gap_evidence=dict(params.get("gap_evidence") or {}),
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
+                experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),

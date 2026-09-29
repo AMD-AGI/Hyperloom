@@ -85,6 +85,48 @@ def test_data_files_sources_exist():
     assert not missing, f"data-files entries point at missing sources: {missing}"
 
 
+def test_existing_skills_own_experience_kb_setup_and_runtime_contracts() -> None:
+    assert _REPO_ROOT is not None
+    setup = (_REPO_ROOT / "src/hyperloom/skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
+    optimizer = (_REPO_ROOT / "src/hyperloom/inference_optimizer/SKILL.md").read_text(encoding="utf-8")
+
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+        assert name in setup
+        assert name in optimizer
+    assert "from hyperloom_kb import RemoteClient" in setup
+    assert "RemoteClient(config).health()" in setup
+    # Users without KB access keep the plain install and skip the KB gate.
+    assert "pip install your_package.whl --target ." in setup
+    assert "`No Experience KB`" in setup
+    assert "--require-experience-kb" in optimizer
+    assert "experience_kb_injections" in optimizer
+    for text in (setup, optimizer):
+        assert "HYPERLOOM_FLEET_KB" not in text
+        assert "HYPERLOOM_KB_ENABLE" not in text
+        assert "HYPERLOOM_KB_DECL" not in text
+        assert "Hyperloom-KB.git" not in text
+        assert "trust_state" not in text
+        assert "unverified" not in text
+        assert "slack" not in text.lower()
+
+
+def test_the_private_experience_kb_client_is_reachable_only_through_the_kb_extra() -> None:
+    assert _REPO_ROOT is not None
+    project = _pyproject()["project"]
+    extras = project["optional-dependencies"]
+    assert project["dependencies"] == []
+    [dependency] = extras["kb"]
+    assert dependency.startswith("hyperloom-kb==")
+    assert "Hyperloom-KB" not in (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    for name, requirements in extras.items():
+        if name == "kb":
+            continue
+        for requirement in requirements:
+            assert "hyperloom-kb" not in requirement, name
+            if requirement.startswith(project["name"] + "["):
+                assert "kb" not in requirement.split("[", 1)[1].rstrip("]").split(","), name
+
+
 def _module_path(dotted: str) -> Path | None:
     base = _src() / dotted.replace(".", "/")
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):

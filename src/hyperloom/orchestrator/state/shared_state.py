@@ -273,6 +273,9 @@ _DEFAULT_LAST_FAILURES = 30
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
 
+# Experience KB injection log cap (orchestration and specialist rows share it).
+_KB_INJECTIONS_CAP = 20
+
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
 
@@ -751,6 +754,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
+    # Experience KB blocks injected into FRAMEWORK_AGENT orchestration and specialist prompts: {tick, phase, ts,
+    # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
+    experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
@@ -1489,6 +1495,46 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             self.clear_bottleneck_switch()
             return True
         return False
+
+    def record_experience_kb_injection(
+        self,
+        *,
+        consumer: str,
+        read_id: str,
+        experience_ids: list[str],
+        experiences: list[dict[str, Any]],
+        prompt_block: str,
+        domain: str = "",
+        gap_canonical_id: str = "",
+    ) -> bool:
+        """Record an injected Experience KB block.
+
+        Orchestration re-reads every tick, so its row is skipped when it injects the same Experiences as the last
+        orchestration row; every specialist dispatch is its own injection and always records.
+        """
+        if consumer == "orchestration":
+            last = next(
+                (row for row in reversed(self.experience_kb_injections) if row.get("consumer") == consumer),
+                {},
+            )
+            if sorted(last.get("experience_ids") or []) == sorted(experience_ids):
+                return False
+        self.experience_kb_injections.append(
+            {
+                "tick": int(self.tick),
+                "phase": self.phase,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "consumer": consumer,
+                "domain": domain,
+                "gap_canonical_id": gap_canonical_id,
+                "read_id": read_id,
+                "experience_ids": list(experience_ids),
+                "experiences": [dict(item) for item in experiences],
+                "prompt_block": prompt_block,
+            }
+        )
+        del self.experience_kb_injections[:-_KB_INJECTIONS_CAP]
+        return True
 
     def merge_lifecycle_events(self, incoming: Any) -> None:
         """Union ``incoming`` lifecycle rows into this state, ordered by timestamp."""
