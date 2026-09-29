@@ -12,6 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.agentx_mode import native_agentx_session
+
+from ...performance_display import throughput_fields
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
@@ -367,7 +370,10 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
 
     source = _mapping(recorded)
-    return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
+    axes = {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
+    if "agentx_gpu_count" in source:
+        axes["agentx_gpu_count"] = _optional_float(source["agentx_gpu_count"])
+    return axes
 
 
 def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
@@ -416,6 +422,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
+        **{field: measurement[field] for field in ("throughput_tok_s", "throughput_unit") if field in measurement},
         "perf": _graded_axes(measurement.get("perf")),
         # Published beside the axes because it qualifies them: upstream rejecting the round makes every figure in
         # ``perf`` a measurement of something it would not accept as a submission. Tri-state, so a session recorded
@@ -640,7 +647,12 @@ def collect_v6_outcome(
         "baseline": baseline,
         "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
-            "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
+            **throughput_fields(
+                _optional_float(recipe.get("throughput")),
+                state.get("framework"),
+                native_agentx=native_agentx_session(state),
+                gpu_count=_mapping(validation.get("perf")).get("agentx_gpu_count"),
+            ),
             # The ledger's own settled figure rather than a second tally of it.
             # Absent a validation this is ``None``, not ``0.0``: nothing
             # measured is not the same as a measured zero.

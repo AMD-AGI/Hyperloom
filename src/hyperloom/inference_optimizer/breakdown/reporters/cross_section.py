@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
+
+from ...performance_display import format_recorded_metric, recorded_metric_unit, recorded_throughput
 
 from .base import RenderedSection, as_dict, outcome_of, session_of, stop_reason_of, task_config_of, validation_of
 
@@ -221,22 +224,25 @@ def _capabilities_split(
 
 def _headline(breakdown: dict[str, Any]) -> str:
     """Build the one-line baseline→final throughput headline."""
-    from ... import framework_registry
-
     fw = task_config_of(breakdown).get("framework_name")
     outcome = outcome_of(breakdown)
-    b = to_float(as_dict(outcome.get("baseline")).get("throughput_tok_s_per_gpu"))
-    f = to_float(as_dict(outcome.get("final")).get("throughput_tok_s_per_gpu"))
+    baseline = as_dict(outcome.get("baseline"))
+    final = as_dict(outcome.get("final"))
+    b = to_float(recorded_throughput(baseline))
+    f = to_float(recorded_throughput(final))
     g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
-        return (
-            f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} → "
-            f"final {framework_registry.format_primary_metric(fw, f, precision=2)} "
-            f"= {sign}{g:.2f}% validated gain"
+        comparison = (
+            f"baseline {format_recorded_metric(fw, baseline, precision=2)} → "
+            f"final {format_recorded_metric(fw, final, precision=2)}"
         )
+        objective = str(final.get("graded_on") or "")
+        if objective in INTVTY_OBJECTIVES or recorded_metric_unit(fw, baseline) != recorded_metric_unit(fw, final):
+            return f"{comparison}; validated gain: {sign}{g:.2f}% ({objective or 'graded metric'})"
+        return f"{comparison} = {sign}{g:.2f}% validated gain"
     if b and not f:
-        return f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} (no validated final)"
+        return f"baseline {format_recorded_metric(fw, baseline, precision=2)} (no validated final)"
     return "no validated throughput recorded"
 
 

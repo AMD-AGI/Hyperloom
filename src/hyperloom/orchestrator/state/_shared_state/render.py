@@ -164,10 +164,10 @@ class _RenderMixin:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
-        from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer.performance_display import format_session_metric
 
         lines = [
-            f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
+            f"baseline  : {format_session_metric(self, self.baseline_tput)}",
             f"current   : {self._format_current_best_for_mission()}",
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
@@ -185,11 +185,11 @@ class _RenderMixin:
         """Render the ``current_best`` one-liner for the mission summary."""
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
-        from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer.performance_display import format_session_metric
 
         cb_tput = self.current_best.get("tput")
         perf = (
-            framework_registry.format_primary_metric(self.framework, cb_tput)
+            format_session_metric(self, cb_tput, measurement=self.current_best)
             if isinstance(cb_tput, (int, float))
             else "?"
         )

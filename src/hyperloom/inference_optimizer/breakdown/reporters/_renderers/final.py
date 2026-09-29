@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ....performance_display import format_recorded_metric, recorded_metric_unit, recorded_throughput
+
 from ..base import (
     Decision,
     RenderedSection,
@@ -104,8 +106,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     b = as_dict(outcome.get("baseline"))
     validation = validation_of(breakdown)
     session = session_of(breakdown)
-    final_tput = f.get("throughput_tok_s_per_gpu")
-    base_tput = b.get("throughput_tok_s_per_gpu")
+    final_tput = recorded_throughput(f)
+    base_tput = recorded_throughput(b)
     gain_v = f.get("gain_pct")
     val_stack_len = validation.get("validated_at_stack_len")
     val_ts = validation.get("validated_ts")
@@ -131,10 +133,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     from .... import framework_registry
 
     fw = task_config_of(breakdown).get("framework_name")
-    _unit = framework_registry.primary_metric_unit(fw)
+    _unit = recorded_metric_unit(fw, f)
     if final_tput:
-        facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")
-    if base_tput and final_tput:
+        facts.append(f"Final: {format_recorded_metric(fw, f, precision=2)}.")
+    if base_tput and final_tput and recorded_metric_unit(fw, b) == _unit:
         base_v = framework_registry.primary_metric_value(fw, base_tput)
         final_v = framework_registry.primary_metric_value(fw, final_tput)
         if base_v is not None and final_v is not None:
@@ -223,7 +225,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     md_kv = md_kv_list(
         [
-            ("final_throughput_tok_s_per_gpu", final_tput),
+            ("final_throughput_tok_s_per_gpu", f.get("throughput_tok_s_per_gpu")),
+            ("final_throughput_tok_s", f.get("throughput_tok_s")),
             ("throughput_unit", _unit or None),
             ("validated_gain_pct", gain_v),
             ("revalidation_pending", revalidation_pending or None),

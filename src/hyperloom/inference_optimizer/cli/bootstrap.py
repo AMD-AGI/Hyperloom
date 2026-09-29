@@ -401,11 +401,9 @@ def _print_final_summary(
     print(f"  stop_reason          : {stop_reason}")
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
-    from .. import framework_registry
+    from ..performance_display import format_session_metric
 
-    print(
-        f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
-    )
+    print(f"  baseline             : {format_session_metric(state, state.baseline_tput)}")
     if session_dir is not None and stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):

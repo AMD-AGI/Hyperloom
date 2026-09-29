@@ -4106,10 +4106,12 @@ class BenchmarkRunExecutor:
                 result["eval_probe"] = eval_probe
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
+        from hyperloom.inference_optimizer.performance_display import format_measurement_metric
+
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            framework_registry.format_primary_metric(eval_framework, result["output_throughput"]),
+            format_measurement_metric(eval_framework, result),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
