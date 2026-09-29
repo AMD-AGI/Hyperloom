@@ -1102,6 +1102,26 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     assert len(client.generations) == gens_after_first
 
 
+def test_a_released_receipt_still_resumes_its_ext_shards(tmp_path, monkeypatch):
+    """v1.0.0 through v1.1.2 persist the ext cursors as ``ext_rows_sent``; a resumed leg must not re-push them."""
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    ext_shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
+    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="old"))
+    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="new", output_tokens=777))
+    released = {"ext_rows_sent": {"forge-1.jsonl": 1}}
+    (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(json.dumps(released), encoding="utf-8")
+
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    assert [g.kwargs["usage_details"]["output"] for g in client.generations] == [777]
+    receipt = lfe.read_receipt(sd)
+    assert receipt["rows_sent"]["reports/trace/ext/forge-1.jsonl"] == 2
+    assert "ext_rows_sent" not in receipt
+
+
 def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, monkeypatch):
     """CLOSE flushes from inside the run, so the shutdown flush must push every row recorded after it."""
     from hyperloom.inference_optimizer.session.session_paths import forge_steps_path

@@ -68,9 +68,8 @@ def _manifest_path(session_dir: Path) -> Path:
     return session_dir / "manifest.json"
 
 
-def _persisted_rows_sent(receipt: dict[str, Any]) -> dict[str, int]:
-    """Return how many rows of each source log a previous process sent, keyed by its path under the session dir."""
-    persisted = receipt.get("rows_sent")
+def _cursor_entries(persisted: Any) -> dict[str, int]:
+    """Return the well-formed ``{name: rows}`` entries of one persisted cursor map."""
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -79,6 +78,17 @@ def _persisted_rows_sent(receipt: dict[str, Any]) -> dict[str, int]:
             cursors[str(name)] = max(0, int(count))
         except (TypeError, ValueError):
             continue
+    return cursors
+
+
+def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
+    """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``.
+
+    Receipts written by v1.0.0 through v1.1.2 carry the ext cursors as ``ext_rows_sent``, keyed by shard name.
+    """
+    ext_prefix = trace_ext_dir(session_dir).relative_to(session_dir).as_posix()
+    cursors = {f"{ext_prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get("ext_rows_sent")).items()}
+    cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
 
@@ -345,7 +355,7 @@ class LangfuseEmitter:
         # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
         # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
         persisted = read_receipt(self.session_dir) or {}
-        self._rows_sent: dict[str, int] = _persisted_rows_sent(persisted)
+        self._rows_sent: dict[str, int] = _persisted_rows_sent(self.session_dir, persisted)
         decisions_sent = persisted.get("decisions_sent")
         self._decisions_sent: set[str] = set(map(str, decisions_sent)) if isinstance(decisions_sent, list) else set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
