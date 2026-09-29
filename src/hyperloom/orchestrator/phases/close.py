@@ -342,6 +342,127 @@ class ClosePhase(CoordinatorCollaborator):
         except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
+    async def _run_close_step(self, step_name: str, coro) -> bool:
+        """Execute one CLOSE step and record success or failure.
+
+        Each step helper records its own success outcome (with any relevant detail
+        or conditional status). This method catches any unhandled exception and
+        records a ``failed`` close step so no exception leaves the sequencer.
+        """
+        try:
+            await coro
+            return True
+        except Exception as exc:
+            log.exception("CLOSE step %r failed", step_name)
+            await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
+            return False
+
+    async def _do_stack_revalidation(self) -> None:
+        """Validate the optimization stack before any close-section records."""
+        await self._revalidate_stack_for_close()
+        await self._record_close_step("stack_revalidation", status="done")
+
+    async def _do_post_opt_roofline(self) -> None:
+        """Profile the final optimized service for the before/after roofline chart."""
+        await self._maybe_run_close_post_opt_roofline()
+        await self._record_close_step("post_opt_roofline", status="done")
+
+    async def _do_fact_finalize(self) -> None:
+        """Recipe KB commit: publishes the terminal outcome before telemetry steps."""
+        outcome = self.ensure_recipe_finalized(source="close") or {}
+        kb_status = str(outcome.get("status") or "done")
+        close_status = (
+            "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"
+        )
+        detail = " ".join(
+            f"{key}={outcome[key]}"
+            for key in ("status", "reason", "backend", "canonical_id", "session_id")
+            if outcome.get(key) not in (None, "")
+        )
+        await self._record_close_step("fact_finalize", status=close_status, detail=detail)
+
+    async def _do_report(self) -> None:
+        """Enqueue and await the report task; emit lifecycle signals and record artifacts."""
+        self._emit_lifecycle(step="report", status="START", detail="close_phase_entry")
+        report_task = await self._enqueue_internal_report_task(reason="close_phase_entry")
+        terminal_state = await self._run_close_task(report_task, step="1 (report)")
+        if terminal_state in {"succeeded", None}:
+            await self._record_close_step("report", status="done", task_id=report_task.task_id)
+            from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
+
+            _rd = _reports_dir(self.session_dir)
+            _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
+            _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
+            _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
+            self._emit_lifecycle(
+                step="report",
+                status="END",
+                artifacts={
+                    "json_path": str(_json_path) if _json_path else "",
+                    "md_path": str(_md_path) if _md_path else "",
+                },
+                detail="close_phase_entry",
+            )
+        else:
+            detail = f"task_state={terminal_state!r}"
+            self._emit_lifecycle(step="report", status="ERROR", detail=detail)
+            await self._record_close_step("report", status="failed", task_id=report_task.task_id, detail=detail)
+
+    async def _do_session_breakdown(self) -> None:
+        """Enqueue and await the session breakdown task."""
+        bd_task = await self._enqueue_internal_session_breakdown_task(reason="close_phase_entry")
+        terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
+        if terminal_state in {"succeeded", None}:
+            await self._record_close_step("session_breakdown", status="done", task_id=bd_task.task_id)
+        else:
+            await self._record_close_step(
+                "session_breakdown",
+                status="failed",
+                task_id=bd_task.task_id,
+                detail=f"task_state={terminal_state!r}",
+            )
+
+    async def _do_langfuse_flush(self) -> None:
+        """Flush the Langfuse trace and splice the receipt back into session_breakdown.json."""
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import (
+            flush_session,
+            record_session_breakdown,
+        )
+
+        flush_session(self.session_dir)
+        from hyperloom.inference_optimizer.breakdown import patch_breakdown_langfuse
+
+        patch_breakdown_langfuse(self.session_dir)
+        # Attach the final breakdown JSON to the trace (no-op when live push is disabled).
+        record_session_breakdown(self.session_dir)
+        await self._record_close_step("langfuse_flush", status="done")
+
+    async def _do_artifact_package(self) -> None:
+        """Bundle session artifacts into a zip under ``/workspace``.
+
+        Stores the package path on ``self._pkg_path`` so the post-sequencer
+        close-section refresh can rebuild the zip after the final close record
+        is written.
+        """
+        session_id = str(getattr(self.shared_state, "session_id", "") or "")
+        from hyperloom.inference_optimizer.breakdown import package_session_artifacts
+
+        # Zipping a large session walks thousands of files; off the loop so it does not stall the Coordinator's
+        # other shutdown work.
+        pkg_path = await asyncio.to_thread(
+            package_session_artifacts,
+            self.session_dir,
+            session_id=session_id,
+        )
+        self._pkg_path = pkg_path
+        if pkg_path is not None:
+            _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
+            await self._record_close_step("artifact_package", status="done", detail=str(pkg_path))
+        else:
+            await self._record_close_step(
+                "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
+            )
+
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE sequencer (fixed order): stack revalidation → post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons."""
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
@@ -362,18 +483,11 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Ahead of the roofline and every close-section record, so they all
         # describe the stack after its last validation settled.
-        try:
-            await self._revalidate_stack_for_close()
-        except Exception as exc:
-            log.exception("CLOSE: stack revalidation failed")
-            await self._record_close_step("stack_revalidation", status="failed", detail=repr(exc)[:240])
+        await self._run_close_step("stack_revalidation", self._do_stack_revalidation())
 
         # Post-optimization roofline (best-effort): profile the final optimized service once so the before/after
         # kernel roofline chart has its "after" column.
-        try:
-            await self._maybe_run_close_post_opt_roofline()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
+        await self._run_close_step("post_opt_roofline", self._do_post_opt_roofline())
 
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
@@ -385,195 +499,23 @@ class ClosePhase(CoordinatorCollaborator):
         # is stated here or nowhere.
         self._record_close_final_recipe()
 
-        # ---------------- Fact finalize (Recipe KB commit) -------------------
-        # Publish before report/breakdown/Langfuse so the terminal outcome and
+        # Fact finalize (Recipe KB commit): publish before report/breakdown/Langfuse so the terminal outcome and
         # audit row are captured by the session's final telemetry.
-        try:
-            outcome = self.ensure_recipe_finalized(source="close") or {}
-            kb_status = str(outcome.get("status") or "done")
-            close_status = (
-                "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"
-            )
-            detail = " ".join(
-                f"{key}={outcome[key]}"
-                for key in (
-                    "status",
-                    "reason",
-                    "backend",
-                    "canonical_id",
-                    "session_id",
-                )
-                if outcome.get(key) not in (None, "")
-            )
-            await self._record_close_step(
-                "fact_finalize",
-                status=close_status,
-                detail=detail,
-            )
-        except Exception as exc:
-            log.exception("CLOSE step 0.5 (fact_finalize) failed")
-            await self._record_close_step(
-                "fact_finalize",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
+        await self._run_close_step("fact_finalize", self._do_fact_finalize())
 
         # Report.
-        try:
-            self._emit_lifecycle(
-                step="report",
-                status="START",
-                detail="close_phase_entry",
-            )
-            report_task = await self._enqueue_internal_report_task(
-                reason="close_phase_entry",
-            )
-            terminal_state = await self._run_close_task(report_task, step="1 (report)")
-            if terminal_state in {"succeeded", None}:
-                await self._record_close_step(
-                    "report",
-                    status="done",
-                    task_id=report_task.task_id,
-                )
-                # Surface the final report location; advertise whichever of final.{json,md} exist under
-                # reports_dir(session_dir).
-                from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-
-                _rd = _reports_dir(self.session_dir)
-                _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
-                _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
-                # Recorded where the step that wrote the files knows which of
-                # them landed, so the export need not probe the filesystem.
-                _close_out.record_close_artifacts(
-                    self.session_dir,
-                    final_json_path=_json_path,
-                    final_md_path=_md_path,
-                )
-                _artifacts = {
-                    "json_path": str(_json_path) if _json_path else "",
-                    "md_path": str(_md_path) if _md_path else "",
-                }
-                self._emit_lifecycle(
-                    step="report",
-                    status="END",
-                    artifacts=_artifacts,
-                    detail="close_phase_entry",
-                )
-            else:
-                detail = f"task_state={terminal_state!r}"
-                self._emit_lifecycle(
-                    step="report",
-                    status="ERROR",
-                    detail=detail,
-                )
-                await self._record_close_step(
-                    "report",
-                    status="failed",
-                    task_id=report_task.task_id,
-                    detail=detail,
-                )
-        except Exception as exc:
-            log.exception("CLOSE step 1 (report) failed")
-            self._emit_lifecycle(
-                step="report",
-                status="ERROR",
-                detail=repr(exc)[:240],
-            )
-            await self._record_close_step(
-                "report",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
+        await self._run_close_step("report", self._do_report())
 
         # Session breakdown.
-        try:
-            bd_task = await self._enqueue_internal_session_breakdown_task(
-                reason="close_phase_entry",
-            )
-            terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
-            if terminal_state in {"succeeded", None}:
-                await self._record_close_step(
-                    "session_breakdown",
-                    status="done",
-                    task_id=bd_task.task_id,
-                )
-            else:
-                await self._record_close_step(
-                    "session_breakdown",
-                    status="failed",
-                    task_id=bd_task.task_id,
-                    detail=f"task_state={terminal_state!r}",
-                )
-        except Exception as exc:
-            log.exception("CLOSE step 2 (session_breakdown) failed")
-            await self._record_close_step(
-                "session_breakdown",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
+        await self._run_close_step("session_breakdown", self._do_session_breakdown())
 
-        # ---------------- Langfuse flush + receipt splice ------------------- Must run before the artifact package:
-        # flush_session flips the receipt to final counts and patch_breakdown_langfuse splices it back into
-        # session_breakdown.json, so the bundled SBD carries final counts.
-        try:
-            from hyperloom.inference_optimizer.trace.langfuse_emitter import (
-                flush_session,
-                record_session_breakdown,
-            )
+        # Langfuse flush + receipt splice: must run before the artifact package so flush_session flips the receipt
+        # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
+        await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
 
-            flush_session(self.session_dir)
-            from hyperloom.inference_optimizer.breakdown import patch_breakdown_langfuse
-
-            patch_breakdown_langfuse(self.session_dir)
-            # Attach the final breakdown JSON to the trace as a ``session_breakdown`` observation (no-op when live
-            # push is disabled).
-            record_session_breakdown(self.session_dir)
-        except Exception as exc:
-            log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
-            await self._record_close_step(
-                "langfuse_flush",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
-
-        # ---------------- Artifact package -> /workspace ------------------ Bundle the curated result/report/analysis
-        # files into a single zip under ``/workspace`` so the Claw sandbox sync ships it to object storage even when
-        # ``$USER_DATA_PATH`` points outside ``/workspace``.
-        session_id = str(getattr(self.shared_state, "session_id", "") or "")
-        pkg_path = None
-        try:
-            from hyperloom.inference_optimizer.breakdown import package_session_artifacts
-
-            # Zipping a large session walks thousands of files; off the loop so it does not stall the Coordinator's
-            # other shutdown work.
-            pkg_path = await asyncio.to_thread(
-                package_session_artifacts,
-                self.session_dir,
-                session_id=session_id,
-            )
-            if pkg_path is not None:
-                # A field rather than something the export parses back out of
-                # the step's free-text ``detail``, which also carries the skip
-                # and failure reasons.
-                _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
-                await self._record_close_step(
-                    "artifact_package",
-                    status="done",
-                    detail=str(pkg_path),
-                )
-            else:
-                await self._record_close_step(
-                    "artifact_package",
-                    status="skipped",
-                    detail="no artifacts matched or dest unwritable",
-                )
-        except Exception as exc:
-            log.exception("CLOSE step 2.6 (artifact_package) failed")
-            await self._record_close_step(
-                "artifact_package",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
+        # Artifact package: bundle the curated result/report/analysis files into a single zip under ``/workspace``
+        # so the Claw sandbox sync ships it to object storage even when ``$USER_DATA_PATH`` is outside ``/workspace``.
+        await self._run_close_step("artifact_package", self._do_artifact_package())
 
         # Record a skipped ``ndjson_drain`` close-step for ledger consumers (RecipeKB is local-only).
         await self._record_close_step("ndjson_drain", status="skipped")
@@ -616,9 +558,11 @@ class ClosePhase(CoordinatorCollaborator):
         try:
             from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
 
+            pkg_path = getattr(self, "_pkg_path", None)
             if patch_breakdown_close(self.session_dir) and pkg_path is not None:
                 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
+                session_id = str(getattr(self.shared_state, "session_id", "") or "")
                 rebuilt = await asyncio.to_thread(
                     package_session_artifacts,
                     self.session_dir,
