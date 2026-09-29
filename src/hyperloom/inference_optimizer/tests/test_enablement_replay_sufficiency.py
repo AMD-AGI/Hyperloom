@@ -912,6 +912,23 @@ def test_compact_short_options_are_classified_and_sanitized(command, credential_
     assert "host" not in row["cmd_sanitized"]
 
 
+@pytest.mark.parametrize(
+    ("command", "sanitized"),
+    [
+        ("rm -rf /tmp/x", "rm -rf /tmp/x"),
+        (
+            "pip install -rrequirements.txt -c constraints.txt foo",
+            "pip install -rrequirements.txt -c constraints.txt foo",
+        ),
+        ("pip install -ihttps://user:token@host/simple foo", "pip install -i<index_url> foo"),
+        ("pip install --index-url=https://user:token@host/simple foo", "pip install --index-url=<index_url> foo"),
+        ("pip install --index-url https://user:token@host/simple foo", "pip install --index-url <index_url> foo"),
+    ],
+)
+def test_sanitizing_keeps_each_option_as_written(command, sanitized):
+    assert sanitize_command_text(command) == sanitized
+
+
 def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():
     """The allowlist strips a leading KEY=VALUE, so both spellings are admitted."""
     cmd = "PIP_INDEX_URL=https://user:token@host/simple pip install foo"

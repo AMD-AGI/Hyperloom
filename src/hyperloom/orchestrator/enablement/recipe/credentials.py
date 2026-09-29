@@ -324,21 +324,14 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     for name, option, value in assignment_pairs(assignments):
         found = _class_for_pair(option, value, family=family)
         rebuilt.append(f"{name}=<{found}>" if found else f"{name}={value}")
-    for option, operand in option_operands(tokens):
-        if not operand:
-            rebuilt.append(option)
-            continue
+    # ``option_operands`` yields one pair per token, and a pair's operand is
+    # always that token's suffix.
+    for token, (option, operand) in zip(tokens, option_operands(tokens)):
         # The whole operand goes, not just its userinfo: the host it names is
         # the private index the credential unlocks, and the class alone is what
         # a replay operator needs to know.
         found = _class_for_pair(option, operand, family=family)
-        safe = f"<{found}>" if found else operand
-        if option and option.startswith("-") and rebuilt and rebuilt[-1] == option:
-            rebuilt[-1] = f"{option} {safe}"
-        elif option and option.startswith("-"):
-            rebuilt.append(f"{option}={safe}")
-        else:
-            rebuilt.append(safe)
+        rebuilt.append(f"{token[: len(token) - len(operand)]}<{found}>" if found else token)
     return _clip(redact_secret_values(" ".join(rebuilt)), clip)
 
 
