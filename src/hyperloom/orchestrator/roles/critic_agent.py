@@ -601,7 +601,7 @@ class CriticAgentBackend:
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
-        # The lever says what a KEEP has to clear; the phase cannot, since one phase carries every lever.
+        # The lever says what a KEEP has to clear; the phase cannot, since one phase carries several levers.
         _proposals = judge_bundle.get("proposals") or []
         _first = _proposals[0] if isinstance(_proposals, list) and _proposals else None
         _inject_lever_orientation(judge_bundle, _first if isinstance(_first, dict) else None)
