@@ -1215,6 +1215,19 @@ async def test_a_keep_whose_materialized_config_is_corrupt_records_no_keep_evide
 
 
 @pytest.mark.asyncio
+async def test_a_keep_whose_materialized_config_is_not_utf8_records_no_keep_evidence(tmp_path: Path, monkeypatch):
+    config = tmp_path / "latin1.yaml"
+    config.write_bytes(b"benchmark: {framework: vllm, note: \xe9}\n")
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
+    )
+
+    assert result["status"] == "kept"
+    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
+
+
+@pytest.mark.asyncio
 async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
     assert result["status"] == "reverted"
