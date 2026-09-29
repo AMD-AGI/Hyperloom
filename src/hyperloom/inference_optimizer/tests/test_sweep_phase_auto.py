@@ -1005,7 +1005,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert "simulated DB outage" in evidence["auto_conc_sweep_error"]
     # No task was enqueued
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["status"] == "failed"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
     assert coord.shared_state.save_count >= 1
 

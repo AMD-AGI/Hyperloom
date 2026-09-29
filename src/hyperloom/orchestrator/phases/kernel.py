@@ -2979,14 +2979,11 @@ class KernelPhase(CoordinatorCollaborator):
             return True
         if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
             return True
-        try:
-            from ..kernel.request_handlers import _resolve_forge_precision_and_quant
+        from ..kernel.request_handlers import _resolve_forge_precision_and_quant
 
-            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
-            if str(precision or "").strip().lower() == "fp8":
-                return True
-        except Exception:  # noqa: BLE001 - best-effort runtime resolution
-            pass
+        precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+        if str(precision or "").strip().lower() == "fp8":
+            return True
         return False
 
     def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
