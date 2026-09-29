@@ -9,8 +9,7 @@ decision framework, cycle directive, optional kernel-opt reference, rules).
 Deterministic for given inputs; the only IO is reading the rules fragment.
 
 Sections are scoped by the ``phase`` argument: a module whose behaviour the
-phase cannot reach is omitted, so the agent is never handed a payload contract
-PolicyGate would deny. A blank phase renders every module.
+phase cannot reach is omitted. A blank phase renders every module.
 """
 
 from __future__ import annotations
@@ -1140,7 +1139,9 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
-        _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy),
+        _section_cycle_directive(
+            macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy
+        ),
     ]
     if (
         kernel_enabled

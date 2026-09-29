@@ -311,8 +311,9 @@ Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
 
-`report` / `session_breakdown`. Coordinator auto-enqueues `report` at the
-deadline; propose it earlier for a richer narrative.
+`report` / `session_breakdown`. The Coordinator auto-enqueues `report`
+when the session closes; you may also propose it in CLOSE for a richer
+narrative.
 
 ### SESSION_DIR contract
 

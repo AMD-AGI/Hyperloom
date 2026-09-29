@@ -83,13 +83,13 @@ unbounded runs use the fixed per-cycle budget window.
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
 the ``=== Phase ===`` block for the five middle phases.
 
-`machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
-actions can run in each phase. Coordinator-owned actions such as
-analysis refreshes and close sequencing might be enqueued internally even
-when the LLM is not allowed to propose them.
+`machine_state.PHASE_ALLOWED_ACTIONS` defines which actions the LLM may
+propose in each phase; the prompt exposes only that subset. Coordinator-owned
+actions such as analysis refreshes and close sequencing may be enqueued
+internally even when the LLM is not allowed to propose them.
 
 Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not allow, and commits the
+action and drops queued work the next phase does not support, and commits the
 transition only once no task is left running. Each phase therefore starts on
 quiet GPUs, and its entry hook runs on the transition itself.
 
@@ -275,8 +275,8 @@ look very different from Orchestration's side:
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
 
-The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
-admits these actions:
+The phase action set (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
+covers these LLM-proposable actions:
 
 - `integrate`
 - `roofline`
@@ -341,11 +341,10 @@ turn never depends on what an earlier turn happened to remember.
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so Critic review, the accuracy gate,
-  and PolicyGate's invariants (path sandbox,
-  resource leases, phase ordering, data dependencies, single-writer
-  rules) apply to every turn. Repetition is checked against state — the
-  tested-variant ledger and the action-failure log — not against agent
-  recall.
+  and PolicyGate's invariants (path sandbox, resource leases,
+  data dependencies, single-writer rules) apply to every turn.
+  Repetition is checked against state — the tested-variant ledger and
+  the action-failure log — not against agent recall.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
@@ -360,8 +359,10 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
-  and invalid envelopes before they mutate runtime state.
+- PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
+  structural requirements are not met before they mutate runtime state.
+  Phase fit is guided by the prompt and enforced at the phase transition
+  by dropping incompatible queued tasks.
 
 ## What is retired
 

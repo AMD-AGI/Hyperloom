@@ -405,9 +405,10 @@ class ConversationCollaborator:
                 )
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                     sections.append(
-                        "WARNING: < 5 min remaining. Prefer `report` next; new "
-                        "`explore` rounds (which bench every variant on the "
-                        "stack) will likely be cut by the deadline."
+                        "WARNING: < 5 min remaining. Avoid new `explore` rounds "
+                        "(which bench every variant on the stack) — they will "
+                        "likely be cut by the deadline. The Coordinator will "
+                        "auto-enqueue `report` when the session closes."
                     )
 
         sections.append("=== Shared session state ===")
