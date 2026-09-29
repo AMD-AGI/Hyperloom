@@ -28,11 +28,7 @@ from ..collaborator import CoordinatorCollaborator
 log = _logging.getLogger(__name__)
 
 
-def resolve_stack_members(
-    record: Mapping[str, Any],
-    *,
-    entries: Mapping[str, Any] | None = None,
-) -> tuple[str, ...]:
+def resolve_stack_members(record: Mapping[str, Any]) -> tuple[str, ...]:
     """Resolve atomic member ids without interpreting a display id as a delimiter format."""
     flag = record.get("stack_validation")
     if "stack_validation" in record and not isinstance(flag, bool):
@@ -55,9 +51,6 @@ def resolve_stack_members(
         if flag is True or not isinstance(kid, str) or not kid.strip() or ("+" in kid and flag is not False):
             raise ValueError("stack membership is unavailable; a display id is not member evidence")
         members = (kid,)
-    if entries is not None:
-        identities = (record.get("stack_member_identities") or ()) if flag is True else None
-        _matching_stack_entries(members, entries, identities=identities)
     return members
 
 
@@ -65,34 +58,30 @@ def _matching_stack_entries(
     members: tuple[str, ...],
     entries: Mapping[str, Any],
     *,
-    identities: Any = None,
+    identities: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Bind members by independent patch identities before testing ledger ambiguity."""
     identity_keys = ("kernel_id", "patch_path", "target_file")
-    expected = None
-    if identities is not None:
-        if (
-            not isinstance(identities, list)
-            or any(
-                not isinstance(row, dict)
-                or any(not isinstance(row.get(key), str) or not row[key].strip() for key in identity_keys)
-                for row in identities
-            )
-            or tuple(row["kernel_id"] for row in identities) != members
-        ):
-            raise ValueError("stack member identities do not match the requested members")
-        expected = {row["kernel_id"]: tuple(row[key] for key in identity_keys) for row in identities}
+    if (
+        not isinstance(identities, list)
+        or any(
+            not isinstance(row, dict)
+            or any(not isinstance(row.get(key), str) or not row[key].strip() for key in identity_keys)
+            for row in identities
+        )
+        or tuple(row["kernel_id"] for row in identities) != members
+    ):
+        raise ValueError("stack member identities do not match the requested members")
+    expected = {row["kernel_id"]: tuple(row[key] for key in identity_keys) for row in identities}
     found: dict[str, dict[str, Any]] = {}
     for entry in entries.values():
         if not isinstance(entry, dict) or entry.get("kernel_id") not in members:
             continue
         kid = entry["kernel_id"]
-        if expected is not None and tuple(entry.get(key) for key in identity_keys) != expected[kid]:
+        if tuple(entry.get(key) for key in identity_keys) != expected[kid]:
             continue
         if kid in found:
             raise ValueError(f"stack member {kid!r} matches multiple ledger entries")
-        if any(not isinstance(entry.get(key), str) or not entry[key].strip() for key in ("patch_path", "target_file")):
-            raise ValueError(f"stack member {kid!r} lacks a complete patch identity")
         found[kid] = entry
     if set(found) != set(members):
         raise ValueError(f"stack members missing from ledger: {sorted(set(members) - set(found))!r}")
@@ -119,8 +108,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         from ..kernel.request_handlers import integrate_handler
 
         state = self.shared_state
-        self._stack_resolved_kernel_ids()
-        self._pending_stack_members()
         drained = 0
         max_drain = 10
         while drained < max_drain:
@@ -219,71 +206,26 @@ class KernelStackPhase(CoordinatorCollaborator):
                 resolved.update(resolve_stack_members(item))
         return resolved
 
-    def _pending_stack_members(self) -> tuple[str, ...]:
-        """Validate persisted recovery evidence without changing any checkpoint."""
-        pending = self.shared_state.pending_stack_validation_result
-        if not pending:
-            if self.shared_state.pending_stack_validation_apply_results or any(
-                isinstance(entry, dict) and entry.get("stack_validation_in_progress")
-                for entry in (self.shared_state.kernel_integrate_attempts or {}).values()
-            ):
-                raise ValueError("stack recovery lacks structured member evidence")
-            return ()
-        if not isinstance(pending, dict):
-            raise ValueError("stack recovery checkpoint must be a mapping")
-        members = resolve_stack_members(pending, entries=self.shared_state.kernel_integrate_attempts)
-        if pending.get("stack_validation") is not True or len(members) < 2:
-            raise ValueError("stack recovery checkpoint must identify a complete validation")
-        if any(
-            isinstance(entry, dict)
-            and entry.get("stack_validation_in_progress")
-            and entry.get("kernel_id") not in members
-            for entry in self.shared_state.kernel_integrate_attempts.values()
-        ):
-            raise ValueError("stack recovery has unrelated in-progress members")
-        return members
-
     def _mark_stack_validation_entries_resolved(
         self,
         entries: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
         """Mark component NEEDS_REVIEW entries as handled by a kept stack."""
-        stack_id = str(result.get("kernel_id") or "")
         decision = str(result.get("decision") or "").upper()
-        if decision != "KEEP" or not stack_id:
-            return
         now = datetime.now(timezone.utc).isoformat()
-        wanted = self._stack_component_identities(entries)
-        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            identity = (
-                str(entry.get("kernel_id") or ""),
-                str(entry.get("patch_path") or ""),
-                str(entry.get("target_file") or ""),
-            )
-            if identity not in wanted:
-                continue
-            entry["stack_resolved"] = True
-            entry["stack_decision"] = decision
-            entry["stack_resolved_at"] = now
-            entry.pop("stack_validation_in_progress", None)
+        for entry in self._stack_component_identities(entries):
+            entry.update(stack_resolved=True, stack_decision=decision, stack_resolved_at=now)
 
-    def _stack_component_identities(
-        self,
-        entries: list[dict[str, Any]],
-    ) -> set[tuple[str, str, str]]:
-        """Return (kernel_id, patch_path, target_file) tuples for stack members."""
-        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
-            raise ValueError("stack members must be ledger rows")
+    def _stack_component_identities(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return the live ledger rows the members' patch identities bind to.
+
+        Looked up afresh on every call: recording an integrate result replaces the row objects a caller may hold.
+        """
         members = resolve_stack_members(
             {"stack_validation": True, "stack_kernel_ids": [e.get("kernel_id") for e in entries]}
         )
-        supplied = {str(index): entry for index, entry in enumerate(entries)}
-        _matching_stack_entries(members, supplied)
-        _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, identities=entries)
-        return {(e["kernel_id"], e["patch_path"], e["target_file"]) for e in entries}
+        return _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts, identities=entries)
 
     def _mark_stack_validation_in_progress(
         self,
@@ -291,17 +233,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         stack_id: str,
     ) -> None:
         """Persist an in-flight stack guard before applying patches."""
-        wanted = self._stack_component_identities(entries)
-        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            identity = (
-                str(entry.get("kernel_id") or ""),
-                str(entry.get("patch_path") or ""),
-                str(entry.get("target_file") or ""),
-            )
-            if identity not in wanted:
-                continue
+        for entry in self._stack_component_identities(entries):
             entry["stack_validation_in_progress"] = True
         self.shared_state.pending_stack_validation_result = {
             "kernel_id": stack_id,
@@ -313,19 +245,14 @@ class KernelStackPhase(CoordinatorCollaborator):
         }
         self.shared_state.pending_stack_validation_apply_results = []
 
-    def _clear_stack_validation_in_progress(self) -> None:
-        """Clear the in-flight stack guard from every ledger row.
+    def _clear_pending_stack_validation_checkpoints(self) -> None:
+        """Drop crash-recovery checkpoints and every in-flight guard once a stack attempt is finished.
 
-        One checkpoint slot means one attempt in flight, so once it is over no
-        row is in flight, including any a crash left marked that this attempt's
-        record can no longer be bound to.
+        One checkpoint slot means one attempt in flight, so once it is over no ledger row is in flight either.
         """
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if isinstance(entry, dict):
                 entry.pop("stack_validation_in_progress", None)
-
-    def _clear_pending_stack_validation_checkpoints(self) -> None:
-        """Drop crash-recovery checkpoints once a stack attempt is finished."""
         self.shared_state.pending_stack_validation_result = {}
         self.shared_state.pending_stack_validation_apply_results = []
 
@@ -346,7 +273,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         # Either the attempt never reached a decision, or its decision's revert did not finish: the members are
         # still on the tree, so tear them down before anything else measures it.
         self._unwind_stack_patches()
-        self._clear_stack_validation_in_progress()
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
         return True
@@ -359,7 +285,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         return _matching_stack_entries(
             resolve_stack_members(pending),
             self.shared_state.kernel_integrate_attempts,
-            identities=pending.get("stack_member_identities") or (),
+            identities=pending.get("stack_member_identities"),
         )
 
     def _unwind_stack_patches(self) -> None:
@@ -388,44 +314,26 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.save(self.session_dir)
         raise RuntimeError(f"stack {stack_id} revert incomplete; checkpoints retained for the next resume")
 
-    def _stack_entries_for_validation(
-        self,
-        kernel_ids: list[Any],
-    ) -> list[dict[str, Any]]:
-        """Rebuild all component rows from explicit ids; the display id supplies no members."""
-        members = resolve_stack_members({"stack_kernel_ids": kernel_ids, "stack_validation": True})
-        return _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts)
-
     async def _finalize_stack_validation_outcome(
         self,
         stack: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
         """Record stack validation, promote KEEP, and clear recovery checkpoints."""
-        self._stack_resolved_kernel_ids()
         decision = str(result.get("decision") or "").upper()
-        if decision == "KEEP":
-            self._stack_component_identities(stack)
-            members = resolve_stack_members(result, entries=self.shared_state.kernel_integrate_attempts)
-            if result.get("stack_validation") is not True or members != tuple(entry["kernel_id"] for entry in stack):
-                raise ValueError("stack result does not describe the validated members")
         self.shared_state.record_kernel_integrate_result(result)
         if revert_owed(result):
             self._halt_on_owed_revert(str(result.get("kernel_id") or ""))
         if decision == "KEEP":
             # Marked only once promoted, so a KEEP that dies on the way leaves no
-            # row claiming a stack that never reached the stack.
+            # row claiming a promotion that never happened.
             await self._record_integrate_keep(result)
             self._mark_stack_validation_entries_resolved(stack, result)
-        else:
-            self._clear_stack_validation_in_progress()
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
 
     async def _maybe_validate_positive_needs_review_stack(self) -> None:
         """Run one E2E stack validation for multiple small positive kernel patches."""
-        if await self._recover_interrupted_stack_validation():
-            return
         entries = self._positive_needs_review_integrates()
         if len(entries) < 2:
             return
@@ -444,11 +352,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         self._mark_stack_validation_in_progress(stack, stack_id)
         self.shared_state.save(self.session_dir)
         result = await self._run_kernel_stack_validation_e2e(stack)
-        if not isinstance(result, dict):
-            raise ValueError("stack validation produced no result; checkpoints retained")
-        checkpoint = self.shared_state.pending_stack_validation_result
-        result = {**result, "stack_member_identities": checkpoint["stack_member_identities"]}
-        resolve_stack_members(result, entries=self.shared_state.kernel_integrate_attempts)
         self.shared_state.pending_stack_validation_result = result
         self.shared_state.save(self.session_dir)
         await self._finalize_stack_validation_outcome(stack, result)
@@ -476,22 +379,9 @@ class KernelStackPhase(CoordinatorCollaborator):
         from ..loop.sub_agent_runner import RunnerContext
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
-        self._stack_resolved_kernel_ids()
-        self._stack_component_identities(entries)
         kernel_ids = [entry["kernel_id"] for entry in entries]
         stack_id = "+".join(kernel_ids)
-        pending_members = self._pending_stack_members()
-        if pending_members and (
-            self.shared_state.pending_stack_validation_apply_results
-            or self.shared_state.pending_stack_validation_result.get("decision")
-        ):
-            raise ValueError("stack validation must recover its pending result before applying again")
-        if pending_members and pending_members != tuple(kernel_ids):
-            raise ValueError("stack validation conflicts with pending members")
-        if not pending_members:
-            self._mark_stack_validation_in_progress(entries, stack_id)
-            self.shared_state.save(self.session_dir)
-        identities = self.shared_state.pending_stack_validation_result["stack_member_identities"]
+        identities = [{key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in entries]
         apply_results: list[dict[str, Any]] = []
         try:
             for entry in entries:
@@ -690,8 +580,6 @@ class KernelStackPhase(CoordinatorCollaborator):
     async def _auto_enqueue_pending_integrations(self) -> None:
         """Auto-dispatch integrate for KEEP'd kernels awaiting integration."""
         state = self.shared_state
-        self._stack_resolved_kernel_ids()
-        self._pending_stack_members()
         pending_records = state.pending_kernel_integration_records()
         if not pending_records:
             return

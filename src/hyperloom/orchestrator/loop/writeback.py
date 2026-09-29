@@ -257,14 +257,14 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
 
 def _integrate_stack_fields(result: Mapping[str, Any], state: SharedState) -> dict[str, Any]:
     """Validate kernel membership against the ledger before promotion and return the members."""
-    from ..phases.kernel_stack import resolve_stack_members
+    from ..phases.kernel_stack import _matching_stack_entries, resolve_stack_members
 
     raw_members = result.get("stack_kernel_ids")
     membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
-    members = resolve_stack_members(
-        membership,
-        entries=state.kernel_integrate_attempts if membership["stack_validation"] is True else None,
-    )
+    members = resolve_stack_members(membership)
+    if membership["stack_validation"] is True:
+        identities = membership.get("stack_member_identities")
+        _matching_stack_entries(members, state.kernel_integrate_attempts, identities=identities)
     return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
 
 
@@ -5412,6 +5412,11 @@ class WritebackCollaborator:
                 )
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("active_inferencex_checkout_missing")
+        # Loading the state file is the one boundary the persisted
+        # ``optimization_stack`` crosses, so bind its rows to their members here:
+        # a row that cannot name what it integrated makes every later read of the
+        # stack a guess, and every reader below inherits that guess.
+        self._stack_resolved_kernel_ids()
         # (0) Interrupted stack unwind: its members are still applied to the
         # framework tree. Retried here, before a resumed leg benchmarks
         # anything: a measurement taken first would measure the patched tree --
@@ -5644,12 +5649,12 @@ class WritebackCollaborator:
         try:
             recovered = await self._recover_interrupted_stack_validation()
         except ValueError as exc:
-            # What is on the tree is unknown; a raise here would escape
-            # ``Coordinator.run``'s guard with no stop reason naming why.
+            # What is on the tree is unknown, so nothing later in this pass may
+            # run on it; the stop reason is durable before the raise.
             self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
             self.shared_state.save(self.session_dir)
-            report["warnings"].append({"kind": "interrupted_stack_validation_unbindable", "error": repr(exc)})
-            return
+            log.error("interrupted stack validation cannot be bound to its ledger rows: %r", exc)
+            raise
         if recovered:
             report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
 
