@@ -119,6 +119,16 @@ class TestOneVetoChannel:
         assert no_gain.veto_reason == ""
         assert vetoed.veto_reason == "latency_budget_exceeded"
 
+    def test_a_candidate_that_lost_on_throughput_carries_no_veto_even_over_budget(self):
+        """The ledger must blame the gate that refused it; the budget never got a say."""
+        graded = resolve_graded_comparison(
+            self._state(250.0),
+            {"output_throughput": 800.0, "e2el_mean_ms": 1211.0},
+            keep_threshold_pct=1.0,
+        )
+        assert graded.verdict == VERDICT_REVERT
+        assert graded.veto_reason == ""
+
 
 class TestLaneResultShapes:
     """Every lane must hand the gate the field it grades on.
@@ -216,36 +226,53 @@ class TestLiftRefusesAndSaysWhy:
         assert not coord.shared_state.current_best
         assert not coord.shared_state.optimization_stack
 
-    def test_the_refusal_is_recorded_with_what_it_measured(self, tmp_path):
-        """A session that ends near baseline under an SLA must be distinguishable
-        from one that found no headroom."""
-        coord = self._coord(tmp_path, 250.0)
-        coord._lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=1211.0))
-        (refusal,) = coord.shared_state.latency_refusals
-        assert refusal["reason"] == "latency_budget_exceeded"
-        assert refusal["variant_name"] == "cpx-2-streams"
-        assert refusal["e2el_mean_ms"] == 1211.0
-        assert refusal["budget_ms"] == 250.0
-
-    def test_an_untimed_winner_is_refused_as_untimed_not_as_slow(self, tmp_path):
-        """The two reasons need opposite responses: one needs a different
-        candidate, the other needs the benchmark to report latency at all."""
+    def test_an_untimed_winner_is_refused(self, tmp_path):
         coord = self._coord(tmp_path, 250.0)
         assert coord._lift_to_current_best("integrate_patch", 1200.0, self._winner()) is False
-        assert coord.shared_state.latency_refusals[0]["reason"] == "latency_unmeasured"
-        assert coord.shared_state.latency_refusals[0]["e2el_mean_ms"] is None
+        assert not coord.shared_state.current_best
 
-    def test_an_in_budget_winner_is_promoted_and_records_nothing(self, tmp_path):
+    def test_an_in_budget_winner_is_promoted(self, tmp_path):
         coord = self._coord(tmp_path, 250.0)
         assert coord._lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=183.0)) is True
         assert coord.shared_state.current_best
-        assert coord.shared_state.latency_refusals == []
 
     def test_with_no_budget_an_untimed_winner_still_promotes(self, tmp_path):
         """Off by default: KEEP behaviour is exactly as it was when unset."""
         coord = self._coord(tmp_path, 0.0)
         assert coord._lift_to_current_best("explore", 1200.0, self._winner()) is True
-        assert coord.shared_state.latency_refusals == []
+
+
+class TestIntegrateDecisionsHonourTheVeto:
+    """The lanes decide KEEP themselves; each must revert its own over-budget change, not leave it for the lift."""
+
+    def _state(self) -> SharedState:
+        return SharedState(baseline_tput=1000.0, latency_budget_ms=250.0)
+
+    def test_the_shared_integrate_decision_reverts_an_over_budget_gain(self):
+        """``assess_integrate_performance`` decides kernel integration and GEMM tuning KEEPs."""
+        from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
+
+        performance = assess_integrate_performance(
+            self._state(),
+            {"output_throughput": 1200.0, "e2el_mean_ms": 1211.0},
+            base_tput=1000.0,
+            keep_threshold_pct=1.0,
+            stack_incremental_keep_threshold_pct=0.5,
+        )
+        assert performance.decision == "REVERT"
+        assert performance.graded.veto_reason == "latency_budget_exceeded"
+
+    def test_the_shared_integrate_decision_keeps_an_in_budget_gain(self):
+        from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
+
+        performance = assess_integrate_performance(
+            self._state(),
+            {"output_throughput": 1200.0, "e2el_mean_ms": 183.0},
+            base_tput=1000.0,
+            keep_threshold_pct=1.0,
+            stack_incremental_keep_threshold_pct=0.5,
+        )
+        assert performance.decision == "KEEP"
 
 
 class TestBaselineFailsClosedAtTheBoundary:
@@ -326,35 +353,36 @@ class TestResumeDoesNotSilentlyKeepTheOldBudget:
         assert latency_budget_resume_conflict(SharedState(latency_budget_ms=archived), requested) == ""
 
 
+class TestScope:
+    """Only scriptable frameworks can carry a budget; everywhere else the flag is refused, not ignored."""
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom", "", None])
+    def test_a_serving_framework_is_refused(self, framework):
+        from hyperloom.inference_optimizer.cli.bootstrap import latency_budget_scope_error
+
+        assert "scriptable" in latency_budget_scope_error(framework, 250.0)
+
+    @pytest.mark.parametrize("framework", ["xdit", "custom"])
+    def test_a_scriptable_framework_is_accepted(self, framework):
+        from hyperloom.inference_optimizer.cli.bootstrap import latency_budget_scope_error
+
+        assert latency_budget_scope_error(framework, 250.0) == ""
+
+    def test_omitting_the_flag_is_never_an_error(self):
+        from hyperloom.inference_optimizer.cli.bootstrap import latency_budget_scope_error
+
+        assert latency_budget_scope_error("sglang", None) == ""
+
+
 class TestPromptBlock:
     """What the router sees. Rendered, not asserted against source text."""
 
     def test_no_block_when_no_budget(self):
         assert SharedState().to_latency_budget_summary() == ""
 
-    def test_the_constraint_is_stated_when_set(self):
-        state = SharedState(latency_budget_ms=250.0)
-        block = state.to_latency_budget_summary()
+    def test_the_constraint_is_one_line_pointing_at_the_existing_ledgers(self):
+        block = SharedState(latency_budget_ms=250.0).to_latency_budget_summary()
+        assert "\n" not in block
         assert "250 ms" in block
-        assert "refused   : none so far" in block
-
-    def test_refusals_are_listed_so_a_binding_sla_is_visible(self):
-        state = SharedState(latency_budget_ms=250.0)
-        state.latency_refusals = [
-            {"variant_name": "cpx-2-streams", "action": "explore", "e2el_mean_ms": 1211.0},
-            {"variant_name": "qpx-4", "action": "integrate_patch", "e2el_mean_ms": None},
-        ]
-        block = state.to_latency_budget_summary()
-        assert "2 winner(s)" in block
-        assert "cpx-2-streams (explore): 1211 ms" in block
-        # An untimed refusal must not read as a measured one.
-        assert "qpx-4 (integrate_patch): not measured" in block
-
-    def test_the_list_is_capped_and_says_so(self):
-        state = SharedState(latency_budget_ms=250.0)
-        state.latency_refusals = [
-            {"variant_name": f"v{i}", "action": "explore", "e2el_mean_ms": 900.0} for i in range(8)
-        ]
-        block = state.to_latency_budget_summary()
-        assert "8 winner(s)" in block
-        assert "(+3 more elided" in block
+        assert "latency_budget_exceeded" in block
+        assert "explore_search" in block

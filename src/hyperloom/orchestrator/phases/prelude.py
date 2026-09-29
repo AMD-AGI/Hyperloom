@@ -2297,6 +2297,18 @@ class PreludePhase(CoordinatorCollaborator):
                     historical_bar,
                     3,
                 )
+        # The latency budget vetoes a replay the threshold kept, here rather than at the lift, so the drift branch
+        # rolls the replay back instead of leaving a refused config promoted on disk.
+        from hyperloom.common.perf_metric import latency_veto_reason
+
+        latency_veto = (
+            latency_veto_reason(result.get("e2el_mean_ms"), float(getattr(self.shared_state, "latency_budget_ms", 0.0)))
+            if reproduced
+            else ""
+        )
+        if latency_veto:
+            reproduced = False
+            outcome["latency_veto"] = latency_veto
         promoted_checkout = ""
         if reproduced:
             params = (task.params if task is not None else {}) or {}
@@ -2526,7 +2538,9 @@ class PreludePhase(CoordinatorCollaborator):
             if recorder is not None:
                 recorder.record_applied(kernel=kernel_outcome)
             outcome["status"] = "drift"
-            outcome["reason"] = f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
+            outcome["reason"] = (
+                latency_veto or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
+            )
             log.info(
                 "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",
                 measured_gain,

@@ -188,12 +188,22 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 
 ### Latency budget (constraint on KEEP)
 
-`--max-latency-ms` sets a ceiling on mean end-to-end latency. It is a
-constraint rather than an objective: it does not decide when the run stops,
-only which winners are admissible, so it composes with whichever `--target-*`
-is in use. It rides the same verdict the gain gates decide — a candidate that
-clears its objective and breaks the ceiling is a REVERT, carrying a
-`veto_reason` that distinguishes it from one that simply did not gain.
+`--max-latency-ms` sets a ceiling on mean end-to-end latency, for **scriptable
+workloads only** (`xdit`, `custom`); the CLI refuses it for a serving framework.
+A scriptable workload grades on output throughput alone, and it is the only
+kind compute partitioning places work for, so it is where a throughput-only
+gate can buy throughput with per-request latency. An AgentX serving session
+already refuses that trade on interactivity.
+
+It is a constraint rather than an objective: it does not decide when the run
+stops, only which winners are admissible, so it composes with whichever
+`--target-*` is in use. It rides the same verdict the gain gates decide — a
+candidate that would otherwise KEEP and breaks the ceiling is a REVERT, with a
+`veto_reason` (`latency_budget_exceeded` or `latency_unmeasured`). A candidate
+that did not gain carries no veto, so the ledger names the gate that refused
+it. Every KEEP decision a scriptable session reaches reads that verdict —
+explore, a framework source patch, and a kernel integration — so a lane
+reverts its own over-budget change rather than leaving it on disk.
 
 The constraint exists because a throughput-only comparison does not merely
 tolerate a latency-for-throughput trade, it selects for the worst one on
@@ -203,10 +213,11 @@ slower, the largest regression is where the most throughput is.
 It fails closed. A candidate that reported no end-to-end latency is refused,
 since a constraint nobody measured is not one anybody satisfied — which is why
 every lane copies `e2el_mean_ms` onto the dict it promotes. It fails closed at
-the boundary too: if the baseline itself exceeds the ceiling, the run stops
-with `baseline_over_latency_budget` rather than spending its whole budget
-refusing every candidate to learn what was knowable at launch. Off by default,
-leaving KEEP behaviour unchanged when unset.
+the boundary too: if the baseline itself exceeds the ceiling, or reported no
+end-to-end latency, the run stops with `baseline_over_latency_budget` rather
+than spending its whole budget refusing every candidate to learn what was
+knowable at launch. Off by default, leaving KEEP behaviour unchanged when
+unset.
 
 ### Runnable gate (earned KEEP)
 

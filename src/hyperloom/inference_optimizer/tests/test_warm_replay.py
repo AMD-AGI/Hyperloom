@@ -3021,3 +3021,25 @@ def test_a_skip_that_resolved_no_recipe_states_an_empty_request_not_an_invented_
     assert ext["skip"]["code"] == "no_warm_start_recipe"
     assert ext["request"]["tier"] == ""
     assert ext["request"]["donor"] is None
+
+
+@pytest.mark.parametrize(
+    ("e2el_ms", "expected_status", "stack_len"),
+    [
+        pytest.param(1211.0, "drift", 0, id="over-budget-rolls-back"),
+        pytest.param(183.0, "reproduced", 1, id="in-budget-adopts"),
+    ],
+)
+def test_promote_warm_replay_honours_the_latency_budget(tmp_path, e2el_ms, expected_status, stack_len):
+    """The replay decides its own KEEP; an over-budget one must drift here, not be refused later by the lift."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.latency_budget_ms = 250.0
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    task = _StubTask(params={"extra_server_args": "--split 8", "baseline_tput_anchor": 600.0})
+    coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0, "e2el_mean_ms": e2el_ms}, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == expected_status
+    assert len(coord.shared_state.optimization_stack) == stack_len
+    if expected_status == "drift":
+        assert outcome["reason"] == "latency_budget_exceeded"

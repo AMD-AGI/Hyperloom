@@ -2691,5 +2691,4 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
     monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", AsyncMock())
     await coord.writeback._promote_explore(out, None, wb._PromoteOutcome())
 
-    assert state.latency_refusals == []
     assert state.current_best["variant_name"] == "v_in_budget"
