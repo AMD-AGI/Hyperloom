@@ -1991,6 +1991,7 @@ async def run_grid(
                 duration_seconds=measurement.get("duration_seconds"),
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                gpu_power_avg_w=measurement.get("gpu_power_avg_w"),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 input_throughput=measurement.get("input_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),

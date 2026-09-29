@@ -2297,18 +2297,14 @@ class PreludePhase(CoordinatorCollaborator):
                     historical_bar,
                     3,
                 )
-        # The latency budget vetoes a replay the threshold kept, here rather than at the lift, so the drift branch
+        # The session constraints veto a replay the threshold kept, here rather than at the lift, so the drift branch
         # rolls the replay back instead of leaving a refused config promoted on disk.
-        from hyperloom.common.perf_metric import latency_veto_reason
+        from hyperloom.common.perf_metric import constraint_veto_reason
 
-        latency_veto = (
-            latency_veto_reason(result.get("e2el_mean_ms"), float(getattr(self.shared_state, "latency_budget_ms", 0.0)))
-            if reproduced
-            else ""
-        )
-        if latency_veto:
+        constraint_veto = constraint_veto_reason(result, self.shared_state) if reproduced else ""
+        if constraint_veto:
             reproduced = False
-            outcome["latency_veto"] = latency_veto
+            outcome["constraint_veto"] = constraint_veto
         promoted_checkout = ""
         if reproduced:
             params = (task.params if task is not None else {}) or {}
@@ -2464,8 +2460,9 @@ class PreludePhase(CoordinatorCollaborator):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
-                    # The latency budget grades on this and fails closed without it.
+                    # The latency and power budgets grade on these and fail closed without them.
                     "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "gpu_power_avg_w": result.get("gpu_power_avg_w"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2539,7 +2536,7 @@ class PreludePhase(CoordinatorCollaborator):
                 recorder.record_applied(kernel=kernel_outcome)
             outcome["status"] = "drift"
             outcome["reason"] = (
-                latency_veto or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
+                constraint_veto or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
             )
             log.info(
                 "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",

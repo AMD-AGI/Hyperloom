@@ -18,7 +18,7 @@ from typing import Any
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
-from ._gpu_metrics import write_gpu_metrics
+from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
 log = logging.getLogger(__name__)
 
@@ -664,6 +664,8 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
+        # Per-GPU mean power over the round, from the same telemetry ``gpu_metrics.json`` is written from.
+        "gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }

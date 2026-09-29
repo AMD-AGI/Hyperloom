@@ -306,26 +306,49 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def _ceiling_veto(observed: Any, ceiling: float | None, *, exceeded: str, unmeasured: str) -> str:
+    """``exceeded`` over the ceiling, ``unmeasured`` without a usable reading, else ""; "" when no ceiling is set.
+
+    Fails closed on an unmeasured candidate: a constraint nobody measured is not one anybody satisfied.
+    """
+    if not ceiling or ceiling <= 0:
+        return ""
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+        return unmeasured
+    value = float(observed)
+    if not isfinite(value) or value <= 0:
+        return unmeasured
+    return exceeded if value > float(ceiling) else ""
+
+
 def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     """Why the latency budget refuses this candidate, or "" when it does not.
 
     The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
     it refuses a candidate whose throughput won: a lever that buys throughput by
     making each stream slower is exactly the case a throughput-only comparison
-    selects for. Off entirely when *budget_ms* is not positive.
-
-    Fails closed on an unmeasured candidate — a constraint nobody measured is not
-    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
-    the dict it promotes.
+    selects for. Off entirely when *budget_ms* is not positive. Every lane copies
+    ``e2el_mean_ms`` onto the dict it promotes.
     """
-    if not budget_ms or budget_ms <= 0:
-        return ""
-    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
-        return "latency_unmeasured"
-    observed = float(observed_ms)
-    if not isfinite(observed) or observed <= 0:
-        return "latency_unmeasured"
-    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+    return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
+
+
+def power_veto_reason(observed_w: Any, budget_w: float) -> str:
+    """Why the power budget refuses this candidate, or "" when it does not.
+
+    The budget is a ceiling on per-GPU mean power over the measured round. A throughput gain bought by drawing more
+    power than the deployment can supply is not one it can use. Off entirely when *budget_w* is not positive. Every
+    lane copies ``gpu_power_avg_w`` onto the dict it promotes.
+    """
+    return _ceiling_veto(observed_w, budget_w, exceeded="power_budget_exceeded", unmeasured="power_unmeasured")
+
+
+def constraint_veto_reason(measurement: Any, state: Any) -> str:
+    """The first session constraint *measurement* breaks, or ""; the one reader every KEEP decision uses."""
+    source = measurement if isinstance(measurement, Mapping) else {}
+    return latency_veto_reason(
+        source.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    ) or power_veto_reason(source.get("gpu_power_avg_w"), float(getattr(state, "power_budget_w", 0.0) or 0.0))
 
 
 @dataclass(frozen=True)
@@ -387,7 +410,9 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "constraint_veto_reason",
     "latency_veto_reason",
+    "power_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",

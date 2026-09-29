@@ -272,6 +272,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
+    "baseline_over_power_budget": (
+        "The baseline's per-GPU mean power exceeded --max-power-w, or the baseline round reported no GPU power, so "
+        "the run stopped before optimizing. Every candidate is measured against that reference, so none could have "
+        "been promoted. If the round reported no power, check that the benchmark's GPU monitor sampled it; "
+        "otherwise lower the cards' power cap (amd-smi set --power-cap) so the baseline fits, or relaunch with a "
+        "ceiling the baseline can meet."
+    ),
     "baseline_over_latency_budget": (
         "The baseline's own mean end-to-end latency exceeded --max-latency-ms, or the baseline reported no "
         "end-to-end latency at all, so the run stopped before optimizing. The budget refuses any KEEP over the "
