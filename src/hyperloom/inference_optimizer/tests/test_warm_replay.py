@@ -983,7 +983,7 @@ def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
     assert coord.shared_state.current_best == prior_best
     assert coord.shared_state.cumulative_gain_validated == 0.0
     assert coord.shared_state.cumulative_gain_validated_ts == ""
-    journal = coord._ensure_journal()
+    journal = coord.writeback._ensure_journal()
     assert not [e for e in journal.entries if e.outcome == OUTCOME_KEEP]
 
 
@@ -1266,7 +1266,7 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     assert (
-        coord._is_promotable_result(
+        coord.writeback._is_promotable_result(
             "replay_warm_recipe",
             {"status": "failed", "error_class": "crash"},
         )
@@ -1276,7 +1276,7 @@ def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
         "flag is cleared; otherwise PRELUDE never exits"
     )
     assert (
-        coord._is_promotable_result(
+        coord.writeback._is_promotable_result(
             "replay_warm_recipe",
             {"status": "succeeded", "output_throughput": 700.0},
         )
@@ -1469,10 +1469,10 @@ async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
 
     failed = {"status": "failed", "error_class": "timeout", "error": "killed"}
     task = _StubTask(kind="replay_warm_recipe")
-    if coord._is_promotable_result(task.kind, failed):
-        await coord._promote_to_shared_state(task.kind, failed, task=task)
+    if coord.writeback._is_promotable_result(task.kind, failed):
+        await coord.writeback._promote_to_shared_state(task.kind, failed, task=task)
     else:
-        await coord._handle_unpromotable_result(task, failed)
+        await coord.writeback._handle_unpromotable_result(task, failed)
 
     assert warm_replay_in_flight(coord.shared_state) is False, (
         "failed replay left warm_replay_in_flight True → PRELUDE would never exit"
@@ -1635,26 +1635,26 @@ async def test_prelude_initial_analysis_runs_when_the_budget_covers_it(tmp_path)
 
 def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
     coord = _make_coord(tmp_path)
-    assert coord._should_run_prelude_bootstrap(600.0) is True
+    assert coord.writeback._should_run_prelude_bootstrap(600.0) is True
 
 
 def test_prelude_bootstrap_skipped_without_throughput(tmp_path):
     coord = _make_coord(tmp_path)
-    assert coord._should_run_prelude_bootstrap(0.0) is False
-    assert coord._should_run_prelude_bootstrap(None) is False
+    assert coord.writeback._should_run_prelude_bootstrap(0.0) is False
+    assert coord.writeback._should_run_prelude_bootstrap(None) is False
 
 
 def test_prelude_bootstrap_skipped_when_roofline_pending(tmp_path):
     coord = _make_coord(tmp_path)
     coord.shared_state.auto_roofline_pending_task_id = "task-roofline"
-    assert coord._should_run_prelude_bootstrap(600.0) is False
+    assert coord.writeback._should_run_prelude_bootstrap(600.0) is False
 
 
 def test_prelude_bootstrap_skipped_when_stop_pending(tmp_path):
     """A baseline that halted the run (e.g. baseline_accuracy_failed) must not enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
     coord = _make_coord(tmp_path)
     coord.shared_state.stop_reason = "baseline_accuracy_failed"
-    assert coord._should_run_prelude_bootstrap(600.0) is False
+    assert coord.writeback._should_run_prelude_bootstrap(600.0) is False
 
 
 def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):

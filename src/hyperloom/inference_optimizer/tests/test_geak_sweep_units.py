@@ -298,7 +298,7 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
             "gpu_ids": gpu_ids,
             "gpu_ids_space": gpu_ids_space,
             "launch_recipe": str(recipe),
-            "baseline_env_spec": coord.build_env_spec(),
+            "baseline_env_spec": coord.writeback.build_env_spec(),
             "bench_client": "native",
             "workload": {"isl": 16, "osl": 16, "conc": 1},
         }
@@ -321,7 +321,7 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
-    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+    outcome = await coord.writeback._validate_geak_via_geak_harness(reason="unit")
 
     assert captured["GPU"] == gpu_ids
     if gpu_ids_space == "logical":

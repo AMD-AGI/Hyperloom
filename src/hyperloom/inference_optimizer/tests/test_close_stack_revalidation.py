@@ -26,7 +26,7 @@ def coordinator(tmp_path, monkeypatch):
     state = c.shared_state
     state.baseline_tput = 1000.0
     state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
-    assert c._lift_to_current_best(
+    assert c.writeback._lift_to_current_best(
         "explore",
         1100.0,
         {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
@@ -62,9 +62,9 @@ def _run_rebench(c, *, measured: float | None, calls: list):
 @pytest.mark.asyncio
 async def test_a_validated_stack_is_not_rebenched(coordinator) -> None:
     c = coordinator
-    assert c._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert c.writeback._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
     calls: list = []
-    c.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
+    c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
     await c._revalidate_stack_for_close()
 
@@ -76,7 +76,7 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
     c = coordinator
     c.shared_state.stop_reason = "global_converged"
     calls: list = []
-    c.run_task_registered = _run_rebench(c, measured=1120.0, calls=calls)
+    c.dispatcher.run_task_registered = _run_rebench(c, measured=1120.0, calls=calls)
 
     await c._revalidate_stack_for_close()
 
@@ -89,24 +89,24 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
     assert not state.optimization_stack_has_unvalidated_keeps()
     assert state.cumulative_gain_validated == pytest.approx(12.0)
     assert state.optimization_stack[-1]["variant_name"] == "page16" and len(state.optimization_stack) == 1
-    assert c.finalize_recipe_and_journal()["reason"] != "unvalidated_recipe_stack"
+    assert c.writeback.finalize_recipe_and_journal()["reason"] != "unvalidated_recipe_stack"
 
 
 @pytest.mark.asyncio
 async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validation(coordinator) -> None:
     c = coordinator
     state = c.shared_state
-    summary = await c._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench")
+    summary = await c.writeback._enqueue_internal_stack_rebench(reason="unit", idempotency_key="unit-rebench")
     task = await c.tasks.get(summary["task_id"])
     assert task.params["recipe_generation"] == 1
-    assert c._lift_to_current_best(
+    assert c.writeback._lift_to_current_best(
         "explore",
         1300.0,
         {"name": "page32", "extra_server_args": "--page-size 32", "candidate_extra_server_args": "--page-size 32"},
     )
-    assert c._update_cumulative_gain_validated(1300.0, {"output_throughput": 1300.0})
+    assert c.writeback._update_cumulative_gain_validated(1300.0, {"output_throughput": 1300.0})
 
-    await c._promote_to_shared_state(
+    await c.writeback._promote_to_shared_state(
         "explore",
         {"status": "succeeded", "output_throughput": 1100.0, "winners": []},
         task=task,
@@ -121,14 +121,14 @@ async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validat
 async def test_a_failed_rebench_leaves_close_publishing_nothing(coordinator) -> None:
     c = coordinator
     calls: list = []
-    c.run_task_registered = _run_rebench(c, measured=None, calls=calls)
+    c.dispatcher.run_task_registered = _run_rebench(c, measured=None, calls=calls)
 
     await c._revalidate_stack_for_close()
 
     assert len(calls) == 1
     assert c.shared_state.optimization_stack_has_unvalidated_keeps()
     assert _steps(c)[-1]["status"] == "failed"
-    assert c.finalize_recipe_and_journal()["reason"] == "unvalidated_recipe_stack"
+    assert c.writeback.finalize_recipe_and_journal()["reason"] == "unvalidated_recipe_stack"
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_an_interrupted_run_is_not_rebenched(coordinator, stop_reason) -> 
     c = coordinator
     c.shared_state.stop_reason = stop_reason
     calls: list = []
-    c.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
+    c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
     await c._revalidate_stack_for_close()
 
@@ -151,7 +151,7 @@ async def test_a_budget_that_cannot_fit_one_measurement_is_not_rebenched(coordin
     c.shared_state.baseline_runtime_sec = 900.0
     c.shared_state.session_budget_usable_sec = lambda **_kwargs: 60.0
     calls: list = []
-    c.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
+    c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
     await c._revalidate_stack_for_close()
 
@@ -168,7 +168,7 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
         seen.append(task)
         return None
 
-    c.run_task_registered = _lanes_busy
+    c.dispatcher.run_task_registered = _lanes_busy
 
     await c._revalidate_stack_for_close()
 
@@ -188,7 +188,7 @@ async def test_a_rebench_that_outlives_its_bound_is_abandoned(coordinator) -> No
         await c.tasks.transition(task.task_id, "running")
         await asyncio.sleep(5)
 
-    c.run_task_registered = _hang
+    c.dispatcher.run_task_registered = _hang
 
     await c._revalidate_stack_for_close()
 

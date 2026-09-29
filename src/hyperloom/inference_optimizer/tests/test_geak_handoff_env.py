@@ -37,7 +37,7 @@ async def test_handoff_preserves_environment_values(
         "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
         stop_after_handoff,
     )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["baseline_env_spec"]["config"]["extra_envs"] == expected
@@ -83,7 +83,7 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
             stop_after_handoff,
         )
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
         return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
     return capture

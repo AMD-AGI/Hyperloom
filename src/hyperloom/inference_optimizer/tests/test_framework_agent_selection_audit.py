@@ -271,7 +271,7 @@ def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path
 # Dispatch pause on a spent phase budget
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher._dispatch_paused_for_phase_budget() is False
 
 
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
@@ -284,7 +284,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
         "phase_budget_remaining_seconds",
         lambda _s: 0.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is True
+    assert coord.dispatcher._dispatch_paused_for_phase_budget() is True
 
 
 def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> None:
@@ -294,7 +294,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
         "phase_budget_remaining_seconds",
         lambda _s: 123.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher._dispatch_paused_for_phase_budget() is False
 
 
 # _maybe_autosubmit_framework_config

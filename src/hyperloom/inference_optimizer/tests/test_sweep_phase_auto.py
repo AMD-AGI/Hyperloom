@@ -1639,13 +1639,13 @@ async def test_stack_members_invalid_recovery_preserves_pending_evidence(tmp_pat
     original_manifest = manifest.read_bytes()
     revert = Mock(return_value={"status": "ok"})
     monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
-    c._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
 
     with session_scope(tmp_path), pytest.raises(ValueError, match="(?i)stack|member"):
         await c._recover_interrupted_stack_validation()
 
     revert.assert_not_called()
-    c._maybe_enqueue_watermark_roofline.assert_not_called()
+    c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
     assert c.shared_state.to_dict() == before
     assert state_path.read_bytes() == original
     assert manifest.read_bytes() == original_manifest
@@ -1688,7 +1688,7 @@ def historical_stack_coord(tmp_path, monkeypatch):
                 "gain_pct": gain,
             }
         )
-    c._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
     return c
 
 
@@ -1795,14 +1795,14 @@ async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_valid
     )
     stack[0]["patch_path"] = str(tmp_path / "different.patch")
     before = deepcopy(c.shared_state.to_dict())
-    c._maybe_enqueue_watermark_roofline = AsyncMock()
+    c.phase_kernel._maybe_enqueue_watermark_roofline = AsyncMock()
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
 
     with pytest.raises(ValueError, match="(?i)stack|member"):
         await c._recover_interrupted_stack_validation()
 
     assert c.shared_state.to_dict() == before
-    c._maybe_enqueue_watermark_roofline.assert_not_called()
+    c.phase_kernel._maybe_enqueue_watermark_roofline.assert_not_called()
 
 
 @pytest.mark.asyncio

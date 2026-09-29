@@ -881,7 +881,7 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
     assert pre.get("last_profile_trace", "") == s.last_profile_trace
 
     s.last_profile_trace = "/sessions/abc/.../NEW_trace.gz"
-    await coord._promote_to_shared_state(
+    await coord.writeback._promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=1),
         task=_roofline_task(),
@@ -905,7 +905,7 @@ async def test_promote_roofline_records_audit_attempt(session_dir):
     s.last_profile_trace = "/t/trace.gz"
 
     assert s.roofline_attempts == []
-    await coord._promote_to_shared_state(
+    await coord.writeback._promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=1),
         task=_roofline_task(),
@@ -931,7 +931,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     }
     s.last_profile_status = "succeeded"
 
-    await coord._promote_to_shared_state(
+    await coord.writeback._promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=3),
         task=_roofline_task(snapshot_id=3),

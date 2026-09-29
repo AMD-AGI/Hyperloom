@@ -285,7 +285,7 @@ def coord(tmp_path: Path):
     c.state = CoordinatorState()
     c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
-    c._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
 
@@ -448,7 +448,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
         },
     )
     await coord.router._handle_review_verdict("critic", intent)
-    coord._record_observation.assert_awaited()
+    coord.writeback._record_observation.assert_awaited()
     assert coord._materialise_calls == []
 
 
@@ -588,7 +588,7 @@ async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
         await coord.router._handle_review_verdict("critic", intent)
     assert any("held to its rule" in r.getMessage() for r in caplog.records)
-    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -625,7 +625,7 @@ async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
     await coord.router._handle_review_verdict("critic", intent)
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
-    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -1280,7 +1280,7 @@ async def test_a_variant_resting_only_on_the_cited_rule_still_gives_up_its_rejec
 
     assert pending.verdict == "advise"
     assert len(coord._materialise_calls) == 1
-    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "verdict_downgraded_to_rule_verdict" in kinds
 
 
@@ -1653,7 +1653,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     coord.state = CoordinatorState()
     coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
-    coord._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
 
     create_calls: list[dict[str, Any]] = []
 
@@ -1706,7 +1706,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.state = CoordinatorState()
     coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
-    coord._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
@@ -1727,7 +1727,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.shared_state = _MoreState()
     await coord.proposals._materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
     assert create_calls == []
-    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    kinds = [call.args[2].get("kind") for call in coord.writeback._record_observation.await_args_list]
     assert "proposal_materialize_skipped" in kinds
 
 
@@ -1739,7 +1739,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     coord.state = CoordinatorState()
     coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
-    coord._record_observation = AsyncMock()  # type: ignore[method-assign]
+    coord.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
@@ -1806,10 +1806,10 @@ def _delegate_coord(tmp_path: Path):
     c.state = CoordinatorState()
     c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
-    c._record_observation = AsyncMock()  # type: ignore[method-assign]
-    c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
-    c._admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
-    c._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
+    c.writeback._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.writeback._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
+    c.dispatcher._admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
+    c.dispatcher._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c
 

@@ -138,7 +138,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
             "candidates_path": "/tmp/candidates.json",
         }
 
-        assert c._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+        assert c.dispatcher._sequence_denial_for_request("kernel_agent", "run_optimization") is None
     finally:
         await c.stop()
 
@@ -191,7 +191,9 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
+        await c.phase_kernel._run_kernel_agent(
+            SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"}))
+        )
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
@@ -200,7 +202,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.shared_state.current_best["tput"] == 900.0
         assert c.shared_state.cumulative_gain_validated == pytest.approx(12.5)
         assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
-        assert c._gemm_tuning_required_before_kernel_opt() is False
+        assert c.dispatcher._gemm_tuning_required_before_kernel_opt() is False
     finally:
         await c.stop()
 

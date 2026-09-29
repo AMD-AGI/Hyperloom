@@ -196,7 +196,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
             "trace_files": ["/new/trace.json.gz"],
             "trace_dir": "/new/torch_trace",
         }
-        await c._promote_to_shared_state("profile", result, task=task)
+        await c.writeback._promote_to_shared_state("profile", result, task=task)
         assert c.shared_state.last_profile_trace == "/new/trace.json.gz"
         assert c.shared_state.last_profile_args == "--cuda-graph-max-bs 8"
         assert c.shared_state.last_trace_analyze == {}
@@ -221,7 +221,7 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
             "trace_files": ["/tmp/ws/torch_trace/main.trace.json.gz"],
             "workspace": "/tmp/ws",
         }
-        await c._promote_to_shared_state("profile", result)
+        await c.writeback._promote_to_shared_state("profile", result)
 
         assert c.shared_state.last_profile_trace == "/tmp/ws/torch_trace/main.trace.json.gz"
         assert (c.shared_state.current_best or {}).get("action") != "profile"
@@ -248,7 +248,7 @@ async def test_profile_trace_dir_without_json_not_promoted(session_dir):
     """Empty trace_dir without .trace.json.gz must NOT be promoted."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        await c._promote_to_shared_state(
+        await c.writeback._promote_to_shared_state(
             "profile",
             {
                 "status": "succeeded",

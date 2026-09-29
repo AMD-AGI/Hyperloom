@@ -99,9 +99,9 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    summary = c._geak_rebench_params(reason="unit")
+    summary = c.writeback._geak_rebench_params(reason="unit")
     assert summary["fallback"] == "geak_harness"
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert st.current_best == before_best
     assert st.cumulative_gain_validated == 20.0
@@ -126,7 +126,7 @@ async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordina
         "accepted_config": {"flags": "--candidate", "env": ""},
     }
 
-    params = c._geak_rebench_params(reason="unit")
+    params = c.writeback._geak_rebench_params(reason="unit")
 
     assert params.get("geak_fallback") is True
     assert params["config_path"] == st.baseline_config_path
@@ -160,7 +160,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
     if args_mode is not None:
         st.current_best.update(remove_args=remove_args, unset_envs=unset_envs, args_mode=args_mode)
     st.geak_result = {}
-    native = await c._enqueue_internal_stack_rebench(reason="resume")
+    native = await c.writeback._enqueue_internal_stack_rebench(reason="resume")
     native_row = await c.tasks.get(str(native["task_id"]))
     base_keys = {"base_remove_args", "base_unset_envs", "base_args_mode"}
     native_controls = {key: value for key, value in native_row.params.items() if key in base_keys}
@@ -179,7 +179,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
             "env": "SGLANG_USE_AITER=1",
         },
     }
-    enqueued = c._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = c.writeback._geak_rebench_params(reason="geak_e2e_win")
 
     assert enqueued.get("geak_fallback") is True
     assert enqueued["grid"][0]["extra_args"] == "--fp8-gemm-backend aiter"
@@ -411,7 +411,7 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     )
     st.current_best = {"extra_server_args": "--incumbent", **controls}
 
-    params = c._geak_rebench_params(reason="geak_e2e_win")
+    params = c.writeback._geak_rebench_params(reason="geak_e2e_win")
     task = await c.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
     entry = task.params["grid"][0]
     ran = GridVariant(
@@ -494,7 +494,7 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
         pytest.fail("empty optimization must not launch a fallback")
 
     monkeypatch.setattr(c, "_validate_geak_via_geak_harness", _must_not_fallback)
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
     assert not c.shared_state.geak_pending
@@ -581,7 +581,7 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c._promote_to_shared_state(
+    await c.writeback._promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -625,7 +625,7 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c._promote_to_shared_state(
+    await c.writeback._promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -690,7 +690,7 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c._promote_to_shared_state(
+    await c.writeback._promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -823,7 +823,7 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     finally:
         monkeypatch.undo()
 
@@ -904,7 +904,7 @@ async def test_failed_runner_does_not_replay_the_settled_result(coordinator, tmp
         lambda: subprocess.CompletedProcess(["geak_runner.py"], 1, "", "runner failed"),
     )
 
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(calls) == 1
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
@@ -922,7 +922,7 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     revalidations = _record_revalidations(c)
     calls = _stub_geak_runner_call(monkeypatch, tmp_path, _timed_out)
 
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(calls) == 1
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
@@ -982,12 +982,14 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     finally:
         monkeypatch.undo()
 
     assert revalidations == ["geak_e2e_win_recovered"]
-    assert c._geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
+    assert (
+        c.writeback._geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
+    )
     assert st.geak_result["final_throughput_tok_s"] == pytest.approx(fresh["final_throughput_tok_s"])
 
 
@@ -1313,7 +1315,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
         idempotency_key="geak-revalidate-c0",
         task_id="refused-rebench",
     )
-    await c._promote_to_shared_state(
+    await c.writeback._promote_to_shared_state(
         rebench.kind,
         {"output_throughput": 150.0, "best_variant": {"fingerprint": "mismatched-hash"}, "winners": []},
         task=rebench,
@@ -1334,8 +1336,8 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     )
     try:
         # Twice: a failed GEAK run must not erase the verdict for the next entry.
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     finally:
         monkeypatch.undo()
 
@@ -1374,7 +1376,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
         lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
     )
     try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     finally:
         monkeypatch.undo()
 

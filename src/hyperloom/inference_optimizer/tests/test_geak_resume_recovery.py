@@ -93,7 +93,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
 
     coord.phase_kernel._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     # The result.json is recovered into state, but as an unvalidated candidate.
     assert coord.shared_state.geak_result["status"] == "ok"
@@ -156,7 +156,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
     # The recovery short-circuit must not have fired; the normal path resolves the runner (and here aborts via the
     # injected error).
@@ -199,7 +199,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["max_model_len"] == 2248
@@ -279,7 +279,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
@@ -320,7 +320,7 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["schema_version"] >= 3
@@ -378,7 +378,7 @@ async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["gpu_pin"]["var"] == "HIP_VISIBLE_DEVICES"

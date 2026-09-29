@@ -35,7 +35,7 @@ def _backends_full() -> dict[str, object]:
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        info = c.resumed_from
+        info = c.writeback.resumed_from
         assert info["is_resume"] is False
         assert info["event_count"] == 0
         assert info["state_json_present"] is False
@@ -49,8 +49,8 @@ async def test_existing_state_json_triggers_resume(session_dir):
     SharedState(session_id="resumed").save(session_dir)
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c.resumed_from["is_resume"] is True
-        assert c.resumed_from["state_json_present"] is True
+        assert c.writeback.resumed_from["is_resume"] is True
+        assert c.writeback.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
 
