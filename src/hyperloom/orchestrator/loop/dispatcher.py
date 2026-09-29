@@ -1264,11 +1264,10 @@ class DispatcherCollaborator:
         # integrate_patch completion handling.
         if task.kind == "integrate_patch" and result.state != "cancelled":
             await self.phase_framework.on_integrate_patch_settled(task, result)
-        # Auto-promote succeeded results into CORE_STATE_FIELDS
-        # (Coordinator-only writer).  Warm replay is deliberately routed
-        # through its promote handler even when dispatch itself failed:
-        # that handler owns rollback of pre-applied framework patches and
-        # clears the PRELUDE ``in_flight`` gate.
+        # Auto-promote succeeded results (Coordinator-only writer).  Warm
+        # replay is deliberately routed through its promote handler even when
+        # dispatch itself failed: that handler owns rollback of pre-applied
+        # framework patches and clears the PRELUDE ``in_flight`` gate.
         result_payload = dict(result.result or {})
         replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
         if replay_needs_cleanup:

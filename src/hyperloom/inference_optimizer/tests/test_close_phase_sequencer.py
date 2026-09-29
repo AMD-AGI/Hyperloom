@@ -31,7 +31,6 @@ from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
     _CLOSE_STEP_WAIT_FLOOR_SEC,
 )
-from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
 
@@ -850,16 +849,6 @@ async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     assert coord.shared_state.close_sequence_done is True
 
 
-def test_close_and_recipe_finalize_fields_in_core_state_fields():
-    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
-    assert {
-        "close_sequence_done",
-        "recipe_finalize_status",
-        "recipe_finalize_attempts",
-        "recipe_finalize_outcome",
-    } <= CORE_STATE_FIELDS
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -870,6 +859,7 @@ def test_close_and_recipe_finalize_fields_in_core_state_fields():
     ],
 )
 def test_policy_blocks_llm_recipe_finalize_state_write(field, value):
+    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )

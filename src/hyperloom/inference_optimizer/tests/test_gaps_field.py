@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
 )
 from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
     PolicyDenied,
     PolicyGate,
 )
@@ -60,13 +59,8 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
 
 
 # 2. PolicyGate lock (Inv-1 / Inv-10.2)
-def test_core_state_fields_includes_gaps():
-    """``CORE_STATE_FIELDS`` MUST contain ``gaps`` so the LLM can't fabricate entries via ``update_state``."""
-    assert "gaps" in CORE_STATE_FIELDS
-
-
 def test_policy_gate_rejects_update_state_for_gaps():
-    """Orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
+    """Orchestration cannot fabricate gaps[] entries via ``update_state`` (rule='state_field')."""
     gate = PolicyGate(role_registry=default_role_registry())
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(

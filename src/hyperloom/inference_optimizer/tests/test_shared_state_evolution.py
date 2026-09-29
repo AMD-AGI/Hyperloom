@@ -16,6 +16,21 @@ from hyperloom.orchestrator.state.shared_state import (
 )
 
 
+def _assert_update_state_denied(changes: dict) -> None:
+    """Assert PolicyGate refuses an orchestration ``update_state`` carrying ``changes``."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+    gate = PolicyGate(role_registry=default_role_registry())
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(type=IntentType.UPDATE_STATE, payload={"changes": changes}),
+        )
+    assert exc.value.rule == "state_field"
+
+
 # 1. schema_version surface
 def test_fresh_session_has_latest_schema_version():
     """Fresh SharedState carries the current schema version."""
@@ -227,30 +242,32 @@ def test_cli_exposes_reset_state_flag():
     assert args2.reset_state is False
 
 
-# 6. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
-def test_core_state_fields_contains_v08_new_additions():
-    """The new fields are locked in CORE_STATE_FIELDS."""
-    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
-
-    must_be_locked = {
-        "phase",
-        "phase_started_ts",
-        "phase_history",
-        "phase_budget_pct",
-        "recipe_kb_session_id",
-        "warm_start_recipe",
-        "warm_start_pitfalls",
-        "warm_start_lessons",
-        "specialist_rounds",
-        "research_lane_capacity",
-        "stop_reason",
-        "optimization_stack",
-        "current_best",
-        "working_recipe_generation",
-        "validated_recipe_generation",
-    }
-    missing = must_be_locked - CORE_STATE_FIELDS
-    assert not missing, f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"
+# 6. Inv-10.2 — the gate blocks an LLM update_state phase change
+@pytest.mark.parametrize(
+    "field",
+    sorted(
+        {
+            "phase",
+            "phase_started_ts",
+            "phase_history",
+            "phase_budget_pct",
+            "recipe_kb_session_id",
+            "warm_start_recipe",
+            "warm_start_pitfalls",
+            "warm_start_lessons",
+            "specialist_rounds",
+            "research_lane_capacity",
+            "stop_reason",
+            "optimization_stack",
+            "current_best",
+            "working_recipe_generation",
+            "validated_recipe_generation",
+        }
+    ),
+)
+def test_v08_coordinator_owned_fields_are_not_writable_by_update_state(field):
+    """v0.8 §3.10 requires these to stay Coordinator-owned."""
+    _assert_update_state_denied({field: "forged"})
 
 
 def test_a_run_leg_boundary_is_not_writable_by_update_state():
@@ -259,36 +276,7 @@ def test_a_run_leg_boundary_is_not_writable_by_update_state():
     The next leg banks time up to it, so a forged value bills that phase for
     time it never ran; the Coordinator owns it exactly as it owns ``stop_ts``.
     """
-    state = SharedState()
-    state.leg_ended_ts = "2026-08-01T00:00:00+00:00"
-
-    applied = state.apply_changes({"leg_ended_ts": "2099-01-01T00:00:00+00:00"}, allow_core=False)
-
-    assert applied == {}
-    assert state.leg_ended_ts == "2026-08-01T00:00:00+00:00"
-
-
-def test_policy_blocks_llm_phase_write():
-    """LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {"phase": "KERNEL"}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
+    _assert_update_state_denied({"leg_ended_ts": "2099-01-01T00:00:00+00:00"})
 
 
 def test_policy_blocks_llm_schema_version_write():
@@ -314,37 +302,9 @@ def test_policy_blocks_llm_schema_version_write():
         gate.validate_intent("orchestration", intent)
 
 
-def test_policy_blocks_llm_optimization_stack_write():
-    """An LLM update_state with ``optimization_stack`` is denied (Coordinator-only)."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {"optimization_stack": []}},
-    )
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
-
-
-# Search ledgers locked under CORE_STATE_FIELDS.
-def test_search_ledgers_in_core_state_fields():
-    """The ``explore_search`` ledger is locked as CORE."""
-    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
-
-    assert "explore_search" in CORE_STATE_FIELDS, (
-        "'explore_search' must be in CORE_STATE_FIELDS so LLM update_state cannot rewrite the search ledger"
-    )
+def test_the_search_ledger_is_not_writable_by_update_state():
+    """A rewritten ``explore_search`` would bypass dedup-by-fingerprint."""
+    _assert_update_state_denied({"explore_search": {"tested": {}}})
 
 
 def test_enablement_accepted_config_path_roundtrips(tmp_path):
@@ -397,7 +357,6 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     (sd / "state.json").write_text(json.dumps({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}))
     loaded = SharedState.load_or_init(sd)
     assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS)
-    assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
 
 
 def test_v4_nested_enablement_roundtrips(tmp_path):
@@ -425,31 +384,6 @@ def test_to_dict_emits_nested_enablement():
     assert isinstance(d.get("enablement"), dict)
     assert d["enablement"]["launch_log"] == "test"
     assert "enablement_launch_log" not in d
-
-
-@pytest.mark.parametrize("field_name", ["explore_search"])
-def test_policy_blocks_llm_search_ledger_write(field_name):
-    """LLM ``update_state`` of a search ledger surfaces a ``state_field`` denial."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
-    from hyperloom.orchestrator.policy.gate import (
-        PolicyDenied,
-        PolicyGate,
-    )
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    intent = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {field_name: {"tested": {}}}},
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "state_field"
 
 
 def _applyback_evidence():

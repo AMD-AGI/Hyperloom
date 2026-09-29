@@ -22,7 +22,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
 )
 from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
     KERNEL_AGENT_OWNED_ACTIONS,
     PolicyDenied,
     PolicyGate,
@@ -66,7 +65,6 @@ def test_orchestration_permissions():
     assert role.backend_type == BackendType.CLAUDE
     assert role.model == DEFAULT_CLAUDE_MODEL
     assert role.can_delegate_side_effects is True
-    assert role.can_mutate_core_state is False
     assert IntentType.PROPOSE_ACTION in role.allowed_intents
     assert IntentType.DELEGATE in role.allowed_intents
     assert IntentType.REQUEST in role.allowed_intents
@@ -123,11 +121,6 @@ def test_response_is_not_a_valid_intent_type():
     envelope = {"intents": [{"intent_type": "response", "payload": {"in_reply_to": "m1", "kind": "profile_done"}}]}
     with pytest.raises(IntentValidationError, match="not in allowed set"):
         validate_envelope(envelope)
-
-
-def test_core_state_fields_includes_current_best():
-    assert "current_best" in CORE_STATE_FIELDS
-    assert "stop_reason" in CORE_STATE_FIELDS
 
 
 # PolicyGate validation
@@ -343,16 +336,6 @@ def test_gate_orchestration_prune_branch_allowed_with_family(gate):
     )
 
 
-def test_gate_orchestration_update_state_non_core_ok(gate):
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.UPDATE_STATE,
-            payload={"changes": {"current_action": "baseline"}},
-        ),
-    )
-
-
 def test_gate_orchestration_update_state_core_field_rejected(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -365,14 +348,8 @@ def test_gate_orchestration_update_state_core_field_rejected(gate):
     assert exc.value.rule == "state_field"
 
 
-def test_core_state_fields_includes_model_arch_tags():
-    """``model_architectures`` / ``model_type`` are config.json fact-layer tags that stay locked."""
-    assert "model_architectures" in CORE_STATE_FIELDS
-    assert "model_type" in CORE_STATE_FIELDS
-
-
 def test_gate_update_state_model_arch_tags_rejected(gate):
-    """A non-core-mutating role must not overwrite the config.json architecture tags via ``update_state``."""
+    """An agent must not overwrite the config.json architecture tags via ``update_state``."""
     for field_name in ("model_architectures", "model_type"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -385,14 +362,8 @@ def test_gate_update_state_model_arch_tags_rejected(gate):
         assert exc.value.rule == "state_field", field_name
 
 
-def test_core_state_fields_includes_degraded_markers():
-    """``degraded_mode`` / ``model_warnings`` are preflight-authored facts that stay locked."""
-    assert "degraded_mode" in CORE_STATE_FIELDS
-    assert "model_warnings" in CORE_STATE_FIELDS
-
-
 def test_gate_update_state_degraded_markers_rejected(gate):
-    """A non-core-mutating role must not forge/clear the degraded-run markers."""
+    """An agent must not forge/clear the degraded-run markers."""
     for field_name, value in (("degraded_mode", False), ("model_warnings", [])):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -453,15 +424,8 @@ def test_robustness_role_no_system_prompt_file():
     assert not p.exists(), "robustness.md must not be shipped"
 
 
-def test_core_state_fields_includes_closing_phase_and_baseline_config():
-    # closing_phase and baseline_config_path are Coordinator-only fact fields locked against non-coordinator
-    # update_state.
-    assert "closing_phase" in CORE_STATE_FIELDS
-    assert "baseline_config_path" in CORE_STATE_FIELDS
-
-
 def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
-    # A non-core-mutating role must not force wind-down or inject a launch config path via update_state.
+    # An agent must not force wind-down or inject a launch config path via update_state.
     for field_name, value in (("closing_phase", True), ("baseline_config_path", "/etc/evil.yaml")):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -477,7 +441,6 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
 def test_gate_update_state_cannot_move_the_resume_boundary(gate):
     # resumed_ts dates the current run leg: moving it hands the previous leg's CLOSE transition back the right to
     # speak for this one.
-    assert "resumed_ts" in CORE_STATE_FIELDS
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
@@ -502,7 +465,6 @@ def test_the_model_cannot_rewrite_the_budget_the_closing_reserve_leaves_it(gate)
 def test_gate_update_state_cannot_move_a_session_end_time(gate):
     # stop_ts is the timestamp half of stop_reason, written by the same setter: locking only the reason lets a model
     # post-date the session's end.
-    assert "stop_ts" in CORE_STATE_FIELDS
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
@@ -512,18 +474,3 @@ def test_gate_update_state_cannot_move_a_session_end_time(gate):
             ),
         )
     assert exc.value.rule == "state_field"
-
-
-def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
-    """Names what the lock prevents: one field, and the run has no usable time left."""
-    state = SharedState(session_id="s", max_minutes=100)
-    # Freeze elapsed time: two live ``session_budget_usable_sec`` reads race the clock by tens of microseconds, which
-    # is enough for ``==`` to fail.
-    state.elapsed_minutes = lambda **_kw: 90.0  # type: ignore[method-assign]
-    honest = state.session_budget_usable_sec()
-
-    applied = state.apply_changes({"closing_grace_sec": 1e9}, allow_core=False)
-
-    assert applied == {}
-    assert honest > 0.0
-    assert state.session_budget_usable_sec() == honest

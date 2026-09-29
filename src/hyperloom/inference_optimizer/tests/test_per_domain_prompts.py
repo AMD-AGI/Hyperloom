@@ -1019,14 +1019,28 @@ def test_update_last_specialist_snapshot():
     assert s.last_specialist["task_id"] == "task-001"
 
 
-def test_research_lane_capacity_is_core_state_field():
-    """LLM cannot raise research_lane_capacity mid-flight."""
-    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("research_lane_capacity", 99),
+        ("gpu_specialist_capacity", 99),
+        ("specialist_rounds", []),
+        ("last_specialist", {"task_id": "forged"}),
+    ],
+)
+def test_update_state_cannot_raise_the_specialist_capacity_mid_flight(field, value):
+    """Capacity is set once at CLI/manifest time; the ledgers beside it are Coordinator-written."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
-    assert "research_lane_capacity" in CORE_STATE_FIELDS
-    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
-    assert "specialist_rounds" in CORE_STATE_FIELDS
-    assert "last_specialist" in CORE_STATE_FIELDS
+    gate = PolicyGate(role_registry=default_role_registry())
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {field: value}}),
+        )
+    assert exc.value.rule == "state_field"
 
 
 # --------------------------------------------------------------------------- # Read-only specialists never receive

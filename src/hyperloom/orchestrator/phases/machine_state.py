@@ -2435,7 +2435,7 @@ def record_phase_transition(
     ts: str | None = None,
     ts_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
+    """Append a phase_history row and atomically update ``phase`` fields; these are Coordinator-only, so LLM update_state cannot drive the machine. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
 
