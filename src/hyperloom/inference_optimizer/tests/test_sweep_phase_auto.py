@@ -267,6 +267,14 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
     monkeypatch.setattr(br, "is_valid_measurement", lambda result: True)
 
 
+def _build_validation_stack(coord: Coordinator, kernel_ids: list) -> list:
+    """Build a validation stack from kernel ids using the underlying member resolution."""
+    from hyperloom.orchestrator.phases.kernel_stack import resolve_stack_members, _matching_stack_entries
+
+    members = resolve_stack_members({"stack_kernel_ids": kernel_ids, "stack_validation": True})
+    return _matching_stack_entries(members, coord.shared_state.kernel_integrate_attempts)
+
+
 def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -302,7 +310,7 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 ):
     """Stack worse than current_best (110) but above baseline (100) must REVERT."""
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -320,7 +328,7 @@ async def test_stack_validation_partial_revert_becomes_failed(
 ):
     """A partial inner revert means the patch may still be on a remote pod."""
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -340,7 +348,7 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
 ):
     """A real increment over current_best (110 -> 112, +1.8%) must KEEP."""
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=112.0)
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -529,7 +537,7 @@ async def test_stack_validation_preserves_actual_measurement(
         request_error_rate=0.0,
         extra_server_args="--max-model-len 8192",
     )
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     original_source = "def kernel():\n    return 1\n"
     optimized_source = "def kernel():\n    return 2\n"
     for entry in stack:
@@ -722,7 +730,7 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
         **c.shared_state.pending_stack_validation_result,
@@ -1202,7 +1210,6 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     # Seed state at KERNEL boundary as if a plateau_kernel just fired
@@ -1253,7 +1260,6 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
     coord.shared_state.kernel_enabled = False
@@ -1367,7 +1373,7 @@ async def test_stack_validation_failed_revert_sets_status_failed(
 ):
     """A completely failed stack revert must set top-level status='failed'."""
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -1406,7 +1412,7 @@ async def test_stack_validation_keep_calls_finalize(
     monkeypatch.setattr(kernel_agent_tool, "_maybe_apply_kernel_patch", _fake_apply_with_manifest)
 
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -1442,7 +1448,7 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
     )
 
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -1482,7 +1488,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     monkeypatch.setattr(krh, "_grade_integrate_accuracy", _fake_accuracy_gate)
 
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
 
     result = await c._run_kernel_stack_validation_e2e(stack)
@@ -1778,7 +1784,7 @@ def test_stack_members_same_selected_identity_is_still_ambiguous(historical_stac
 @pytest.mark.asyncio
 async def test_stack_members_recovery_rejects_changed_patch_with_unchanged_validation_stamp(tmp_path, monkeypatch):
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result.update(
         status="ok",
@@ -1943,7 +1949,7 @@ async def _halt_a_stack_revert(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     _stub_python_cache_clear(monkeypatch)
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _materialize_stack_sources(tmp_path, stack)
     stuck = Path(next(entry for entry in stack if entry["kernel_id"] == "k001")["target_file"])
     with monkeypatch.context() as mp:
@@ -2101,7 +2107,7 @@ async def test_stack_revert_success_clears_checkpoints(tmp_path: Path, monkeypat
     _stub_python_cache_clear(monkeypatch)
     _stub_stack_benchmark(monkeypatch, new_tput=105.0)
     c = _stack_validation_coordinator(tmp_path)
-    stack = c._stack_entries_for_validation(["k001", "k004"])
+    stack = _build_validation_stack(c, ["k001", "k004"])
     _materialize_stack_sources(tmp_path, stack)
 
     with session_scope(tmp_path):

@@ -65,6 +65,11 @@ async def run_lease_and_db_reclaim(
 class MaintenanceCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
+    _DISK_FREE_MIN_GB: float = 20.0
+    _DISK_USED_MAX_FRAC: float = 0.85
+    _DISK_RUNS_KEEP_PER_ACTION: int = 50
+    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
+
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
 

@@ -264,9 +264,9 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     _arm_kernel_phase(st)
     arm(st)
 
-    exit_now = ps.exit_normal_kernel(st)
-    assert exit_now is not None and exit_now[0] == reason, label
-    assert ps.exit_normal_kernel(st, kernel_work_in_flight=True) is None, label
+    # Without in-flight flag: the leverage exit fires.
+    out_without_flag = ps.compute_next_phase(st)
+    assert out_without_flag is not None and out_without_flag[1] == reason, label
 
     inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
@@ -280,13 +280,10 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     _spend_the_phase_budget(st)
     st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
-    exit_now = ps.exit_normal_kernel(st, kernel_work_in_flight=True)
     transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
 
-    assert exit_now is not None
-    assert exit_now[0] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
     assert transition is not None
-    assert transition[1] == exit_now[0]
+    assert transition[1] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
     assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 

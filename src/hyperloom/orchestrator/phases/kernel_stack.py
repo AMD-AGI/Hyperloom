@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn
 from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
@@ -150,11 +149,6 @@ class KernelStackPhase(CoordinatorCollaborator):
     def __init__(self, coordinator) -> None:
         """Initialise the phase with its own in-flight integrate guard."""
         super().__init__(coordinator)
-        # Per-kernel in-flight guard, keyed on the recorded integrate-attempt
-        # count. Declared here because ``__getattr__`` forwards anything this
-        # object does not own to the Coordinator, and the Coordinator has no
-        # such field to forward to.
-        self._attempt_marks: dict[str, int] = {}
 
     async def _drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
@@ -438,14 +432,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
         self.shared_state.save(self.session_dir)
         raise RuntimeError(f"stack {stack_id} revert incomplete; checkpoints retained for the next resume")
-
-    def _stack_entries_for_validation(
-        self,
-        kernel_ids: list[Any],
-    ) -> list[dict[str, Any]]:
-        """Rebuild all component rows from explicit ids; the display id supplies no members."""
-        members = resolve_stack_members({"stack_kernel_ids": kernel_ids, "stack_validation": True})
-        return _matching_stack_entries(members, self.shared_state.kernel_integrate_attempts)
 
     async def _finalize_stack_validation_outcome(
         self,
@@ -743,49 +729,3 @@ class KernelStackPhase(CoordinatorCollaborator):
                 "stack_validation_started_at": started,
                 "stack_member_identities": identities,
             }
-
-    async def _auto_enqueue_pending_integrations(self) -> None:
-        """Auto-dispatch integrate for KEEP'd kernels awaiting integration."""
-        state = self.shared_state
-        self._stack_resolved_kernel_ids()
-        self._pending_stack_members()
-        pending_records = state.pending_kernel_integration_records()
-        if not pending_records:
-            return
-
-        for pending in pending_records:
-            kid = str(pending.get("kernel_id") or "")
-            integration_id = str(pending.get("integration_id") or "")
-            dispatch_key = integration_id or kid
-            recorded = (
-                state.integrate_attempt_count_for_integration(integration_id)
-                if integration_id
-                else state.integrate_attempt_count_for_kernel(kid)
-            )
-            mark = self._attempt_marks.get(dispatch_key)
-            if mark is not None and recorded <= mark:
-                # A prior integrate for this kernel is still in flight.
-                continue
-            log.info(
-                "auto-integrate: dispatching integrate for KEEP'd kernel %s "
-                "(IR-3 mandatory integration; recorded_attempts=%d)",
-                kid,
-                recorded,
-            )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "orchestration",
-                    "kernel_agent",
-                    "request",
-                    {
-                        "kind": "integrate",
-                        "kernel_id": kid,
-                        "integration_id": integration_id,
-                        "task_group_key": str(pending.get("task_group_key") or ""),
-                        "identity_route": str(pending.get("identity_route") or ""),
-                        "source": "auto_integrate_after_kernel_opt",
-                        "mode": "patch",
-                    },
-                )
-            )
-            self._attempt_marks[dispatch_key] = recorded

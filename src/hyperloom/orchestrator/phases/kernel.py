@@ -202,6 +202,8 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 class KernelPhase(CoordinatorCollaborator):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
+    _REPROFILE_CHANGE_TOL: float = 1e-5
+
     @staticmethod
     def _serving_config_signature(serving_config: Any) -> str:
         """Stable identity string for a ``serving_config`` sub-dict, or '' when empty."""

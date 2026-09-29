@@ -194,7 +194,7 @@ async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir)
 
         # Register an executor so target_analysis qualifies for the whitelist.
         c.sub.register_executor("target_analysis", _stub)
-        wl = c._inline_action_whitelist()
+        wl = c.dispatcher._inline_action_whitelist()
         assert "target_analysis" in wl
         # Heavy, lane-holding actions never qualify.
         assert "explore" not in wl
@@ -211,7 +211,7 @@ async def test_run_action_now_sync_disabled_by_flag(session_dir, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", "0")
     c = _silent_coordinator(session_dir)
     try:
-        out = c._run_action_now_sync("target_analysis", {})
+        out = c.dispatcher._run_action_now_sync("target_analysis", {})
         assert "disabled" in out
     finally:
         await c.stop()
@@ -221,7 +221,7 @@ async def test_run_action_now_sync_disabled_by_flag(session_dir, monkeypatch):
 async def test_run_action_now_sync_rejects_non_whitelisted(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        out = c._run_action_now_sync("explore", {})
+        out = c.dispatcher._run_action_now_sync("explore", {})
         assert "not inline-eligible" in out
     finally:
         await c.stop()
@@ -254,8 +254,8 @@ async def test_run_action_now_happy_path_emits_delegated_result(
             lambda *a, **k: None,
         )
 
-        out = await c._run_action_now("inline_probe", {"p": 1})
-        repeated = await c._run_action_now("inline_probe", {"p": 1})
+        out = await c.dispatcher._run_action_now("inline_probe", {"p": 1})
+        repeated = await c.dispatcher._run_action_now("inline_probe", {"p": 1})
         assert repeated.split(" topic=", 1)[-1] == out.split(" topic=", 1)[-1]
         assert ran["calls"] == 1
         assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
@@ -296,7 +296,7 @@ async def test_inline_existing_task_reuses_terminal_without_execution(session_di
         if state not in ("queued", "running"):
             evidence = {"outcome": asdict(stored_result), "cleanup_confirmed": True} if has_payload else {}
             await c.tasks.transition(task.task_id, state, evidence=evidence)
-        out = await c._run_action_now("inline_probe", params)
+        out = await c.dispatcher._run_action_now("inline_probe", params)
         assert execute.await_count == int(state == "queued")
         assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
         assert not await c.locks.lane_holders()
@@ -323,8 +323,8 @@ async def test_inline_repeated_outcome_does_not_rerun(session_dir, monkeypatch, 
         monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
         execute = AsyncMock(side_effect=error, return_value={"status": "ok", "gain_pct": 1.5})
         c.sub.register_executor("inline_probe", execute)
-        first = await c._run_action_now("inline_probe", {})
-        second = await c._run_action_now("inline_probe", {})
+        first = await c.dispatcher._run_action_now("inline_probe", {})
+        second = await c.dispatcher._run_action_now("inline_probe", {})
         assert second.split(" topic=", 1)[-1] == first.split(" topic=", 1)[-1]
         assert execute.await_count == 1
         assert len(await c.bus.tail(topic="delegated_result")) == 1
@@ -349,7 +349,7 @@ async def test_inline_unconfirmed_terminal_is_diagnostic_only(session_dir, monke
         )
         execute = AsyncMock()
         c.sub.register_executor("inline_probe", execute)
-        out = await c._run_action_now("inline_probe", {})
+        out = await c.dispatcher._run_action_now("inline_probe", {})
         assert "cleanup unconfirmed" in out
         assert "diagnostic only" in out
         assert execute.await_count == 0
@@ -380,7 +380,7 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
         # Leave _sequence_denial_for_action unstubbed to exercise its real signature.
         c.shared_state.baseline_tput = 100.0
 
-        out = await c._run_action_now("inline_probe", {"p": 1})
+        out = await c.dispatcher._run_action_now("inline_probe", {"p": 1})
         assert "inline run complete" in out
     finally:
         await c.stop()
@@ -415,7 +415,7 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
 
         # Run the blocking sync bridge in a worker thread so it can wait on this loop.
         out = await asyncio.to_thread(
-            c._run_action_now_sync,
+            c.dispatcher._run_action_now_sync,
             "inline_probe",
             {},
         )
@@ -785,11 +785,9 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    reloop, ev = ps.should_reloop_to_explore(
-        st,
-        now_unix=start_unix + 7200 - remaining_sec,
-        min_remaining_sec=7200,
-    )
+    _inputs = ps.workflow_predicate_inputs(st, now_unix=start_unix + 7200 - remaining_sec)
+    _inputs["sweep_result"]["reloop"]["min_remaining_sec"] = ps._cycle_reloop_min_remaining_sec(st, 7200)
+    reloop, ev = ps._reloop_decision(_inputs)
 
     assert ev["min_remaining_sec_effective"] == expected_floor
     assert reloop is (remaining_offset >= 0), ev

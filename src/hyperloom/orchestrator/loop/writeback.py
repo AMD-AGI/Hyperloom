@@ -579,6 +579,8 @@ def _record_config_attempts(
 class WritebackCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
+    PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0
+
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
 
@@ -4912,7 +4914,7 @@ class WritebackCollaborator:
         """
         outcome.verdict = Verdict.RECORDED
         outcome.early_return = True
-        # Write last_conc_sweep so exit_normal_sweep can distinguish an honest sweep_done from a no-pair sweep_failed.
+        # Write last_conc_sweep so the SWEEP exit logic can distinguish an honest sweep_done from a no-pair sweep_failed.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
 

@@ -44,9 +44,9 @@ def _plateaued_explore_state(
 # plateau → actionable
 def test_both_arms_dry_is_actionable():
     st = _plateaued_explore_state()
-    out = ps.exit_normal_optimize(st)
+    out = ps.compute_next_phase(st)
     assert out is not None
-    reason, evidence = out
+    _target, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
     assert evidence.get("plateau") is True

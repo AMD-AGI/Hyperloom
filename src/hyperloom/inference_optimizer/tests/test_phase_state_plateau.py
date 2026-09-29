@@ -23,8 +23,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     apply_escalate_budget_bump,
     compute_next_phase,
     compute_plateau_kernel,
-    exit_normal_optimize,
-    exit_normal_kernel,
     kernel_work_pending,
 )
 from hyperloom.orchestrator.state import shared_state
@@ -330,7 +328,7 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
 
-def test_exit_normal_optimize_exits_on_plateau():
+def test_optimize_exits_on_plateau():
     """Both arms dry advances to the next lever."""
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -349,12 +347,12 @@ def test_exit_normal_optimize_exits_on_plateau():
         # Patch arm: discovery exhausted.
         framework_agent_phase_done=True,
     )
-    out = exit_normal_optimize(state)
+    out = compute_next_phase(state)
     assert out is not None
-    assert out[0] == "optimize_no_more_leverage"
+    assert out[1] == "optimize_no_more_leverage"
 
 
-def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
+def test_skip_to_kernel_hint_short_circuits_optimize():
     """A ``skip_to_kernel`` hint exits even when the arms' own signals disagree."""
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -370,12 +368,12 @@ def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
         plateau_overrides={},
         framework_agent_phase_done=False,
     )
-    out = exit_normal_optimize(state)
-    assert out is not None and out[0] == "optimize_no_more_leverage"
-    assert out[1]["evidence"] == "llm_escalation"
+    out = compute_next_phase(state)
+    assert out is not None and out[1] == "optimize_no_more_leverage"
+    assert out[2]["evidence"] == "llm_escalation"
 
 
-def test_exit_normal_kernel_does_not_exit_on_plateau():
+def test_kernel_does_not_exit_on_plateau():
     """KERNEL_AGENT plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL_AGENT",
@@ -389,10 +387,10 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
         pending_escalate_hint="",
         stop_reason="",
     )
-    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state) is None
 
 
-def test_exit_normal_kernel_after_gemm_does_not_exit():
+def test_gemm_completion_alone_does_not_exit_kernel():
     """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL_AGENT → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL_AGENT",
@@ -411,7 +409,7 @@ def test_exit_normal_kernel_after_gemm_does_not_exit():
         },
         stop_reason="",
     )
-    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state) is None
 
 
 def test_compute_next_phase_skip_to_close_routes_to_close():
@@ -458,11 +456,11 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
     )
 
 
-def test_exit_normal_optimize_skip_to_sweep_is_non_terminal():
+def test_skip_to_sweep_from_optimize_is_non_terminal():
     # skip_to_sweep exhausts the explore lever, non-terminal.
-    out = exit_normal_optimize(_skip_to_sweep_state("FRAMEWORK_AGENT"))
+    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), kernel_enabled=True)
     assert out is not None
-    reason, evidence = out
+    _target, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -490,7 +488,6 @@ def test_kernel_skip_to_sweep_waits_for_pending_keep():
     state.has_keep_pending_integrate = True
 
     assert kernel_work_pending(state) is True
-    assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
@@ -505,7 +502,6 @@ def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
     }
 
     assert kernel_work_pending(state) is True
-    assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
@@ -514,7 +510,6 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is True
-    assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
@@ -545,7 +540,6 @@ def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     }
 
     assert kernel_work_pending(state) is True
-    assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 

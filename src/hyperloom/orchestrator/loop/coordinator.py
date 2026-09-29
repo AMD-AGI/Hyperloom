@@ -139,7 +139,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
         model_class: str | None = None,
-        recipe_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         proposal_scorer: Any = None,
@@ -154,8 +153,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
         # KnowledgePlane owns RecipeKB.
-        plane_recipe_kb = getattr(knowledge_plane, "recipe_kb", None)
-        self.recipe_kb: RecipeKB | None = plane_recipe_kb if plane_recipe_kb is not None else recipe_kb
+        self.recipe_kb: RecipeKB | None = getattr(knowledge_plane, "recipe_kb", None)
         # Per-session optimization journal; lazy-instantiated on first use.
         self._journal: Journal | None = None
         # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
@@ -407,11 +405,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_clear_stack_validation_in_progress": "phase_kernel_stack",
         "_clear_pending_stack_validation_checkpoints": "phase_kernel_stack",
         "_recover_interrupted_stack_validation": "phase_kernel_stack",
-        "_stack_entries_for_validation": "phase_kernel_stack",
         "_finalize_stack_validation_outcome": "phase_kernel_stack",
         "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
         "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
-        "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
@@ -508,9 +504,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_reactor_conversation": "conversation",
         "_compose_prompt": "conversation",
         "_load_system_prompt": "conversation",
-        "_inline_action_whitelist": "dispatcher",
-        "_run_action_now_sync": "dispatcher",
-        "_run_action_now": "dispatcher",
         "_plateau_advisory_block": "conversation",
         "_dominant_roofline_direction": "conversation",
         "_bottleneck_redirect_advisory_block": "conversation",
@@ -610,15 +603,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     f"{type(self).__name__!r} delegates {name!r} to {owner!r}, but that collaborator does not define it"
                 ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
-
-    def _inline_action_whitelist(self) -> frozenset[str]:
-        return self.dispatcher._inline_action_whitelist()
-
-    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return self.dispatcher._run_action_now_sync(action_name, params)
-
-    async def _run_action_now(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return await self.dispatcher._run_action_now(action_name, params)
 
     def _collaborator(self, attr: str, factory):
         """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
@@ -845,13 +829,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         write_trees(resolve_trees(), session_dir=self.session_dir)
 
-    # Advisory disk guard: when the session partition runs low, LRU-trim the
-    # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
-    _DISK_FREE_MIN_GB: float = 20.0
-    _DISK_USED_MAX_FRAC: float = 0.85
-    _DISK_RUNS_KEEP_PER_ACTION: int = 50
-    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
-
     # Action catalogue mapping action_name -> metadata.
     action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
 
@@ -950,21 +927,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
         except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
-
-    # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
-    # "any change", absorbing float noise).
-    _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
-    # run.
-    CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
-
-    # Floor on how long CLOSE waits for its full-stack revalidation. The bound scales to two baseline runtimes (a cold
-    # boot plus the warm decision round); explore's own session-deadline check keeps it inside the run's budget.
-    CLOSE_STACK_REVALIDATION_TIMEOUT_SEC: float = 600.0
-
-    # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
         """Run ``n`` loop-body ticks of :meth:`run` without its stop checks or teardown; replays a resume first."""
@@ -1500,12 +1462,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     ),
                 },
             )
-
-    # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
-
-    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
-    PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
 
 
 __all__ = [

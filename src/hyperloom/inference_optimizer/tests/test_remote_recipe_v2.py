@@ -1176,7 +1176,6 @@ def test_degraded_kb_skips_remote_close_writer(
     coordinator = SimpleNamespace(
         shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
-        recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
         _ensure_journal=lambda: _Journal(),
     )
@@ -1209,7 +1208,6 @@ def test_local_close_ignores_ambient_kb_store(
     coordinator = SimpleNamespace(
         shared_state=SimpleNamespace(current_best={}),
         session_dir=tmp_path,
-        recipe_kb=None,
         knowledge_plane=None,
         _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
@@ -1255,8 +1253,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
             current_best={"tput": 10.0},
         ),
         session_dir=tmp_path,
-        recipe_kb=_LegacyRecipe(),
-        knowledge_plane=None,
+        knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
         _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
@@ -1325,7 +1322,6 @@ def test_remote_close_transport_failure_is_nonfatal(
     coordinator = SimpleNamespace(
         shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
-        recipe_kb=None,
         knowledge_plane=None,
         _ensure_journal=lambda: _Journal(),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
@@ -1377,7 +1373,6 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
     coordinator = SimpleNamespace(
         shared_state=state,
         session_dir=tmp_path,
-        recipe_kb=None,
         knowledge_plane=None,
         _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
         _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",

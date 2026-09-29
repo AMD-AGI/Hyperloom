@@ -54,7 +54,7 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
 
 def test_subthreshold_gain_does_not_reset_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert ev["min_gain_pct"] == pytest.approx(0.40)
     assert ev["cycle_gained"] is False
     assert ev["no_gain_cycle_streak_effective"] == 2
@@ -63,14 +63,14 @@ def test_subthreshold_gain_does_not_reset_streak():
 
 def test_three_subthreshold_cycles_converge():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "global_converged"
 
 
 def test_suprathreshold_gain_resets_streak():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert ev["cycle_gained"] is True
     assert ev["no_gain_cycle_streak_effective"] == 0
     assert reloop is True
@@ -82,7 +82,7 @@ def test_all_saturated_directions_stop_reloop():
         "kernel_switch_specialist": {"saturated": True},
         "comm_specialist": {"saturated": True},
     }
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
@@ -90,7 +90,7 @@ def test_all_saturated_directions_stop_reloop():
 def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
-    reloop, ev = ps.should_reloop_to_explore(st)
+    reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
@@ -127,7 +127,8 @@ def test_unbounded_explore_exits_when_cap_exceeded():
         phase_started_unix=now - (cap + 10),
         phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
-    out = ps.exit_normal_optimize(st, now_unix=now)
+    out_full = ps.compute_next_phase(st, now_unix=now)
+    out = None if out_full is None else (out_full[1], out_full[2])
     assert out is not None
     assert out[0] == "optimize_budget_cap"
 
@@ -140,7 +141,7 @@ def test_bounded_explore_does_not_hit_absolute_cap():
         phase_started_unix=now - 60,
         phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
-    assert ps.exit_normal_optimize(st, now_unix=now) is None
+    assert ps.compute_next_phase(st, now_unix=now) is None
 
 
 # Vocab: the leverage reasons close a phase, they never stop the run
