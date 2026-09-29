@@ -226,10 +226,22 @@ every framework. It rides the same verdict as `--max-latency-ms`: a candidate
 that would otherwise KEEP and draws more than the ceiling is a REVERT with
 `veto_reason` `power_budget_exceeded`, or `power_unmeasured` when its round
 reported no GPU power (fail closed). Every KEEP decision point reads that
-verdict, so a lane reverts its own over-budget change. The reading is the
-round's `gpu_metrics.json` `avg_power_w`, carried as `gpu_power_avg_w` on the
-measurement. If the baseline itself is over the ceiling, or reported no power,
-the run stops with `baseline_over_power_budget`.
+verdict, so a lane reverts its own over-budget change. If the baseline itself
+is over the ceiling, or reported no power, the run stops with
+`baseline_over_power_budget`.
+
+The reading is the round's `gpu_power.json` `avg_power_w`, carried as
+`gpu_power_avg_w` on the measurement. Hyperloom samples it itself with
+read-only `amd-smi metric --power --mem-usage` every 2 s, only while the round
+is in its measured phase (from server ready, and from AIPerf's measured-phase
+line under AgentX, until the client exits or the eval starts). It is averaged
+over the serving cards: those in the visible-device mask that held at least
+10% of VRAM during that phase, so a TP4 round on an unpinned eight-card host is
+averaged over its four cards. A round that was sampled but had no serving card
+or no power reading stays unmeasured. The benchmark report's `gpu_monitor`
+block (`gpu_metrics.json`) is only the fallback for rounds no sampler ran on:
+on one node it reads a single card over the whole process lifetime, boot and
+idle tail included.
 
 The optimizer never changes power settings. The power cap and DPM performance
 level decide how much of the card's throughput is available at what power, so
