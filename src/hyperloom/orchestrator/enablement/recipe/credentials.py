@@ -19,8 +19,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 
-from .setup_allowlist import TRUSTED_BIN_PREFIX_RE
-
 #: Installer families the setup allowlist admits, keyed by the token that
 #: introduces the command. Only the ``pip`` family is covered by the KEEP-time
 #: distribution closure; every other family mutates state that map cannot see.
@@ -110,7 +108,7 @@ def installer_class(cmd: str) -> str:
     _, tokens = split_env_assignments(cmd)
     if not tokens:
         return ""
-    head = Path(TRUSTED_BIN_PREFIX_RE.sub("", tokens[0], count=1)).name
+    head = Path(tokens[0]).name
     for family, heads in _INSTALLER_FAMILIES:
         if head in heads:
             return family

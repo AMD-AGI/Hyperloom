@@ -12,8 +12,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command, sanitize_setup_command
-from ...enablement.recipe.setup_ledger import build_execution_row
+from ...enablement.recipe.credentials import sanitize_command_text
+from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command
+from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, build_execution_row
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 
 log = logging.getLogger(__name__)
@@ -22,96 +23,51 @@ SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 
 
-def with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str:
-    """Append the allowlist rejections to a round's ``reason``.
+def setup_report_fields(reason: str, setup_result: dict[str, Any]) -> dict[str, Any]:
+    """The ``reason`` and ``setup_commands_*`` fields of a round's result.
 
-    A rejected setup command was only ever a ``log.warning``. Downstream saw the
-    round's outcome with no link to the cause, so the same authoring attempt was
-    re-dispatched until the budget ran out -- each round proposing the same fix
-    and each round having it silently dropped. Naming the rejection in the reason
-    is what lets the next round (or an operator) see that the proposal was never
-    the problem.
+    Allowlist rejections are named in the reason, not only logged. A rejection
+    that was only a ``log.warning`` left downstream with the round's outcome and
+    no link to the cause, so the same proposal was re-authored and re-dropped
+    until the budget ran out.
 
     Args:
-        reason: The round's existing reason text.
+        reason: The round's own reason text.
         setup_result: The :func:`run_setup_commands` result.
+    """
+    applied = list(setup_result.get("applied") or [])
+    skipped = list(setup_result.get("skipped") or [])
+    if skipped:
+        note = (
+            f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist "
+            f"and never ran: {'; '.join(skipped)}"
+        )
+        reason = f"{reason} ({note})" if reason else note
+    return {"reason": reason, "setup_commands_applied": applied, "setup_commands_skipped": skipped}
+
+
+def resolve_setup_commands(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Resolve the ordered, deduped setup commands to replay, each with its source.
+
+    Base commands stacked from prior rounds (``params['enablement_setup_commands']``)
+    come first as ``"inherited"``, then the current specialist's
+    ``specialist_done.setup_commands`` as ``"proposed"``; a command in both stays
+    ``"inherited"``. Non-list sources and blank entries are dropped, and the list
+    is capped at :data:`SETUP_CMD_MAX`.
 
     Returns:
-        ``reason`` unchanged when nothing was rejected, else ``reason`` with a
-        one-line summary of the rejected commands appended.
+        ``(cmd, source)`` pairs in replay order (pre-allowlist).
     """
-    # ``run_setup_commands`` already stores the sanitised form, so for every
-    # production caller this is a no-op. Applied again anyway: the lesson of the
-    # gap this closes is that a safety step placed at the call sites protects
-    # the call sites that exist, and the sanitiser is idempotent.
-    skipped = [sanitize_setup_command(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
-    if not skipped:
-        return reason
-    listed = "; ".join(skipped[:SETUP_CMD_MAX])
-    if len(skipped) > SETUP_CMD_MAX:
-        listed += f"; (+{len(skipped) - SETUP_CMD_MAX} more)"
-    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
-    return f"{reason} ({note})" if reason else note
-
-
-def resolve_setup_commands(
-    *,
-    params: dict[str, Any],
-    done_payload: dict[str, Any] | None,
-) -> list[str]:
-    """Resolve the ordered, deduped enablement setup commands to replay.
-
-    Sources (in order; deduped preserving first occurrence): base commands
-    stacked from prior rounds (``params['enablement_setup_commands']``) then the
-    current specialist's ``specialist_done.setup_commands``. Non-string / blank
-    entries are dropped; the list is capped at :data:`SETUP_CMD_MAX`.
-
-    Args:
-        params: The integrate_patch task params.
-        done_payload: The specialist ``specialist_done`` payload (may be None).
-
-    Returns:
-        list[str]: Ordered unique candidate setup commands (pre-allowlist).
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    sources: list[Any] = []
-    base = params.get("enablement_setup_commands")
-    if isinstance(base, list):
-        sources.extend(base)
-    if isinstance(done_payload, dict):
-        dp = done_payload.get("setup_commands")
-        if isinstance(dp, list):
-            sources.extend(dp)
-    for c in sources:
-        s = str(c or "").strip()
-        if s and s not in seen:
-            seen.add(s)
-            out.append(s)
-        if len(out) >= SETUP_CMD_MAX:
-            break
-    return out
-
-
-def setup_command_sources(
-    *,
-    params: dict[str, Any],
-    done_payload: dict[str, Any] | None,
-) -> dict[str, str]:
-    """Map each candidate command to whether it was inherited or proposed here.
-
-    A command replayed from the durable base and one this round's specialist
-    proposed carry different replay meaning, and the resolved list dedups them
-    into one string.
-    """
-    inherited = {str(c or "").strip() for c in (params.get("enablement_setup_commands") or [])}
-    sources: dict[str, str] = {cmd: "inherited" for cmd in inherited if cmd}
-    proposed = (done_payload or {}).get("setup_commands") or []
-    for raw in proposed:
-        cmd = str(raw or "").strip()
-        if cmd and cmd not in sources:
-            sources[cmd] = "proposed"
-    return sources
+    resolved: dict[str, str] = {}
+    for source, raw in (
+        ("inherited", params.get("enablement_setup_commands")),
+        ("proposed", (done_payload or {}).get("setup_commands")),
+    ):
+        for item in raw if isinstance(raw, list) else []:
+            cmd = str(item or "").strip()
+            if cmd:
+                resolved.setdefault(cmd, source)
+    return list(resolved.items())[:SETUP_CMD_MAX]
 
 
 def execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path: Path) -> bool:
@@ -137,25 +93,24 @@ def execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path:
         log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
         return False
     try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-    except OSError:
-        # Logging is best-effort.
-        pass
+    except OSError as exc:
+        log.warning("integrate_patch: enablement setup output not written to %s (%s)", log_path, exc)
     if proc.returncode != 0:
         log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
     return proc.returncode == 0
 
 
 def run_setup_commands(
-    commands: list[str],
+    commands: list[tuple[str, str]],
     *,
     cwd: Path,
     log_dir: Path,
-    sources: dict[str, str] | None = None,
-    round_task_id: str = "",
-    seq_start: int = 0,
-    on_execution: Callable[[dict[str, Any]], None] | None = None,
+    round_task_id: str,
+    seq_start: int,
+    on_execution: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
@@ -171,58 +126,49 @@ def run_setup_commands(
     is the source of truth for runnability.
 
     Args:
-        commands: Candidate setup commands (already deduped / capped).
+        commands: :func:`resolve_setup_commands` output.
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
-
-    Args (continued):
-        sources: ``{cmd: "inherited"|"proposed"}`` for the ledger rows.
         round_task_id: The round the executions belong to.
         seq_start: Highest ledger ``seq`` already durable, so occurrence
             identity stays monotonic across rounds.
+        on_execution: Persists one ledger row as its command finishes.
 
     Returns:
         dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
-        ``applied`` are the allowlisted commands that ran (rc==0) and
-        ``executions`` is one ledger row per ATTEMPTED command.
+        ``applied`` are the allowlisted commands that ran (rc==0), ``skipped``
+        the rejected ones in sanitized form, and ``executions`` one ledger row
+        per ATTEMPTED command.
     """
     applied: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
     executions: list[dict[str, Any]] = []
-    if not commands:
-        return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # Logging is best-effort.
-        pass
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
-    def _record(cmd: str, index: int, outcome: str) -> None:
+    def _record(cmd: str, index: int, source: str, outcome: str) -> None:
         row = build_execution_row(
-            seq=int(seq_start) + len(executions) + 1,
+            seq=seq_start + len(executions) + 1,
             round_task_id=round_task_id,
             cmd_index=index,
             cmd=cmd,
-            source=(sources or {}).get(str(cmd).strip(), "proposed"),
+            source=source,
             outcome=outcome,
             env=env,
         )
         executions.append(row)
-        if on_execution is not None:
-            # Persisted HERE, not after the await returns. Cancelling the await
-            # unwinds the caller while this thread and its in-flight subprocess
-            # carry on, so a row handed back through the return value is lost
-            # for a command that actually ran -- and the ledger is what says a
-            # round installed into the shared venv at all.
-            on_execution(row)
+        # Persisted HERE, not after the await returns. Cancelling the await
+        # unwinds the caller while this thread and its in-flight subprocess
+        # carry on, so a row handed back through the return value is lost
+        # for a command that actually ran -- and the ledger is what says a
+        # round installed into the shared venv at all.
+        on_execution(row)
 
     with cancel_scope_listener():
-        for cmd_index, cmd in enumerate(commands):
+        for cmd_index, (cmd, source) in enumerate(commands):
             # Checked between commands, as upstream does: a command already
             # inside subprocess.run is not killed. Commands never reached are
             # recorded nowhere -- the ledger states what ran, not what was planned.
@@ -230,26 +176,19 @@ def run_setup_commands(
                 log.info("integrate_patch: enablement setup replay stopped after cancel")
                 break
             if not is_allowlisted_setup_command(cmd):
-                # Sanitised HERE, not at the reporting sites. This list is copied
-                # verbatim into every result payload that carries
-                # ``setup_commands_skipped``, and a rejected command is LLM-written
-                # text that can hold a bearer token or a credentialed URL. Doing it
-                # at the four call sites protects those four; doing it at the source
-                # protects the fifth as well.
-                safe_cmd = sanitize_setup_command(cmd)
+                # A rejected command is LLM-written text that can hold a bearer
+                # token or a credentialed URL, and this list is copied into every
+                # result payload and from there into the journal, the report and
+                # the KB, so it is only ever stored sanitized.
+                safe_cmd = sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
                 skipped.append(safe_cmd)
-                # Also carried into the round's ``reason`` by
-                # with_skipped_setup_reason: a warning alone left the caller with an
-                # outcome and no link to the cause, so the same proposal was
-                # re-authored and re-dropped until the budget ran out. The log is a
-                # disk-backed surface too, so it gets the sanitised form as well.
                 log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-                _record(cmd, cmd_index, "skipped")
+                _record(cmd, cmd_index, source, "skipped")
                 continue
             if execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
                 applied.append(cmd)
-                _record(cmd, cmd_index, "applied")
+                _record(cmd, cmd_index, source, "applied")
             else:
                 failed.append(cmd)
-                _record(cmd, cmd_index, "failed")
+                _record(cmd, cmd_index, source, "failed")
     return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}

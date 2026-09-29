@@ -70,12 +70,7 @@ from ._accuracy_gate import (
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._setup_replay import (
-    resolve_setup_commands,
-    run_setup_commands,
-    setup_command_sources,
-    with_skipped_setup_reason,
-)
+from ._setup_replay import resolve_setup_commands, run_setup_commands, setup_report_fields
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -499,20 +494,12 @@ def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
     return inherited
 
 
-def _durable_execution_seq(shared_state: Any) -> int:
-    """Return the highest ``seq`` already in the durable setup ledger."""
-    ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
-    return max((int(row.get("seq") or 0) for row in ledger if isinstance(row, dict)), default=0)
-
-
 def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
     """Append this round's execution rows to the durable, append-only ledger."""
-    rows = [row for row in (setup_result.get("executions") or []) if isinstance(row, dict)]
-    if shared_state is None or not rows:
+    if shared_state is None or not shared_state.enablement.append_setup_executions(
+        setup_result.get("executions") or []
+    ):
         return
-    ledger = list(getattr(shared_state.enablement, "setup_executions", None) or [])
-    ledger.extend(rows)
-    shared_state.enablement.setup_executions = ledger
     try:
         shared_state.save(session_dir)
     except OSError:
@@ -2396,9 +2383,8 @@ class IntegratePatchExecutor:
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
-                    sources=setup_command_sources(params=params, done_payload=done_payload),
                     round_task_id=specialist_task_id,
-                    seq_start=_durable_execution_seq(shared_state),
+                    seq_start=shared_state.enablement.last_execution_seq() if shared_state is not None else 0,
                     on_execution=lambda row: _append_setup_executions(
                         shared_state, {"executions": [row]}, session_dir=self.session_dir
                     ),
@@ -2545,9 +2531,7 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
-                "reason": with_skipped_setup_reason(
+                **setup_report_fields(
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
                     "this specialist task",
@@ -3141,9 +3125,7 @@ class IntegratePatchExecutor:
                 # specialist's own setup commands were dropped on the way in,
                 # that is the likeliest reason -- and the one the next round
                 # needs, since re-authoring the same proposal cannot help.
-                "reason": with_skipped_setup_reason(f"enablement not runnable: {run_reason}", setup_result),
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                **setup_report_fields(f"enablement not runnable: {run_reason}", setup_result),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **bringup_evidence,
@@ -3215,7 +3197,7 @@ class IntegratePatchExecutor:
                 "advanced": True,
                 "runnable": False,
                 "correctness_verified": False,
-                "reason": with_skipped_setup_reason(
+                **setup_report_fields(
                     f"enablement progressed: {run_reason}; boot advanced "
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
                     setup_result,
@@ -3226,8 +3208,6 @@ class IntegratePatchExecutor:
                 # before half.
                 "enablement_observation_path": after_loaded.path,
                 **bringup_evidence,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **eval_provenance,
@@ -3258,9 +3238,7 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            "reason": with_skipped_setup_reason(reason, setup_result),
-            "setup_commands_applied": list(setup_result.get("applied") or []),
-            "setup_commands_skipped": list(setup_result.get("skipped") or []),
+            **setup_report_fields(reason, setup_result),
             "bench_result": bench_result,
             "workspace": str(output_root),
             **bringup_evidence,

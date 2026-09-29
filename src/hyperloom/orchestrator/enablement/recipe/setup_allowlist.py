@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which recorded enablement setup commands may be replayed, and how a refused one is stored.
-
-The one owner of the install-only allowlist: the integrate replay decides what may run by it, and credential
-classification normalises a command the same way before naming its installer.
-"""
+"""The install-only allowlist: which recorded enablement setup commands the integrate replay may run."""
 
 from __future__ import annotations
 
 import re
-
-from hyperloom.common.env_safety import redact_secret_values
 
 # Enablement environment-setup replay: allowlist of install-only command shapes.
 # A specialist may run arbitrary Bash in its own sandboxed session, but the
@@ -51,27 +45,10 @@ SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
 #: matches, normalises to an allowlisted ``pip install foo``, and then
 #: ``run_setup_commands`` executes the ORIGINAL string -- running /tmp/x/pip,
 #: which is exactly the workspace-owned binary the prefix list exists to keep out.
-TRUSTED_BIN_PREFIX_RE = re.compile(
+_TRUSTED_BIN_PREFIX_RE = re.compile(
     r"^(?:/opt/(?!\.\.?/)[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)"
     r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*/"
 )
-
-#: Per-command clip in the rejection summary. Long enough to recognise the
-#: command, short enough that twelve of them cannot bury the round's own reason.
-SKIPPED_CMD_CHARS = 160
-
-
-def sanitize_setup_command(cmd: str) -> str:
-    """A rejected command in the form it is safe to store and hand back.
-
-    Rejected commands are LLM-written text. They reach the journal, the report
-    and the KB, and are read back into the next round's mandate, so a bearer
-    token or a credentialed URL in one would outlive the round that produced it.
-    Clipped as well, so a single rejected install naming a hundred packages
-    cannot crowd out the reason it is reported alongside.
-    """
-    text = redact_secret_values(str(cmd).strip())
-    return text if len(text) <= SKIPPED_CMD_CHARS else text[:SKIPPED_CMD_CHARS] + "..."
 
 
 def is_allowlisted_setup_command(cmd: str) -> bool:
@@ -123,5 +100,5 @@ def is_allowlisted_setup_command(cmd: str) -> bool:
     # absolute system prefixes keeps "which KIND of operation may replay" intact
     # -- the property the SETUP_CMD_ALLOWLIST comment promises -- while still treating a venv's own
     # interpreter as the interpreter it is.
-    text = TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
+    text = _TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
     return any(re.match(pat, text) for pat in SETUP_CMD_ALLOWLIST)
