@@ -466,7 +466,8 @@ def _escalate(hint: str) -> Intent:
 @pytest.mark.asyncio
 async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None:
     await coord._handle_escalate_strategy_change("orchestration", _escalate("bogus"))
-    assert coord.shared_state.last_consumed_escalate_hint != "bogus"
+    # A bogus hint must not be pending (it was neither consumed nor stored).
+    assert coord.shared_state.pending_escalate_hint != "bogus"
 
 
 @pytest.mark.asyncio
@@ -484,8 +485,6 @@ async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator,
     after = coord.shared_state.phase_budget_pct
     assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
     assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
-    assert coord.shared_state.last_consumed_escalate_hint == hint
-    assert coord.shared_state.last_consumed_escalate_hint_ts
     assert coord.shared_state.pending_escalate_hint == ""
 
 

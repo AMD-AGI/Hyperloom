@@ -322,8 +322,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # total or a later anchor reissues time the session already spent.
         "elapsed_charged_sec",
         "leg_anchor_unix",
-        # Who granted extra budget and why; grants come from an operator flag.
-        "budget_extensions",
         # Sizes the closing reserve, so it decides how much of ``max_minutes``
         # is still usable: locking the budget without locking this one leaves
         # the same forgery one field over -- a large value spends the session
@@ -390,14 +388,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
-        "last_specialist",
         # research_lane / GPU capacity set once at CLI/manifest time; locked.
         "research_lane_capacity",
         "gpu_specialist_capacity",
         # phase-machine escalation plumbing; LLM blocked (defense in depth).
         "pending_escalate_hint",
-        "last_consumed_escalate_hint",
-        "last_consumed_escalate_hint_ts",
         "last_discarded_escalate_hint",
         "last_discarded_escalate_hint_ts",
         "plateau_overrides",
@@ -415,9 +410,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gaps",
         # Orchestration working-memory checkpoint; Coordinator-authored.
         "orchestration_memory",
-        # Bounded rollback ring of prior good orchestration_memory records;
-        # Coordinator-only writer, locked in lock-step with its parent.
-        "orchestration_memory_history",
         # Advisory model-architecture profile from the SKILL launcher; locked.
         "model_arch",
         # Architecture-identity tags from config.json; locked against pollution.

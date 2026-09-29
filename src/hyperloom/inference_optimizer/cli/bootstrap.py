@@ -262,7 +262,6 @@ def _seed_shared_state(
         reference_envs=_ref_envs,
         reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
-        reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),

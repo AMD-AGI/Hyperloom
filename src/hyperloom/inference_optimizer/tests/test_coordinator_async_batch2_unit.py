@@ -1818,8 +1818,8 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
         },
         source="specialist:rec-spec-1",
     )
-    last = coord.shared_state.last_specialist
-    assert last.get("task_id") == "rec-spec-1"
+    # Verify the specialist result was recorded (state saved and rounds updated).
+    assert coord.shared_state.rounds_since_last_specialist.get("kernel_agent", -1) == 0
 
 
 @pytest.mark.asyncio
@@ -2114,7 +2114,6 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
     assert coord.shared_state.last_discarded_escalate_hint_ts
-    assert coord.shared_state.last_consumed_escalate_hint == ""
 
 
 @pytest.mark.asyncio
@@ -2139,8 +2138,6 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
     assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_consumed_escalate_hint == "skip_to_kernel"
-    assert coord.shared_state.last_consumed_escalate_hint_ts
     assert coord.shared_state.last_discarded_escalate_hint == ""
 
 

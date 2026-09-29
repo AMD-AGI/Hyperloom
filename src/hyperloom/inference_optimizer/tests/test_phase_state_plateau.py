@@ -305,7 +305,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
-    state.specialist_domain_empty_streak = {"serving_specialist": 3}
     state.rounds_since_last_specialist = {"serving_specialist": 4}
     state.rounds_since_last_keep = {"serving_specialist": 5}
     state.last_conc_sweep = {"status": "succeeded"}
@@ -319,7 +318,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
-    assert state.specialist_domain_empty_streak == {}
     assert state.rounds_since_last_specialist == {}
     assert state.rounds_since_last_keep == {}
     assert state.last_conc_sweep == {}
@@ -605,20 +603,17 @@ def test_set_pending_escalate_hint_drops_unknown():
     assert s.pending_escalate_hint == ""
 
 
-def test_consume_pending_escalate_hint_clears_and_audits():
+def test_consume_pending_escalate_hint_clears_and_returns_hint():
     s = SharedState()
     s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL)
     consumed = s.consume_pending_escalate_hint()
     assert consumed == "skip_to_kernel"
     assert s.pending_escalate_hint == ""
-    assert s.last_consumed_escalate_hint == "skip_to_kernel"
-    assert s.last_consumed_escalate_hint_ts != ""
 
 
 def test_consume_pending_escalate_hint_noop_when_empty():
     s = SharedState()
     assert s.consume_pending_escalate_hint() == ""
-    assert s.last_consumed_escalate_hint == ""
 
 
 def test_set_stop_reason_accepts_vocab():

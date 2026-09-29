@@ -2994,21 +2994,6 @@ class WritebackCollaborator:
         self.shared_state.bump_domain_round_counters()
         self.shared_state.note_specialist_dispatched(domain)
 
-        self.shared_state.update_last_specialist(
-            {
-                "task_id": task.task_id,
-                "domain": domain,
-                "gap_canonical_id": str(
-                    done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
-                ),
-                "proposals_total": len(proposals),
-                "confidence": done_payload.get("confidence"),
-                "summary": str(done_payload.get("summary") or "")[:480],
-                "reason": str(run_error or done_payload.get("reason") or "")[:480],
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)

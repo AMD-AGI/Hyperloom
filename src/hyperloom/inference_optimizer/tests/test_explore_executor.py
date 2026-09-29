@@ -1543,6 +1543,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
             "config_path": str(base),
             "output_dir": str(tmp_path / "explore-singleround"),
             "base_tput": 800.0,
+            "baseline_double_run": False,
             "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
         },
         idempotency_key="ex-no-double-run",
@@ -2269,7 +2270,6 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     state.model_name = "Qwen3-14B-FP8"
     state.model_type = "qwen3"
     state.gpu_type = "mi355x"
-    state.baseline_double_run = False
     state.stack_fingerprint_meta = {
         "sglang": "0.5.20.dev20260920+gc610c40399",
         "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
@@ -2292,6 +2292,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
             "config_path": str(base),
             "output_dir": str(output_dir),
             "base_tput": 800.0,
+            "baseline_double_run": False,
             "grid": [
                 {
                     "name": "unified",

@@ -3108,28 +3108,12 @@ class BenchmarkRunExecutor:
         params: dict[str, Any] | None = None,
         ctx_extra: dict[str, Any] | None = None,
     ) -> bool:
-        """Whether baseline double-run is enabled."""
-        params = params or {}
-        if "baseline_double_run" in params:
-            return is_truthy(params.get("baseline_double_run"))
-
-        extra = ctx_extra or {}
-        state = extra.get("shared_state") or self.shared_state
-        if state is not None:
-            return bool(getattr(state, "baseline_double_run", False))
-
-        try:
-            from ...state.shared_state import SharedState
-
-            session_dir = Path(str(extra.get("session_dir") or self.session_dir))
-            state = SharedState.load_or_init(session_dir)
-            return bool(getattr(state, "baseline_double_run", False))
-        except Exception:
-            log.debug(
-                "baseline_executor: could not resolve baseline_double_run from session state",
-                exc_info=True,
-            )
-            return True
+        """Whether baseline double-run is enabled; task param can disable it, default on."""
+        if "baseline_double_run" in (params or {}):
+            return is_truthy((params or {}).get("baseline_double_run"))
+        if hasattr(self, "_baseline_double_run_default"):
+            return bool(self._baseline_double_run_default)
+        return True
 
     def _write_lifecycle_config(
         self,
