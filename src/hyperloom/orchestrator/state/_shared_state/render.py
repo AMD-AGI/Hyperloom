@@ -261,11 +261,11 @@ class _RenderMixin:
         stack = stack if isinstance(stack, dict) else {}
         conflicts = [str(c) for c in stack.get("conflicts") or []]
         if conflicts:
-            out.append(f"  · config not replayed from this match, stack differs: {'; '.join(conflicts)[:240]}")
+            out.append(f"  · tuned on a different stack (the replay measures it): {'; '.join(conflicts)[:240]}")
         notes = [str(n) for n in stack.get("notes") or []]
         if notes:
             out.append(f"  · stack not verified: {'; '.join(notes)[:240]}")
-        if not replay and not conflicts:
+        if not replay:
             # Remote Recipe hits replay through the section SDKs, so the context
             # carries no config; the priors below are still real.
             out.append("  · (no replayable config on this match)")

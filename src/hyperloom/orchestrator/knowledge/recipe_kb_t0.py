@@ -367,8 +367,8 @@ def _find_config_donor(
 ) -> tuple[Mapping[str, Any] | None, str, float]:
     """Borrow a replayable config through the standard degradation tiers.
 
-    A candidate recorded on a ROCm/AITER build that provably differs from ``live_stack`` is skipped, so a compatible
-    sibling can still donate.
+    ``live_stack`` only ranks: among otherwise equal candidates, one recorded on the pod's ROCm/AITER build comes
+    first. A mismatched build is never excluded; the warm replay measures it.
     """
     if not (model_type or arch_slug):
         return None, "", 0.0
@@ -418,8 +418,6 @@ def _find_config_donor(
                 _candidate_dimension(candidate, "framework_version"),
             ):
                 continue
-            if live_stack and compare_stacks(row_stack_fingerprint(candidate), live_stack).blocks_replay:
-                continue
             if _donor_is_trustworthy(
                 candidate,
                 target_arch_slug=arch_slug,
@@ -438,6 +436,7 @@ def _find_config_donor(
         ranked = _rank_warm_candidates(
             usable,
             target_framework_version=framework_version,
+            live_stack=live_stack,
         )
         if ranked:
             return ranked[0], tier, confidence
@@ -459,8 +458,8 @@ def _build_warm_start_context(
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
-    ``stack`` compares ``recipe``'s ROCm/AITER with the pod's. A proven mismatch keeps the recipe's priors but stops
-    it standing in as its own config source, and is recorded as ``stack_mismatch`` for PRELUDE and the prompt.
+    ``stack`` compares ``recipe``'s ROCm/AITER with the pod's. Any difference is recorded as ``stack_mismatch`` for
+    the prompt and the warm-replay outcome; it does not stop the replay, which is what measures it.
     """
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
@@ -486,18 +485,11 @@ def _build_warm_start_context(
         ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
         ctx["lessons"] = list(prior_source.get("lessons") or [])
         ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
-    stack_blocked = bool(stack is not None and stack.blocks_replay)
     if stack is not None and (stack.conflicts or stack.notes):
         ctx["stack_mismatch"] = stack.to_dict()
     # Replay config comes from the donor, or the identity recipe as self-donor.
     donor = config_donor if not current_remote and isinstance(config_donor, Mapping) else None
-    if (
-        not current_remote
-        and donor is None
-        and not stack_blocked
-        and isinstance(recipe, Mapping)
-        and _has_replayable_config(recipe)
-    ):
+    if not current_remote and donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
         donor = recipe
         config_donor_tier = config_donor_tier or "self"
         if config_donor_confidence is None:
@@ -779,14 +771,17 @@ def _rank_warm_candidates(
     rows: list[Mapping[str, Any]],
     *,
     target_framework_version: str,
+    live_stack: Mapping[str, Any] | None = None,
 ) -> list[Mapping[str, Any]]:
-    """Rank framework proximity, validated gain, then recency."""
+    """Rank framework proximity, validated gain, a matching ROCm/AITER build, then recency."""
     target_version = str(target_framework_version or "")
     ranked = list(rows)
     ranked.sort(
         key=lambda row: str(row.get("updated_at") or ""),
         reverse=True,
     )
+    if live_stack:
+        ranked.sort(key=lambda row: bool(compare_stacks(row_stack_fingerprint(row), live_stack).conflicts))
     ranked.sort(key=_max_session_gain, reverse=True)
     ranked.sort(
         key=lambda row: (
@@ -1223,18 +1218,13 @@ def run_t0_anchor(
         isinstance(warm_point, Mapping) and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
     )
     warm_stack = compare_stacks(row_stack_fingerprint(warm_point), fp) if warm_point else None
-    if warm_stack is not None and warm_stack.blocks_replay:
-        log.info(
-            "warm-start recipe %s not used as a config source: %s",
-            cid,
-            "; ".join(warm_stack.conflicts),
-        )
+    if warm_stack is not None and warm_stack.conflicts:
+        log.info("warm-start recipe %s was tuned on a different stack: %s", cid, "; ".join(warm_stack.conflicts))
     # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
     # gate before it becomes the donor.
     if (
         not current_remote_point
         and warm_point
-        and not (warm_stack is not None and warm_stack.blocks_replay)
         and _has_replayable_config(warm_point)
         and (
             warm_tier == "exact"

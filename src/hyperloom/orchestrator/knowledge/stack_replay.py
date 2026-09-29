@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a KB row's ROCm/AITER build can back a config replay on this pod.
+"""How a KB row's ROCm/AITER build compares with this pod's.
 
 ``framework_version`` is part of the ``canonical_id``, so a row never reaches a
 pod on the wrong framework release. ROCm and AITER cannot join the identity (a
-patch bump or a new commit would orphan every row), so they are compared here,
-at replay time, as a soft signal: a proven mismatch stops the row being a config
-source, and ``unknown`` on either side is no claim at all.
+patch bump or a new commit would orphan every row), so they are compared here as
+evidence: disclosed with the match and used to rank otherwise equal donors. The
+warm replay, not retrieval, decides whether the config works on this stack.
+``unknown`` on either side is no claim at all.
 """
 
 from __future__ import annotations
@@ -25,15 +26,11 @@ _RELEASE_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
 
 class StackComparison:
-    """Proven mismatches (these stop a replay) and incomparable pairs (disclosed only)."""
+    """Proven mismatches and incomparable pairs, both disclosed; neither stops a replay."""
 
     def __init__(self, conflicts: list[str], notes: list[str]) -> None:
         self.conflicts = conflicts
         self.notes = notes
-
-    @property
-    def blocks_replay(self) -> bool:
-        return bool(self.conflicts)
 
     def to_dict(self) -> dict[str, list[str]]:
         return {"conflicts": list(self.conflicts), "notes": list(self.notes)}
