@@ -217,11 +217,10 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Capture the cycle's working memory, then rebuild the system prompt
-        # for the new cycle around the directive that capture produced.
-        summary["memory_captured"] = await self._coord.cycle_memory._capture_cycle_memory()
+        # Rebuild the orchestration system prompt for the new cycle from the directive captured
+        # during the SWEEP turn of the prior cycle.
         summary["orch_prompt_reseeded"] = self._coord.cycle_memory._reseed_orch_prompt_for_cycle()
-        # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
+        # Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         log.info(
             "cycle soft-restart %d → %d: %s",
