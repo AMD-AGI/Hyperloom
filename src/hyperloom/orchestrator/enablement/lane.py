@@ -636,12 +636,8 @@ class EnablementLane(CoordinatorCollaborator):
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
-    async def _pump_enablement_safely(self, *, caller: str) -> None:
-        """ENABLEMENT phase pump — called every tick while in ENABLEMENT.
-
-        Args:
-            caller: Label identifying the caller, for logs and the recorded stage.
-        """
+    async def _pump_enablement_safely(self) -> None:
+        """ENABLEMENT phase pump — called every tick while in ENABLEMENT."""
         if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
         # Independently, because a raise in one pump must not skip the rest: the
@@ -654,8 +650,8 @@ class EnablementLane(CoordinatorCollaborator):
             try:
                 await pump()
             except Exception as exc:
-                log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
-                stage = f"enablement_pump:{pump.__name__}:{caller}"
+                log.exception("ENABLEMENT %s failed", pump.__name__)
+                stage = f"enablement_pump:{pump.__name__}"
                 # Named here rather than by the coordinator's generic handler:
                 # the lane's event is open for the whole session, so only the
                 # lane knows which exceptions are its own to answer for.

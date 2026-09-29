@@ -1010,9 +1010,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._pump_dispatcher_once()
         if not in_closing:
             # FRAMEWORK_AGENT phase pump: enqueue the next candidate / fetch the next batch.
-            await self.phase_framework.pump(caller="run")
+            await self.phase_framework.pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self._pump_enablement_safely(caller="run")
+            await self._pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
             await self._await_within_session_bound(

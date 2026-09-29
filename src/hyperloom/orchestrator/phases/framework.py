@@ -2073,7 +2073,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         )
 
-    async def pump(self, *, caller: str) -> None:
+    async def pump(self) -> None:
         """Best-effort FRAMEWORK pump wrapper run once per Coordinator tick.
 
         A pump that raises must not take the tick down -- the phase is driven
@@ -2084,8 +2084,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         try:
             await self._pump_framework_agent_phase()
         except Exception as exc:
-            log.exception("FRAMEWORK pump (%s) failed", caller)
-            self._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
+            log.exception("FRAMEWORK pump failed")
+            self._record_coordinator_exception(stage="framework_pump", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,
