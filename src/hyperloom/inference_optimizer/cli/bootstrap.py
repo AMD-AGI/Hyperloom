@@ -59,7 +59,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 2
+AGENTX_MEASUREMENT_EPOCH = 3
 LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
 
 
@@ -110,12 +110,20 @@ def agentx_state_is_stale(state: Any) -> str:
     if want_mode == "agentx":
         from hyperloom.common.agentx_mode import native_agentx_session
 
-        expected_epoch = AGENTX_MEASUREMENT_EPOCH if native_agentx_session(state) else LEGACY_AGENTX_MEASUREMENT_EPOCH
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
-        if had_epoch != expected_epoch:
+        backend = str(getattr(state, "agentx_backend", "") or "").strip().lower()
+        expected_backend = "native" if native_agentx_session(state) else "legacy"
+        if backend and backend != expected_backend:
+            return f"session AgentX backend {backend!r} conflicts with its measurement epoch {had_epoch}"
+        if had_epoch == LEGACY_AGENTX_MEASUREMENT_EPOCH:
+            from hyperloom.common.agentx_mode import config_enables_native_agentx
+
+            accepted = str(getattr(state, "baseline_config_path", "") or "").strip()
+            if accepted and config_enables_native_agentx(accepted):
+                return "session epoch 1 conflicts with its accepted native AgentX baseline"
+        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, AGENTX_MEASUREMENT_EPOCH}:
             return (
-                f"session carries AgentX epoch {had_epoch}, this build measures "
-                f"epoch {expected_epoch}; the recorded results describe "
+                f"session carries unsupported AgentX epoch {had_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
     return ""
@@ -263,6 +271,9 @@ def _seed_shared_state(
             _snapshot_path = session_dir / "benchmark.source.yaml"
             _snapshot_path.write_bytes(_source_bytes)
             _benchmark_source_config_path = str(_snapshot_path)
+            os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(_snapshot_path)
+            if str(getattr(args, "_generated_agentx_source", "")) == str(_source_path):
+                _source_path.unlink()
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -315,7 +326,7 @@ def _seed_shared_state(
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
-        warm_replay_enabled=(not native_agentx and not bool(getattr(args, "no_warm_replay", False))),
+        warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
         warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
@@ -337,13 +348,13 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # Native launchers cannot measure an optimized concurrency-sweep arm.
         conc_sweep_enabled=(
             bool(getattr(args, "enable_conc_sweep", None))
             if getattr(args, "enable_conc_sweep", None) is not None
-            else not native_agentx
+            else True
         ),
         benchmark_mode=benchmark_mode,
+        agentx_backend="native" if native_agentx else "legacy" if benchmark_mode == "agentx" else "",
         agentx_epoch=(
             AGENTX_MEASUREMENT_EPOCH
             if native_agentx

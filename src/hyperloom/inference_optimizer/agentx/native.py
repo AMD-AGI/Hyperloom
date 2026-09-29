@@ -155,6 +155,7 @@ AGENTX_RUNTIME_PIN_NAMES = (
     "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT",
     "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT",
     "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+    "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT",
     "HYPERLOOM_AGENTX_GPU_COUNT",
     "MAGPIE_REF",
     "INFERENCEX_REF",
@@ -261,6 +262,14 @@ _NATIVE_LAUNCHER_TRANSITIVE_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
     ): ("benchmarks/single_node/agentic/apply_k3_container_patches.sh",),
 }
 
+# Reviewed revisions that publish the upstream recipe/launcher contract.
+_NATIVE_LAUNCH_CONTRACT_REFS: frozenset[str] = frozenset({"421312f8984c2152f4b8eafefc93ea2fa598e80f"})
+_NATIVE_LAUNCH_CONTRACT_INPUTS = (
+    "configs/agentx-launchers.json",
+    "utils/agentic/server_launch.py",
+    "utils/agentic/custom_model.py",
+)
+
 _MAGPIE_SOURCE_IDENTITY_CODE = r"""
 import hashlib
 import json
@@ -287,6 +296,10 @@ _AUDITED_MAGPIE_EXECUTION_TREES = {
     "a3339dc2776ee0c977fb3313fe89f56da7a91555": {
         "file_count": 79,
         "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
+    },
+    "d72965776df5416dad063c00237f6e389b841162": {
+        "file_count": 81,
+        "tree_sha256": "84dd7920ff992571c7dc6d485a4680ac3fc2afe7b6dde606dbd754d545a5729c",
     },
 }
 
@@ -567,6 +580,10 @@ def _run_magpie_recipe_resolver(
         raise RuntimeError("Magpie AgentX recipe resolver returned invalid JSON") from exc
     if not isinstance(result, dict) or not isinstance(result.get("benchmark"), dict):
         raise RuntimeError("Magpie AgentX recipe resolver returned an invalid result")
+    from .identity import has_launch_contract
+
+    if has_launch_contract(benchmark) and not has_launch_contract(result["benchmark"]):
+        raise RuntimeError("Pinned Magpie does not support the native AgentX optimization launch contract")
     return result
 
 
@@ -746,6 +763,29 @@ def _checkout_head(root: Path, *, label: str) -> str:
     return head
 
 
+def _launcher_manifest(root: Path, head: str) -> dict[str, tuple[str, str]]:
+    if head not in _NATIVE_LAUNCH_CONTRACT_REFS:
+        return {recipe: item for (commit, recipe), item in _NATIVE_LAUNCHER_MANIFEST.items() if commit == head}
+    manifest_path = root / "configs" / "agentx-launchers.json"
+    if _contains_symlink(root, manifest_path) or manifest_path.read_bytes() != _head_blob(
+        root, "configs/agentx-launchers.json"
+    ):
+        raise ValueError("Native AgentX launcher manifest changed from its pinned source")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("recipes"), dict):
+        raise ValueError("Native AgentX launcher manifest has an unsupported schema")
+    generic = manifest.get("generic", {})
+    if not isinstance(generic, dict) or manifest["recipes"].keys() & generic.keys():
+        raise ValueError("Native AgentX launcher manifest has invalid generic capabilities")
+    entries: dict[str, tuple[str, str]] = {}
+    for recipe, entry in {**manifest["recipes"], **generic}.items():
+        if not isinstance(entry, dict) or entry.get("launch_overrides_version") != 1:
+            raise ValueError(f"Native AgentX recipe {recipe!r} has no supported launch contract")
+        script = validate_native_launcher_name(str(entry.get("benchmark_script") or "")).as_posix()
+        entries[recipe] = (script, hashlib.sha256(_head_blob(root, f"benchmarks/{script}")).hexdigest())
+    return entries
+
+
 def validate_native_recipe_launcher(
     *,
     inferencex_path: str | Path,
@@ -754,17 +794,14 @@ def validate_native_recipe_launcher(
 ) -> dict[str, str]:
     """Prove that a pinned recipe is paired with its audited launcher.
 
-    The current InferenceX recipe schema does not carry launcher identity and
-    its fleet runners use non-uniform filename fallback rules.  Consequently a
-    clean checkout and a recipe fingerprint alone cannot detect, for example,
-    a GLM recipe paired with a DSv4 launcher.  The exact-ref manifest above is
-    the fail-closed compatibility boundary until InferenceX publishes this
-    relation in the recipe itself.
+    New revisions publish a versioned launcher manifest. Saved older native
+    sessions use the exact-ref compatibility manifest because their fleet
+    runners have non-uniform filename fallback rules.
     """
     root = validate_native_checkout_path(inferencex_path)
     head = _checkout_head(root, label="InferenceX")
     recipe_name = str(recipe or "").strip()
-    manifest_entry = _NATIVE_LAUNCHER_MANIFEST.get((head, recipe_name))
+    manifest_entry = _launcher_manifest(root, head).get(recipe_name)
     if manifest_entry is None:
         raise ValueError(
             "Native AgentX has no audited launcher mapping for "
@@ -841,11 +878,15 @@ def native_execution_identity(
         )
     if wanted and head != wanted:
         raise ValueError(f"InferenceX HEAD {head} does not match the pinned ref {wanted}")
+    from .identity import has_launch_contract
+
+    if has_launch_contract(resolved_benchmark) and head not in _NATIVE_LAUNCH_CONTRACT_REFS:
+        raise ValueError("Pinned InferenceX does not support the native AgentX optimization launch contract")
 
     launcher_manifest_entries = [
         (recipe, expected_sha256)
-        for (commit, recipe), (script, expected_sha256) in _NATIVE_LAUNCHER_MANIFEST.items()
-        if commit == head and script == benchmark_script
+        for recipe, (script, expected_sha256) in _launcher_manifest(root, head).items()
+        if script == benchmark_script
     ]
     if not launcher_manifest_entries:
         raise ValueError(
@@ -863,6 +904,17 @@ def native_execution_identity(
             )
         }
     )
+    if head in _NATIVE_LAUNCH_CONTRACT_REFS:
+        transitive_relative = sorted(
+            set(transitive_relative)
+            | set(_NATIVE_LAUNCH_CONTRACT_INPUTS)
+            | {
+                path
+                for (_commit, script), paths in _NATIVE_LAUNCHER_TRANSITIVE_INPUTS.items()
+                if script == benchmark_script
+                for path in paths
+            }
+        )
     transitive_paths = [root / Path(*PurePosixPath(item).parts) for item in transitive_relative]
     missing_transitive = [str(path) for path in transitive_paths if not path.is_file()]
     if missing_transitive:
@@ -1002,6 +1054,12 @@ def native_execution_identity(
     identity["static_execution_fingerprint"] = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    from .identity import has_launch_contract, native_workload_fingerprint
+
+    if has_launch_contract(resolved_benchmark):
+        identity["workload_fingerprint"] = native_workload_fingerprint(
+            resolved_benchmark, identity["static_execution_fingerprint"]
+        )
     # The complete resolved BenchmarkConfig is accepted only after
     # materialization and persisted beside the recipe.  Magpie overlays its
     # envs onto the InferenceX launcher environment, so this second layer also
@@ -1224,19 +1282,25 @@ def resolve_native_recipe(
                 f"expected {expected_execution_fingerprint!r}, resolved "
                 f"{actual_execution_fingerprint!r}."
             )
-        materialized_fingerprint = execution["execution_fingerprint"]
-        accepted_materialized_fingerprint = os.environ.get(
-            "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
-            "",
-        ).strip()
+        from .identity import has_launch_contract
+
+        optimizing = has_launch_contract(resolved_benchmark)
+        pinned_field = "workload_fingerprint" if optimizing else "execution_fingerprint"
+        pin_name = (
+            "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"
+            if optimizing
+            else "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT"
+        )
+        materialized_fingerprint = execution[pinned_field]
+        accepted_materialized_fingerprint = os.environ.get(pin_name, "").strip()
         if accepted_materialized_fingerprint and materialized_fingerprint != accepted_materialized_fingerprint:
             raise ValueError(
-                "Native AgentX resolved BenchmarkConfig changed after its first "
-                "materialization: expected execution fingerprint "
+                "Native AgentX fixed benchmark workload changed after its first "
+                "materialization: expected fingerprint "
                 f"{accepted_materialized_fingerprint!r}, resolved "
                 f"{materialized_fingerprint!r}."
             )
-        os.environ["HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT"] = materialized_fingerprint
+        os.environ[pin_name] = materialized_fingerprint
         workload["execution"] = execution
     return topology
 

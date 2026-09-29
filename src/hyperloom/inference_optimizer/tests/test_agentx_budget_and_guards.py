@@ -614,7 +614,7 @@ def test_resume_ignores_inherited_benchmark_yaml(monkeypatch, tmp_path):
 
 
 @pytest.mark.usefixtures("native_config")
-def test_agentx_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
+def test_epoch_two_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
@@ -624,7 +624,8 @@ def test_agentx_preflight_rejects_explicit_concurrency_sweep(monkeypatch):
                 framework="sglang",
                 nodes=1,
                 enable_conc_sweep=True,
-            )
+            ),
+            _St("agentx", 2),
         )
     assert exc.value.code == 2
 
@@ -721,7 +722,7 @@ def _saved_native_baseline(tmp_path):
     )
     state = _St(
         "agentx",
-        AGENTX_MEASUREMENT_EPOCH,
+        2,
         baseline_config_path=str(baseline_path),
     )
     return state, pins
@@ -730,6 +731,29 @@ def _saved_native_baseline(tmp_path):
 def test_resume_accepts_matching_agentx_state(monkeypatch):
     _on(monkeypatch)
     assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH)) == ""
+
+
+def test_epoch_three_resume_pins_workload_without_freezing_candidate_execution(monkeypatch, tmp_path):
+    state, pins = _saved_native_baseline(tmp_path)
+    state.agentx_epoch = 3
+    config = Path(state.baseline_config_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed["benchmark"]["agentx"]["launch_overrides"] = {"version": 1}
+    parsed["benchmark"]["workload_spec"]["execution"]["workload_fingerprint"] = "f" * 64
+    config.write_text(yaml.safe_dump(parsed))
+    _blank_agentx_runtime_pins(monkeypatch)
+    restored = _restore_agentx_runtime_pins_from_state(state)
+    assert restored["HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"] == "f" * 64
+    assert "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT" not in restored
+    assert "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT" not in os.environ
+
+
+def test_resume_rejects_implicit_launch_contract_upgrade(monkeypatch, tmp_path):
+    state, _ = _saved_native_baseline(tmp_path)
+    state.agentx_epoch = 3
+    _blank_agentx_runtime_pins(monkeypatch)
+    with pytest.raises(ValueError, match="launch contract.*conflicts with the session epoch"):
+        _restore_agentx_runtime_pins_from_state(state)
 
 
 def test_resume_accepts_matching_synthetic_state(monkeypatch):
@@ -1259,7 +1283,9 @@ def test_legacy_agentx_keeps_optimizer_launch_options_without_native_pins(monkey
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    _preflight_agentx_backend(argparse.Namespace(framework=framework, nodes=2, enable_conc_sweep=True))
+    _preflight_agentx_backend(
+        argparse.Namespace(framework=framework, nodes=2, enable_conc_sweep=True), _St("agentx", 1)
+    )
 
 
 def test_legacy_resume_preserves_epoch_one_and_does_not_require_native_pins(monkeypatch, native_config):

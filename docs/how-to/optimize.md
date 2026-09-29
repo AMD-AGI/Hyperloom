@@ -75,20 +75,31 @@ for the full prompt field reference (every field maps to a CLI flag defined in
 
 AgentX measurement uses Magpie's native InferenceX integration. Pass a source
 Magpie YAML with `--benchmark-config`; its `benchmark.agentx: enable` switch
-automatically selects Hyperloom's AgentX session and grading mode. Do not export
-`HYPERLOOM_AGENTX` for this path. That environment variable remains only as a
-legacy mode switch for callers that do not supply a source YAML. This
+automatically selects Hyperloom's AgentX session and grading mode. Alternatively,
+set `HYPERLOOM_AGENTX=1` and pass the usual model, framework, GPU, precision, and
+concurrency arguments; Magpie resolves the native recipe and launcher. This
 integration is pinned to Magpie
-[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus the generic
-eval source-path hotfix at commit `a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
-`3d5581562f643f9bdeb8410cd924e2c70906c966`.
+[v0.3.0](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the generic
+eval source-path fix at commit `d72965776df5416dad063c00237f6e389b841162` and InferenceX commit
+`421312f8984c2152f4b8eafefc93ea2fa598e80f`.
 
-Native AgentX is opt-in through `benchmark.agentx: enable`. Existing
-`HYPERLOOM_AGENTX=1` launches without that config field continue to use the
-legacy `aiperf_client.sh` benchmark, including server tuning, patch integration,
-GEAK proposals with canonical revalidation, and concurrency sweeps. Legacy
-AgentX epoch-1 sessions can resume on that same backend; native epoch-2
-measurements remain separate and cannot reuse a legacy baseline or KEEP record.
+New AgentX sessions record native backend epoch 3 and retain Hyperloom's
+optimization loop. Recipe or matrix ambiguity is an error: use the existing
+`AGENTX_RECIPE`, `AGENTX_CONFIG_FILE`, or `AGENTX_SELECTOR` inputs to select the
+intended workload. A local checkpoint requires a canonical `AGENTX_MODEL_ID`
+or source `benchmark.model`; Hyperloom does not infer identity from a basename.
+When no registered recipe matches, Magpie can resolve a custom SGLang or vLLM
+workload on MI300X, MI325X, or MI355X from an explicit image, TP, EP, and
+concurrency. Supply `HYPERLOOM_IMAGE`, `--tp`, `--ep`, and `--conc`, or the
+corresponding source `docker_image` and `envs.TP`/`EP_SIZE`/`CONC` fields.
+Magpie verifies model context from the checkpoint's `config.json` or Hugging
+Face metadata; `--max-model-len` may cap it. An ambiguous registered recipe
+still requires a selector and never falls through to a custom workload.
+Model architecture, modality, and quantization support still depend on the
+chosen framework image; the generic launcher does not make every model runnable.
+Persisted epoch-1 sessions resume their legacy client, and epoch-2 native
+sessions retain the measurement-only contract. Resume never upgrades an epoch
+or reuses a baseline or KEEP record from another backend.
 
 For the pinned GLM-5.2 TP4 recipe, create a source YAML. It carries the public
 model identity, framework, launcher, image pin, and fixed concurrency; recipe
@@ -213,25 +224,30 @@ leave `INFERENCE_OPTIMIZER_RAY_EXEC` unset or set it to `0`, because explicitly
 setting it to `1` is rejected. Multi-node/disaggregated execution,
 `server_lifecycle`, and Atom are also unsupported.
 
-The pinned InferenceX launchers own their complete server argv and expose no
-optimizer-argument hook. Hyperloom does not modify a launcher. Server-argument,
-server-environment, removal, and reference-launch candidate overrides therefore
-fail closed instead of measuring an unchanged server. This release provides
-native AgentX measurement only; server configuration optimization and a
-baseline-versus-optimized concurrency sweep require an upstream launcher hook.
+New native sessions use the versioned upstream launch-overrides contract.
+Server arguments, environment changes, and source overlays must be represented
+in launch evidence before a canonical result can be accepted. Hyperloom keeps
+the workload fingerprint fixed while each candidate has its own execution
+identity. Unsupported launch controls fail closed. Saved epoch-2 sessions keep
+their earlier measurement-only restrictions.
 
 Native Magpie AgentX v1 does not collect PyTorch traces. Measurement rounds use
 the native launcher above, including its radix/prefix-cache behavior. The
-launcher also forces the model's native context, so `ISL`, `OSL`, and
-`MAX_MODEL_LEN` do not reshape native replay. If PRELUDE schedules roofline or
+registered launcher retains its context policy; `ISL` and `OSL` do not reshape
+native replay. Custom workloads validate `MAX_MODEL_LEN` against the model's
+native context. If PRELUDE schedules roofline or
 profile analysis, Hyperloom uses `aiperf_client.sh` with a generic server. That
 compatibility trace is diagnostic only; it is not recipe-identical native
 AgentX. The diagnostic path preserves the installed framework source and skips
 TraceLens/CK source patches, so annotation coverage can be lower without
 changing subsequent native measurements. AIPerf's
 `profile`/`profiled` fields describe workload statistics, not a PyTorch profiler
-trace. The native `KERNEL_AGENT`/GEAK phase is not dispatched: it records
-`status=skipped` and `error_class=unsupported_upstream_launcher_hook`.
+trace. In epoch-3 sessions, GEAK uses this diagnostic workload to propose
+changes. Its proxy scores cannot promote a candidate: accepted source patches
+require a real Critic review and transactional integration followed by native
+AgentX measurement. A rejected review, missing artifact, or failed canonical
+run leaves the accepted configuration unchanged. Epoch-2 sessions keep their
+earlier GEAK skip.
 
 Accepted native results require `benchmark_valid=true`, `publishable=true`, an
 `agentic-coding` scenario, matching strict recipe/launch/raw fingerprints, and

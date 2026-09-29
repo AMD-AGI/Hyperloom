@@ -106,6 +106,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_REST
 
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
+    ENV_CURRENT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
@@ -966,12 +967,13 @@ def _preflight_agentx_backend(args: argparse.Namespace, state: Any = None) -> No
         )
         raise SystemExit(2)
     if native:
-        _preflight_native_agentx_backend(args, framework)
+        _preflight_native_agentx_backend(args, framework, state)
 
 
-def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str) -> None:
+def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, state: Any = None) -> None:
     """Check the pinned single-node launcher contract for explicit native sessions."""
     from hyperloom.inference_optimizer.agentx.native import AGENTX_REQUIRED_RUNTIME_PIN_NAMES
+    from hyperloom.common.agentx_mode import native_agentx_optimization_session
 
     if not os.environ.get("AGENTX_MODEL_ID", "").strip():
         model_value = str(getattr(args, "model", "") or "").strip()
@@ -1006,7 +1008,7 @@ def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str) -
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if getattr(args, "enable_conc_sweep", None) is True:
+    if getattr(args, "enable_conc_sweep", None) is True and not native_agentx_optimization_session(state):
         print(
             "ERROR: native Magpie AgentX does not yet support Hyperloom's "
             "post-optimization concurrency sweep. The pinned InferenceX "
@@ -1095,6 +1097,7 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
     os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT", None)
     os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT", None)
     os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT", None)
+    os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT", None)
     os.environ.pop("HYPERLOOM_AGENTX_GPU_COUNT", None)
     os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG_SHA256", None)
     cli_value = str(getattr(args, "benchmark_config", "") or "").strip()
@@ -1108,10 +1111,11 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
         # different launch select a foreign YAML before state.json is loaded.
         os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG", None)
         return False
+    os.environ.pop(ENV_CURRENT_SESSION_DIR, None)
     inherited = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
     raw_path = cli_value or inherited
     if not raw_path:
-        return False
+        return _agentx_enabled()
 
     path = Path(raw_path).expanduser().resolve()
     if not path.is_file():
@@ -1157,9 +1161,12 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
 
     os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(path)
     os.environ["HYPERLOOM_BENCHMARK_CONFIG_SHA256"] = hashlib.sha256(source_bytes).hexdigest()
-    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+    from hyperloom.common.agentx_mode import native_agentx_enabled
 
     native = native_agentx_enabled(benchmark.get("agentx"))
+    if _agentx_enabled() and "agentx" in benchmark and not native:
+        raise ValueError("HYPERLOOM_AGENTX=1 conflicts with disabled benchmark.agentx")
+    native = native or _agentx_enabled()
     raw_envs = benchmark.get("envs")
     benchmark_envs = raw_envs if isinstance(raw_envs, Mapping) else {}
     if native:
@@ -1220,6 +1227,13 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
             value = _positive_yaml_int(env_name)
             if value is not None:
                 setattr(args, attr, value)
+    raw_agentx = benchmark.get("agentx")
+    if getattr(args, "conc", None) is None and isinstance(raw_agentx, Mapping):
+        configured_conc = raw_agentx.get("concurrency")
+        if configured_conc is not None:
+            args.conc = int(configured_conc)
+            if args.conc <= 0:
+                raise ValueError("benchmark.agentx.concurrency must be a positive integer")
     if not native and getattr(args, "tp", None) is None:
         yaml_tp = _positive_yaml_int("TP")
         if yaml_tp is not None:
@@ -1399,6 +1413,10 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
         raise ValueError("resolved AgentX recipe did not provide a fingerprint")
     resolved_benchmark = preview.get("benchmark")
     control_source = resolved_benchmark if isinstance(resolved_benchmark, Mapping) else preview_benchmark
+    for name, field in (("AGENTX_MODEL_ID", "model"), ("AGENTX_SERVER_SCRIPT", "benchmark_script")):
+        value = str(control_source.get(field) or "").strip()
+        if value:
+            os.environ[name] = value
     execution = native_execution_identity(
         inferencex_path=inferencex_path,
         benchmark_script=str(control_source.get("benchmark_script") or ""),
@@ -1478,13 +1496,14 @@ def _restore_agentx_runtime_pins_from_state(
     pins back into the process before those actions build a workload so a new
     shell cannot silently choose another model, launcher, checkout, or image.
     """
-    from hyperloom.common.agentx_mode import native_agentx_session
+    from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 
     if not native_agentx_session(state):
         for name in (
             "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT",
             "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT",
             "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+            "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT",
             "HYPERLOOM_AGENTX_GPU_COUNT",
         ):
             os.environ.pop(name, None)
@@ -1514,6 +1533,8 @@ def _restore_agentx_runtime_pins_from_state(
         pin_source = config_path
     else:
         seed_agentx: dict[str, Any] = {"enabled": True}
+        if native_agentx_optimization_session(state):
+            seed_agentx["launch_overrides"] = {"version": 1}
         if seed_pins.get("AGENTX_MODE"):
             seed_agentx["mode"] = seed_pins["AGENTX_MODE"]
         if seed_pins.get("AGENTX_RECIPE"):
@@ -1549,6 +1570,10 @@ def _restore_agentx_runtime_pins_from_state(
 
     if not native_agentx_enabled(benchmark.get("agentx")):
         raise ValueError(f"saved AgentX pin source {pin_source!r} does not enable native AgentX")
+    from hyperloom.inference_optimizer.agentx.identity import has_launch_contract
+
+    if native_agentx_optimization_session(state) != has_launch_contract(benchmark):
+        raise ValueError(f"saved AgentX launch contract in {pin_source!r} conflicts with the session epoch")
 
     raw_envs = benchmark.get("envs")
     envs = raw_envs if isinstance(raw_envs, Mapping) else {}
@@ -1585,11 +1610,15 @@ def _restore_agentx_runtime_pins_from_state(
         "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT": str(
             execution.get("execution_fingerprint") or ""
         ).strip(),
+        "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT": str(execution.get("workload_fingerprint") or "").strip(),
         "HYPERLOOM_AGENTX_GPU_COUNT": gpu_count,
         "MAGPIE_REF": str(execution.get("magpie_commit") or seed_pins.get("MAGPIE_REF") or "").strip(),
         "INFERENCEX_REF": str(execution.get("inferencex_commit") or seed_pins.get("INFERENCEX_REF") or "").strip(),
     }
     baseline_pins.update(_canonical_agentx_control_pins(benchmark))
+    if native_agentx_optimization_session(state):
+        baseline_pins.pop("HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT", None)
+        seed_pins.pop("HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT", None)
     for name, baseline_value in baseline_pins.items():
         if seed_pins.get(name) and baseline_value and seed_pins[name] != baseline_value:
             raise ValueError(
@@ -1610,7 +1639,11 @@ def _restore_agentx_runtime_pins_from_state(
             (
                 "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT",
                 "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT",
-                "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+                (
+                    "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"
+                    if native_agentx_optimization_session(state)
+                    else "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT"
+                ),
                 "HYPERLOOM_AGENTX_GPU_COUNT",
                 "MAGPIE_REF",
                 "INFERENCEX_REF",
@@ -2232,6 +2265,117 @@ def _persist_preflight_failure_artifacts(
     return session_dir
 
 
+def _resolve_fresh_gpu(args: argparse.Namespace) -> str:
+    """Resolve the actual target GPU before native recipe selection."""
+    # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
+    user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+    if _should_remote_probe_gpu(args):
+        from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
+
+        probed = remote_autodetect_gpu_type() or ""
+        if probed:
+            print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+    else:
+        probed = _autodetect_gpu_type() or ""
+    gpu_type, gpu_warnings = _resolve_gpu_type(
+        user_specified=user_specified,
+        probed=probed,
+    )
+    for line in gpu_warnings:
+        print(line, file=sys.stderr)
+    if probed and not user_specified:
+        print(f"GPU type        : {gpu_type} (auto-detected)")
+    runner_gpu_type = _gpu_runner_type(gpu_type)
+    if gpu_type and runner_gpu_type != gpu_type:
+        print(
+            f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
+            f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
+            f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
+            file=sys.stderr,
+        )
+    args.gpu_type = gpu_type or None
+    if runner_gpu_type:
+        os.environ["TARGET_GPU_TYPE"] = gpu_type
+        os.environ["GPU_TYPE"] = runner_gpu_type
+        print(f"GPU type        : {gpu_type}")
+        print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
+    else:
+        os.environ.pop("TARGET_GPU_TYPE", None)
+        os.environ.pop("GPU_TYPE", None)
+        args.gpu_type = None
+        print("GPU type        : <unset> (Magpie will auto-detect)")
+    return gpu_type
+
+
+async def _prepare_fresh_workload(args: argparse.Namespace) -> tuple[str, str]:
+    """Resolve model, framework and target hardware before selecting a recipe."""
+    # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
+    if not args.model:
+        args.model = os.environ.get("MODEL_PATH") or ""
+    if not args.model:
+        print(
+            "ERROR: model is required. Pass --model <path> or set "
+            "MODEL_PATH env (or use --resume-from <session_dir> to "
+            "continue an existing session).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
+    from hyperloom.common.model_paths import resolve_serving_model_path
+
+    os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
+
+    # Quantization prelude (one-shot, before any session/baseline work): if --quantize was passed, quantize the
+    # source model now and rewrite args.model to the exported quantized model.
+    await _run_quantization_prelude(args)
+
+    # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
+    framework = (
+        args.framework or os.environ.get("FRAMEWORK", "")
+    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    if not framework_registry.is_supported(framework):
+        print(
+            f"ERROR: --framework must be one of "
+            f"{', '.join(framework_registry.names())} "
+            f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
+            "--framework",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _enforce_expected_framework(framework)
+    os.environ["FRAMEWORK"] = framework
+    print(f"Framework       : {framework}")
+    _apply_operator_supplied_paths(args, framework)
+
+    # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
+    if framework == "atom":
+        _apply_atom_auto_tighten(args)
+
+    gpu_type = _resolve_fresh_gpu(args)
+    _require_custom_entrypoint(framework, gpu_type=_gpu_runner_type(gpu_type) or gpu_type)
+    _check_gfx_arch_resolvable(args.gpu_type)
+    resolved = argparse.Namespace(**vars(args))
+    _resolve_workload_knobs(resolved)
+    args.precision = resolved.precision
+    args.conc = resolved.conc
+    return framework, gpu_type
+
+
+def _preflight_for_session(args: argparse.Namespace) -> dict[str, str]:
+    """Read persisted mode during resume preflight without committing the session pointer."""
+    previous = os.environ.get(ENV_CURRENT_SESSION_DIR)
+    if args.resume_from:
+        os.environ[ENV_CURRENT_SESSION_DIR] = str(Path(args.resume_from).expanduser().resolve())
+    try:
+        return _preflight(args)
+    finally:
+        if args.resume_from:
+            if previous is None:
+                os.environ.pop(ENV_CURRENT_SESSION_DIR, None)
+            else:
+                os.environ[ENV_CURRENT_SESSION_DIR] = previous
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     try:
@@ -2373,7 +2517,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
-        resolved_urls = _preflight(args)
+        resolved_urls = _preflight_for_session(args)
     except Exception as exc:
         try:
             _persist_preflight_failure_artifacts(args, exc)
@@ -2387,7 +2531,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # _configure_benchmark_config deliberately cleared it.
         os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG", None)
     else:
+        framework, gpu_type = await _prepare_fresh_workload(args)
         try:
+            from .agentx_source import prepare_native_agentx_source
+
+            prepare_native_agentx_source(args)
             _finalize_benchmark_config(args)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
@@ -2775,93 +2923,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
-        # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
-        if not args.model:
-            args.model = os.environ.get("MODEL_PATH") or ""
-        if not args.model:
-            print(
-                "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume-from <session_dir> to "
-                "continue an existing session).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
-        from hyperloom.common.model_paths import resolve_serving_model_path
-
-        os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
-
-        # Quantization prelude (one-shot, before any session/baseline work): if --quantize was passed, quantize the
-        # source model now and rewrite args.model to the exported quantized model.
-        await _run_quantization_prelude(args)
-
-        # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (
-            args.framework or os.environ.get("FRAMEWORK", "")
-        ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-        if not framework_registry.is_supported(framework):
-            print(
-                f"ERROR: --framework must be one of "
-                f"{', '.join(framework_registry.names())} "
-                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
-                "--framework",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _enforce_expected_framework(framework)
-        os.environ["FRAMEWORK"] = framework
-        print(f"Framework       : {framework}")
-        _apply_operator_supplied_paths(args, framework)
-
-        # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
-        if framework == "atom":
-            _apply_atom_auto_tighten(args)
-
-        # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-        if _should_remote_probe_gpu(args):
-            from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
-
-            probed = remote_autodetect_gpu_type() or ""
-            if probed:
-                print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
-        else:
-            probed = _autodetect_gpu_type() or ""
-        gpu_type, gpu_warnings = _resolve_gpu_type(
-            user_specified=user_specified,
-            probed=probed,
-        )
-        for line in gpu_warnings:
-            print(line, file=sys.stderr)
-        if probed and not user_specified:
-            print(f"GPU type        : {gpu_type} (auto-detected)")
-        runner_gpu_type = _gpu_runner_type(gpu_type)
-        if gpu_type and runner_gpu_type != gpu_type:
-            print(
-                f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
-                file=sys.stderr,
-            )
-        args.gpu_type = gpu_type or None
-        if runner_gpu_type:
-            os.environ["TARGET_GPU_TYPE"] = gpu_type
-            os.environ["GPU_TYPE"] = runner_gpu_type
-            print(f"GPU type        : {gpu_type}")
-            print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
-        else:
-            os.environ.pop("TARGET_GPU_TYPE", None)
-            os.environ.pop("GPU_TYPE", None)
-            args.gpu_type = None
-            print("GPU type        : <unset> (Magpie will auto-detect)")
-        _require_custom_entrypoint(framework, gpu_type=runner_gpu_type or gpu_type)
-
-        # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
-        # unanswerable until args.gpu_type is final.
-        _check_gfx_arch_resolvable(args.gpu_type)
-
-        # Resolve workload knobs (flag > default; no resume state on a fresh launch) so ISL/OSL/CONC/TP/EP are
-        # authoritative reals before MAX_MODEL_LEN auto-derivation and env projection (issue #903).
         _resolve_workload_knobs(args)
         # MAX_MODEL_LEN is operator-overridable.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)

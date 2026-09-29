@@ -325,7 +325,25 @@ class TestVariantResultToDict:
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
         expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
+        expected.pop("materialized_config")
+        expected.pop("native_measurement")
         assert encoded == expected
+
+    def test_preserves_native_identity_with_actual_candidate_config(self):
+        result = VariantResult(
+            name="native",
+            extra_server_args="",
+            extra_envs={},
+            status="succeeded",
+            output_throughput=286.0,
+            materialized_config="/runs/candidate.yaml",
+            native_measurement={"agentx_workload_fingerprint": "a" * 64, "agentx_launch_contract": 1},
+        )
+        encoded = result.to_dict()
+        assert encoded["output_throughput"] == 286.0
+        assert encoded["materialized_config"] == "/runs/candidate.yaml"
+        assert encoded["agentx_workload_fingerprint"] == "a" * 64
+        assert "native_measurement" not in encoded
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")

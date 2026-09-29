@@ -67,12 +67,29 @@ def test_native_agentx_session_forces_direct_local_execution(monkeypatch, tmp_pa
     assert rb.ray_gpu_specialist_exec_enabled() is False
 
 
-def test_legacy_agentx_keeps_the_ray_backend(monkeypatch):
+def test_fresh_agentx_switch_forces_direct_local_execution(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    assert rb._should_use_ray_backend() is True
-    assert rb.ray_gpu_specialist_exec_enabled() is True
+    assert rb._should_use_ray_backend() is False
+    assert rb.ray_gpu_specialist_exec_enabled() is False
+
+
+@pytest.mark.parametrize("epoch, ray_enabled", [(1, True), (2, False), (3, False)])
+def test_saved_agentx_epoch_owns_ray_routing(monkeypatch, tmp_path, epoch, ray_enabled):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    SharedState(session_id="saved-agentx", benchmark_mode="agentx", agentx_epoch=epoch).save(tmp_path)
+    source = tmp_path / "native.yaml"
+    source.write_text("benchmark:\n  agentx: enable\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(source))
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    assert rb._should_use_ray_backend() is ray_enabled
+    assert rb.ray_gpu_specialist_exec_enabled() is ray_enabled
 
 
 # ── visible-device merge invariant ───────────────────────────────────────────

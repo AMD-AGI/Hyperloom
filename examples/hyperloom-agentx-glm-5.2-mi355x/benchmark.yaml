@@ -1,5 +1,5 @@
 # Native Magpie AgentX example for the pinned InferenceX revision
-# 3d5581562f643f9bdeb8410cd924e2c70906c966. inferencex_path is intentionally
+# 421312f8984c2152f4b8eafefc93ea2fa598e80f. inferencex_path is intentionally
 # omitted: Hyperloom preflight reuses or clones the tested pin. A custom
 # benchmark.inferencex_path only nominates a preferred writable checkout.
 benchmark:

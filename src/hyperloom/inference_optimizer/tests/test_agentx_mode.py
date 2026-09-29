@@ -15,19 +15,23 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.common.agentx_mode import config_enables_native_agentx, native_agentx_session
+from hyperloom.common.agentx_mode import (
+    config_enables_native_agentx,
+    native_agentx_session,
+    native_agentx_optimization_session,
+)
 from hyperloom.inference_optimizer.cli.preflight import _native_agentx_preflight_requested
 
 
 @pytest.mark.parametrize(
     "selector, expected", [("enable", True), ({"enabled": True}, True), (False, False), (None, False)]
 )
-def test_fresh_native_selection_requires_explicit_source_yaml(tmp_path, selector, expected):
+def test_fresh_native_selection_accepts_source_yaml_or_public_switch(tmp_path, selector, expected):
     path = tmp_path / "benchmark.yaml"
     path.write_text(yaml.safe_dump({"benchmark": {"agentx": selector}}), encoding="utf-8")
-    env = {"HYPERLOOM_BENCHMARK_CONFIG": str(path), "HYPERLOOM_AGENTX": "1"}
+    env = {"HYPERLOOM_BENCHMARK_CONFIG": str(path)}
     assert native_agentx_session(env=env) is expected
-    assert native_agentx_session(env={"HYPERLOOM_AGENTX": "1", "AGENTX_SERVER_SCRIPT": "native.sh"}) is False
+    assert native_agentx_session(env={"HYPERLOOM_AGENTX": "1"}) is True
 
 
 @pytest.mark.parametrize("raw", ["[", "[]", "benchmark: []", "benchmark: {}"])
@@ -78,11 +82,11 @@ def test_preflight_uses_saved_identity_before_exporting_native_pins(tmp_path, mo
     assert os.environ["MAGPIE_REF"] == (pins["MAGPIE_REF"] if expected else "")
 
 
-def test_preflight_does_not_promote_legacy_env_or_unreadable_resume(monkeypatch, tmp_path):
+def test_preflight_selects_native_for_fresh_switch_but_not_unreadable_resume(monkeypatch, tmp_path):
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", "native.sh")
-    assert _native_agentx_preflight_requested(argparse.Namespace()) is False
+    assert _native_agentx_preflight_requested(argparse.Namespace()) is True
     assert _native_agentx_preflight_requested(argparse.Namespace(resume_from=str(tmp_path))) is False
 
 
@@ -104,3 +108,39 @@ assert not any(name.startswith('hyperloom.inference_optimizer.agentx') for name 
     env = dict(os.environ, HYPERLOOM_BENCHMARK_CONFIG=str(config), HYPERLOOM_AGENTX="0")
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("epoch,native,optimize", [(1, False, False), (2, True, False), (3, True, True)])
+def test_saved_epoch_controls_subprocess_routing(tmp_path, epoch, native, optimize):
+    state = {"benchmark_mode": "agentx", "agentx_epoch": epoch}
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    env = {"INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR": str(tmp_path), "HYPERLOOM_AGENTX": "1"}
+    assert native_agentx_session(env=env) is native
+    assert native_agentx_optimization_session(env=env) is optimize
+    assert native_agentx_optimization_session(state, env={"HYPERLOOM_AGENTX": "1"}) is optimize
+
+
+def test_epoch_one_outranks_saved_foreign_config(tmp_path):
+    source = tmp_path / "foreign.yaml"
+    source.write_text("benchmark:\n  agentx: enable\n", encoding="utf-8")
+    state = {"benchmark_mode": "agentx", "agentx_epoch": 1, "baseline_config_path": str(source)}
+    assert not native_agentx_session(state, env={"HYPERLOOM_AGENTX": "1"})
+
+
+def test_fresh_agentx_optimization_has_no_extra_switch():
+    assert native_agentx_optimization_session(env={"HYPERLOOM_AGENTX": "1"})
+    assert not native_agentx_optimization_session(env={"HYPERLOOM_AGENTX": "0"})
+
+
+@pytest.mark.parametrize("epoch,warm_replay,backend", [(1, True, "legacy"), (2, False, "native"), (3, True, "native")])
+def test_persisted_epoch_keeps_backend_and_optimization_contract(epoch, warm_replay, backend):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.from_dict({"benchmark_mode": "agentx", "agentx_epoch": epoch, "warm_replay_enabled": True})
+    assert state.agentx_epoch == epoch
+    assert state.agentx_backend == backend
+    assert state.warm_replay_enabled is warm_replay
+    restored = SharedState.from_dict(state.to_dict())
+    assert restored.agentx_backend == backend
+    assert restored.agentx_epoch == epoch
+    assert restored.warm_replay_enabled is warm_replay

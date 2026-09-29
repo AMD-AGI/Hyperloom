@@ -7,7 +7,7 @@
         "eval_start": 1,
         "num_prompts": 1
       },
-      "sha256": "23dc5b2fcc2b66fb6f6afc509f7400da062f43f758d22f61881f73a3c441ce18"
+      "sha256": "99467b8e61d1ee466335e572b8831db072dfe877139e9de0dbd750279b317b4e"
     },
     "utils/bench_serving/benchmark_serving.py": {
       "anchors": {
@@ -24,6 +24,6 @@
     "path": "utils/evals/patches/lm_eval_sitecustomize.py",
     "sha256": "b46fbc383c896d16b2cf3e7f862ada35b97612d6179e71a5a7145e4dd15b2ea2"
   },
-  "ref": "3d5581562f643f9bdeb8410cd924e2c70906c966",
+  "ref": "421312f8984c2152f4b8eafefc93ea2fa598e80f",
   "refresh_with": "python scripts/refresh_inferencex_anchor_contract.py"
 }

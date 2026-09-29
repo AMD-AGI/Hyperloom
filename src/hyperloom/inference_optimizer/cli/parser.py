@@ -344,7 +344,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Tensor-parallel size outside native AgentX (default: "
         f"{DEFAULT_TP}). Native AgentX instead resolves the physical GPU count "
         "as recipe TP x PP x PCP; omit this flag to use that count, or pass it "
-        "as an exact consistency assertion.",
+        "as an exact consistency assertion. Custom native workloads require "
+        "an explicit single-node TP.",
     )
     opt.add_argument(
         "--conc",
@@ -352,8 +353,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Magpie client concurrency cap (max in-flight requests). It may "
         "also come from benchmark.envs.CONC. Native AgentX requires the fixed "
-        "value to exist in the selected recipe and does not enable a "
-        "concurrency sweep. Outside native AgentX, the default is "
+        "value to exist in the selected recipe or explicit custom workload. "
+        "Native optimization sessions can sweep supported concurrency points. The default is "
         f"{DEFAULT_CONC} and --conc-sweep-concs configures a ladder.",
     )
     opt.add_argument(
@@ -361,23 +362,21 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="max_model_len",
         type=_positive_int_arg,
         default=None,
-        help="Explicit server-facing MAX_MODEL_LEN outside native AgentX. "
-        "Resolution there is --max-model-len > "
+        help="Explicit server-facing MAX_MODEL_LEN. Synthetic resolution is --max-model-len > "
         "auto(ISL+OSL+headroom, clamped to native context). Native InferenceX "
-        "AgentX launchers deliberately unset MAX_MODEL_LEN and use the model's "
-        "native context; the compatibility profile leg may still use it.",
+        "AgentX registered recipes retain their context policy; a custom "
+        "workload validates this limit against the model's native context.",
     )
     opt.add_argument(
         "--server-args",
         dest="server_args",
         type=str,
         default="",
-        help="Framework server args to apply in every phase outside native "
-        "AgentX. Routed through "
+        help="Framework server args to apply in every phase. Routed through "
         "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
         "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
-        "Native AgentX rejects this flag because the pinned InferenceX "
-        "launcher has no optimizer-argv hook. "
+        "New native AgentX sessions use the formal launch-override contract; "
+        "persisted epoch-2 sessions retain their frozen launcher. "
         'Example: --server-args "--kv-cache-dtype fp8_e4m3 '
         '--gpu-memory-utilization 0.85".',
     )

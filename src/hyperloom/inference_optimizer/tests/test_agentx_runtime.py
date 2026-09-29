@@ -413,6 +413,47 @@ def test_pinned_native_agentx_requires_session_owned_execution_identity(tmp_path
         runtime.maybe_prepare_agentx(env=env, inferencex_path=str(tmp_path), config_path=cfg)
 
 
+def test_native_optimization_accepts_new_candidate_on_the_persisted_workload(tmp_path, monkeypatch):
+    cfg, env = _pinned_native_cfg(tmp_path, monkeypatch)
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    bench = data["benchmark"]
+    bench["agentx"] = {
+        "enabled": True,
+        "launch_overrides": {"version": 1, "append_args": ["--chunked-prefill-size", "8192"]},
+    }
+    execution = bench["workload_spec"]["execution"]
+    execution["execution_fingerprint"] = "f" * 64
+    execution["workload_fingerprint"] = "e" * 64
+    env["HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"] = "e" * 64
+    cfg.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.agentx.native.native_execution_identity", lambda **_kwargs: dict(execution)
+    )
+
+    assert runtime.maybe_prepare_agentx(env=env, inferencex_path=str(tmp_path), config_path=cfg) is True
+
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.agentx.native.native_execution_identity",
+        lambda **_kwargs: {**execution, "execution_fingerprint": "d" * 64},
+    )
+    with pytest.raises(ValueError, match="persisted execution identity changed"):
+        runtime.maybe_prepare_agentx(env=env, inferencex_path=str(tmp_path), config_path=cfg)
+
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.agentx.native.native_execution_identity",
+        lambda **_kwargs: {**execution, "workload_fingerprint": "d" * 64},
+    )
+    with pytest.raises(ValueError, match="BenchmarkConfig changed"):
+        runtime.maybe_prepare_agentx(env=env, inferencex_path=str(tmp_path), config_path=cfg)
+
+
+def test_native_optimization_cannot_drop_the_launch_contract(tmp_path, monkeypatch):
+    cfg, env = _pinned_native_cfg(tmp_path, monkeypatch)
+    env["HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"] = "e" * 64
+    with pytest.raises(ValueError, match="missing its launch contract"):
+        runtime.maybe_prepare_agentx(env=env, inferencex_path=str(tmp_path), config_path=cfg)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [

@@ -34,7 +34,7 @@ from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.agentx_mode import native_agentx_session
+from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -2360,12 +2360,13 @@ class BenchmarkRunExecutor:
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
         native_agentx = native_agentx_session(live_shared_state)
+        native_optimizer = native_agentx_optimization_session(live_shared_state)
         mutation_replay = (
             str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
             or bool(params.get("patches"))
             or bool(params.get("warm_kernel_plan"))
         )
-        if native_agentx and mutation_replay:
+        if native_agentx and not native_optimizer and mutation_replay:
             return {
                 "status": "skipped",
                 "error_class": "unsupported_upstream_launcher_hook",
@@ -2444,7 +2445,7 @@ class BenchmarkRunExecutor:
         # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
         _rt_from_params = params.get("runtime_override")
-        if native_agentx and isinstance(_rt_from_params, dict) and _rt_from_params:
+        if native_agentx and not native_optimizer and isinstance(_rt_from_params, dict) and _rt_from_params:
             return {
                 "status": "failed",
                 "error_class": "unsupported_upstream_launcher_hook",
@@ -2463,15 +2464,20 @@ class BenchmarkRunExecutor:
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
         await _prepare_aiter_serving_so(base_extra_envs, output_dir)
+        complete_native_snapshot = (
+            params.get("native_launch_overrides") if native_optimizer and not self.allow_agentx_profile_compat else None
+        )
         try:
             config_path = materialize_config_with_envs(
                 config_path,
                 output_dir,
-                extra_server_args=effective_extra_server_args,
-                extra_envs=base_extra_envs,
-                remove_args=params.get("remove_args"),
-                unset_envs=params.get("unset_envs"),
-                args_mode=str(params.get("args_mode") or "append"),
+                extra_server_args="" if complete_native_snapshot is not None else effective_extra_server_args,
+                extra_envs=None if complete_native_snapshot is not None else base_extra_envs,
+                remove_args=None if complete_native_snapshot is not None else params.get("remove_args"),
+                unset_envs=None if complete_native_snapshot is not None else params.get("unset_envs"),
+                args_mode="append"
+                if complete_native_snapshot is not None
+                else str(params.get("args_mode") or "append"),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
                 benchmark_script=override_script,
@@ -2480,6 +2486,9 @@ class BenchmarkRunExecutor:
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
                 native_agentx_mode=native_agentx,
+                native_launch_overrides=None
+                if self.allow_agentx_profile_compat
+                else params.get("native_launch_overrides") or params.get("base_native_launch_overrides"),
                 grading=getattr(live_shared_state, "grading", None),
                 allow_agentx_profile_compat=self.allow_agentx_profile_compat,
             )
@@ -2503,7 +2512,17 @@ class BenchmarkRunExecutor:
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
         # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
         # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        if isinstance(_rt_from_params, dict) and _rt_from_params:
+        if native_optimizer and not self.allow_agentx_profile_compat:
+            from ._native_candidate import update_native_candidate_file
+
+            update_native_candidate_file(
+                config_path,
+                runtime_override=_rt_from_params,
+                overlay_pythonpath=str(params.get("overlay_pythonpath") or params.get("final_overlay") or ""),
+                source_files=params.get("native_source_files"),
+                absent_source_files=params.get("native_absent_source_files") or (),
+            )
+        elif isinstance(_rt_from_params, dict) and _rt_from_params:
             try:
                 import yaml as _yaml
 
@@ -2772,6 +2791,27 @@ class BenchmarkRunExecutor:
         else:
             applied_patches = patch_application
             _pre_patch_sha = before_apply_sha
+        if native_optimizer and (params.get("patches") or params.get("warm_kernel_apply_results")):
+            from ._native_source import warm_source_evidence
+
+            try:
+                evidence = warm_source_evidence(params, output_dir)
+                update_native_candidate_file(config_path, **evidence)
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                rollback = _revert_warm_patch_trees(params.get("_warm_patch_trees") or [])
+                kernel_rollback = _rollback_warm_kernel_apply_results(
+                    params.get("warm_kernel_apply_results") or [], params.get("warm_kernel_snapshots")
+                )
+                rollback["errors"] = list(rollback.get("errors") or []) + list(kernel_rollback.get("errors") or [])
+                rollback["ok"] = bool(rollback.get("ok") and kernel_rollback.get("ok"))
+                return {
+                    "status": "failed",
+                    "error_class": "native_source_attestation_failed",
+                    "error": str(exc),
+                    "rollback": rollback,
+                    "output_dir": str(output_dir),
+                }
+
         if applied_patches:
             log.info(
                 "baseline_executor: prepared %d warm-replay code patches: %s",
@@ -3961,7 +4001,12 @@ class BenchmarkRunExecutor:
             report,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
+            materialized_config_path=config_path,
         )
+        if measurement.get("agentx_launch_contract") == 1:
+            from ._native_candidate import record_launch_evidence
+
+            record_launch_evidence(config_path, measurement)
         warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")

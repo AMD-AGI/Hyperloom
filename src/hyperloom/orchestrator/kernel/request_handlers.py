@@ -4773,9 +4773,9 @@ async def integrate_handler(
     # materializing the native recipe.  Refuse before touching the framework
     # tree.  The specialist integrate path enforces the same boundary.
     state = SharedState.load_or_init(session_dir)
-    from hyperloom.common.agentx_mode import native_agentx_session
+    from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 
-    if native_agentx_session(state):
+    if native_agentx_session(state) and not native_agentx_optimization_session(state):
         return {
             "status": "skipped",
             "error_class": "unsupported_upstream_launcher_hook",
@@ -4952,6 +4952,16 @@ async def integrate_handler(
             "remove_args": to_str_list(payload.get("remove_args")),
             "unset_envs": to_str_list(payload.get("unset_envs")),
             "args_mode": str(payload.get("args_mode") or "append"),
+            **{
+                key: payload[key]
+                for key in (
+                    "native_launch_overrides",
+                    "base_native_launch_overrides",
+                    "runtime_override",
+                    "overlay_pythonpath",
+                )
+                if payload.get(key)
+            },
             # The only artifact that patches FlyDSL sources, so the only run that
             # needs the JIT cache key widened.
             "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
@@ -5033,6 +5043,12 @@ async def integrate_handler(
             }
 
     try:
+        if native_agentx_optimization_session(state) and mode != "env_only":
+            from ..actions.executors._native_source import kernel_source_evidence
+
+            evidence = kernel_source_evidence(apply_result)
+            fake_task.params["native_source_files"] = evidence["source_files"]
+            fake_task.params["native_absent_source_files"] = evidence["absent_source_files"]
         bench_result = await _run_integrate_rebaseline_with_lock_retry(
             baseline_executor,
             ctx,

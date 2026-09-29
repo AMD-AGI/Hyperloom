@@ -67,6 +67,7 @@ class GridVariant:
             extra_envs,
             allow_predicate=is_allowed_variant_env_key,
         )
+        self.dropped_envs = list(dropped_envs)
         if dropped_envs:
             log.warning("Variant %s: dropping unsafe extra_envs %s", name, ", ".join(sorted(dropped_envs)))
         self.remove_args = to_str_list(remove_args)
@@ -161,6 +162,8 @@ class VariantResult:
     server_log_path: str | None = None
     launch_evidence: dict[str, Any] = field(default_factory=dict)
     launch_evidence_path: str | None = None
+    materialized_config: str | None = None
+    native_measurement: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
@@ -198,4 +201,6 @@ class VariantResult:
             "server_log_path": self.server_log_path,
             "launch_evidence": self.launch_evidence,
             "launch_evidence_path": self.launch_evidence_path,
+            **({"materialized_config": self.materialized_config} if self.materialized_config else {}),
+            **self.native_measurement,
         }

@@ -98,6 +98,13 @@ def integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, An
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",
+                "agentx_server_launch",
+                "valid_measurement",
+                "benchmark_valid",
+                "publishable",
+                "submission_valid",
+                "native_agentx_protocol_valid",
+                "native_agentx_protocol_errors",
             )
             if key in measurement
         },

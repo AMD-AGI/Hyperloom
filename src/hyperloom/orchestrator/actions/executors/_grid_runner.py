@@ -414,6 +414,7 @@ def _build_variant_yaml(
     base_extra_envs: dict[str, str] | None = None,
     base_remove_args: list[str] | None = None,
     base_unset_envs: list[str] | None = None,
+    base_native_launch_overrides: dict[str, Any] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
     with base_yaml_path.open(encoding="utf-8") as f:
@@ -429,10 +430,14 @@ def _build_variant_yaml(
     from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
 
     native_agentx = native_agentx_enabled(bench.get("agentx"))
+    native_optimizer = False
     native_expected_gpu_count: int | None = None
     native_expected_topology: dict[str, Any] = {}
     native_outer_image = ""
     if native_agentx:
+        from ._native_candidate import apply_native_candidate, has_launch_contract
+
+        native_optimizer = has_launch_contract(bench)
         raw_workload = bench.get("workload_spec")
         workload = raw_workload if isinstance(raw_workload, dict) else {}
         raw_topology = workload.get("resolved_topology")
@@ -499,122 +504,153 @@ def _build_variant_yaml(
             unsupported.append("overlay_pythonpath")
         if getattr(variant, "runtime_override", None):
             unsupported.append("runtime_override")
-        if unsupported:
+        if unsupported and not native_optimizer:
             raise ValueError(
                 "Native AgentX cannot apply Hyperloom grid candidates with "
                 "the pinned InferenceX launcher (no optimizer-argv hook): " + "; ".join(unsupported)
             )
 
-    envs = apply_runtime_benchmark_overrides(
-        bench,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        benchmark_script=benchmark_script,
-        conc=variant_conc(variant),
-    )
-    extra_args_env = server_args_env_name(bench.get("framework"))
+    if native_optimizer:
+        if getattr(variant, "dropped_envs", None):
+            raise ValueError(f"Native candidate contains unsupported environment keys: {variant.dropped_envs}")
+        if base_native_launch_overrides is not None:
+            from ._native_candidate import install_native_launch_snapshot
 
-    replacing = str(base_args_mode).strip().lower() == "replace"
-    variant_remove = to_str_list(getattr(variant, "remove_args", []))
-    # A replacing base drops the inherited string wholesale, so only the
-    # variant's own removals still name flags that survive to be stripped.
-    effective_remove = (
-        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
-    )
-    combined = compose_server_args(
-        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
-        base_extra_args=base_extra_args,
-        variant_extra_args=variant.extra_server_args,
-        remove_args=effective_remove,
-        args_mode=getattr(variant, "args_mode", "append"),
-    )
-    # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
-    # was seeded with, or from an explicitly authored variant.
-    if combined and _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
-        from ._workload_envs import _remove_moe_runner_backend_arg
-
-        if extra_args_env == "EXTRA_SGLANG_ARGS" and moe_runner_requires_aiter(combined, model_path):
-            log.warning(
-                "grid: dropping inherited --moe-runner-backend for variant %s: "
-                "this checkpoint's MoE quant scheme is only implemented on the "
-                "aiter runner and would crash on the first forward pass.",
-                variant.name,
-            )
-            combined = _remove_moe_runner_backend_arg(combined)
-    if combined:
-        envs[extra_args_env] = _shell_safe_dedupe(combined)
-    elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
-        envs[extra_args_env] = ""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
-    for k in to_str_list(base_unset_envs):
-        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            continue
-        envs.pop(k, None)
-    for k, v in (base_extra_envs or {}).items():
-        envs[str(k)] = str(v)
-    for k in getattr(variant, "unset_envs", []) or []:
-        # Unsetting a pin retargets the benchmark rather than toggling a knob.
-        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
-            continue
-        envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
-        envs[str(k)] = str(v)
-    # The recipe re-exports these unconditionally, so a value carried here is
-    # one the run never used.
-    for k in recipe_launch_contract(bench)[1] & envs.keys():
-        log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
-        envs.pop(k, None)
-    # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
-    # the client's grace alone would make the round wait inside a cap that did not move with it.
-    _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
-    if _overlay:
-        # Structural containment on the overlay dir before it is prepended to PYTHONPATH: a legitimate authored-kernel
-        # overlay is a single existing directory (never a ``:``-joined list, never a ``..`` traversal or control
-        # char).
-        _overlay_ok = (
-            ":" not in _overlay
-            and ".." not in Path(_overlay).parts
-            and not any(c in _overlay for c in ("\n", "\r", "\x00"))
-            and Path(_overlay).is_dir()
-        )
-        if _overlay_ok:
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+            install_native_launch_snapshot(bench, base_native_launch_overrides)
         else:
-            log.warning(
-                "grid: dropping unsafe overlay_pythonpath %r (not a single "
-                "existing directory / contains separator or traversal)",
-                _overlay,
+            apply_native_candidate(
+                bench,
+                extra_server_args=base_extra_args,
+                extra_envs=base_extra_envs,
+                remove_args=base_remove_args,
+                unset_envs=base_unset_envs,
+                args_mode=base_args_mode,
             )
-
-    # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
-    # server subprocess resolves the attempt runtime.
-    _rt_override = getattr(variant, "runtime_override", None) or {}
-    if _rt_override:
-        apply_runtime_override(envs, _rt_override)
-
-    # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
-    # force-prepend both so an LLM-supplied PATH can't drop one.
-    if str(bench.get("framework", "")).strip().lower() == "xdit":
-        _cur_path = str(envs.get("PATH", "") or "")
-        _parts = [p for p in _cur_path.split(":") if p]
-        for _essential in ("/opt/rocm/bin", "/venv/bin"):
-            if _essential not in _parts:
-                _parts.insert(0, _essential)
-        envs["PATH"] = ":".join(_parts)
-
-    if server_lifecycle is not None:
-        from ._server_lifecycle import inject_lifecycle
-
-        inject_lifecycle(
+        apply_native_candidate(
             bench,
-            cleanup=bool(server_lifecycle.get("cleanup", True)),
-            pid_dir=server_lifecycle["pid_dir"],
-            port=int(server_lifecycle["port"]),
+            extra_server_args=variant.extra_server_args,
+            extra_envs=variant.extra_envs,
+            remove_args=getattr(variant, "remove_args", []),
+            unset_envs=getattr(variant, "unset_envs", []),
+            args_mode=getattr(variant, "args_mode", "append"),
+            runtime_override=getattr(variant, "runtime_override", None),
+            overlay_pythonpath=str(getattr(variant, "overlay_pythonpath", "") or ""),
+            source_files=getattr(variant, "native_source_files", None),
+            absent_source_files=getattr(variant, "native_absent_source_files", ()),
         )
+        envs = bench.setdefault("envs", {})
+        if server_lifecycle is not None:
+            raise ValueError("Native AgentX optimizer candidates cannot change server lifecycle")
+    else:
+        envs = apply_runtime_benchmark_overrides(
+            bench,
+            model_path=model_path,
+            gpu_type=gpu_type,
+            benchmark_script=benchmark_script,
+            conc=variant_conc(variant),
+        )
+        extra_args_env = server_args_env_name(bench.get("framework"))
 
+        replacing = str(base_args_mode).strip().lower() == "replace"
+        variant_remove = to_str_list(getattr(variant, "remove_args", []))
+        # A replacing base drops the inherited string wholesale, so only the
+        # variant's own removals still name flags that survive to be stripped.
+        effective_remove = (
+            variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
+        )
+        combined = compose_server_args(
+            inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
+            base_extra_args=base_extra_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=effective_remove,
+            args_mode=getattr(variant, "args_mode", "append"),
+        )
+        # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
+        # was seeded with, or from an explicitly authored variant.
+        if combined and _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
+            from ._workload_envs import _remove_moe_runner_backend_arg
+
+            if extra_args_env == "EXTRA_SGLANG_ARGS" and moe_runner_requires_aiter(combined, model_path):
+                log.warning(
+                    "grid: dropping inherited --moe-runner-backend for variant %s: "
+                    "this checkpoint's MoE quant scheme is only implemented on the "
+                    "aiter runner and would crash on the first forward pass.",
+                    variant.name,
+                )
+                combined = _remove_moe_runner_backend_arg(combined)
+        if combined:
+            envs[extra_args_env] = _shell_safe_dedupe(combined)
+        elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
+            envs[extra_args_env] = ""
+        # Composed base-then-variant, so a variant unsetting a key the base sets
+        # removes it: the last layer to name a key is the one that decides it.
+        for k in to_str_list(base_unset_envs):
+            if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+                continue
+            envs.pop(k, None)
+        for k, v in (base_extra_envs or {}).items():
+            envs[str(k)] = str(v)
+        for k in getattr(variant, "unset_envs", []) or []:
+            # Unsetting a pin retargets the benchmark rather than toggling a knob.
+            if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+                log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+                continue
+            envs.pop(str(k), None)
+        for k, v in variant.extra_envs.items():
+            envs[str(k)] = str(v)
+        # The recipe re-exports these unconditionally, so a value carried here is
+        # one the run never used.
+        for k in recipe_launch_contract(bench)[1] & envs.keys():
+            log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
+            envs.pop(k, None)
+        # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
+        # the client's grace alone would make the round wait inside a cap that did not move with it.
+        _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+        if _overlay:
+            # Structural containment on the overlay dir before it is prepended to PYTHONPATH: a legitimate authored-kernel
+            # overlay is a single existing directory (never a ``:``-joined list, never a ``..`` traversal or control
+            # char).
+            _overlay_ok = (
+                ":" not in _overlay
+                and ".." not in Path(_overlay).parts
+                and not any(c in _overlay for c in ("\n", "\r", "\x00"))
+                and Path(_overlay).is_dir()
+            )
+            if _overlay_ok:
+                _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+                envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+            else:
+                log.warning(
+                    "grid: dropping unsafe overlay_pythonpath %r (not a single "
+                    "existing directory / contains separator or traversal)",
+                    _overlay,
+                )
+
+        # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
+        # server subprocess resolves the attempt runtime.
+        _rt_override = getattr(variant, "runtime_override", None) or {}
+        if _rt_override:
+            apply_runtime_override(envs, _rt_override)
+
+        # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
+        # force-prepend both so an LLM-supplied PATH can't drop one.
+        if str(bench.get("framework", "")).strip().lower() == "xdit":
+            _cur_path = str(envs.get("PATH", "") or "")
+            _parts = [p for p in _cur_path.split(":") if p]
+            for _essential in ("/opt/rocm/bin", "/venv/bin"):
+                if _essential not in _parts:
+                    _parts.insert(0, _essential)
+            envs["PATH"] = ":".join(_parts)
+
+        if server_lifecycle is not None:
+            from ._server_lifecycle import inject_lifecycle
+
+            inject_lifecycle(
+                bench,
+                cleanup=bool(server_lifecycle.get("cleanup", True)),
+                pid_dir=server_lifecycle["pid_dir"],
+                port=int(server_lifecycle["port"]),
+            )
     if native_agentx:
         # Concurrency is part of the measurement contract even though the
         # current upstream recipe fingerprint excludes it.  Never compare a
@@ -653,8 +689,13 @@ def _build_variant_yaml(
             )
         envs = bench.setdefault("envs", {})
 
-    # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"), bench=bench)
+    if native_optimizer:
+        from ._native_source import verify_native_source_imports
+
+        verify_native_source_imports(bench)
+    else:
+        # The final write to the argument env; nothing below may touch it.
+        seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -686,6 +727,7 @@ async def _settled_measurement(
     subprocess_started_unix: float | None,
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
+    materialized_config_path: Path | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Read the benchmark report, re-reading briefly while it is still settling."""
     deadline = time.monotonic() + max(0.0, float(settle_seconds))
@@ -696,6 +738,7 @@ async def _settled_measurement(
             report,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
+            materialized_config_path=materialized_config_path,
         )
         attempts += 1
         if measurement.get("valid_measurement") or time.monotonic() >= deadline:
@@ -1042,6 +1085,7 @@ async def run_grid(
     base_extra_envs: dict[str, str] | None = None,
     base_remove_args: list[str] | None = None,
     base_unset_envs: list[str] | None = None,
+    base_native_launch_overrides: dict[str, Any] | None = None,
     warmup_before_measure: bool | None = None,
     server_already_ready: bool = False,
     serving_lease: Any = None,
@@ -1264,6 +1308,7 @@ async def run_grid(
                 base_extra_envs=base_extra_envs,
                 base_remove_args=base_remove_args,
                 base_unset_envs=base_unset_envs,
+                base_native_launch_overrides=base_native_launch_overrides,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -1328,6 +1373,7 @@ async def run_grid(
                         base_extra_envs=base_extra_envs,
                         base_remove_args=base_remove_args,
                         base_unset_envs=base_unset_envs,
+                        base_native_launch_overrides=base_native_launch_overrides,
                     )
                 else:
                     log.info(
@@ -1364,6 +1410,7 @@ async def run_grid(
                     base_extra_envs=base_extra_envs,
                     base_remove_args=base_remove_args,
                     base_unset_envs=base_unset_envs,
+                    base_native_launch_overrides=base_native_launch_overrides,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -1480,6 +1527,7 @@ async def run_grid(
                 _, warmup_measurement = await _settled_measurement(
                     warmup_workspace,
                     subprocess_started_unix=warmup_started_unix,
+                    materialized_config_path=warmup_cfg_path,
                     settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
                 )
             else:
@@ -1487,6 +1535,7 @@ async def run_grid(
                     None,
                     workspace=warmup_workspace,
                     subprocess_started_unix=warmup_started_unix,
+                    materialized_config_path=warmup_cfg_path,
                 )
             if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
                 _teardown_variant_server(slot, lifecycle)
@@ -1993,8 +2042,13 @@ async def run_grid(
         report, measurement = await _settled_measurement(
             workspace,
             subprocess_started_unix=variant_started_unix,
+            materialized_config_path=cfg_path,
             settle_seconds=REPORT_SETTLE_SECONDS,
         )
+        if measurement.get("agentx_launch_contract") == 1:
+            from ._native_candidate import record_launch_evidence
+
+            record_launch_evidence(cfg_path, measurement)
         nonzero_kept_error: str | None = None
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         for leak_src, _ in harvested:
@@ -2155,6 +2209,23 @@ async def run_grid(
                 intvty_p90=measurement.get("e2e_norm_intvty_p90"),
                 intvty_p50=measurement.get("e2e_norm_intvty_p50"),
                 request_error_rate=measurement.get("request_error_rate"),
+                materialized_config=str(cfg_path) if measurement.get("agentx_launch_contract") == 1 else None,
+                native_measurement={
+                    key: value
+                    for key, value in measurement.items()
+                    if measurement.get("agentx_launch_contract") == 1
+                    and (
+                        key.startswith(("agentx_", "native_agentx_"))
+                        or key
+                        in {
+                            "valid_measurement",
+                            "benchmark_valid",
+                            "publishable",
+                            "submission_valid",
+                            "invalid_measurement_reasons",
+                        }
+                    )
+                },
                 workspace=str(workspace),
                 report_path=str(report_path) if report_path.exists() else None,
                 raw_result_path=measurement.get("raw_result_path"),

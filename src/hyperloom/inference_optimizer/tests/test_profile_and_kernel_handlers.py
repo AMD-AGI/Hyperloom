@@ -2283,7 +2283,7 @@ async def test_agentx_profile_rejects_incompatible_topology_before_side_effects(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("native", [False, True, "optimization"], ids=["legacy", "native", "native-optimization"])
 async def test_profile_executor_preserves_session_identity_with_generic_template(tmp_path, monkeypatch, native):
     import yaml
 
@@ -2354,6 +2354,23 @@ async def test_profile_executor_preserves_session_identity_with_generic_template
     monkeypatch.setattr(profile_mod, "ensure_benchmark_serving_patched", patch_checkout)
     executor = ProfileExecutor(session_dir=tmp_path)
     executor.shared_state = _agentx_profile_state(tmp_path) if native else SimpleNamespace(benchmark_mode="agentx")
+    if native == "optimization":
+        import sys
+
+        from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
+
+        executor.shared_state.agentx_epoch = 3
+        executor.shared_state.agentx_backend = "native"
+        accepted = Path(executor.shared_state.baseline_config_path)
+        accepted_config = yaml.safe_load(accepted.read_text())
+        evidence = {
+            "effective_argv": [sys.executable, "-m", "sglang.launch_server", "--mem-fraction-static", "0.73"],
+            "runtime_environment": {"PATH": os.environ["PATH"], "SGLANG_NATIVE_TEST": "1"},
+        }
+        evidence["evidence_sha256"] = canonical_sha256(evidence)
+        accepted_config["benchmark"].update(framework="sglang")
+        accepted_config["benchmark"]["workload_spec"]["server_launch"] = evidence
+        accepted.write_text(yaml.safe_dump(accepted_config))
     captured = {}
 
     async def measure(**kwargs):
@@ -2386,6 +2403,7 @@ async def test_profile_executor_preserves_session_identity_with_generic_template
                 "config_path": str(config),
                 "output_dir": str(output),
                 "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "1"},
+                **({"native_launch_overrides": {"version": 1}} if native == "optimization" else {}),
             },
         ),
         extra={},
@@ -2397,6 +2415,10 @@ async def test_profile_executor_preserves_session_identity_with_generic_template
     assert config.read_bytes() == original_config
     assert captured["benchmark_script"] == "aiperf_client.sh"
     assert "agentx" not in captured
+    if native == "optimization":
+        assert "--mem-fraction-static 0.73" in captured["envs"]["EXTRA_SGLANG_ARGS"]
+        assert captured["envs"]["SGLANG_NATIVE_TEST"] == "1"
+        assert captured["envs"]["HYPERLOOM_FRAMEWORK_PYTHON"] == sys.executable
     if native:
         assert captured["workload_spec"]["harness"] == "hyperloom-profiler-compat"
         assert captured["envs"]["AGENTX_SERVER_SCRIPT"] == ""

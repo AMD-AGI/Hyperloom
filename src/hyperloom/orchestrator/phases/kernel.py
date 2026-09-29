@@ -1005,7 +1005,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
         from hyperloom.common.perf_metric import is_agentx_mode
-        from hyperloom.common.agentx_mode import native_agentx_session
+        from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
         from ..actions.executors._workload_envs import agentx_enabled
 
         benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
@@ -1048,7 +1048,7 @@ class KernelPhase(CoordinatorCollaborator):
             state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
-        if native_agentx_session(state):
+        if native_agentx_session(state) and not native_agentx_optimization_session(state):
             # The pinned native launcher exposes neither Hyperloom nor GEAK an
             # optimizer-argv hook. Running the proxy here can consume the full
             # KERNEL_AGENT budget, but every resulting candidate is
@@ -1289,9 +1289,19 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
             handoff["bench_launcher"] = "native"
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+        if native_agentx_optimization_session(state):
+            from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
+
+            try:
+                seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement)
+            except ValueError as exc:
+                _finish_skip(
+                    {"status": "error", "error_class": "invalid_native_launch_evidence", "error": str(exc)},
+                    record_delegation=False,
+                )
+                return
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1653,6 +1663,14 @@ class KernelPhase(CoordinatorCollaborator):
         """
         state = self.shared_state
         params = self._geak_rebench_params(reason=reason)
+        from .geak_native_revalidation import ORIGIN, finish_invalid_source, revalidate_source
+
+        if params.get("origin") == ORIGIN:
+            await revalidate_source(self, params)
+            return
+        if params.get("reason") == "geak_native_source_invalid":
+            finish_invalid_source(self, str(params.get("error") or "GEAK source artifacts are unavailable"))
+            return
         skip_reason = params.get("reason") if params.get("skipped") else None
         if skip_reason == "geak_invalid_config":
             return
@@ -1730,6 +1748,13 @@ class KernelPhase(CoordinatorCollaborator):
         if not isinstance(result, dict):
             return False
         result.setdefault("kernel_event_id", kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)))
+        prior_pending = self.shared_state.geak_pending or {}
+        prior_review = prior_pending.get("native_review") or {}
+        preserve_review = bool(prior_review) and _geak_rebench.geak_candidate_matches(
+            prior_review.get("candidate"), result
+        )
+        if prior_review and not preserve_review:
+            self.shared_state.geak_pending = {}
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
@@ -1793,6 +1818,12 @@ class KernelPhase(CoordinatorCollaborator):
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        if preserve_review:
+            self.shared_state.geak_pending.update(
+                native_review=prior_review,
+                status=prior_pending.get("status", "awaiting_rebench"),
+                revalidation_task_id=prior_pending.get("revalidation_task_id", ""),
+            )
         recorder = self._kernel_timeline()
         if recorder is not None:
             recorder.record_geak_claim(
@@ -1972,6 +2003,9 @@ class KernelPhase(CoordinatorCollaborator):
             "workspace": result.get("eval_dir"),
         }
         if isinstance(measurement_provenance, Mapping):
+            from ..measurement.integrate_performance import integrate_measurement_fields
+
+            promotion_measurement.update(integrate_measurement_fields(measurement_provenance))
             for key in (
                 "extra_server_args",
                 "effective_extra_server_args",
@@ -2132,6 +2166,7 @@ class KernelPhase(CoordinatorCollaborator):
         baseline_tput: float,
         provenance: str,
         overlay_loaded: bool | None,
+        source_applied: bool = False,
     ) -> None:
         """Write one adoption row per accepted GEAK kernel."""
         if not isinstance(result, dict):
@@ -2152,7 +2187,7 @@ class KernelPhase(CoordinatorCollaborator):
         if baseline_tput > 0 and measured_tput > 0:
             rebench_gain = (measured_tput - baseline_tput) / baseline_tput * 100.0
         # One kernel, overlay proven loaded, one measured number: the gain is attributable.
-        attributable = bool(overlay_loaded) and len(rows) == 1
+        attributable = bool(overlay_loaded or source_applied) and len(rows) == 1
         am = result.get("alignment_metrics") or {}
         basis = str(am.get("final_basis") or result.get("final_throughput_basis") or "")
         alignment_status = str((result.get("baseline_alignment") or {}).get("status") or "")
@@ -2199,6 +2234,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "last_status": attempt_status,
                     "validated": attributable,
                     "overlay_loaded": bool(overlay_loaded),
+                    **({"source_applied": True} if source_applied else {}),
                     "basis": basis,
                     "alignment_status": alignment_status,
                     # GEAK's own same-config A/B, kept beside the orchestrator number so the two are never confused

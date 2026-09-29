@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import logging
@@ -28,7 +29,7 @@ from hyperloom.agents.kernel.tools._trace_rank import (
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.agentx_mode import native_agentx_session
+from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -1402,6 +1403,19 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from ._workload_envs import agentx_active
 
         agentx_session = agentx_active(shared_state)
+        if native_agentx_optimization_session(shared_state):
+            from ._native_profile import project_native_profile
+
+            try:
+                await asyncio.to_thread(project_native_profile, params, shared_state)
+                params["extra_server_args"] = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return {
+                    "status": "failed",
+                    "error_class": "native_profile_launch_unverified",
+                    "error": str(exc),
+                    "trace_input_ready": False,
+                }
         if native_agentx_session(shared_state):
             compatibility_error = self._agentx_profile_compatibility_error(shared_state)
             if compatibility_error:

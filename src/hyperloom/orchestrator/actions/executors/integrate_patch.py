@@ -54,7 +54,7 @@ from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
-from hyperloom.common.agentx_mode import native_agentx_session
+from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
 from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_prepared_records, load_records, mark_prepared, restore_records
@@ -2348,7 +2348,7 @@ class IntegratePatchExecutor:
                 "error_class": "integrate_restore_incomplete",
                 "error": "previous integration still requires recovery",
             }
-        if native_agentx_session(shared_state):
+        if native_agentx_session(shared_state) and not native_agentx_optimization_session(shared_state):
             return {
                 "status": "skipped",
                 "error_class": "unsupported_upstream_launcher_hook",
@@ -3282,6 +3282,15 @@ class IntegratePatchExecutor:
         # timestamp, so it stays correct as the gate progresses.
         session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
         try:
+            if native_agentx_optimization_session(shared_state):
+                from ._native_source import applied_source_evidence
+
+                evidence = applied_source_evidence(attempt.framework_root, attempt.applied, attempt.applied_artifacts)
+                params = {
+                    **params,
+                    "native_source_files": evidence["source_files"],
+                    "native_absent_source_files": evidence["absent_source_files"],
+                }
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
                 output_root=output_root,
@@ -3338,6 +3347,9 @@ class IntegratePatchExecutor:
             )
         if attempt.dropped_env_overrides:
             verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+        if params.get("overlay_pythonpath") and verdict.get("status") == "kept":
+            verdict["final_overlay"] = str(params["overlay_pythonpath"])
+            verdict["overlay_pythonpath"] = str(params["overlay_pythonpath"])
         return verdict
 
     @staticmethod
@@ -5315,16 +5327,25 @@ class IntegratePatchExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        import yaml
+
+        from ._native_candidate import has_launch_contract
+
+        source_benchmark = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark", {})
+        native_optimizer = has_launch_contract(source_benchmark)
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
-            extra_envs=self._framework_run_eval_envs(params),
-            remove_args=params.get("base_remove_args"),
-            unset_envs=params.get("base_unset_envs"),
-            args_mode=str(params.get("base_args_mode") or "append"),
+            extra_envs={"RUN_EVAL": "false"} if native_optimizer else self._framework_run_eval_envs(params),
+            remove_args=None if params.get("base_native_launch_overrides") else params.get("base_remove_args"),
+            unset_envs=None if params.get("base_native_launch_overrides") else params.get("base_unset_envs"),
+            args_mode="append"
+            if params.get("base_native_launch_overrides")
+            else str(params.get("base_args_mode") or "append"),
+            native_launch_overrides=params.get("base_native_launch_overrides"),
             out_name="integrate_patch.with_envs.yaml",
         )
 
@@ -5343,11 +5364,17 @@ class IntegratePatchExecutor:
             name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
             extra_server_args=extra_server_args_applied,
             extra_envs=variant_envs,
-            unset_envs=to_str_list(unset_envs),
-            args_mode=args_mode,
+            remove_args=to_str_list(params.get("remove_args")),
+            unset_envs=list(dict.fromkeys(to_str_list(params.get("unset_envs")) + to_str_list(unset_envs))),
+            args_mode=str(params.get("args_mode") or "append"),
             note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
+        variant.overlay_pythonpath = str(params.get("overlay_pythonpath") or "")
+        variant.native_source_files = dict(params.get("native_source_files") or {})
+        variant.native_absent_source_files = list(params.get("native_absent_source_files") or [])
         effective_unset = list(dict.fromkeys(base_unset + list(variant.unset_envs)))
+        effective_remove = list(dict.fromkeys(base_remove + list(variant.remove_args)))
+        effective_mode = "replace" if "replace" in (args_mode, variant.args_mode) else "append"
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:
             # Preserve list/dict values; apply_runtime_override expects them.
@@ -5400,6 +5427,7 @@ class IntegratePatchExecutor:
                 base_extra_envs=base_envs,
                 base_remove_args=base_remove,
                 base_unset_envs=base_unset,
+                base_native_launch_overrides=params.get("base_native_launch_overrides"),
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
@@ -5432,7 +5460,7 @@ class IntegratePatchExecutor:
                     "launch_evidence_path": r.launch_evidence_path or "",
                     "server_log_path": r.server_log_path or "",
                     # Materialized config used for this bench; needed by revalidation.
-                    "materialized_config": str(config_path),
+                    "materialized_config": r.materialized_config or str(config_path),
                     # The composed stack, not the variant alone: revalidation
                     # replays this and would otherwise boot without the base
                     # layer. RUN_EVAL is dropped -- the replay owns its own
@@ -5447,15 +5475,22 @@ class IntegratePatchExecutor:
                             inherited_args="",
                             base_extra_args=str(params.get("base_extra_args") or "").strip(),
                             variant_extra_args=variant.extra_server_args,
-                            remove_args=base_remove,
-                            args_mode=args_mode,
+                            remove_args=effective_remove,
+                            args_mode=variant.args_mode,
                         ),
-                        "remove_args": list(base_remove),
+                        "remove_args": list(effective_remove),
                         "unset_envs": list(effective_unset),
-                        "args_mode": args_mode,
+                        "args_mode": effective_mode,
+                        **({"final_overlay": variant.overlay_pythonpath} if variant.overlay_pythonpath else {}),
                     },
                 }
             )
+            if native_optimizer and r.materialized_config:
+                from hyperloom.orchestrator.measurement.native_launch import native_launch_config
+
+                # This is the verified server snapshot, including inherited
+                # runtime/source layers and the recipe's replace semantics.
+                bench["effective_config"].update(native_launch_config(bench))
 
         # Classified here so the gate compares two observations produced by
         # the same reader.

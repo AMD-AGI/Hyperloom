@@ -40,21 +40,27 @@ cmd = [
 
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. Hyperloom pins the Magpie
-[v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus its
-generic eval source-path hotfix to immutable commit
-`a3339dc2776ee0c977fb3313fe89f56da7a91555`. The hotfix keeps evaluation scripts
-bound to their intended InferenceX source after directory changes. Native GPU
-validation used the v0.3.0 release commit; the hotfix pin has a separately audited
-published execution tree. A source configuration with
+[v0.3.0 release](https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0) plus native launch overrides, custom-model replay, and the
+generic eval source-path fix at immutable commit
+`d72965776df5416dad063c00237f6e389b841162`. The hotfix keeps evaluation scripts
+bound to their intended InferenceX source after directory changes. The launch extensions are pinned development commits rather than a new Magpie
+release. Earlier GPU validation used the v0.3.0 release commit and does not
+validate these extensions; their source and wheel share an audited execution tree. A source configuration with
 `benchmark.agentx: enable` selects Magpie's native InferenceX launcher, preserving
 the recipe's radix/prefix-cache settings and trace-replay protocol. The native
 path validates the installed package and launcher files before running.
 
-Existing `HYPERLOOM_AGENTX=1` sessions keep Hyperloom's `aiperf_client.sh`
-measurement and optimization path unless their source or accepted config
-explicitly enables `benchmark.agentx`. Legacy server tuning, GEAK proposal
-validation, patch integration, and concurrency sweeps remain available. The
-measurement-only restrictions below apply to native AgentX.
+Fresh `HYPERLOOM_AGENTX=1` sessions use Magpie native AgentX and retain
+Hyperloom's optimization loop. Magpie resolves the recipe and launcher from
+the model, framework, GPU, precision, and concurrency; ambiguous inputs fail
+with a selector error. New sessions record backend `native` and epoch 3.
+With no registered recipe match, an explicit image, TP, EP, concurrency, and
+canonical model identify a custom SGLang/vLLM workload; Magpie validates its
+model context and resolves a formal generic launcher. Registered ambiguities
+remain errors. Candidate KEEPs retain the exact native launch snapshot, so
+resume and subsequent candidates do not apply the same launch arguments twice.
+Persisted epoch-1 sessions resume the legacy client, and epoch-2 native sessions
+retain their measurement-only contract. No baseline or KEEP record is migrated.
 
 Generic benchmark paths still apply compatibility patches when needed; native
 AgentX keeps the audited package and recipe files unchanged. Its separate

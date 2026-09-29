@@ -1587,6 +1587,7 @@ def materialize_config_with_envs(
     benchmark_script: str | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
     establish_quality_ref: bool = False,
+    native_launch_overrides: Mapping[str, Any] | None = None,
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
     agentx_mode: bool | None = None,
@@ -1852,11 +1853,9 @@ def materialize_config_with_envs(
     conc_val = int(envs.get("CONC") or _default_conc)
 
     if native_agentx:
-        # Native InferenceX launchers own their full argv.  The pinned revision
-        # does not expose an EXTRA_SGLANG_ARGS/EXTRA_VLLM_ARGS hook, so accepting
-        # any Hyperloom candidate override here would benchmark an unchanged
-        # server and mislabel it as the candidate.  Keep the baseline path
-        # useful, and fail closed until that interface exists upstream.
+        # Persisted epoch-two recipes have no server launch contract. Keep
+        # their measurement-only boundary; epoch-three candidates use the
+        # formal launcher interface instead of generic EXTRA_*_ARGS hooks.
         framework_env = server_args_env_name(bench.get("framework"))
         source_server_args = str(envs.get(framework_env) or "").strip()
         ref_args, reference_envs, reference_controls = resolve_reference_launch()
@@ -1878,7 +1877,7 @@ def materialize_config_with_envs(
         if flydsl_source_dirs:
             unsupported.append("flydsl_source_dirs")
 
-        combined_extra: dict[str, Any] = dict(_operator_extra_env())
+        combined_extra: dict[str, Any] = {} if native_launch_overrides is not None else dict(_operator_extra_env())
         if extra_envs:
             combined_extra.update(extra_envs)
         safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
@@ -1894,7 +1893,50 @@ def materialize_config_with_envs(
         unsupported_extra = sorted(set(safe_extra_envs).difference(allowed_round_envs))
         if unsupported_extra:
             unsupported.append("extra_envs=" + ",".join(unsupported_extra))
-        if unsupported:
+        from ._native_candidate import apply_native_candidate, has_launch_contract
+
+        optimizer_contract = has_launch_contract(bench)
+        if native_launch_overrides is not None and not optimizer_contract:
+            raise ValueError("Native launch snapshots cannot upgrade a measurement-only session")
+        if optimizer_contract:
+            if native_launch_overrides is not None:
+                from ._native_candidate import install_native_launch_snapshot
+
+                install_native_launch_snapshot(bench, native_launch_overrides)
+                source_server_args, ref_args, reference_envs, reference_controls = "", "", {}, {}
+                server_args = str(extra_server_args or "").strip()
+            if dropped_extra_envs:
+                raise ValueError(
+                    f"Native candidate contains unsupported environment keys: {sorted(dropped_extra_envs)}"
+                )
+            if flydsl_source_dirs:
+                source_dirs = flydsl_extra_source_dirs()
+                if not source_dirs:
+                    raise ValueError("Native FlyDSL candidates require discoverable source roots")
+                safe_extra_envs.setdefault(ENV_FLYDSL_EXTRA_SOURCE_DIRS, source_dirs)
+            if source_server_args:
+                apply_native_candidate(bench, extra_server_args=source_server_args)
+            apply_native_candidate(
+                bench,
+                extra_server_args=ref_args,
+                extra_envs=reference_envs,
+                remove_args=reference_controls.get("remove_args"),
+                unset_envs=reference_controls.get("unset_envs"),
+                args_mode=str(reference_controls.get("args_mode") or "append"),
+                overlay_pythonpath=str(reference_controls.get("overlay_pythonpath") or ""),
+            )
+            candidate_remove = to_str_list(remove_args)
+            if drop_moe_runner_backend:
+                candidate_remove.append("--moe-runner-backend")
+            apply_native_candidate(
+                bench,
+                extra_server_args=server_args,
+                extra_envs=safe_extra_envs,
+                remove_args=candidate_remove,
+                unset_envs=unset_envs,
+                args_mode="replace" if replace_args else "append",
+            )
+        elif unsupported:
             raise ValueError(
                 "Native AgentX cannot apply Hyperloom server candidates with "
                 "the pinned InferenceX launcher (no optimizer-argv hook): " + "; ".join(unsupported)

@@ -22,14 +22,19 @@ it.
 
 ### Added
 
-- **Opt into native Magpie/InferenceX AgentX measurements.** Existing
-  `HYPERLOOM_AGENTX=1` launches keep the legacy client, server tuning, GEAK
-  revalidation, patch integration, and concurrency sweeps unless the source or
-  accepted config enables `benchmark.agentx`. Legacy epoch-1 sessions remain
-  resumable; native epoch-2 results cannot be mixed with legacy measurements. The
-  pinned pair is Magpie v0.3.0 plus the generic eval source-path hotfix at commit
-  `a3339dc2776ee0c977fb3313fe89f56da7a91555` and InferenceX commit
-  `3d5581562f643f9bdeb8410cd924e2c70906c966`. Both dependencies are pinned by
+- **Use native Magpie/InferenceX AgentX throughout new optimization sessions.**
+  Fresh `HYPERLOOM_AGENTX=1` launches resolve the native recipe and launcher from
+  ordinary workload inputs and retain Hyperloom's optimization loop. New sessions
+  persist backend `native`, epoch 3, and the versioned upstream launch contract.
+  Models without a registered recipe can use the formal custom workload path
+  with an explicit image, TP, EP, and concurrency; Magpie validates model
+  context instead of borrowing an unrelated model's launcher.
+  Existing epoch-1 sessions resume the legacy client; epoch-2 native sessions
+  retain their measurement-only contract. No historical baseline or KEEP is
+  migrated. Unsupported or ambiguous recipes fail before measurement. The
+  pinned pair is Magpie v0.3.0 plus native launch overrides, custom-model replay, and the eval source-path fix at commit
+  `d72965776df5416dad063c00237f6e389b841162` and InferenceX commit
+  `421312f8984c2152f4b8eafefc93ea2fa598e80f`. Both dependencies are pinned by
   immutable commit for reproducible AgentX measurements. The upstream hotfix
   keeps generic GSM8K evaluation and its probe files reachable after benchmark
   directory changes. Install preserves the
@@ -39,15 +44,15 @@ it.
   A new
   `--benchmark-config <yaml>` option accepts the Magpie source config;
   `benchmark.agentx: enable` automatically selects Hyperloom's AgentX session
-  and grading mode. `HYPERLOOM_AGENTX` remains an optional legacy switch, not a
-  second requirement. The YAML can provide `benchmark.model`,
+  and grading mode. `HYPERLOOM_AGENTX=1` is an alternative fresh-launch input,
+  not a second requirement. The YAML can provide `benchmark.model`,
   `benchmark.precision`, `benchmark.framework`, `benchmark.runner_type`,
   `benchmark.run_mode`, `benchmark.benchmark_script`, optional
   `benchmark.inferencex_path`, effective `benchmark.docker_image`, fixed
   `benchmark.envs.CONC`, and YAML-native `benchmark.agentx.selector`. Hyperloom
   pre-resolves each recipe through the benchmark interpreter,
-  separates a canonical model id from local `MODEL_PATH`, requires an explicit
-  `single_node/agentic` launcher, and validates strict recipe/launch/raw
+  separates a canonical model id from local `MODEL_PATH`, resolves the
+  `single_node/agentic` launcher from the upstream manifest, and validates strict recipe/launch/raw
   fingerprints plus trusted topology. This addresses
   [#1601](https://github.com/AMD-AGI/Hyperloom/issues/1601).
   **Upgrade note:** native local mode takes its effective image pin from
@@ -58,16 +63,16 @@ it.
   the zero-based `ROCR_VISIBLE_DEVICES` mask with `gpu_selection.auto=false`.
   Native AgentX
   bypasses outer Ray; explicitly enabling `INFERENCE_OPTIMIZER_RAY_EXEC` fails.
-  The launchers are never modified and expose no optimizer-argv hook, so native
-  server-arg/env candidates fail closed: this is a measurement-only release,
-  not server-configuration optimization. Native AgentX concurrency sweep
-  defaults off, and explicitly passing `--enable-conc-sweep` fails preflight.
+  New sessions use the upstream launch-overrides contract for candidate
+  arguments, environments, and source overlays. Canonical revalidation checks
+  launch evidence and a fixed workload fingerprint; candidate execution
+  identities remain distinct. Epoch-2 resumes retain their earlier restrictions.
   Native runs collect no PyTorch trace; PRELUDE's generic-server compatibility
   profile remains diagnostic and is not recipe-identical. It skips TraceLens/CK
   framework source patches to preserve subsequent native measurements, with
   potentially reduced trace annotation coverage,
-  while native `KERNEL_AGENT`/GEAK records `skipped` with
-  `unsupported_upstream_launcher_hook` instead of dispatching. AIPerf
+  while GEAK proposals require canonical AgentX revalidation before acceptance.
+  AIPerf
   `profile`/`profiled` fields are workload statistics. Finally, `publishable`
   is only the Magpie protocol attestation; Hyperloom separately binds the
   selected recipe to exact audited launcher bytes and the pinned checkout. It

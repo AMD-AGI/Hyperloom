@@ -179,6 +179,16 @@ def maybe_prepare_agentx(
     )
 
     native = native_agentx_enabled(bench.get("agentx"))
+    from .identity import has_launch_contract
+
+    optimizing = has_launch_contract(bench)
+    fingerprint_field = "workload_fingerprint" if optimizing else "execution_fingerprint"
+    materialized_pin_name = "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT"
+    if optimizing:
+        materialized_pin_name = "HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT"
+        expected_materialized_execution = str(env.get(materialized_pin_name) or "").strip()
+    elif env.get("HYPERLOOM_AGENTX_EXPECTED_WORKLOAD_FINGERPRINT") and native:
+        raise ValueError("Native AgentX optimization session is missing its launch contract")
     explicit_path = str(inferencex_path or "").strip()
     configured_path = str(bench.get("inferencex_path") or "").strip()
     runtime_path = str(env.get("INFERENCEX_PATH") or "").strip()
@@ -229,7 +239,7 @@ def maybe_prepare_agentx(
                     ("HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT", expected_recipe),
                     ("HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT", expected_execution),
                     (
-                        "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+                        materialized_pin_name,
                         expected_materialized_execution,
                     ),
                     ("HYPERLOOM_AGENTX_GPU_COUNT", expected_gpu_count),
@@ -247,7 +257,7 @@ def maybe_prepare_agentx(
                     "Native AgentX YAML execution fingerprint differs from the "
                     f"session pin: {yaml_execution!r} != {expected_execution!r}"
                 )
-            yaml_materialized_execution = str(execution.get("execution_fingerprint") or "").strip()
+            yaml_materialized_execution = str(execution.get(fingerprint_field) or "").strip()
             if yaml_materialized_execution != expected_materialized_execution:
                 raise ValueError(
                     "Native AgentX YAML materialized execution fingerprint "
@@ -350,15 +360,12 @@ def maybe_prepare_agentx(
                 f"expected {expected_execution!r}, resolved "
                 f"{current_execution['static_execution_fingerprint']!r}"
             )
-        if (
-            expected_materialized_execution
-            and current_execution["execution_fingerprint"] != expected_materialized_execution
-        ):
+        if expected_materialized_execution and current_execution[fingerprint_field] != expected_materialized_execution:
             raise ValueError(
                 "Native AgentX resolved BenchmarkConfig changed after "
                 "materialization: expected execution fingerprint "
                 f"{expected_materialized_execution!r}, resolved "
-                f"{current_execution['execution_fingerprint']!r}"
+                f"{current_execution[fingerprint_field]!r}"
             )
         if pinned_native_session and execution != current_execution:
             raise ValueError("Native AgentX persisted execution identity changed after materialization")

@@ -2615,6 +2615,110 @@ def test_source_layer_handles_omit_a_completeness_the_result_never_recorded():
     assert "source_snapshot_complete" not in handles
 
 
+@pytest.mark.parametrize(
+    "result_overlay",
+    [
+        {"final_overlay": "/accepted/overlay"},
+        {"overlay_pythonpath": "/accepted/overlay"},
+        {"effective_config": {"final_overlay": "/accepted/overlay"}},
+    ],
+)
+def test_source_patch_keep_preserves_overlay_for_resume(session_dir, tmp_path, result_overlay):
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 1000.0
+    result = {**_keep_result(tmp_path, import_root="python"), **result_overlay}
+    assert coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {"name": "patch-with-overlay", "scope": "source_patch", **wb._source_layer_handles(result)},
+    )
+    assert coord.shared_state.current_best["final_overlay"] == "/accepted/overlay"
+    assert coord.shared_state.optimization_stack[-1]["final_overlay"] == "/accepted/overlay"
+
+
+def test_best_measurement_retains_native_execution_evidence(session_dir):
+    coord = _coord(session_dir)
+    coord.shared_state.current_best = {"tput": 1200.0}
+    evidence = {
+        "materialized_config": "/accepted/native.yaml",
+        "agentx_server_launch": {"effective_argv": ["python", "-m", "sglang.launch_server"]},
+        "agentx_launch_contract": 1,
+        "agentx_workload_fingerprint": "a" * 64,
+        "agentx_candidate_fingerprint": "b" * 64,
+        "native_agentx_protocol_valid": True,
+        "valid_measurement": True,
+    }
+    coord.writeback._stamp_current_best_measurement(evidence)
+    assert evidence.items() <= coord.shared_state.current_best_measurement.items()
+    assert coord.shared_state.current_best["measurement"] == coord.shared_state.current_best_measurement
+
+
+def test_native_keep_preserves_exact_snapshot_and_json_argv(session_dir, tmp_path):
+    import json
+    import shlex
+    from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
+    from hyperloom.orchestrator.state.shared_state import stack_base_params
+
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 1000.0
+    coord.shared_state.current_best = {"tput": 1050.0, "extra_server_args": "--obsolete", "extra_envs": {"OLD": "1"}}
+    snapshot = {
+        "version": 1,
+        "append_args": ["--json-config", '{"nested": "value with spaces"}', "--enable-cache"],
+        "env": {"SGLANG_USE_AITER": "1"},
+        "remove_args": ["--old-default"],
+        "unset_env": ["OLD"],
+        "replace_args": False,
+        "source_files": {"/source/kernel.py": "f" * 64},
+    }
+    launch = {
+        "version": 1,
+        "framework": "sglang",
+        "base_argv": ["python", "-m", "sglang.launch_server", "--old-default", "old-value"],
+        "effective_argv": ["python", "-m", "sglang.launch_server", *snapshot["append_args"]],
+        "base_env": {"SGLANG_USE_AITER": None, "OLD": "1"},
+        "effective_env": {**snapshot["env"], "OLD": None},
+        "resolved_executable": "/usr/bin/python",
+        "runtime_environment": dict(snapshot["env"]),
+        "source_files": snapshot["source_files"],
+        "overrides_sha256": canonical_sha256(snapshot),
+    }
+    launch["evidence_sha256"] = canonical_sha256(launch)
+    materialized = tmp_path / "measured.yaml"
+    materialized.write_text(
+        json.dumps({"benchmark": {"framework": "sglang", "agentx": {"launch_overrides": snapshot}}})
+    )
+    evidence = {
+        "name": "native-candidate",
+        "agentx_launch_contract": 1,
+        "agentx_server_launch": launch,
+        "materialized_config": str(materialized),
+    }
+    assert coord._lift_to_current_best("explore", 1200.0, evidence)
+    current = coord.shared_state.current_best
+    assert shlex.split(current["extra_server_args"]) == snapshot["append_args"]
+    assert current["extra_envs"] == snapshot["env"]
+    assert current["args_mode"] == "append"
+    assert current["native_launch_overrides"] == snapshot
+    assert coord.shared_state.optimization_stack[-1]["native_launch_overrides"] == snapshot
+    base = stack_base_params(coord._current_best_launch_config())
+    assert base["base_native_launch_overrides"] == snapshot
+    base["base_native_launch_overrides"]["append_args"].append("--later")
+    assert current["native_launch_overrides"] == snapshot
+
+
+def test_native_keep_refuses_config_that_changed_after_measurement(tmp_path):
+    import json
+    from hyperloom.orchestrator.measurement.native_launch import native_launch_config
+
+    path = tmp_path / "native.yaml"
+    path.write_text(json.dumps({"benchmark": {"framework": "sglang", "agentx": {"launch_overrides": {"version": 1}}}}))
+    with pytest.raises(ValueError, match="does not match its measured launch"):
+        native_launch_config(
+            {"agentx_launch_contract": 1, "materialized_config": str(path), "agentx_server_launch": {}}
+        )
+
+
 def test_env_spec_hands_geak_the_import_root_not_the_snapshot_top(session_dir, tmp_path):
     """GEAK PYTHONPATHs this value; the snapshot top holds no importable module."""
     coord = _coord(session_dir)

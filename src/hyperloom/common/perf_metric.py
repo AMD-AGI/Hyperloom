@@ -140,7 +140,7 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
-def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
+def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
     # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
@@ -157,7 +157,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         total = inp + out
     if intvty is None or intvty_p50 is None or total is None:
         return None
-    snap: dict[str, float] = {
+    snap: dict[str, Any] = {
         GRADED_INTVTY: intvty,
         GRADED_INTVTY_P50: intvty_p50,
         GRADED_TOTAL: total,
@@ -176,7 +176,16 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     ):
         if value is not None:
             snap[key] = value
+    snap.update(_native_comparison_identity(source))
     return snap
+
+
+def _native_comparison_identity(source: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        name: source[name]
+        for name in ("agentx_launch_contract", "agentx_workload_fingerprint", "agentx_candidate_fingerprint")
+        if name in source
+    }
 
 
 def output_tput_of(source: Mapping[str, Any] | None) -> float:
@@ -212,13 +221,13 @@ def total_tput_per_chip_of(snapshot: Mapping[str, float] | None) -> float:
     return total / gpu_count if gpu_count is not None else total
 
 
-def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
+def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, Any]:
     """The graded axes *source* carries, for stamping onto a winner record."""
     # A KEEP's ``current_best`` becomes the next candidate's anchor, and an anchor missing an axis degrades the whole
     # session to output grading. Axes are absent rather than None so a partial record is not read as a measured zero.
     if not isinstance(source, Mapping):
         return {}
-    axes: dict[str, float] = {}
+    axes: dict[str, Any] = _native_comparison_identity(source)
     intvty = _positive(source.get(GRADED_INTVTY))
     if intvty is not None:
         axes[GRADED_INTVTY] = intvty
@@ -249,7 +258,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     return axes
 
 
-def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, float] | None, str]:
+def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, Any] | None, str]:
     """Grading anchor: the current-best snapshot, falling back to the baseline; ``reason`` names any failure."""
     # A ``current_best`` that exists but carries no axes must not fall through to ``baseline_perf`` -- that would
     # anchor a candidate against a recipe it was never measured on.
@@ -289,12 +298,17 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
-def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
+def rounds_are_comparable(candidate: Mapping[str, Any], anchor: Mapping[str, Any]) -> bool:
     """Whether the pair measured the same work: equal-length windows and no extra failed requests.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
     """
+    identity_key = "agentx_workload_fingerprint"
+    if any("agentx_launch_contract" in side or identity_key in side for side in (candidate, anchor)):
+        identity = candidate.get(identity_key)
+        if not isinstance(identity, str) or len(identity) != 64 or identity != anchor.get(identity_key):
+            return False
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
             return False

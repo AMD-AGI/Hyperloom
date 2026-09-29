@@ -215,15 +215,15 @@ def test_seed_snapshots_agentx_source_yaml_and_runtime_pins(
     assert snapshot.read_text(encoding="utf-8") == source_text
     assert state.benchmark_mode == "agentx"
     assert state.agentx_epoch == cb.AGENTX_MEASUREMENT_EPOCH
-    assert state.conc_sweep_enabled is False
+    assert state.conc_sweep_enabled is True
     assert state.agentx_runtime_pins == pins
     assert state.benchmark_source_config_path == str(snapshot)
     assert state.active_inferencex_path == str(inferencex.resolve())
-    assert state.warm_replay_enabled is False
+    assert state.warm_replay_enabled is True
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert persisted["agentx_runtime_pins"] == pins
     assert persisted["benchmark_source_config_path"] == str(snapshot)
-    assert persisted["warm_replay_enabled"] is False
+    assert persisted["warm_replay_enabled"] is True
 
 
 def test_seed_records_the_launch_verdict_for_the_partition_shape(
@@ -774,17 +774,17 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("enable_conc_sweep, expected", [(None, True), (True, True), (False, False)])
-def test_legacy_agentx_seed_keeps_epoch_and_optimizer_features(tmp_path, monkeypatch, enable_conc_sweep, expected):
+def test_fresh_agentx_seed_uses_native_epoch_and_optimizer_features(tmp_path, monkeypatch, enable_conc_sweep, expected):
     _neutralize_seed_io(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.setenv("AGENTX_SERVER_SCRIPT", "irrelevant-ambient-native-pin.sh")
     state = cb._seed_shared_state(
-        tmp_path, _args(enable_conc_sweep=enable_conc_sweep, conc_sweep_concs=None), session_id="legacy-agentx"
+        tmp_path, _args(enable_conc_sweep=enable_conc_sweep, conc_sweep_concs=None), session_id="fresh-agentx"
     )
     assert state.benchmark_mode == "agentx"
-    assert state.agentx_epoch == 1
-    assert state.agentx_runtime_pins == {}
+    assert state.agentx_epoch == 3
+    assert state.agentx_backend == "native"
     assert state.benchmark_source_config_path == ""
     assert state.warm_replay_enabled is True
     assert state.conc_sweep_enabled is expected

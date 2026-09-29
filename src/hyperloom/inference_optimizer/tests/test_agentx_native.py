@@ -95,6 +95,40 @@ def _commit_all(path: Path, message: str = "fixture update") -> str:
     ).stdout.strip()
 
 
+def test_native_launcher_uses_the_pinned_upstream_manifest_and_rejects_edited_mapping(tmp_path, monkeypatch):
+    root = tmp_path / "InferenceX"
+    _init_git_repo(root)
+    script = "single_node/agentic/model.sh"
+    launcher = root / "benchmarks" / script
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/bash\nexit 0\n")
+    manifest = root / "configs" / "agentx-launchers.json"
+    manifest.parent.mkdir()
+    payload = {
+        "version": 1,
+        "recipes": {"model-recipe": {"benchmark_script": script, "launch_overrides_version": 1}},
+    }
+    manifest.write_text(json.dumps(payload))
+    commit = _commit_all(root)
+    monkeypatch.setattr(native_agentx, "_NATIVE_LAUNCH_CONTRACT_REFS", frozenset({commit}))
+    identity = native_agentx.validate_native_recipe_launcher(
+        inferencex_path=root, recipe="model-recipe", benchmark_script=script
+    )
+    assert identity["inferencex_commit"] == commit
+    assert identity["launcher"] == script
+
+    with pytest.raises(ValueError, match="requires audited launcher"):
+        native_agentx.validate_native_recipe_launcher(
+            inferencex_path=root, recipe="model-recipe", benchmark_script="single_node/agentic/other.sh"
+        )
+    payload["recipes"]["model-recipe"]["benchmark_script"] = "single_node/agentic/other.sh"
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="manifest changed"):
+        native_agentx.validate_native_recipe_launcher(
+            inferencex_path=root, recipe="model-recipe", benchmark_script=script
+        )
+
+
 def test_magpie_wheel_identity_prefers_direct_url_over_unrelated_outer_git(tmp_path: Path):
     outer = tmp_path / "hyperloom"
     outer_commit = _init_git_repo(outer)
@@ -241,6 +275,10 @@ def test_magpie_pinned_published_tree_hash_matches_independent_wheel_audit():
         "a3339dc2776ee0c977fb3313fe89f56da7a91555": {
             "file_count": 79,
             "tree_sha256": "113f880b18ccd3ec26e6a432fcdf06a0c365520d51c3ed3c46069d33d7f07e93",
+        },
+        "d72965776df5416dad063c00237f6e389b841162": {
+            "file_count": 81,
+            "tree_sha256": "84dd7920ff992571c7dc6d485a4680ac3fc2afe7b6dde606dbd754d545a5729c",
         },
     }
     assert namespace["_MAGPIE_UNPUBLISHED_PATHS"] == frozenset({"mcp/config.json"})

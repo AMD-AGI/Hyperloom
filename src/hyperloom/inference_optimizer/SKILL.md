@@ -939,12 +939,13 @@ default, which is commonly shorter than one complete canonical AgentX round.
 
 The source `benchmark.agentx: enable` switch automatically stamps Hyperloom
 session state and selects AgentX grading before preflight. Do not require or
-export `HYPERLOOM_AGENTX` on this path. `HYPERLOOM_AGENTX=1` without an enabled
-`benchmark.agentx` field keeps the legacy `aiperf_client.sh` measurement and
-optimization backend: server tuning, source/kernel patch integration, GEAK
-proposal revalidation, and concurrency sweeps remain supported. Legacy epoch-1
-sessions can resume; native epoch-2 sessions retain their own config and pins.
-Never reinterpret a legacy baseline or KEEP as native evidence.
+export `HYPERLOOM_AGENTX` on this path. A fresh `HYPERLOOM_AGENTX=1` launch
+also uses Magpie native AgentX, with the normal model/framework/GPU/precision/
+concurrency inputs resolved to an unambiguous upstream recipe and launcher.
+New sessions use epoch 3 and preserve Hyperloom optimization. Persisted epoch-1
+sessions keep the legacy client; epoch-2 native sessions keep their original
+measurement-only contract and pins. Never migrate a saved epoch, baseline, or
+KEEP record implicitly.
 `--benchmark-config` is fresh-launch only. A
 resume rejects a new source-config flag. It restores the accepted materialized
 config and runtime pins after baseline acceptance, or the session's snapshotted
@@ -1025,13 +1026,12 @@ only and is not recipe-identical; AIPerf `profile`/`profiled` fields are workloa
 statistics, not a PyTorch trace. Diagnostic profiling preserves the installed
 framework source by skipping TraceLens/CK source patches; annotation coverage
 may be lower, but subsequent native measurements keep the same framework.
-The native `KERNEL_AGENT`/GEAK phase is not dispatched: it records
-`status=skipped` and `error_class=unsupported_upstream_launcher_hook`.
-
-The pinned launchers own their full server argv and expose no optimizer hook.
-Hyperloom never modifies them, and native server-arg/env candidates, removals,
-and reference launches fail closed. This is a measurement-only release until
-an upstream launcher hook exists. Accepted results additionally require an
+Epoch-3 native sessions use the versioned upstream launch-overrides contract.
+Each candidate needs launch evidence and canonical revalidation; a GEAK proxy
+score cannot become a KEEP result. The workload fingerprint is immutable, while
+candidate execution identities include their launch configuration. Saved
+epoch-2 sessions retain their measurement-only restrictions. Accepted results
+additionally require an
 `agentic-coding` scenario, strict matching recipe/launch/raw fingerprints, and
 a trusted fingerprint-bound topology. `publishable=true` attests Magpie's
 canonical protocol. Hyperloom separately binds the selected recipe to the exact

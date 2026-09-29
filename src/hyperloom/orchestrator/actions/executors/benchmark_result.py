@@ -866,6 +866,7 @@ def _merge_native_agentx_report(
     recipe = metrics.get("recipe")
     measurement["agentx_recipe"] = recipe
     measurement["agentx_launch"] = metrics.get("launch")
+    measurement["agentx_server_launch"] = metrics.get("server_launch")
     measurement["agentx_request_accounting"] = metrics.get("request_accounting")
     if recipe_fingerprint is not None:
         measurement["agentx_recipe_fingerprint"] = recipe_fingerprint
@@ -1077,6 +1078,7 @@ def _validate_native_agentx_protocol(
     workspace: Path | None,
     raw: dict[str, Any] | None,
     raw_path: Path | None,
+    materialized_config_path: Path | None = None,
 ) -> None:
     """Cross-bind the native report to its exact AIPerf protocol artifacts.
 
@@ -1126,6 +1128,32 @@ def _validate_native_agentx_protocol(
             config = wrapped if isinstance(wrapped, dict) else loaded
         else:
             reject("config_snapshot_invalid")
+
+    # Magpie intentionally snapshots only its own BenchmarkConfig fields.
+    # The launch authority and fixed session identity remain in Hyperloom's
+    # materialized input; bind the two before using that private metadata.
+    from hyperloom.inference_optimizer.agentx.identity import has_launch_contract
+
+    expected: dict[str, Any] = {}
+    if materialized_config_path is not None:
+        try:
+            loaded_expected = yaml.safe_load(Path(materialized_config_path).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            loaded_expected = None
+        if isinstance(loaded_expected, dict):
+            wrapped = loaded_expected.get("benchmark")
+            expected = wrapped if isinstance(wrapped, dict) else loaded_expected
+        else:
+            reject("materialized_config_unreadable")
+    if has_launch_contract(config) or has_launch_contract(expected):
+        if not expected:
+            reject("materialized_config_missing")
+        else:
+            observed_config = {key: value for key, value in config.items() if key != "workload_spec"}
+            expected_config = {key: value for key, value in expected.items() if key != "workload_spec"}
+            if observed_config != expected_config:
+                reject("materialized_config_snapshot_mismatch")
+            config = expected
 
     raw_agentx = config.get("agentx")
     agentx = raw_agentx if isinstance(raw_agentx, dict) else {}
@@ -1180,6 +1208,18 @@ def _validate_native_agentx_protocol(
         raw = {}
     else:
         measurement["native_agentx_aggregate_path"] = str(raw_path)
+
+    if resolved.get("custom") is True:
+        if report_recipe.get("custom_recipe") is not True or raw.get("custom_recipe") is not True:
+            reject("custom_recipe_identity_missing")
+        for output_field, config_field in (
+            ("native_context_length", "native-context-length"),
+            ("max_model_len", "max-model-len"),
+            ("model_config_sha256", "model-config-sha256"),
+        ):
+            require_same(
+                output_field, resolved.get(config_field), report_recipe.get(output_field), raw.get(output_field)
+            )
 
     require_same(
         "recipe_fingerprint",
@@ -1499,6 +1539,35 @@ def _validate_native_agentx_protocol(
     if measurement.get("native_agentx_aggregate_ambiguous") is True:
         reject("inferencex_aggregate_ambiguous")
 
+    from hyperloom.inference_optimizer.agentx.identity import (
+        canonical_sha256,
+        has_launch_contract,
+        validate_server_launch,
+        verified_workload_fingerprint,
+    )
+
+    if has_launch_contract(config):
+        measurement["agentx_launch_contract"] = 1
+        measurement.pop("agentx_workload_fingerprint", None)
+        measurement.pop("agentx_candidate_fingerprint", None)
+        for error in validate_server_launch(config, measurement.get("agentx_server_launch")):
+            reject(error)
+        try:
+            launch_artifact = json.loads((workspace / "agentx_server_launch.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            reject("server_launch_artifact_missing")
+        else:
+            if launch_artifact != measurement.get("agentx_server_launch"):
+                reject("server_launch_artifact_mismatch")
+        workload_fingerprint = verified_workload_fingerprint(config)
+        if workload_fingerprint is None:
+            reject("workload_fingerprint_invalid")
+        elif not errors:
+            measurement["agentx_workload_fingerprint"] = canonical_sha256(
+                {"workload": workload_fingerprint, "dataset": aiperf_dataset}
+            )
+            measurement["agentx_candidate_fingerprint"] = measurement["agentx_server_launch"]["evidence_sha256"]
+
     measurement["native_agentx_protocol_errors"] = errors
     measurement["native_agentx_protocol_valid"] = not errors
     reasons = measurement.get("submission_invalid_reasons")
@@ -1556,6 +1625,7 @@ def extract_benchmark_measurement(
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
+    materialized_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extract a normalized measurement from Magpie and InferenceX outputs.
 
@@ -1569,6 +1639,8 @@ def extract_benchmark_measurement(
             and (as a fallback) salvageable leaks.
         subprocess_started_unix: Optional launch time enabling the mtime-gated
             leak salvage pass.
+        materialized_config_path: Exact Hyperloom input submitted to Magpie;
+            required to bind native optimization results to their session.
 
     Returns:
         A normalized measurement dict (including ``valid_measurement``, any
@@ -1674,6 +1746,7 @@ def extract_benchmark_measurement(
             workspace=workspace,
             raw=native_aggregate,
             raw_path=native_aggregate_path,
+            materialized_config_path=materialized_config_path,
         )
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
@@ -1732,6 +1805,7 @@ def extract_benchmark_measurement(
                 workspace=workspace,
                 raw=native_aggregate,
                 raw_path=native_aggregate_path,
+                materialized_config_path=materialized_config_path,
             )
         measurement["valid_measurement"] = is_valid_measurement(measurement)
 
