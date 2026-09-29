@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -123,6 +124,40 @@ def seed_kernel_keep(
     state.kernel_opt_task_attempts[task_key] = entry
     _queue_kernel_keep(state, task_key=task_key, kernel_id=kernel_id, entry=entry)
     return task_key
+
+
+def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
+    """Build a real Coordinator with idle mock backends and optional state overrides.
+
+    Returns a fully initialised :class:`~hyperloom.orchestrator.loop.coordinator.Coordinator`.
+    Callers that need to replace collaborator state (``tasks``, ``bus``, etc.) may do so
+    by assigning to the returned instance directly after construction.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    def _idle_plan() -> ScriptedPlan:
+        return ScriptedPlan(
+            turns=[],
+            default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+        )
+
+    backends = coord_kwargs.pop("backends", None) or {
+        "orchestration": MockBackend(_idle_plan(), name="orchestration"),
+        "critic": MockBackend(_idle_plan(), name="critic"),
+    }
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
+        **coord_kwargs,
+    )
+    if shared_state_overrides:
+        for k, v in shared_state_overrides.items():
+            setattr(coord.shared_state, k, v)
+    return coord
 
 
 @pytest.fixture
