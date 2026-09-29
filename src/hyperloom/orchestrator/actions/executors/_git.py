@@ -52,10 +52,8 @@ def _run_git_cp(
         return None
 
 
-def _git_head_sha(root: str | Path | None) -> str:
-    """Return ``root``'s HEAD commit, or ``""`` when it is not a git tree."""
-    if not root:
-        return ""
+def _git_head_sha(root: str | Path) -> str:
+    """Return ``root``'s HEAD commit, or ``""`` when the read failed (spawn failure, timeout, non-zero exit)."""
     cp = _run_git_cp(["-C", str(root), "rev-parse", "HEAD"], timeout=30.0)
     if cp is None or cp.returncode != 0:
         return ""

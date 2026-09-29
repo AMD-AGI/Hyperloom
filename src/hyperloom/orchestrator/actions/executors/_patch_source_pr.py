@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from hyperloom.common.url_safety import require_http_url
 
-from ._git import _run_git
+from ._git import _git_head_sha, _run_git
 
 log = logging.getLogger(__name__)
 
@@ -174,8 +174,7 @@ def _materialize_pr_diff_from_head(
 
     # Diff against the merge-base so applying introduces only the PR's own commits, not the full divergence from the
     # live HEAD.
-    ok_hb, base_out, _e = _run_git(["-C", root, "rev-parse", "HEAD"], timeout=30.0)
-    live_head = base_out.strip() if ok_hb else ""
+    live_head = _git_head_sha(framework_root)
     merge_base = ""
     if live_head:
         ok_mb, mb_out, _mb_e = _run_git(["-C", root, "merge-base", live_head, head_sha], timeout=60.0)
