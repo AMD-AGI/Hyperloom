@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _apply_warm_patches,
     _create_patch_snapshot,
     _restore_patch_snapshot,
+    _revert_legacy_warm_patch_trees,
     _revert_patches,
     _revert_warm_patch_state,
     _revert_warm_patch_trees,
@@ -736,7 +738,7 @@ def test_required_timeline_applies_in_a_repo_with_no_head(tmp_path, output_dir):
     assert result["status"] == "prepared"
     assert [entry["status"] for entry in result["applied"]] == ["applied_nogit"]
     assert "patched = True" in target.read_text()
-    assert params["_warm_patch_nogit_backups"], "the only way back must be recorded"
+    assert result["trees"][0]["nogit_backups"], "the only way back must be recorded"
 
 
 def test_required_timeline_applies_on_a_non_git_install_tree(tmp_path, output_dir):
@@ -829,35 +831,41 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
     applied = _apply_warm_patches(params, str(install_root), output_dir)
 
     assert [p["status"] for p in applied] == ["applied_nogit"]
-    assert not params.get("_warm_patch_snapshot_manifest"), "nogit has no git snapshot"
-    assert params["_warm_patch_nogit_backups"], "teardown would have nothing to undo"
+    restore = _revert_legacy_warm_patch_trees(params)
+    assert restore["ok"] is True, restore
+    assert "patched = True" not in target.read_text(), "teardown left the patch in the tree"
 
 
-def test_teardown_undoes_a_nogit_apply(tmp_path):
-    """Keying the revert on pre_sha alone leaked nogit patches into later tasks that reuse the same checkout."""
-    target = tmp_path / "vllm" / "fp8.py"
+@pytest.mark.parametrize("backup_intact", [True, False], ids=["intact", "corrupt"])
+def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact):
+    """The restore verifies against the digest the apply recorded, not against whatever the backup now holds."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
-    backup = tmp_path / "backups" / "p__vllm__fp8.py__0000.bak"
-    backup.parent.mkdir(parents=True)
-    shutil.copy2(target, backup)
-    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
-
-    result = _revert_warm_patch_state(
-        str(tmp_path),
-        pre_sha="",
-        nogit_backups=[
-            {
-                "target": str(target),
-                "existed": True,
-                "backup_path": str(backup),
-                "revert_action": "restore",
-            }
-        ],
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+            "required_patch_timeline": True,
+        },
+        str(install_root),
+        output_dir,
     )
+    backups = result["trees"][0]["nogit_backups"]
+    patched = target.read_bytes()
+    if not backup_intact:
+        Path(backups[0]["backup_path"]).write_text("# fp8 module\ncorrupt = True\n")
 
-    assert result == {"ok": True, "errors": [], "channel": "nogit"}
-    assert "patched = True" not in target.read_text()
+    restore = _revert_warm_patch_state(str(install_root), nogit_backups=backups)
+
+    if backup_intact:
+        assert restore == {"ok": True, "errors": []}
+        assert target.read_text() == "# fp8 module\noriginal = True\n"
+    else:
+        assert restore["ok"] is False
+        assert "missing or corrupt backup" in restore["errors"][0]
+        assert target.read_bytes() == patched
 
 
 def test_legacy_patch_skips_when_rollback_snapshot_fails(
