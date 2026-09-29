@@ -2223,6 +2223,32 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
+    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
+    assert task.params["proposal_msg_id"] == pending.proposal_msg_id
+
+
+@pytest.mark.asyncio
+async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
+    coord: Coordinator,
+) -> None:
+    coord.shared_state.baseline_tput = 800.0
+    first = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-first",
+    )
+    duplicate = _pending(
+        "explore",
+        {"params": {"grid": [{"name": "v0"}]}},
+        msg_id="prop-duplicate",
+    )
+
+    await coord._materialize_approved_proposal(first)
+    await coord._materialize_approved_proposal(duplicate)
+
+    queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
+    assert len(queued) == 1
+    assert queued[0].params["proposal_msg_id"] == "prop-first"
 
 
 @pytest.mark.asyncio

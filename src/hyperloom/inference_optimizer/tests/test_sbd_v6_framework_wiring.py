@@ -980,14 +980,21 @@ def test_review_subjects_resolve_a_candidate_to_its_own_row():
 
 def test_measured_variants_settle_their_grid(session_dir: Path):
     import asyncio
-    from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    task = SimpleNamespace(task_id="t-exp-9", kind="explore", params={"proposal_msg_id": msg_id})
+    _review(
+        coord,
+        msg_id,
+        {"verdict": "approve", "reasoning": "the grid is safe to measure"},
+    )
+    task_id = coord.state.pending_proposals[msg_id].task_id
+    task = asyncio.run(coord.tasks.get(task_id))
+    assert task is not None
+    assert task.params["proposal_msg_id"] == msg_id
     asyncio.run(
         coord._fact_write_hook(
             task=task,
@@ -1013,7 +1020,12 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     proposal = ext["proposals"][0]
     assert proposal["terminal"]["disposition"] == "attempted"
     assert proposal["attempt_refs"] == [ext["attempts"][0]["attempt_id"]]
-    assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "attempted"]
+    assert [step["step"] for step in proposal["lifecycle"]] == [
+        "proposed",
+        "reviewed",
+        "routed",
+        "attempted",
+    ]
 
 
 def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Path):
