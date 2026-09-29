@@ -237,6 +237,21 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
     assert reused.task_id == created.task_id
 
 
+@pytest.mark.asyncio
+async def test_exists_with_key_prefix_matches_the_prefix_literally(tmp_path):
+    registry = TaskRegistry(SqliteConnection(tmp_path / "key-prefix.db"))
+    try:
+        await registry.create(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
+
+        assert await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("queued",))
+        # Real keys carry ``_``; it must match only itself, not any character.
+        assert not await registry.exists_with_key_prefix("integrate_patch", "a_b-reconcile", states=("queued",))
+        assert not await registry.exists_with_key_prefix("explore", "aab-reconcile", states=("queued",))
+        assert not await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("succeeded",))
+    finally:
+        registry.db.close()
+
+
 def test_legacy_task_dispatch_provenance_is_unknown_not_guessed():
     task = Task(task_id="legacy", kind="baseline", state="queued", params={}, idempotency_key="legacy")
 

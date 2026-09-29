@@ -4948,12 +4948,11 @@ class WritebackCollaborator:
             A dict with ``is_resume``, ``event_count``, ``state_json_present``
             and ``rebuilt`` (the last set later by :meth:`replay_for_resume`).
         """
-        ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
-        events_present = (int(ev_count["c"]) if ev_count else 0) > 0
+        event_count = self.bus.count_sync()
         state_path = SharedState.state_path(self.session_dir)
         return {
-            "is_resume": events_present or state_path.exists(),
-            "event_count": int(ev_count["c"]) if ev_count else 0,
+            "is_resume": event_count > 0 or state_path.exists(),
+            "event_count": event_count,
             "state_json_present": state_path.exists(),
             "rebuilt": False,  # set by replay_for_resume()
         }
