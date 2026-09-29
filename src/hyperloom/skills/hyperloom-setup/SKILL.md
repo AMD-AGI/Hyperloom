@@ -201,6 +201,18 @@ value.
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
 
+9. Ask whether this workspace shares Experiences with a global Experience KB.
+   Runs always read and write the workspace's local service; a global KB only
+   adds push and pull. Skip the question when `HYPERLOOM_GLOBAL_KB_URL` is
+   already set to a non-placeholder value in the shell or `.env`, and confirm
+   that URL instead. Present exactly these two option labels in this order:
+   `No global KB` / `I have a global KB URL and token`.
+   - `No global KB`: write no global keys.
+   - `I have a global KB URL and token`: ask the URL with a plain-text
+     follow-up; the token goes into `.env` as a placeholder the user fills in.
+     Then ask how Experiences reach it, with exactly these labels in this
+     order: `Push when I ask` / `Push after every run`.
+
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
@@ -237,6 +249,10 @@ Write the Anthropic keys plus the common keys:
   and generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
   still `<PLEASE_FILL_IN>`; it keeps every other value. It prints only whether
   each key was `written` or `kept`, never the token.
+- `Global Experience KB` (only when the user has one in Step 2):
+  `HYPERLOOM_GLOBAL_KB_URL` as entered, `HYPERLOOM_GLOBAL_KB_TOKEN` (preserve a
+  non-placeholder value; otherwise write `<PLEASE_FILL_IN>`), and
+  `HYPERLOOM_KB_AUTO_PUSH=1` only for `Push after every run`.
 
 Common keys:
 
@@ -281,6 +297,7 @@ Then read `.env` back and confirm:
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
 - `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` are both set.
+- when `HYPERLOOM_GLOBAL_KB_URL` is set, `HYPERLOOM_GLOBAL_KB_TOKEN` is set too.
 
 If any required secret is missing or still a placeholder, stop and ask the user
 to edit `.env` again.
@@ -441,6 +458,23 @@ When the `.env` settings the service uses change (the Anthropic gateway, model,
 or global KB), the next run of this step or of an optimize launch restarts it
 with them.
 
+### Global Experience KB
+
+Only when `HYPERLOOM_GLOBAL_KB_URL` is set. Push and pull run through the local
+service, in the same environment as the optimizer, with `.env` loaded:
+
+```bash
+PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service pull
+PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service push
+```
+
+In `baremetal` mode, run `pull` once now so the first run already reads what
+the global KB holds for this workspace's schema. Each command prints one line
+with the global URL and the `created`, `unchanged`, `skipped`, and `rejected`
+counts, and exits 1 when it stopped early or rejected an Experience; report
+that line. A failure here does not block setup: report it and continue. In
+`docker` mode, tell the user the same commands run inside the container.
+
 ## Step 6: Report Result
 
 Report:
@@ -454,6 +488,8 @@ Report:
 - Experience KB service: in `baremetal` mode, `ready` with its URL once the
   service step succeeds, or `failed`; in `docker` mode, that it starts inside
   the container at the first optimize launch.
+- Global Experience KB: `not configured`, or its URL, whether it pushes after
+  every run or on request, and the `pull` summary line in `baremetal` mode.
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.

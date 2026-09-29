@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -38,6 +39,17 @@ log = logging.getLogger(__name__)
 
 _PERMANENT_HTTP_STATUSES = frozenset({HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT})
 _SYNC_COUNTS = ("created", "unchanged", "skipped")
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def is_loopback(url: str) -> bool:
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class RemoteClientError(RuntimeError):
@@ -116,10 +128,11 @@ class RemoteClient:
         self,
         config: RemoteConfig,
         *,
-        opener: Any = urllib.request.urlopen,
+        opener: Any = None,
     ) -> None:
         self.config = config
-        self._opener = opener
+        # An environment proxy cannot reach this host's loopback, and urllib proxies it unless NO_PROXY lists it.
+        self._opener = opener or (_DIRECT.open if is_loopback(config.base_url) else urllib.request.urlopen)
 
     def _request(
         self,
@@ -484,4 +497,5 @@ __all__ = [
     "RemoteExperienceSession",
     "RemoteReadResult",
     "RemoteWriteResult",
+    "is_loopback",
 ]

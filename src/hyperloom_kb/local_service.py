@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import signal
 import socket
@@ -19,7 +18,7 @@ from urllib.parse import urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.http_service import ServiceSettings
-from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, is_loopback
 from hyperloom_kb.schema import JsonValue
 
 LOG_NAME = "service.log"
@@ -37,16 +36,6 @@ class LocalService:
     # Only set when this call started the service; a service that was already serving is not ours to hold.
     process: subprocess.Popen[bytes] | None = None
     restarted: bool = False
-
-
-def is_loopback(url: str) -> bool:
-    host = urlsplit(url).hostname or ""
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 def _address(url: str) -> tuple[str, int]:
@@ -70,11 +59,10 @@ def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str])
     child_env["HYPERLOOM_KB_TOKEN"] = token
     package_root = str(Path(__file__).resolve().parent.parent)
     child_env["PYTHONPATH"] = os.pathsep.join(path for path in (package_root, child_env.get("PYTHONPATH", "")) if path)
-    # ``-m hyperloom_kb.http_service`` would re-execute a module the package ``__init__`` already imported.
     command = [
         sys.executable,
-        "-c",
-        "from hyperloom_kb.http_service import main; raise SystemExit(main())",
+        "-m",
+        "hyperloom_kb",
         "--home",
         str(home),
         "--host",
@@ -184,5 +172,4 @@ __all__ = [
     "LocalService",
     "LocalServiceError",
     "ensure_local_service",
-    "is_loopback",
 ]

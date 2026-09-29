@@ -7,7 +7,8 @@ The optimizer owns two ends of it: recording each Framework attempt's facts on
 the SBD V6 timeline, and handing the written `session_breakdown.json` to the
 `hyperloom_kb` package. The projection from attempts to Experiences -- which
 fields become identity, baseline, change, and outcome, and which attempts are
-fit to publish -- is the `hyperloom-sbd-v6` mapping packaged in `hyperloom_kb`.
+fit to publish -- is the `hyperloom-sbd-v6` mapping packaged in `hyperloom_kb`
+(see [Experience collection](reference/experience-kb-collect.md)).
 
 ## What Hyperloom records
 
@@ -74,37 +75,12 @@ their benchmark mode and workload identity.
 
 ## Configuration
 
-Each workspace runs a local Experience KB service. `hyperloom-setup` points the
-workspace `.env` at it:
+Publications go to the workspace's local Experience KB service, which every
+optimize launch starts when it is not serving; its configuration, the global KB
+it can push to and pull from, and its HTTP API are in
+[Experience KB service](reference/experience-kb.md).
 
-```bash
-python -m hyperloom.inference_optimizer.experience_kb_service init-env   # loopback URL + generated token
-python -m hyperloom.inference_optimizer.experience_kb_service ensure     # start it unless it already serves
-```
-
-Every optimize launch runs the same `ensure` step after loading `.env`, so the
-service runs wherever the optimizer runs, with its data and `service.log` under
-`$USER_DATA_PATH/experience-kb`. A service that cannot be started is logged and
-the run continues; its writes are spooled under
-`$USER_DATA_PATH/experience-kb/spool` and sent by the next launch that finds
-the service serving. A restarted service serves every Experience it stored
-before it stopped, so a later run reads what an earlier one wrote. A service
-already listening on that port must answer with this workspace's token,
-otherwise the start is refused; one that does but serves another declaration or
-was started with other settings is restarted with the current ones.
-
-A service holds every schema written to it: each write carries its
-declaration, so a workspace that moves to a new declaration keeps the
-Experiences of the old one. A run's reads search only the schema it writes.
-Push sends Experiences of every schema; pull fetches the global KB's
-Experiences for each schema the workspace holds.
-
-The service plans reads through the Anthropic-side gateway in `.env`
-(`ANTHROPIC_BASE_URL`, its key, and `CLAUDE_MODEL`). Without one it still
-accepts writes, and reads report `unavailable`.
-
-Publication is disabled only when `HYPERLOOM_KB_URL` is unset. The
-`hyperloom_kb` package ships inside Hyperloom. CLI startup fails when the
-packaged mapping cannot load or validates a different declaration than the
-mapping produces; `cold_start_check.py --require-experience-kb` also checks the
-service's health and declaration.
+Publication is disabled only when `HYPERLOOM_KB_URL` is unset. CLI startup
+fails when the packaged mapping cannot load or validates a different
+declaration than the mapping produces; `cold_start_check.py
+--require-experience-kb` also checks the service's health and declaration.

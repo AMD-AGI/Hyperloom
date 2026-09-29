@@ -44,7 +44,6 @@ from hyperloom_kb.local_service import (
     LocalService,
     LocalServiceError,
     ensure_local_service,
-    is_loopback,
 )
 from hyperloom_kb.query_view import (
     CapabilityState,
@@ -70,6 +69,7 @@ from hyperloom_kb.remote import (
     RemoteExperienceSession,
     RemoteReadResult,
     RemoteWriteResult,
+    is_loopback,
 )
 from hyperloom_kb.retrieval import (
     CandidateHit,
