@@ -701,8 +701,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
                 " change at least one of the eight fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
-                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
-                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]
         )
     lines.extend(
@@ -900,11 +899,9 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
         "",
         "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
         *update_fields,
-        "A Coordinator-owned core field refuses the whole intent before anything is written. Every other",
-        "key -- a non-core field outside the list above, a wrong value type, an unknown name -- is dropped",
-        "on its own, and the rest of that same update still applies. The observation reports what was",
-        "written in `changes` and every dropped key in `rejected`; re-sending a key from `changes` would",
-        "repeat a write that already landed.",
+        "Any other key -- a Coordinator-owned field, an unknown name -- and any listed key carrying the",
+        "wrong value type refuses the whole update: nothing is written, and the denial names the key it",
+        "refused. There is no partial apply, so re-send the update carrying only the fields above.",
     ]
 
 

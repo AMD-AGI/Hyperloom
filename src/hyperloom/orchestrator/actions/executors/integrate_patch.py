@@ -2413,7 +2413,7 @@ class IntegratePatchExecutor:
         # a forged coordinator.db row with no genuine Critic verdict must be
         # rejected here, all-or-nothing, before it can install packages or mutate
         # the live framework tree. specialist_patch_verdicts is a Coordinator-only
-        # CORE_STATE_FIELD an LLM/forged row cannot write, and a legitimate
+        # field an LLM/forged row cannot write, and a legitimate
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
         # task is unaffected. No-op when SharedState is absent.
