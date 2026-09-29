@@ -262,7 +262,6 @@ def _inline_accuracy(scores: Mapping[str, Any]) -> tuple[float, int]:
 def map_mlperf(
     report: Mapping[str, Any],
     *,
-    issued_trajectories: int,
     corpus: str,
     scores: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -274,9 +273,6 @@ def map_mlperf(
 
     Args:
         report: The parsed ``result_summary.json``.
-        issued_trajectories: Trajectories the run was configured to replay. The
-            harness does not record it, and it is what two fixed-work rounds must
-            share to be comparable.
         corpus: The dataset the trajectories came from.
         scores: The parsed inline ``scores.json``, when the run produced one.
     """
@@ -298,7 +294,6 @@ def map_mlperf(
         "request_error_rate": 100.0 * failed / issued if issued > 0 else None,
         "submission_valid": not reasons,
         "submission_invalid_reasons": reasons,
-        "issued_trajectories": int(issued_trajectories),
         "corpus_loader": str(corpus),
     }
     if report["duration_ns"] is not None:

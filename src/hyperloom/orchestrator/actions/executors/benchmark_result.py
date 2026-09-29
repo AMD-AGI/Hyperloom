@@ -528,8 +528,6 @@ def _merge_raw_result(
         measurement["e2e_norm_intvty_p50"] = to_float(raw.get("e2e_norm_intvty_p50"))
     if measurement.get("request_error_rate") is None:
         measurement["request_error_rate"] = to_float(raw.get("request_error_rate"))
-    if measurement.get("issued_trajectories") is None:
-        measurement["issued_trajectories"] = first_int(raw.get("issued_trajectories"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),

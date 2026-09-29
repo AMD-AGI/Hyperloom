@@ -14,14 +14,11 @@ import pytest
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
     GRADED_ERROR_RATE,
-    GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
-    INTVTY_V1,
     VERDICT_KEEP,
     VERDICT_REVERT,
     graded_axes_of,
-    intvty_grading_enabled,
     perf_snapshot_from_mapping,
 )
 from hyperloom.orchestrator.state.shared_state import (
@@ -734,83 +731,10 @@ def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
     assert graded.verdict == VERDICT_REVERT
 
 
-# Fixed-work comparability (MLPerf agentic).
-_FIXED_WORK_BASE = {
-    "input_throughput": 25801.36,
-    "output_throughput": 183.44,
-    "total_throughput": 25984.80,
-    "e2e_norm_intvty_p90": 22.56,
-    "e2e_norm_intvty_p50": 56.55,
-}
-
-
-def _fixed_work(duration: float, **over: float) -> dict[str, float]:
-    return {
-        **_FIXED_WORK_BASE,
-        "duration_seconds": duration,
-        "request_error_rate": 0.0,
-        "issued_trajectories": 150,
-        **over,
-    }
-
-
-def test_a_fixed_work_speedup_past_the_window_drift_is_comparable():
-    """A fixed-work run that got 10% faster finished the same trajectories 10% sooner.
-
-    The fixed-window rule reads that as a truncated round, so only gains inside the 5% drift band could be kept.
-    """
-    from hyperloom.common.perf_metric import rounds_are_comparable
-
-    anchor = perf_snapshot_from_mapping(_fixed_work(3849.0))
-    faster = perf_snapshot_from_mapping(_fixed_work(3849.0 / 1.10))
-    assert anchor and faster
-    assert rounds_are_comparable(faster, anchor)
-
-
-def test_a_fixed_work_speedup_past_the_drift_keeps(monkeypatch):
-    """End to end through the resolver: a +10% interactivity round on the same trajectories is a KEEP."""
-    from hyperloom.common.perf_metric import VERDICT_KEEP
-    from hyperloom.orchestrator.state.shared_state import SharedState, resolve_graded_comparison
-
-    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
-    anchor = perf_snapshot_from_mapping(_fixed_work(3849.0))
-    candidate = _fixed_work(
-        3849.0 / 1.10,
-        e2e_norm_intvty_p50=_FIXED_WORK_BASE["e2e_norm_intvty_p50"] * 1.10,
-    )
-    state = SharedState(benchmark_mode="agentx", grading={"objective": GRADED_INTVTY, "noise_pct": 5.0})
-    graded = resolve_graded_comparison(state, candidate, anchor_perf=anchor)
-    assert graded.verdict == VERDICT_KEEP
-
-
-@pytest.mark.parametrize(
-    "candidate_over",
-    [
-        pytest.param({"issued_trajectories": 25}, id="different-trajectory-count"),
-        pytest.param({"request_error_rate": 2.0}, id="more-failures"),
-    ],
-)
-def test_fixed_work_rounds_that_did_different_work_are_not_comparable(candidate_over):
-    from hyperloom.common.perf_metric import rounds_are_comparable
-
-    anchor = perf_snapshot_from_mapping(_fixed_work(3849.0))
-    candidate = perf_snapshot_from_mapping(_fixed_work(3500.0, **candidate_over))
-    assert anchor and candidate
-    assert not rounds_are_comparable(candidate, anchor)
-
-
-def test_a_fixed_work_round_is_not_comparable_to_a_fixed_window_one():
-    from hyperloom.common.perf_metric import rounds_are_comparable
-
-    window = perf_snapshot_from_mapping({**_FIXED_WORK_BASE, "duration_seconds": 3600.0, "request_error_rate": 0.0})
-    fixed = perf_snapshot_from_mapping(_fixed_work(3600.0))
-    assert window and fixed
-    assert not rounds_are_comparable(fixed, window)
-    assert not rounds_are_comparable(window, fixed)
-
-
 def test_the_mlperf_backend_grades_on_output(monkeypatch):
     """The harness has no per-request interactivity series, so asking for it would degrade every round."""
+    from hyperloom.common.perf_metric import INTVTY_V1, intvty_grading_enabled
+
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
     assert intvty_grading_enabled(benchmark_mode="agentx") is False

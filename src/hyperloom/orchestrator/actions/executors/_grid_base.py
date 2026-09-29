@@ -140,7 +140,6 @@ class VariantResult:
     intvty_p90: float | None = None
     intvty_p50: float | None = None
     request_error_rate: float | None = None
-    issued_trajectories: int | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -182,7 +181,6 @@ class VariantResult:
             "e2e_norm_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p50": self.intvty_p50,
             "request_error_rate": self.request_error_rate,
-            "issued_trajectories": self.issued_trajectories,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

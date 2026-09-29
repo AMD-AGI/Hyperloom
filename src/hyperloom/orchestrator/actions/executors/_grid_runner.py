@@ -2000,7 +2000,6 @@ async def run_grid(
                 intvty_p90=measurement.get("e2e_norm_intvty_p90"),
                 intvty_p50=measurement.get("e2e_norm_intvty_p50"),
                 request_error_rate=measurement.get("request_error_rate"),
-                issued_trajectories=measurement.get("issued_trajectories"),
                 workspace=str(workspace),
                 report_path=str(report_path) if report_path.exists() else None,
                 raw_result_path=measurement.get("raw_result_path"),

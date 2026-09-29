@@ -21,7 +21,6 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
     GRADED_ERROR_RATE,
-    GRADED_FIXED_WORK,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
@@ -1039,7 +1038,6 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
-                        GRADED_FIXED_WORK: r.issued_trajectories,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1283,7 +1281,6 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
-                            GRADED_FIXED_WORK: r.issued_trajectories,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,

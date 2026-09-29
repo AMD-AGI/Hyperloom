@@ -1009,15 +1009,13 @@ server lifecycle and swaps the AgentX client for the MLCommons
 `agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
 recorded at seed; resuming a session under the other backend is refused.
 
-It is a fixed-work workload: a round finishes a set number of trajectories, so a
-speedup shortens the run. Two rounds are comparable when they issued the same
-trajectory count and the candidate's error rate is no worse; duration is not a
-comparability input. The harness publishes no per-request OSL/E2EL series, so
-MLPerf sessions grade on **output throughput** (`HYPERLOOM_PERF_METRIC` is not
-honoured here) and gate every KEEP on the harness's inline accuracy
-(`scores.json` `score`) against the baseline's smoke score, within the usual
-accuracy tolerance. A round with unscored turns, or over the 10% error-rate
-ceiling, fails that gate.
+The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
+on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
+every KEEP on the harness's inline accuracy (`scores.json` `score`) against the
+baseline's smoke score, within the usual accuracy tolerance. A round with
+unscored turns, or over the 10% error-rate ceiling, fails that gate. A baseline
+without a fully scored inline accuracy stops the session
+(`baseline_accuracy_failed`), so the gate is never left without a reference.
 
 Search runs the 150-trajectory smoke set. The canonical 613-trajectory
 submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
@@ -1037,7 +1035,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
 | `MLPERF_AGENTIC_FLOW` | `smoke_test` | `run_agentic.sh` flow: `smoke_test` (150 trajectories) or `full` (613). |
-| `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout and is the fixed-work count rounds must share to be comparable. |
+| `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout. |
 | `MLPERF_AGENTIC_HARDWARE` | `mi355x` | Hardware key passed to `run_agentic.sh`. |
 
 Preflight also refuses a non-SGLang framework and a model path that is not

@@ -33,7 +33,6 @@ def _scores() -> dict:
 def _map(report=None, scores=None, **kw):
     return map_mlperf(
         _report() if report is None else report,
-        issued_trajectories=kw.pop("issued_trajectories", 25),
         corpus=kw.pop("corpus", "agentic_combined_v6"),
         scores=scores,
     )
@@ -65,10 +64,8 @@ def test_throughput_and_counts_come_from_the_report():
     assert mapped["osl_distribution"]["p50"] == 30
 
 
-def test_the_fixed_work_the_round_issued_is_recorded():
-    mapped = _map(issued_trajectories=150, corpus="agentic_combined_v6")
-    assert mapped["issued_trajectories"] == 150
-    assert mapped["corpus_loader"] == "agentic_combined_v6"
+def test_the_corpus_is_recorded():
+    assert _map(corpus="agentic_combined_v6")["corpus_loader"] == "agentic_combined_v6"
 
 
 def test_no_interactivity_key_is_written():
@@ -134,7 +131,6 @@ def test_a_scores_file_without_turns_raises():
 def test_deployed_map_mlperf_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.delitem(sys.modules, "agentx_mapping", raising=False)
-    monkeypatch.setenv("AGENTIC_NUM_TRAJECTORIES", "150")
     monkeypatch.setenv("AGENTIC_DATASET_PATH", "/data/agentic_combined_v6.jsonl")
     deployed = deploy_agentx_assets(tmp_path / "benchmarks")
     mapper = next(path for path in deployed if path.name == "map_mlperf.py")
@@ -144,7 +140,6 @@ def test_deployed_map_mlperf_cli(tmp_path, monkeypatch):
     mod = SourceFileLoader("map_mlperf_cli", str(mapper)).load_module()
     mod.main(str(_FIXTURES / "result_summary.json"), str(dst), str(_FIXTURES / "scores.json"))
     out = json.loads(dst.read_text(encoding="utf-8"))
-    assert out["issued_trajectories"] == 150
     assert out["corpus_loader"] == "agentic_combined_v6"
     assert out["accuracy_score"] == pytest.approx(0.7178)
     assert out["median_ttft_ms"] == pytest.approx(3325.72024)

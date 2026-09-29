@@ -693,6 +693,8 @@ class SpecialistRunner:
                 # shape supplies their numbers.
                 benchmark_mode=str(params.get("benchmark_mode") or ""),
                 agentx_corpus_shape=dict(params.get("agentx_corpus_shape") or {}),
+                agentx_grading=dict(params.get("agentx_grading") or {}),
+                agentx_backend=str(params.get("agentx_backend") or ""),
                 # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),

@@ -877,6 +877,8 @@ class SpecialistPromptInputs:
     # session actually replayed.
     benchmark_mode: str = ""
     agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
+    agentx_grading: dict[str, Any] = field(default_factory=dict)
+    agentx_backend: str = ""
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -1353,7 +1355,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if _is_agentx(inp):
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
-        workload_rows += grading_lines()
+        workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")

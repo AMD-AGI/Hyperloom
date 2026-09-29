@@ -3824,7 +3824,6 @@ class WritebackCollaborator:
                 "e2e_norm_intvty_p50": result.get("e2e_norm_intvty_p50"),
                 "duration_seconds": result.get("duration_seconds"),
                 "request_error_rate": result.get("request_error_rate"),
-                "issued_trajectories": result.get("issued_trajectories"),
                 "output_tput_per_gpu": result.get("output_tput_per_gpu"),
                 "workspace": result.get("workspace"),
             }
@@ -3838,7 +3837,6 @@ class WritebackCollaborator:
                     "e2e_norm_intvty_p50",
                     "duration_seconds",
                     "request_error_rate",
-                    "issued_trajectories",
                 ):
                     if snap.get(_axis) is not None:
                         current_best[_axis] = snap[_axis]

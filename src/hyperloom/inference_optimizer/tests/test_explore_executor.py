@@ -2607,7 +2607,6 @@ def _mlperf_smoke(**over) -> dict:
     return {
         "output_throughput": 220.0,
         "duration": 3500.0,
-        "issued_trajectories": 150,
         "request_error_rate": 0.0,
         "submission_valid": True,
         "accuracy_score": 0.72,
@@ -2617,11 +2616,8 @@ def _mlperf_smoke(**over) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_explore_mlperf_keeps_a_fixed_work_speedup(sub_agent_runner, tmp_path, monkeypatch):
-    """+10% output throughput finishes the same 150 trajectories ~10% sooner, and is a KEEP.
-
-    The fixed-window duration rule would call that pair incomparable.
-    """
+async def test_explore_mlperf_keeps_an_output_throughput_gain(sub_agent_runner, tmp_path, monkeypatch):
+    """+10% output throughput at the baseline's accuracy is a KEEP, graded on output throughput."""
     tested, _ = await _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
     assert tested["outcome"] == "KEEP"
     assert tested["graded_objective"] == "output_throughput"

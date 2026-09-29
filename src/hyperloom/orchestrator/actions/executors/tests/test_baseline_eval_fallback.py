@@ -1288,3 +1288,43 @@ def test_end_to_end_live_flag_blocks_launch_without_mocks(tmp_path):
 
     assert out is not None
     assert out["error_class"] == "eval_concurrency_flag_unpatchable"
+
+
+@pytest.mark.parametrize(
+    "inline",
+    [
+        pytest.param({"accuracy_score": 0.72, "accuracy_missing_turns": 1}, id="unscored-turn"),
+        pytest.param(
+            {"accuracy_score": 0.72, "accuracy_missing_turns": 0, "request_error_rate": 25.0}, id="error-rate"
+        ),
+        pytest.param({}, id="no-scores-json"),
+    ],
+)
+def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_path, monkeypatch, inline):
+    """Otherwise ``baseline_accuracy`` stays 0 and every later KEEP skips the accuracy gate."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ws = _fake_workspace(slot)
+        (ws / "inferencex_result.json").write_text(
+            json.dumps({"output_throughput": 1500.0, "request_error_rate": 0.0, "submission_valid": True, **inline}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(magpie_python="/opt/venv/bin/python", default_config_path=base, session_dir=tmp_path)
+    state = SharedState(enablement_mode="off", benchmark_mode="agentx", agentx_backend="mlperf")
+    ctx = _make_baseline_ctx(
+        {"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "model_path": "/models/kimi-k3", "gpu_type": "mi355x"},
+        state,
+    )
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+        _run(executor(ctx))
+
+    assert state.stop_reason == "baseline_accuracy_failed"

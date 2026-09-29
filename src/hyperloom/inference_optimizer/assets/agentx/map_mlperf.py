@@ -28,7 +28,6 @@ def main(src, dst, scores_src=None):
             scores = json.load(handle)
     result = map_mlperf(
         report,
-        issued_trajectories=int(_required_env("AGENTIC_NUM_TRAJECTORIES")),
         corpus=os.path.splitext(os.path.basename(_required_env("AGENTIC_DATASET_PATH")))[0],
         scores=scores,
     )
