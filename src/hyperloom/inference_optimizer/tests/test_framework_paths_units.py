@@ -563,6 +563,22 @@ class TestSummariseFrameworkRootDiscovery:
         out = fp.summarise_framework_root_discovery("/sgl-workspace/xdit_tools/")
         assert "xdit=missing" in out
 
+    @pytest.mark.parametrize(
+        ("root", "bucket"),
+        [("/work/xdit/", "xdit"), ("/work/XDiT/", "xdit"), ("/opt/SGLang/", "sglang"), ("/app/ATOM/", "atom")],
+    )
+    def test_directory_names_match_case_insensitively(self, root, bucket):
+        assert f"{bucket}=ok" in fp.summarise_framework_root_discovery(root)
+
+    def test_lowercase_xdit_checkout_reads_as_the_tree_it_resolves_to(self, tmp_path, monkeypatch):
+        """The resolver and the summary must agree on an env-named checkout whatever its case."""
+        checkout = tmp_path / "xdit"
+        checkout.mkdir()
+        monkeypatch.setenv("XDIT_REPO_PATH", str(checkout))
+
+        assert fp.resolve_framework_tree("xdit") == f"{checkout}/"
+        assert "xdit=ok" in fp.summarise_framework_root_discovery(fp.probe_framework_source_roots_for_env())
+
     def test_installed_xfuser_package_counts_as_xdit(self):
         """xDiT installs as ``xfuser``; the root resolve_framework_tree picks must read as found here too."""
         out = fp.summarise_framework_root_discovery("/usr/local/lib/python3.12/dist-packages/xfuser/")

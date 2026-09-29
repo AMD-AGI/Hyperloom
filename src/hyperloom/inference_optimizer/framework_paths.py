@@ -297,7 +297,8 @@ def _source_dirnames(owner: str) -> frozenset[str]:
 
     ``owner`` is a registered framework or the kernel library. A framework's
     names are its installed package and its default checkout's directory, so a
-    tree is recognised from either layout.
+    tree is recognised from either layout. Names are lower-cased: a checkout's
+    directory is named by whoever cloned it (``xdit``, ``xDiT``).
 
     Args:
         owner (str): Registered framework name, or ``"aiter"``.
@@ -308,7 +309,7 @@ def _source_dirnames(owner: str) -> frozenset[str]:
     if owner == _KERNEL_LIBRARY:
         return frozenset({_KERNEL_LIBRARY})
     checkout = _reg.source_root(owner)
-    return frozenset(d for d in (_reg.python_package(owner), Path(checkout).name if checkout else None) if d)
+    return frozenset(d.lower() for d in (_reg.python_package(owner), Path(checkout).name if checkout else None) if d)
 
 
 def _root_belongs_to(owner: str, root: str) -> bool:
@@ -320,9 +321,10 @@ def _root_belongs_to(owner: str, root: str) -> bool:
 
     Returns:
         bool: True when the root's own directory is one ``owner`` installs or
-            checks out under; a name merely containing it does not count.
+            checks out under, ignoring case; a name merely containing it does
+            not count.
     """
-    return Path(root.strip().rstrip("/")).name in _source_dirnames(owner)
+    return Path(root.strip().rstrip("/")).name.lower() in _source_dirnames(owner)
 
 
 def _discover_scriptable_repo_roots() -> tuple[str, ...]:

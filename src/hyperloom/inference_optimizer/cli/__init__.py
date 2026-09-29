@@ -917,8 +917,12 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched)."""
+def _reset_state_file(session_dir: Path, *, framework: str) -> None:
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
+
+    The fresh state keeps ``framework``: the session is single-framework, and
+    nothing after this point re-derives it.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -938,11 +942,13 @@ def _reset_state_file(session_dir: Path) -> None:
             exc,
         )
         return
+    SharedState(framework=framework).save(session_dir)
     import logging as _logging
 
     _logging.getLogger(__name__).info(
-        "--reset-state: backed up state.json to %s; session starts blank.",
+        "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
+        framework,
     )
 
 
@@ -2292,7 +2298,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir)
+        _reset_state_file(session_dir, framework=state.framework)
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
