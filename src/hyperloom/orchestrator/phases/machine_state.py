@@ -200,7 +200,7 @@ DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
 
-import os as _os_env  # noqa: E402
+from hyperloom.common.env import env_float as _env_float, env_int as _env_int  # noqa: E402
 
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved candidates without a KEEP (including
 # non-benchmarked terminal outcomes), the source arm is dry.
@@ -223,15 +223,8 @@ _CYCLE_RELOOP_MAX_BUDGET_SHARE: float = 0.5
 
 def _default_cycle_reloop_min_remaining_sec() -> float:
     """Absolute reloop floor in seconds; env-overridable via ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass  # malformed env override; fall through to the 3 h default
-    return 10800.0
+    v = _env_float("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", default=10800.0)
+    return v if v > 0 else 10800.0
 
 
 # Minimum session wall-clock (seconds) that must remain to justify opening a new macro-cycle; below this we wind down
@@ -324,12 +317,8 @@ def _cycle_reloop_min_remaining_sec(
 
 def _kernel_idle_max_ticks() -> int:
     """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
-    try:
-        val = int(raw)
-        return val if val >= 1 else 3
-    except (TypeError, ValueError):
-        return 3
+    val = _env_int("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", default=3)
+    return val if val >= 1 else 3
 
 
 KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
@@ -337,12 +326,8 @@ KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
 
 def _kernel_idle_min_seconds() -> float:
     """Wall-clock seconds a KERNEL idle streak must last before winding down."""
-    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
-    try:
-        val = float(raw)
-        return val if val > 0.0 else 600.0
-    except (TypeError, ValueError):
-        return 600.0
+    val = _env_float("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", default=600.0)
+    return val if val > 0.0 else 600.0
 
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()

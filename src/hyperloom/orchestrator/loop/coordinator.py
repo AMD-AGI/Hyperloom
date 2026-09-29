@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_bool, env_flag
+from hyperloom.common.env import env_bool, env_flag, env_float, env_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -258,15 +258,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
         if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
-            try:
-                _cycle_hours = float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_CYCLE_HOURS",
-                        str(DEFAULT_CYCLE_HOURS),
-                    )
-                )
-            except ValueError:
-                _cycle_hours = DEFAULT_CYCLE_HOURS
+            _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
         # Medium-intensity soft restart at each macro-cycle boundary.
@@ -278,18 +270,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
-        try:
-            self._backend_error_streak_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                        "5",
-                    )
-                ),
-            )
-        except ValueError:
-            self._backend_error_streak_threshold = 5
+        self._backend_error_streak_threshold: int = max(
+            1,
+            env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
+        )
 
         # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "critic")

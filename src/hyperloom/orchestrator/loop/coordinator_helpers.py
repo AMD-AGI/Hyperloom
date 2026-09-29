@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_float, is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_external_env_key,
@@ -60,20 +60,30 @@ DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
 
 def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> float:
     """Resolve the reactor turn's total wall-clock timeout."""
-    environ = os.environ if env is None else env
-    raw = environ.get(REACTOR_TURN_TIMEOUT_ENV, "").strip()
-    if not raw:
+    if env is not None:
+        raw = env.get(REACTOR_TURN_TIMEOUT_ENV, "").strip()
+        if not raw:
+            return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0.0 and math.isfinite(value):
+            return value
+        log.warning(
+            "%s=%r is not a positive finite number; using default %.1fs",
+            REACTOR_TURN_TIMEOUT_ENV,
+            raw,
+            DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+        )
         return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-    try:
-        value = float(raw)
-    except ValueError:
-        value = 0.0
+    value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
     if value > 0.0 and math.isfinite(value):
         return value
     log.warning(
-        "%s=%r is not a positive finite number; using default %.1fs",
+        "%s=%.1f is not a positive finite number; using default %.1fs",
         REACTOR_TURN_TIMEOUT_ENV,
-        raw,
+        value,
         DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
     )
     return DEFAULT_REACTOR_TURN_TIMEOUT_SEC

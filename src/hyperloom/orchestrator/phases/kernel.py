@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -984,13 +984,13 @@ class KernelPhase(CoordinatorCollaborator):
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run deadline is set (budget_known=False).
-        env_default_timeout = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))
+        env_default_timeout = env_int("GEAK_E2E_TIMEOUT_S", default=43200)
         deadline = self._run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
-        margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
+        margin = env_float("GEAK_BUDGET_MARGIN_S", default=300.0)
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
@@ -1141,9 +1141,9 @@ class KernelPhase(CoordinatorCollaborator):
             observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
-            "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
-            "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
-            "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
+            "isl": int(getattr(state, "isl", 0) or 1024),
+            "osl": int(getattr(state, "osl", 0) or 1024),
+            "conc": int(getattr(state, "conc", 0) or 64),
         }
         # Forward the benchmark settings and GPU placement used by Hyperloom.
         _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
@@ -1224,9 +1224,9 @@ class KernelPhase(CoordinatorCollaborator):
             "observed_server_identity": observed_server_identity,
             "measurement_evidence": launch_evidence,
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-            # Serving-launch fidelity (both optional; unset => GEAK adapter default).
-            "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
-            "mem_fraction": float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0),
+            # Serving-launch fidelity defaults; overwritten by _serving_fidelity.update() below.
+            "max_model_len": int(getattr(state, "max_model_len", 0) or 0),
+            "mem_fraction": 0.0,
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
@@ -1382,7 +1382,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
-        min_run = int(os.environ.get("GEAK_MIN_RUN_S", "600"))
+        min_run = env_int("GEAK_MIN_RUN_S", default=600)
         if budget_known and runner_timeout < min_run:
             log.warning(
                 "GEAK: only %ds budget remains (< min %ds); skipping e2e "
@@ -1424,7 +1424,7 @@ class KernelPhase(CoordinatorCollaborator):
 
         # Run in its own process group so a timeout can SIGTERM the whole runner -> run_e2e -> vllm/node tree (grace
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
-        term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
+        term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
 
         # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
         # graded on total token throughput, so leaving this pinned to output aims
@@ -2506,7 +2506,7 @@ class KernelPhase(CoordinatorCollaborator):
         from ..measurement.paired import assess_paired, interleaved_plan
 
         try:
-            n_pairs = int(os.environ.get("HYPERLOOM_GEMM_PAIRED_PAIRS", "0") or 0)
+            n_pairs = env_int("HYPERLOOM_GEMM_PAIRED_PAIRS", default=0)
         except ValueError:
             n_pairs = 0
         if n_pairs <= 0 or float(reference.get("tput") or 0.0) <= 0:
@@ -3976,8 +3976,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
-        import os
-
         from ..kernel._kernel_decisions import enqueue_nominated_patch
         from ..kernel.nomination_result import parse_outcome
 
@@ -4001,7 +3999,7 @@ class KernelPhase(CoordinatorCollaborator):
                 )
             return
         try:
-            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "1.0"))
+            keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
         except (TypeError, ValueError):
             keep_pct = 1.0
         queued = 0
