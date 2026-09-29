@@ -5,15 +5,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any
 
 from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-if TYPE_CHECKING:
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-_CoordinatorT = TypeVar("_CoordinatorT", bound="Coordinator")
 
 
 def variant_result(**overrides: Any) -> VariantResult:
@@ -67,7 +62,7 @@ def optimize_state(
     return state
 
 
-def fake_coordinator(cls: type[_CoordinatorT], session_dir: Any, **state: Any) -> _CoordinatorT:
+def fake_coordinator(cls: type[Any], session_dir: Any, **state: Any) -> Any:
     """A Coordinator built without ``__init__`` that holds only the given state; the rest resolves for real."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
