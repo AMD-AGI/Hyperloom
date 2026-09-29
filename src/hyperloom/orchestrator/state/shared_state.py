@@ -474,10 +474,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     nodes: int = 1
     # Per-agent Unix timestamp of the most recent completed reactor pass.
     agent_last_active: dict[str, float] = field(default_factory=dict)
-    # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
+    # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-confidence``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
-    warm_replay_min_reproduce_pct: float = 0.8
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.

@@ -49,9 +49,6 @@ from ..loop.coordinator_helpers import (
 from ..collaborator import CoordinatorCollaborator
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
-# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
-_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
-
 log = _logging.getLogger(__name__)
 
 
@@ -609,7 +606,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _warm_kernel_gate_reason(self) -> str:
         """Why this run must not replay kernel champions, or '' when allowed."""
-        if not getattr(self, "_warm_replay_enabled", True):
+        if not self.shared_state.warm_replay_enabled:
             return "warm_replay_disabled"
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return "kb_degraded"
@@ -1048,7 +1045,7 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> "Task | None":
         """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior."""
         state = self.shared_state
-        if not getattr(self, "_warm_replay_enabled", True):
+        if not self.shared_state.warm_replay_enabled:
             # The guard is flipped even on a disabled-skip so a resume without
             # --no-warm-replay cannot retroactively trigger a replay against
             # the operator's original intent.
@@ -1200,10 +1197,7 @@ class PreludePhase(CoordinatorCollaborator):
             conf = float(warm.get("confidence") or 0.0)
         except (TypeError, ValueError):
             conf = 0.0
-        min_conf = float(
-            getattr(self, "_warm_replay_min_confidence", _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE)
-            or _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE
-        )
+        min_conf = float(float(self.shared_state.warm_replay_min_confidence))
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
@@ -1921,7 +1915,6 @@ class PreludePhase(CoordinatorCollaborator):
             donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
             expected_gain_pct=params.get("warm_expected_gain_pct"),
             confidence=params.get("warm_recipe_conf"),
-            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
             session_baseline_tput=session_baseline_tput,
             kernel_count=len(list(params.get("warm_kernel_plan") or [])),
             recipe_suppressed=not str(params.get("config_source") or ""),
@@ -2010,7 +2003,6 @@ class PreludePhase(CoordinatorCollaborator):
             donor=self._warm_replay_donor(outcome) or None,
             expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
             confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
             session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
             kernel_count=len(list(params.get("warm_kernel_plan") or [])),
             # Rebinding, not opening: the enqueue seam already put this event
@@ -2286,9 +2278,6 @@ class PreludePhase(CoordinatorCollaborator):
                 keep_threshold = default_threshold
             if not math.isfinite(keep_threshold):
                 keep_threshold = default_threshold
-        min_reproduce = float(
-            getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
-        )
         # Local legacy replay keeps any positive gain.
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
         outcome["keep_threshold_pct"] = keep_threshold
@@ -2304,18 +2293,6 @@ class PreludePhase(CoordinatorCollaborator):
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
-        if expected_gain > 0:
-            historical_bar = expected_gain * min_reproduce
-            # Advisory, and deliberately not a gate row: falling short never
-            # rejects a replay that cleared the keep threshold, and a
-            # ``passed=False`` row would make ``blocked_by`` name it as the
-            # reason an arc that actually succeeded ended.
-            if measured_gain > 0 and measured_gain < historical_bar:
-                outcome["below_historical_reproduce_pct"] = True
-                outcome["historical_reproduce_bar_pct"] = round(
-                    historical_bar,
-                    3,
-                )
         promoted_checkout = ""
         if reproduced:
             params = (task.params if task is not None else {}) or {}
@@ -2511,11 +2488,9 @@ class PreludePhase(CoordinatorCollaborator):
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput, result)
             log.info(
-                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
-                "min_required=+%.2f%%); pushed warm_replay onto stack",
+                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
                 measured_gain,
                 expected_gain,
-                expected_gain * min_reproduce if expected_gain > 0 else 0.0,
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:

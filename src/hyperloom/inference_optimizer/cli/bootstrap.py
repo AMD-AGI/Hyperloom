@@ -274,7 +274,6 @@ def _seed_shared_state(
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
-        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,

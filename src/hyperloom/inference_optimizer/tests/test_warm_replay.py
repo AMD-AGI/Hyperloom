@@ -39,6 +39,8 @@ class _StubSharedState:
     warm_start_recipe: dict = field(default_factory=dict)
     warm_start_context: dict = field(default_factory=dict)
     warm_replay_attempted: bool = False
+    warm_replay_enabled: bool = True
+    warm_replay_min_confidence: float = 0.7
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_history_injected: bool = False
     auto_roofline_pending_task_id: str = ""
@@ -145,7 +147,6 @@ def _make_coord(
     warm_start_context: dict | None = None,
     warm_replay_enabled: bool = True,
     warm_replay_min_confidence: float = 0.7,
-    warm_replay_min_reproduce_pct: float = 0.8,
     warm_replay_attempted: bool = False,
     resume_from_disk: bool = False,
 ) -> Coordinator:
@@ -159,10 +160,9 @@ def _make_coord(
         warm_start_context=warm_start_context or {},
         warm_replay_attempted=warm_replay_attempted,
     )
+    coord.shared_state.warm_replay_enabled = warm_replay_enabled
+    coord.shared_state.warm_replay_min_confidence = warm_replay_min_confidence
     coord.tasks = _StubTaskRegistry()
-    coord._warm_replay_enabled = warm_replay_enabled
-    coord._warm_replay_min_confidence = warm_replay_min_confidence
-    coord._warm_replay_min_reproduce_pct = warm_replay_min_reproduce_pct
     coord._journal = None
     return coord
 
@@ -1199,7 +1199,6 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "reproduced"
     assert outcome["actual_gain_pct"] == 10.0
-    assert outcome.get("below_historical_reproduce_pct") is True
     assert len(coord.shared_state.optimization_stack) == 1
     assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
