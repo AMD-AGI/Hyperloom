@@ -1178,6 +1178,7 @@ def test_degraded_kb_skips_remote_close_writer(
     _ss.current_best = {"tput": 10.0}
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
         _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
@@ -1212,6 +1213,7 @@ def test_local_close_ignores_ambient_kb_store(
     _ss = SharedState()
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
         _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
@@ -1256,6 +1258,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
 
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
         _journal=None,
         _ensure_journal=lambda: _Journal(),
@@ -1325,6 +1328,7 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
         _journal=type("_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None})(),
@@ -1377,6 +1381,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
     )
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
         _journal=None,
