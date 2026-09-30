@@ -6,12 +6,12 @@ installation instructions, see the
 pages.
 
 The recommended path is to prepare a dedicated workspace, open that directory in
-Claude Code, and install the wheel into the current directory with `pip install --target .`.
+Claude Code or Codex, and install the wheel into the current directory with `pip install --target .`.
 For source installation instructions, please refer to the [full installation instructions](https://rocm.docs.amd.com/projects/hyperloom/en/latest/install/install.html#source-checkout-manual-installation).
 
 ```{note}
 If accessing a remote server through ssh, it is recommended to connect remotely through
-Claude Code, install Hyperloom on the remote server, and use your local instance to
+Claude Code or Codex, install Hyperloom on the remote server, and use your local instance to
 run the Hyperloom skills.
 ```
 
@@ -19,7 +19,7 @@ run the Hyperloom skills.
 
 The current directory serves as both the install target and the agent workspace.
 Prepare a dedicated clean directory first, then open that directory in Claude
-Code before running the install command.
+Code or Codex before running the install command.
 
 > **Recommended run mode: Docker.** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
@@ -34,7 +34,8 @@ Code before running the install command.
 - Python 3.10+ and `pip` on the machine where you open the workspace and run
   `pip install --target .`. This covers the Hyperloom wheel only; serving-framework
   Python constraints depend on your setup scenario below.
-- Access to the Anthropic LLM provider.
+- Access to the Anthropic LLM provider (Claude) or the OpenAI LLM provider
+  (Codex).
 - A dedicated workspace directory opened in the user's agent.
 
 From the agent terminal in that workspace, install the published release wheel
@@ -84,6 +85,11 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker (Recommended)`
    - `baremetal`
+
+Setup asks for the Anthropic side only. To run on Codex, add `OPENAI_BASE_URL`,
+`OPENAI_API_KEY` and, optionally, `CODEX_MODEL` to `.env` yourself. With only the
+OpenAI side configured, orchestration, TraceLens and Forge run on Codex, while
+GEAK needs the Anthropic side.
 
 ```note
 If you are performing the Hyperloom setup inside of a Docker container, select
@@ -241,8 +247,9 @@ must never be printed.
 - If the current workspace contains many package folders after `pip install
   --target .`, that is expected.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`;
-  restart the agent if needed.
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
+  (Claude Code) and `.agents/skills/hyperloom-setup/` (Codex); restart the
+  agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.
