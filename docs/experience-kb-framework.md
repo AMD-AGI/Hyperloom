@@ -35,7 +35,11 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
   applied or reverted as `{path, sha256, content}`, in the order `patch_path`,
   `patches_applied`, `patches_reverted`, whatever their size. A patch outside
   the session, not UTF-8, or carrying a credential is left out, and an attempt
-  with no recorded patch is not published.
+  with no recorded patch is not published unless it changed configuration.
+- **Configuration from a specialist.** A source attempt records the server args
+  and environment variables its specialist delivered as its `config_delta`.
+  One that delivered no patch is published as a `config_variant` Experience;
+  its `provenance.extra.arm` still says `source`.
 
 ## Reasoning provenance
 
@@ -48,7 +52,8 @@ accepted as original decision reasoning, and a provenance label such as
 `llm_direct` is not a substitute for reasoning.
 
 `rendered_refs` records the Experiences the service injected into the decision
-that produced the proposal; it is exposure, not reliance. What the deciding
+that produced the proposal; it is exposure, not reliance. A read that matched
+nothing still records its `kb_read_id`, with no `rendered_refs`. What the deciding
 agent says it relied on is `experience_citations`: per variant for the
 orchestration agent, per proposal or per written patch for a specialist, each
 `{id, stance, claim}` with `stance` one of `adopt`, `adapt`, `avoid`, or

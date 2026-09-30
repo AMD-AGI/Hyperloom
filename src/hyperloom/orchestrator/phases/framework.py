@@ -412,7 +412,7 @@ def _record_source_attempt(
     params: Mapping[str, Any],
     specialist_task_id: str = "",
 ) -> None:
-    """Record one authored patch's measured attempt on the framework timeline event.
+    """Record one authored deliverable's measured attempt -- a patch, or server args and envs -- on the framework event.
 
     A pure timeline recorder: the control-plane ledger write sits beside the call
     to this function, not inside it, so a phase with no open recorder still
@@ -433,6 +433,9 @@ def _record_source_attempt(
     # stack as of dispatch. Absent on a row that never reached a measurement.
     stack = result.get("measured_against")
     measured_against = {"measured_against": stack} if isinstance(stack, Mapping) and stack else {}
+    # The levers the deliverable layered onto that stack: the whole change when the specialist returned no patch.
+    levers = {"extra_server_args": params.get("extra_server_args"), "extra_envs": params.get("extra_envs")}
+    config_delta = {"config_delta": levers} if any(levers.values()) else {}
     normalized_status = {
         "kept": "KEEP",
         "reverted": "REVERT",
@@ -516,6 +519,7 @@ def _record_source_attempt(
         ),
         attribution_eligible=(_is_kept(status) and base is not None and result.get("output_throughput") is not None),
         **measured_against,
+        **config_delta,
     )
     _record_kb_exposure(recorder, candidate_id, params)
     delta_pct = result.get("delta_pct")

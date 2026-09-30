@@ -125,10 +125,28 @@ let:
     if: {eq: [{length: $patches}, 1]}
     then: $patches.0.sha256
     else: {if: {present: $patches}, then: {sha256: $patches}}
+  config_delta_is_effective:
+    any:
+      - {present: $config_delta.extra_server_args}
+      - {present: $config_delta.extra_envs}
+      - {present: $config_delta.remove_args}
+      - {present: $config_delta.unset_envs}
+      - {eq: [$config_delta.args_mode, replace]}
   source_summary: {text: {first: [$proposal.title, $attempt.candidate_id]}}
-  change_family: {map: $arm, table: {config: config_variant, source: source_patch}}
+  # The family follows what the attempt changed: a source-arm deliverable of server args or envs alone is a
+  # configuration change measured through integrate_patch.
+  change_family:
+    if:
+      any:
+        - {eq: [$arm, config]}
+        - all:
+            - {eq: [$arm, source]}
+            - {absent: $patch_fingerprint}
+            - $config_delta_is_effective
+    then: config_variant
+    else: {map: $arm, table: {source: source_patch}}
   change_content:
-    if: {eq: [$arm, config]}
+    if: {eq: [$change_family, config_variant]}
     then: {canonical_json: $config_delta}
     else:
       canonical_json:
@@ -185,20 +203,13 @@ require:
   - reason: unsupported Framework attempt arm
     check: {present: $change_family}
   - reason: config attempt has no effective config_delta
-    check:
-      any:
-        - {ne: [$arm, config]}
-        - {present: $config_delta.extra_server_args}
-        - {present: $config_delta.extra_envs}
-        - {present: $config_delta.remove_args}
-        - {present: $config_delta.unset_envs}
-        - {eq: [$config_delta.args_mode, replace]}
+    check: {any: [{ne: [$change_family, config_variant]}, $config_delta_is_effective]}
   - reason: config delta has unsupported args_mode
-    check: {any: [{ne: [$arm, config]}, {in: [$config_delta.args_mode, [append, replace]]}]}
+    check: {any: [{ne: [$change_family, config_variant]}, {in: [$config_delta.args_mode, [append, replace]]}]}
   - reason: source attempt has no durable patch material
-    check: {any: [{ne: [$arm, source]}, {present: $patch_fingerprint}]}
+    check: {any: [{ne: [$change_family, source_patch]}, {present: $patch_fingerprint}]}
   - reason: source attempt has no change summary
-    check: {any: [{ne: [$arm, source]}, {present: $source_summary}]}
+    check: {any: [{ne: [$change_family, source_patch]}, {present: $source_summary}]}
   - reason: attempt has no supported terminal outcome
     check: {present: $decision}
   - reason: failed attempt is not candidate-attributed
@@ -266,17 +277,17 @@ experience:
       object:
         change_family: $change_family
         change_fingerprint:
-          if: {eq: [$arm, config]}
+          if: {eq: [$change_family, config_variant]}
           then: {sha256: $change_content}
           else: $patch_fingerprint
     summary:
-      if: {eq: [$arm, config]}
+      if: {eq: [$change_family, config_variant]}
       then: {first: [{text: $attempt.variant_name}, Framework configuration variant]}
       else: $source_summary
     kind: $change_family
     content: $change_content
     resource_refs:
-      if: {eq: [$arm, source]}
+      if: {eq: [$change_family, source_patch]}
       then: {each: $patches, as: patch, value: $patch.path}
   rendered_refs:
     each: $proposal.rendered_refs

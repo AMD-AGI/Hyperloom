@@ -234,6 +234,21 @@ def test_source_attempt_carries_patch_material_from_the_document() -> None:
     assert change["resource_refs"] == ["patches/a.diff"]
 
 
+def test_a_source_attempt_that_changed_only_configuration_is_a_config_experience() -> None:
+    delta = {"extra_server_args": "--enable-fused-moe", "extra_envs": {"VLLM_FUSED_MOE": "1"}}
+    attempt = _source_attempt("levers-1", patch_material=[], config_delta=delta, variant_name="fused-moe-routing")
+    experience = _collected(_dry(_sbd(attempt)))["levers-1"]
+
+    change = experience["change"]
+    assert change["kind"] == "config_variant"
+    assert change["identity"]["change_family"] == "config_variant"
+    assert json.loads(change["content"]) == {**delta, "remove_args": [], "unset_envs": [], "args_mode": "append"}
+    assert change["identity"]["change_fingerprint"] == hashlib.sha256(change["content"].encode()).hexdigest()
+    assert change["summary"] == "fused-moe-routing"
+    assert change["resource_refs"] == []
+    assert experience["provenance"]["extra"]["arm"] == "source"
+
+
 def test_multi_patch_fingerprint_hashes_the_patch_list() -> None:
     second = {"path": "patches/b.diff", "sha256": "b" * 64, "content": "+b\n"}
     attempt = _source_attempt()

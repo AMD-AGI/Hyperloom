@@ -1934,7 +1934,8 @@ class V6FrameworkAttempt(TypedDict, total=False):
     adoption ledger walks both arms with one reader. Which fields carry
     still follows the arm -- a variant has a ``fingerprint`` and a
     ``config_delta``, an authored patch has a ``patch_path`` and the files it
-    touched -- but the lifecycle and the verdict are the same shape for both.
+    touched, and an authored deliverable of server args or envs has those as
+    its ``config_delta`` -- but the lifecycle and the verdict are the same shape for both.
     ``blocked_by`` is projected at assembly as the first gate that did not
     pass."""
 
