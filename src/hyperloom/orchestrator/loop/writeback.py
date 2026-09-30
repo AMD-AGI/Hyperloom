@@ -2994,10 +2994,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 
         # Per-anchor coverage ledger: every specialist completion is
-        # one "round" — tick all anchors, then zero the one that just ran so a
-        # long-idle domain's counter climbs until the hard-trigger forces it.
+        # one "round" — tick all anchors.
         self.shared_state.bump_domain_round_counters()
-        self.shared_state.note_specialist_dispatched(domain)
 
         self.shared_state.update_last_specialist(
             {

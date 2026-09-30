@@ -529,8 +529,22 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         from .domains import domain_for_tag
 
+        queued = await self.tasks.queued()
+        running = await self.tasks.running()
+        in_flight_domains: set[str] = set()
+        for t in (*queued, *running):
+            if getattr(t, "kind", "") == "specialist":
+                p = getattr(t, "params", None) or {}
+                for tag in (p.get("tags") or []):
+                    in_flight_domains.add(str(tag))
+                d = str(p.get("domain") or "").strip()
+                if d:
+                    in_flight_domains.add(d)
+
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
+            if anchor in in_flight_domains:
+                continue
             gap_cid = state.best_gap_for_anchor(anchor)
             if not gap_cid:
                 continue
@@ -590,8 +604,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "idempotency_key": idempotency_key,
                 },
             )
-            # Zero the counter up-front so a slow enqueue can't re-fire next tick.
-            state.note_specialist_dispatched(anchor)
             await self._handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)

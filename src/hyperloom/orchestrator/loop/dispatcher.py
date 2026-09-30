@@ -649,6 +649,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 from ..specialists.profile import requires_gpu as _requires_gpu
 
                 needs_gpu = _requires_gpu(params)
+                # Zero the per-anchor stale counter at dispatch time so the next
+                # stalled-domain check sees this domain as recently dispatched.
+                _domain = str(params.get("domain") or "").strip()
+                if _domain:
+                    try:
+                        self.shared_state.note_specialist_dispatched(_domain)
+                    except Exception:  # noqa: BLE001
+                        log.debug("dispatcher: note_specialist_dispatched failed for %s", _domain)
                 # Absolute stop instant, tightened by the session bound.
                 specialist_deadline = self._specialist_deadline(
                     needs_gpu=needs_gpu,

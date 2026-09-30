@@ -546,6 +546,50 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     ]
 
 
+def test_force_stalled_skips_anchor_with_inflight_specialist(tmp_path: Path):
+    """When a specialist for an anchor is already queued or running, the stalled-domain
+    force is skipped for that anchor."""
+    import asyncio
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    state = SharedState()
+    state.phase = "FRAMEWORK_AGENT"
+    c.shared_state = state
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    state.framework_repo_path = str(source_root)
+
+    running_specialist = SimpleNamespace(
+        kind="specialist",
+        params={"domain": "serving_specialist", "tags": ["framework"]},
+    )
+
+    queued_calls: list[str] = []
+    c.tasks = SimpleNamespace(
+        find_by_idempotency_key=AsyncMock(return_value=None),
+        queued=AsyncMock(return_value=[running_specialist]),
+        running=AsyncMock(return_value=[]),
+    )
+    c._handle_intent = AsyncMock()
+
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+
+    from unittest.mock import patch
+
+    with patch.object(SpecialistDispatchCollaborator, "_warm_specialist_params", new=AsyncMock()):
+        asyncio.get_event_loop().run_until_complete(c._maybe_force_stalled_domain_specialist())
+
+    c._handle_intent.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
     state = force_coord.shared_state
