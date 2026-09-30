@@ -141,8 +141,8 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         assert call_count["n"] == 1, "second identical request must hit the cache"
         cached = c.shared_state.last_trace_analyze
@@ -151,7 +151,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
         assert "k001" in cached["reusable_native_kernel_ids"]
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -284,7 +284,7 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
         await c._reactor_pass("orchestration")
-        assert "trace_analyze_done" in await c._compose_prompt("orchestration")
+        assert "trace_analyze_done" in await c.conversation._compose_prompt("orchestration")
     finally:
         await c.stop()
 
@@ -300,7 +300,7 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq >= alert.seq
-        assert "stall_warning" not in await c._compose_prompt("orchestration")
+        assert "stall_warning" not in await c.conversation._compose_prompt("orchestration")
     finally:
         await c.stop()
 
@@ -316,7 +316,7 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq == 0
-        assert "stall_warning" in await c._compose_prompt("orchestration")
+        assert "stall_warning" in await c.conversation._compose_prompt("orchestration")
     finally:
         await c.stop()
 
@@ -326,7 +326,7 @@ async def test_failed_kernel_request_recorded_in_last_action_failures(session_di
     """A failed kernel request lands in the log the FAILURE RECOVERY block reads."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -358,7 +358,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
         )
         assert held is not None
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -400,7 +400,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
             assert int(holders_before.get(lane, 0)) == 0
 
         # A minimal integrate that reverts immediately (no patch file exists).
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
