@@ -292,6 +292,7 @@ def test_per_cycle_budget_shrinks_phase_window():
         phase=ps.PHASE_FRAMEWORK_AGENT,
         max_minutes=96 * 60,
         phase_started_unix=now,
+        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
     whole_run = SharedState(**common, cycle_minutes=0.0)
     per_cycle = SharedState(**common, cycle_minutes=360.0)  # 6h cycle
@@ -327,6 +328,7 @@ def test_long_run_chargeback_cap_and_tail():
         max_minutes=48 * 60,
         cycle_minutes=24 * 60.0,
         phase_started_unix=now,
+        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
     total_early = ps._phase_budget_total_seconds(early, now_unix=now)
     assert total_early == pytest.approx(24 * 3600 * pct / denom)  # capped at the window
@@ -341,6 +343,7 @@ def test_long_run_chargeback_cap_and_tail():
         max_minutes=48 * 60,
         cycle_minutes=24 * 60.0,
         phase_started_unix=now,
+        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
     total_tail = ps._phase_budget_total_seconds(tail, now_unix=now)
     assert total_tail == pytest.approx(3 * 3600 * pct / denom)  # session tail < window
@@ -371,6 +374,7 @@ def test_short_run_keeps_chargeback_budgeting_across_cycles():
         max_minutes=600,
         cycle_minutes=360.0,
         phase_started_unix=now,
+        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
     cycle0 = SharedState(**common, macro_cycle=0)
     cycle1 = SharedState(**common, macro_cycle=1)
