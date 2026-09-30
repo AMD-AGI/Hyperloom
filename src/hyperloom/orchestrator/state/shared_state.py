@@ -735,6 +735,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
     # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
+    # Operator-granted budget extensions, each {minutes, reason, ts}.
+    budget_extensions: list = field(default_factory=list)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
     macro_cycle: int = 0
@@ -2524,6 +2526,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             # Granting an unbounded session a budget would bound it.
             return 0.0
         self.max_minutes = int(float(self.max_minutes) + added)
+        self.budget_extensions.append({"minutes": added, "reason": reason})
         return float(self.max_minutes)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
