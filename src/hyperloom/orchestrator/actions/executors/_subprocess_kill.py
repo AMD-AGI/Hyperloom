@@ -888,7 +888,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
-                    kv_recorder=_build_kv_recorder(server_log_path, env),
+                    kv_recorder=_build_kv_recorder(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)

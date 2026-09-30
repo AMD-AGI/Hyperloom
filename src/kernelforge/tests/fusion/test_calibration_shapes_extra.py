@@ -124,6 +124,124 @@ def test_shapes_gqa_groups_computed(tmp_path):
     assert s["gqa_groups"] == 4
 
 
+def test_shapes_non_dsv4_model_omits_o_groups_fields(tmp_path):
+    """A model without ``o_groups`` (real Llama-2-70B GQA config) must NOT gain the
+    DSv4 wo_a group axis, and the group-axis guard must be a no-op for it."""
+    from kernelforge.fusion.shapes import harness_group_dim_mismatch
+
+    # Real meta-llama/Llama-2-70b-hf config values.
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "hidden_size": 8192,
+                "num_attention_heads": 64,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 28672,
+                "num_hidden_layers": 80,
+            }
+        )
+    )
+    # Even under attention TP the group axis stays absent for a non-DSv4 model.
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=8)
+    assert "o_groups" not in s
+    assert "n_local_groups" not in s
+    # The whole shapes dict is rendered into the authoring prompt, so the DSv4
+    # instruction must not reach a model that has no group axis.
+    assert "group_axis_note" not in s
+    # n_local_heads is generic attention TP math and still stamped.
+    assert s["n_local_heads"] == 64 // 8
+    assert s["gqa_groups"] == 64 // 8
+    # No o_groups -> the guard cannot fire, whatever the harness sets G to.
+    assert harness_group_dim_mismatch("G = 8  # gqa_groups\n", s) == ""
+    assert harness_group_dim_mismatch("G = shapes['gqa_groups']\n", s) == ""
+
+
+def test_shapes_dsv4_o_groups_not_confused_with_gqa(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "num_attention_heads": 128,
+                "num_key_value_heads": 1,
+                "o_groups": 16,
+                "head_dim": 512,
+                "qk_rope_head_dim": 64,
+                "o_lora_rank": 1024,
+                "hidden_size": 7168,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=1)
+    assert s["gqa_groups"] == 128
+    assert s["o_groups"] == 16
+    assert s["n_local_groups"] == 16
+    assert s["n_local_heads"] == 128
+    assert s["qk_rope_head_dim"] == 64
+    assert "n_local_groups" in s["group_axis_note"]
+
+
+def test_shapes_attn_tp_scales_local_dims(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "num_attention_heads": 128,
+                "o_groups": 16,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=8)
+    assert s["n_local_heads"] == 16
+    assert s["n_local_groups"] == 2
+
+
+def test_shapes_dsv4_tp_sharded_attention_scales_group_axis(tmp_path):
+    """DSv4-Flash at tp=4 with attention sharded by TP (no DP-attention).
+
+    Same config as ``test_deepseek_v4_sparse_mla_matches_runtime_shapes`` in
+    gemm_tune, which is the sharding this repo already serves DSv4-Flash with.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "hidden_size": 4096,
+                "num_attention_heads": 64,
+                "num_key_value_heads": 1,
+                "o_groups": 8,
+                "head_dim": 512,
+                "o_lora_rank": 1024,
+            }
+        )
+    )
+    s = resolve_decode_shapes(str(tmp_path), attn_tp_size=4)
+    assert s["n_local_groups"] == 2
+    assert s["n_local_heads"] == 16
+
+
+def test_harness_group_dim_mismatch_catches_gqa_as_g(tmp_path):
+    from kernelforge.fusion.shapes import harness_group_dim_mismatch
+
+    shapes = {
+        "o_groups": 16,
+        "n_local_groups": 16,
+        "gqa_groups": 128,
+        "num_attention_heads": 128,
+        "n_local_heads": 128,
+    }
+    bad = "G = 128  # gqa_groups / n_local_groups\n"
+    why = harness_group_dim_mismatch(bad, shapes)
+    assert why and "n_local_groups=16" in why
+    assert harness_group_dim_mismatch("G = 16  # n_local_groups\n", shapes) == ""
+    assert "gqa_groups" in harness_group_dim_mismatch("G = shapes['gqa_groups']\n", shapes)
+
+
 def test_shapes_missing_config_returns_minimal(tmp_path):
     s = resolve_decode_shapes(str(tmp_path))  # no config.json
     assert s["model_type"] == ""

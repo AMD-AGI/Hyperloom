@@ -75,6 +75,9 @@ from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
 )
+from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
+from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
+from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
 
 
 log = logging.getLogger(__name__)
@@ -899,11 +902,10 @@ class SpecialistSubprocessDispatcher:
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task is offered but no preset selects
-        # it: one tag per task would give the spend rollup as many buckets as
-        # there are tasks, which is the opposite of what it is read for. Reading
-        # spend per task needs a header of its own, not a value in this one.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
+        # under no component at all. The task tag is what attributes the
+        # requests of a child that dies before its result row -- the only
+        # place such a child's token usage survives is the gateway's log.
+        inject_attribution_env(env, component="specialist", operation="run_agent", task=task_id)
 
         backend = ""
         try:
@@ -1168,6 +1170,9 @@ class SpecialistSubprocessDispatcher:
             response = parse_claude_stream_json_response(process_log)
             tool_calls = parse_claude_stream_json_tool_calls(process_log)
             turn_usages = parse_claude_stream_json_turn_usages(process_log)
+            record_stream_json_requests(process_log)
+            record_stream_json_tools(process_log)
+            record_stream_json_compactions(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,

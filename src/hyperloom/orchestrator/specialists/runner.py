@@ -33,7 +33,14 @@ from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs
 from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    llm_call_summary,
+    trajectory_span,
+)
 from .domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
@@ -87,6 +94,23 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
         or resolve_framework_tree(str(params.get("framework") or ""))
         or str(framework_repo_path or "").strip()
     )
+
+
+def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
+    """The terminal status and attributes of a specialist subprocess's ``llm.call`` span."""
+    attributes: dict[str, Any] = {
+        **llm_call_summary(result.usage),
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+    }
+    try:
+        attributes["latency_ms"] = int(float(result.elapsed_seconds) * 1000)
+    except (TypeError, ValueError):
+        pass
+    if result.error or result.timed_out:
+        attributes["error_message"] = (result.error or "timed out")[:500]
+        return STATUS_FAILED, attributes
+    return STATUS_COMPLETED, attributes
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -801,6 +825,7 @@ class SpecialistRunner:
         latency_ms: int | None = None,
         tick: int | None = None,
         phase: str | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``status="error"`` row for a specialist turn that never returned.
 
@@ -825,6 +850,7 @@ class SpecialistRunner:
                 task_id=task_id,
                 turn=turn,
                 error=error,
+                call_id=call_id,
                 latency_ms=latency_ms,
                 tick=tick,
                 phase=phase,
@@ -938,6 +964,7 @@ class SpecialistRunner:
         """
         assert self.backend_factory is not None  # narrowed by run()
         domain = prep.domain
+        assert domain is not None  # set by a prep that did not short-circuit
         gap = prep.gap
         workspace = prep.workspace
         max_turns = prep.max_turns
@@ -974,6 +1001,7 @@ class SpecialistRunner:
 
         for turn_idx in range(1, max_turns + 1):
             turns_used = turn_idx
+            turn_call_id = new_call_id()
             try:
                 self._write_heartbeat(
                     workspace,
@@ -982,12 +1010,20 @@ class SpecialistRunner:
                     status="running",
                 )
                 _t0 = time.perf_counter()
-                turn_result = await backend.run(
-                    prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
-                    system_prompt=prep.system_prompt,
-                    disallowed_tools=list(SPECIALIST_TOOL_DENYLIST),
-                    max_turns=1,
-                )
+                with trajectory_span(
+                    EVENT_LLM_CALL,
+                    call_id=turn_call_id,
+                    component="specialist",
+                    agent=domain.key,
+                    attributes={"name": domain.key, "turn": turn_idx},
+                ) as call_span:
+                    turn_result = await backend.run(
+                        prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
+                        system_prompt=prep.system_prompt,
+                        disallowed_tools=list(SPECIALIST_TOOL_DENYLIST),
+                        max_turns=1,
+                    )
+                    call_span.finish(**llm_call_summary(turn_result.metadata))
                 _turn_latency_ms = int((time.perf_counter() - _t0) * 1000)
             except BackendError as exc:
                 backend_error = f"backend_error:{exc!r}"
@@ -1008,6 +1044,7 @@ class SpecialistRunner:
                         latency_ms=int((time.perf_counter() - _t0) * 1000),
                         tick=_tick,
                         phase=_phase,
+                        call_id=turn_call_id,
                     )
                 break
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -1037,7 +1074,7 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
-                metadata=turn_result.metadata,
+                metadata={"call_id": turn_call_id, **(turn_result.metadata or {})},
                 latency_ms=_turn_latency_ms,
                 tick=_tick,
                 phase=_phase,
@@ -1125,6 +1162,7 @@ class SpecialistRunner:
         """
         assert self.subprocess_dispatcher is not None  # narrowed by run()
         domain = prep.domain
+        assert domain is not None  # set by a prep that did not short-circuit
         gap = prep.gap
         workspace = prep.workspace
         notes = list(prep.notes)
@@ -1154,24 +1192,36 @@ class SpecialistRunner:
             status="subprocess_starting",
         )
         deadline = _ctx_deadline(ctx)
-        # Ray-managed GPU execution: when the dispatcher acquired a
-        # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
-        # so any GPU command lands within Ray's assigned devices. ``None`` keeps
-        # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
-        sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
-            task_id=ctx.task.task_id,
-            workspace=workspace,
-            worktree=prep.worktree,
-            worktree_base=prep.worktree_base,
-            system_prompt=prep.system_prompt,
-            user_prompt=prep.user_prompt,
-            disallowed_tools=SPECIALIST_TOOL_DENYLIST,
-            max_turns=prep.max_turns,
-            gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
-            deadline=deadline,
-            gpu_lease=ctx.extra.get("gpu_specialist_lease"),
-            progress_cb=ctx.extra.get("specialist_progress_cb"),
-        )
+        call_id = new_call_id()
+        # The subprocess's tool and compaction events are parsed inside this span, so they inherit the specialist's
+        # component/agent and hang off its llm.call rather than the coordinator's session scope.
+        with trajectory_span(
+            EVENT_LLM_CALL,
+            call_id=call_id,
+            component="specialist",
+            agent=domain.key,
+            attributes={"name": domain.key},
+        ) as call_span:
+            # Ray-managed GPU execution: when the dispatcher acquired a
+            # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
+            # so any GPU command lands within Ray's assigned devices. ``None`` keeps
+            # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
+            sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
+                task_id=ctx.task.task_id,
+                workspace=workspace,
+                worktree=prep.worktree,
+                worktree_base=prep.worktree_base,
+                system_prompt=prep.system_prompt,
+                user_prompt=prep.user_prompt,
+                disallowed_tools=SPECIALIST_TOOL_DENYLIST,
+                max_turns=prep.max_turns,
+                gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
+                deadline=deadline,
+                gpu_lease=ctx.extra.get("gpu_specialist_lease"),
+                progress_cb=ctx.extra.get("specialist_progress_cb"),
+            )
+            call_status, call_attributes = _subprocess_call_outcome(sub_result)
+            call_span.finish(call_status, **call_attributes)
         self._append_transcript(
             workspace,
             1,
@@ -1201,7 +1251,7 @@ class SpecialistRunner:
         if len(turn_usages) > 1:
             last_idx = len(turn_usages) - 1
             for i, tu in enumerate(turn_usages):
-                md = dict(tu)
+                md: dict[str, Any] = {**tu, "call_id": call_id}
                 if sub_result.usage and sub_result.usage.get("model"):
                     md.setdefault("model", sub_result.usage.get("model"))
                 self._trace_specialist_llm_call(
@@ -1216,7 +1266,7 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
                 turn=1,
-                metadata=sub_result.usage,
+                metadata={**sub_result.usage, "call_id": call_id} if sub_result.usage else None,
                 latency_ms=_sub_latency_ms,
                 tick=_tick,
                 phase=_phase,
