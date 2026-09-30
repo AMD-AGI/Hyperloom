@@ -50,6 +50,7 @@ _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
 #: Profiling-only flags are not part of a clean throughput baseline.
 _PROFILING_LAUNCH_FLAGS: frozenset[str] = frozenset(
     {
+        "--profiler-config",
         "--enable-profile-cuda-graph",
         "--enable-shape-discovery-for-cuda-graph-profile",
         "--enable-profile",
@@ -65,7 +66,7 @@ _LAUNCH_ARGV_MARKERS: dict[str, str] = {
 }
 
 
-def split_launch_flags(argv_tail: str) -> str:
+def split_launch_flags(argv_tail: str, *, preserve_semantics: bool = False) -> str:
     """Remove run-specific and profiling flags from a captured launch argv."""
     try:
         tokens = shlex.split(argv_tail)
@@ -85,7 +86,24 @@ def split_launch_flags(argv_tail: str) -> str:
             if index < len(tokens) and not tokens[index].startswith("-"):
                 index += 1
             continue
-        if flag in _RUN_SPECIFIC_LAUNCH_FLAGS or flag in _PROFILING_LAUNCH_FLAGS:
+        semantic = flag in {
+            "--tokenizer",
+            "--tokenizer-path",
+            "--served-model-name",
+            "--tensor-parallel-size",
+            "--tp-size",
+            "--tp",
+            "--data-parallel-size",
+            "--dp-size",
+            "--pipeline-parallel-size",
+            "--pp-size",
+            "--random-seed",
+            "--node-rank",
+            "--nnodes",
+        }
+        if (
+            flag in _RUN_SPECIFIC_LAUNCH_FLAGS and not (preserve_semantics and semantic)
+        ) or flag in _PROFILING_LAUNCH_FLAGS:
             if "=" not in token and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
                 index += 2
             else:
@@ -93,7 +111,7 @@ def split_launch_flags(argv_tail: str) -> str:
             continue
         kept.append(token)
         index += 1
-    return " ".join(kept)
+    return shlex.join(kept)
 
 
 def launch_argv_from_log(path: str, framework: str) -> str:

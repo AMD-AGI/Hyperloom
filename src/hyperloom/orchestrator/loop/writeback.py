@@ -5394,6 +5394,8 @@ class WritebackCollaborator:
             )
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
+        launch_evidence = (measurement or {}).get("launch_evidence") or {}
+        serving_env = launch_evidence.get("observed_server_env") if isinstance(launch_evidence, Mapping) else None
         env_spec = {
             "schema_version": 1,
             "config": {
@@ -5405,6 +5407,7 @@ class WritebackCollaborator:
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
                 # when unavailable, args_mode governs recipe inheritance.
                 "server_launch_flags": server_launch_flags,
+                "server_env": dict(serving_env) if isinstance(serving_env, Mapping) else None,
             },
             "source_snapshots": source_snapshots,
             "overlay_pythonpath": materialized.get("final_overlay") or "",

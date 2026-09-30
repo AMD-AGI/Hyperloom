@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from hyperloom.common.launch_log_evidence import (
     observed_vllm_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.common.serving_launch import load_capture, vllm_tail
+from hyperloom.common.launch_log_evidence import split_launch_flags
 
 log = logging.getLogger(__name__)
 
@@ -99,8 +102,10 @@ def build_launch_evidence(
     observed_flags = ""
     observed_server_identity: dict[str, Any] = {}
     observed_model_binding: dict[str, Any] = {}
+    capture: dict[str, Any] = {}
     if actual_server_log:
         try:
+            log_path = Path(actual_server_log)
             observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
             # Read from the raw launch line, which still carries the operands
             # ``split_launch_flags`` strips: without it the evidence records only
@@ -120,6 +125,20 @@ def build_launch_evidence(
                 observed_server_identity = observed_vllm_server_identity_from_log(actual_server_log)
                 if not observed_model_binding:
                     observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
+            if resolved_framework == "vllm":
+                capture = load_capture(log_path, recipe_digest)
+                if capture:
+                    server = capture["server"]
+                    observed_flags = split_launch_flags(shlex.join(vllm_tail(server["argv"])), preserve_semantics=True)
+                    binding = server["semantic_binding"]
+                    observed_model_binding = {
+                        "model_digest": _digest_operand(binding["model"]),
+                        "tokenizer_digest": _digest_operand(binding["tokenizer"]),
+                        "served_model_digest": _digest_operand(binding["served_model_name"]),
+                        "tp": binding["tp"],
+                        "dp": binding["dp"],
+                        "pp": binding["pp"],
+                    }
         except Exception:
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 
@@ -138,6 +157,10 @@ def build_launch_evidence(
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
         "observed_server_launch_flags": observed_flags,
+        "observed_server_launch_tokens": shlex.split(observed_flags),
+        "server_launch_argv_complete": bool(capture),
+        "observed_server_env": capture.get("server", {}).get("serving_env"),
+        "server_launch_capture": capture,
         "observed_server_identity": observed_server_identity,
         "observed_model_binding": observed_model_binding,
         "requested_model_digest": _digest_operand(

@@ -16,7 +16,7 @@ from pathlib import Path
 # publishes it rather than being spelled out again at each reader.
 AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
 
-_ASSET_FILES = (AGENTX_CLIENT_SCRIPT, "map_aiperf.py", "aiperf_phase_gate.py")
+_ASSET_FILES = (AGENTX_CLIENT_SCRIPT, "map_aiperf.py", "aiperf_phase_gate.py", "agentx_launch_capture.py")
 
 # map_aiperf.py imports the mapping from its own directory under this name; the
 # prefix keeps it from clobbering an InferenceX file in the shared benchmarks dir.
@@ -33,6 +33,9 @@ def deploy_agentx_assets(benchmarks_dir: str | Path) -> list[Path]:
     src_dir = agentx_asset_dir()
     sources = {name: src_dir / name for name in _ASSET_FILES}
     sources[_MAPPING_MODULE] = Path(__file__).resolve().with_name("mapping.py")
+    common = Path(__file__).resolve().parents[2] / "common"
+    for name in ("__init__.py", "serving_launch.py", "env_safety.py", "visible_devices.py", "proctree.py"):
+        sources[f"_hyperloom_launch/{name}"] = common / name
     dst_dir = Path(benchmarks_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -40,8 +43,9 @@ def deploy_agentx_assets(benchmarks_dir: str | Path) -> list[Path]:
         if not src.exists():
             raise FileNotFoundError(f"AgentX asset missing from package: {src}")
         dst = dst_dir / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
         # Atomic publish: copy to a temp file in the same dir, set mode, then os.replace() (atomic rename).
-        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=str(dst_dir))
+        fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", dir=str(dst.parent))
         os.close(fd)
         try:
             shutil.copyfile(src, tmp)

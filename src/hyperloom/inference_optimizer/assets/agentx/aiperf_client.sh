@@ -211,9 +211,15 @@ else
   fi
 
   log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
+  _recipe_command=(bash "${BENCH_DIR}/${BUILTIN}")
+  case "$BUILTIN" in
+    */agentic/*)
+      _recipe_command=(python3 "${BENCH_DIR}/agentx_launch_capture.py" run
+        --result "${RESULT_DIR}/${RESULT_FILENAME}.json" --port "$PORT"
+        --config "${HYPERLOOM_LAUNCH_CONFIG_PATH:-/nonexistent}" -- "${_recipe_command[@]}") ;;
+  esac
   MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
-    PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
-    bash "${BENCH_DIR}/${BUILTIN}"
+    PORT="$PORT" RESULT_DIR="$RESULT_DIR" "${_recipe_command[@]}"
   SERVER_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
 
   # Fail loud if the builtin server phase did not record a pid: proceeding would
@@ -256,6 +262,7 @@ PYMERGE
         else
           log "WARN no profile_export_aiperf.json under ${RESULT_DIR}; Magpie may read 0.00 req/s"
         fi
+        python3 "${BENCH_DIR}/agentx_launch_capture.py" seal --result "$_AG_RESULT"
         exit 0
         ;;
     esac

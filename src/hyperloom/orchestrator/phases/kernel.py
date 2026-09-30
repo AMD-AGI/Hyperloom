@@ -1317,8 +1317,9 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
-            handoff["bench_launcher"] = "native"
+            # A client-oriented model script need not implement Magpie's server phase.
+            # An explicit supported recipe launcher wins; native replay needs full evidence.
+            handoff["bench_launcher"] = str(os.environ.get("BENCH_LAUNCHER") or "native").strip().lower()
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
 
         out_dir = self.session_dir / "geak"

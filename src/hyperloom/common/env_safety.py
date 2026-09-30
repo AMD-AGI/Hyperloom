@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
+from .visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
 import os
 import re
