@@ -134,7 +134,10 @@ def test_list_form_args_are_space_joined_not_repr(value, expected):
     "value,expected",
     [
         ({"--kv-cache-dtype": "fp8_e4m3"}, "--kv-cache-dtype fp8_e4m3"),
-        ({"--mem-fraction-static": 0.9, "--max-running-requests": 128}, "--mem-fraction-static 0.9 --max-running-requests 128"),
+        (
+            {"--mem-fraction-static": 0.9, "--max-running-requests": 128},
+            "--mem-fraction-static 0.9 --max-running-requests 128",
+        ),
         ({"--enable-mixed-chunk": True, "--disable-radix-cache": False}, "--enable-mixed-chunk"),
         ({"--served-model-name": "a b"}, "--served-model-name 'a b'"),
     ],
