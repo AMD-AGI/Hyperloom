@@ -75,7 +75,7 @@ def _task_is_dead(task: Task | None) -> bool:
 
 
 class ClosePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _derive_close_stop_reason(self) -> str:
         """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""

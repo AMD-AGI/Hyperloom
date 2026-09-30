@@ -37,26 +37,8 @@ def _silent_plan() -> ScriptedPlan:
     return ScriptedPlan(turns=[], default_intent=_idle_intent())
 
 
-def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    coord = Coordinator.__new__(Coordinator)
-    stale_name = "_stale_delegated_for_test"
-    monkeypatch.setitem(Coordinator._DELEGATED, stale_name, "phase_kernel")
-
-    with pytest.raises(AttributeError, match="does not define"):
-        getattr(coord, stale_name)
-
-
 def _build_backends() -> dict[str, Backend]:
     return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
-
-
-def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
-    coord = object.__new__(Coordinator)
-    coord.__dict__["dummy_owner"] = object()
-    monkeypatch.setitem(Coordinator._DELEGATED, "_deleted_delegate", "dummy_owner")
-
-    with pytest.raises(AttributeError, match="delegates '_deleted_delegate'"):
-        getattr(coord, "_deleted_delegate")
 
 
 @pytest.mark.asyncio
@@ -93,7 +75,7 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     }
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_warm_replay(report)
+    await coord._resume_recover_pending_warm_replay(report)
 
     assert restores == [("/mirror", "mirror-sha")]
     assert kernel_restores == [{"manifest_path": "/tmp/m"}]
@@ -124,7 +106,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     }
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_warm_replay(report)
+    await coord._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
     assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:/mirror:missing_snapshot_manifest"]
@@ -155,7 +137,7 @@ async def test_resume_retains_pending_when_any_restore_fails(
     }
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_warm_replay(report)
+    await coord._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
     assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["restore failed"]
@@ -166,17 +148,6 @@ async def test_resume_retains_pending_when_any_restore_fails(
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
-
-
-def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
-    """A map entry naming a method its collaborator never defined is a crash at first call, not at import."""
-    unresolved = []
-    for name in Coordinator._DELEGATED:
-        try:
-            getattr(coord, name)
-        except AttributeError as exc:
-            unresolved.append(f"{name}: {exc}")
-    assert unresolved == []
 
 
 # -- _context_inbox_reader --------------------------------------------------
@@ -252,7 +223,7 @@ def test_context_reader_failure_carries_traceback_to_the_log(
         shared_state=coord.shared_state,
         inbox_reader=coord._context_inbox_reader,
         recent_outcomes_reader=coord._context_recent_outcomes_reader,
-        running_tasks_reader=coord.conversation._context_running_tasks_reader,
+        running_tasks_reader=coord._context_running_tasks_reader,
     )
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
@@ -406,7 +377,7 @@ async def test_pending_restore_unwinds_dependent_patches_to_original(coord: Coor
     candidate = await pending_candidate(patches=True)
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert coord.shared_state.pending_integrate == {}
@@ -419,13 +390,13 @@ async def test_pending_restore_artifact_only_survives_lost_memory_and_repeats(co
     report = {"fixes": [], "warnings": []}
     candidate.result.clear()
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert not (candidate.root / "created.json").exists()
     assert coord.shared_state.pending_integrate == {}
     repeated = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(repeated)
+    await coord._resume_recover_pending_integrate(repeated)
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert not (candidate.root / "created.json").exists()
     assert repeated == {"fixes": [], "warnings": []}
@@ -447,7 +418,7 @@ async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: 
     backup.unlink()
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert coord.shared_state.pending_integrate.get("task_id") == sentinel_task
     assert evidence.read_bytes() == backup_content
@@ -455,7 +426,7 @@ async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: 
     assert report["warnings"], report
     backup.write_bytes(backup_content)
     retry_report = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(retry_report)
+    await coord._resume_recover_pending_integrate(retry_report)
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert not (candidate.root / "created.json").exists()
     assert coord.shared_state.pending_integrate == {}
@@ -496,7 +467,7 @@ async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
             )
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
     assert coord.shared_state.pending_integrate == {}
@@ -536,7 +507,7 @@ async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pend
     if evidence == "stack":
         coord.shared_state.optimization_stack = [{"task_id": candidate.task.task_id}]
     report = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
     assert (candidate.root / "cfg.json").read_text() == "C\n"
     if evidence == "stack":
         assert coord.shared_state.pending_integrate == {}
@@ -583,7 +554,7 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
             coord.shared_state.pending_integrate = {}
     assert target.read_text() == "CANDIDATE"
     report = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
     assert report["warnings"] == []
     assert target.read_text() == "KEPT"
 
@@ -597,7 +568,7 @@ async def test_failed_pending_restore_blocks_resume_before_followup_actions(coor
     async def forbidden(*_args, **_kwargs):
         pytest.fail("resume continued after an incomplete restore")
 
-    monkeypatch.setattr(coord.writeback, "_resume_recover_pending_targeted_build", forbidden)
+    monkeypatch.setattr(coord, "_resume_recover_pending_targeted_build", forbidden)
     with pytest.raises(RuntimeError, match="refusing resume before measurement"):
         await coord._resume_consistency_pass()
     assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
@@ -615,7 +586,7 @@ async def test_pending_restore_rejects_legacy_artifact_without_backup_evidence(c
     }
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert target.read_text(encoding="utf-8") == "possibly-kept-content"
     assert coord.shared_state.pending_integrate.get("task_id") == "legacy-artifact"
@@ -712,7 +683,7 @@ async def test_resume_replays_an_accepted_integrate_from_its_task_row(coord, cra
 
     coord.shared_state.pending_integrate = marker
     repeated = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(repeated)
+    await coord._resume_recover_pending_integrate(repeated)
 
     assert [row["variant_name"] for row in coord.shared_state.optimization_stack] == ["spec-restore"]
     assert coord.shared_state.pending_integrate == {}
@@ -1028,7 +999,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
         "patches": ["/tmp/p.diff"],
     }
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "_resume_rollback_pending_integrate",
         lambda pending: {"reversed": list(pending["patches"]), "failed": []},
     )
@@ -1074,7 +1045,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
 
     rolled_back: list[dict] = []
     monkeypatch.setattr(
-        coord.writeback,
+        coord,
         "_resume_rollback_pending_integrate",
         lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
@@ -1299,7 +1270,7 @@ async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordina
     }
 
     report = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert reversed_calls == []
     assert coord.shared_state.pending_integrate["task_id"] == "ti-crash"
@@ -1592,7 +1563,7 @@ async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> 
         idempotency_key="queryable-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = coord.conversation._context_running_tasks_reader()
+    out = coord._context_running_tasks_reader()
     assert spec.task_id in out
     assert "serving_specialist" in out
 
@@ -1651,7 +1622,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "attempts": [{"r": 1}],
         },
     )
-    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
+    monkeypatch.setattr(coord, "_target_gap_advisory_block", lambda: "GAP-NOTES")
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
@@ -1684,7 +1655,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
     coord._record_fact_per_task(
         task=task,
@@ -1701,8 +1672,8 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
     coord.recipe_kb = object()
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
+    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
     coord._record_fact_per_task(
         task=task,
@@ -1961,7 +1932,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
     coord.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
@@ -1980,14 +1951,14 @@ def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
 
 def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"report"})
     out = coord._run_action_now_sync("explore")
     assert "not inline-eligible" in out
 
 
 def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"report"})
     coord._coordinator_loop = None
     out = coord._run_action_now_sync("report")
     assert "coordinator loop not running" in out
@@ -2008,7 +1979,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
     await coord._handle_intent("orchestration", _idle_intent())
     assert recorded
 
@@ -2056,7 +2027,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     async def _scout():
         return None
 
-    monkeypatch.setattr(coord.phase_internal, "_maybe_enqueue_explore_research_scout", _scout)
+    monkeypatch.setattr(coord, "_maybe_enqueue_explore_research_scout", _scout)
     await coord._advance_phase_if_needed()
 
 
@@ -2074,7 +2045,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
@@ -2092,7 +2063,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
 
@@ -2109,7 +2080,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
@@ -2127,7 +2098,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "SWEEP"
     assert coord.shared_state.pending_escalate_hint == ""
@@ -2154,7 +2125,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
     assert coord.shared_state.pending_escalate_hint == ""
@@ -2191,7 +2162,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
         idempotency_key="owner-source",
     )
     monkeypatch.setattr(
-        coord.router,
+        coord,
         "_admission_denial_for_action",
         lambda _action: None,
     )
@@ -2226,9 +2197,9 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
         "gap_layer": "framework",
     }
 
-    assert coord.router._stamp_specialist_owner(explore_params) == "EXPLORE"
+    assert coord._stamp_specialist_owner(explore_params) == "EXPLORE"
     assert explore_params["source_phase"] == "EXPLORE"
-    assert coord.router._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
+    assert coord._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
 
 
@@ -2372,7 +2343,7 @@ def _delegate(action_name: str, key: str, params=None) -> Intent:
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     assert await coord.tasks.queued()
 
@@ -2382,7 +2353,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     monkeypatch.setattr(
-        coord.dispatcher,
+        coord,
         "_sequence_denial_for_action",
         lambda a: PolicyDenied(
             "blocked",
@@ -2395,7 +2366,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
@@ -2403,20 +2374,20 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
 
 
-# -- _maybe_autosubmit_specialist_patches early returns ---------------------
+# -- maybe_autosubmit_specialist_patches early returns ---------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -2434,7 +2405,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -2457,7 +2428,7 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
     )
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
     n_before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"]},
     )
@@ -2519,7 +2490,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
     coord.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
@@ -2726,7 +2697,7 @@ async def test_run_action_now_async_does_not_starve_database_executor(coord: Coo
     coord._inline_fast_actions_enabled = True
     coord._coordinator_loop = loop
     monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.5")
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
+    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"inline_probe"})
     calls = []
 
     async def action(name, params):
@@ -2734,10 +2705,10 @@ async def test_run_action_now_async_does_not_starve_database_executor(coord: Coo
         calls.append(params["index"])
         return f"done:{row['value']}"
 
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", action)
+    monkeypatch.setattr(coord, "_run_action_now", action)
     try:
         results = await asyncio.wait_for(
-            asyncio.gather(*(coord.dispatcher._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
+            asyncio.gather(*(coord._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
             2.0,
         )
         assert results == ["done:1"] * 8
@@ -2753,11 +2724,11 @@ async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coo
     from unittest.mock import Mock
 
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
+    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"inline_probe"})
     coord._coordinator_loop = asyncio.get_running_loop()
     create_action = Mock(side_effect=AssertionError("same-loop sync calls must not create an action coroutine"))
     schedule = Mock(side_effect=AssertionError("same-loop sync calls must not schedule work"))
-    monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
+    monkeypatch.setattr(coord, "_run_action_now", create_action)
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
 
     out = coord._run_action_now_sync("inline_probe")
@@ -2787,7 +2758,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2814,7 +2785,7 @@ async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator
     sid = "spec-plain-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2847,7 +2818,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
         params={"enablement": True},
         idempotency_key="kv-enablement",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2873,7 +2844,7 @@ async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordina
     sid = "spec-opt-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2908,7 +2879,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
         params={"enablement": True},
         idempotency_key="kv-inherit",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2936,7 +2907,7 @@ async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> Non
         params={"enablement": True},
         idempotency_key="kv-override",
     )
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -2957,7 +2928,7 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
     sid = "spec-no-inherit"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
-    await coord._maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
@@ -2984,7 +2955,7 @@ async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coor
     )
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     assert coord.shared_state.pending_integrate == {}
     assert any(entry.get("kind") == "settled_pending_integrate" for entry in report["fixes"])
@@ -3008,7 +2979,7 @@ async def test_a_failed_online_restore_is_retried_not_held_forever(coord, pendin
     )
     report = {"fixes": [], "warnings": []}
 
-    await coord.writeback._resume_recover_pending_integrate(report)
+    await coord._resume_recover_pending_integrate(report)
 
     # The rollback ran, so the candidate's edits are gone from the tree.
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"

@@ -15,7 +15,6 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
-from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
 from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
@@ -27,7 +26,7 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 
 @pytest.fixture
 def coord(build_coord):
-    """``build_coord`` augmented with the routing-method surface the framework phase delegates to (launch-probe enqueue, rearm capture, build lifecycle)."""
+    """``build_coord`` augmented with the routing-method surface the framework phase delegates to (launch-probe enqueue, rearm capture)."""
     build_coord._rearm_calls = []
     for name in (
         "_enqueue_build_launch_probe",
@@ -47,11 +46,7 @@ def coord(build_coord):
     async def _maybe_rearm_enablement(res):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
 
-    async def _enqueue_targeted_build(action):
-        return await build_coord._bl.enqueue_targeted_build(action)
-
     build_coord._maybe_rearm_enablement = _maybe_rearm_enablement
-    build_coord.enqueue_targeted_build = _enqueue_targeted_build
     build_coord._framework_gpu_params = lambda: {}
     build_coord._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     # The launch probe is an ``integrate_patch`` task, so it resolves its lanes from that kind rather than from the
@@ -60,7 +55,6 @@ def coord(build_coord):
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
     )
-    build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
 
 
@@ -353,7 +347,7 @@ async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatc
 
 
 async def _enqueue_and_transition(coord, action, state):
-    task_id = await coord._bl.enqueue_targeted_build(action)
+    task_id = await coord.enqueue_targeted_build(action)
     await coord.tasks.transition(task_id, "running")
     await coord.tasks.transition(task_id, state)
     return task_id

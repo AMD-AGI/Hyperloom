@@ -27,15 +27,9 @@ class _StateStub:
 
 
 class _MemCoord:
-    _FRAMEWORK_TRIED_MEMORY_CAP = FrameworkPhase._FRAMEWORK_TRIED_MEMORY_CAP
-    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
-    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
-    _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
-    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
-    _build_framework_working_memory = FrameworkPhase._build_framework_working_memory
-
     def __init__(self) -> None:
         self.shared_state = _StateStub()
+        self.phase_framework = FrameworkPhase(self)
 
 
 def test_build_working_memory_aggregates_tried():
@@ -57,7 +51,7 @@ def test_build_working_memory_aggregates_tried():
             ],
         },
     ]
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
 
     refs = {t["ref"] for t in mem["tried_and_why"]}
     assert refs == {"PR:723", "PR:1015", "PR:900"}
@@ -69,17 +63,17 @@ def test_build_working_memory_aggregates_tried():
 
 def test_build_working_memory_empty_when_no_progress():
     coord = _MemCoord()
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
     assert mem["tried_and_why"] == []
 
 
 def test_build_working_memory_caps_tried_rows():
     coord = _MemCoord()
-    cap = coord._FRAMEWORK_TRIED_MEMORY_CAP
+    cap = FrameworkPhase._FRAMEWORK_TRIED_MEMORY_CAP
     coord.shared_state.framework_agent_phase_progress = [
         {"candidate_id": f"PR:{i}", "status": "reverted"} for i in range(cap + 5)
     ]
-    mem = coord._build_framework_working_memory()
+    mem = coord.phase_framework._build_framework_working_memory()
     assert len(mem["tried_and_why"]) == cap
     # Most-recent kept (last cap entries).
     assert mem["tried_and_why"][-1]["ref"] == f"PR:{cap + 4}"

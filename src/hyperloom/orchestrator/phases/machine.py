@@ -20,7 +20,7 @@ log = _logging.getLogger(__name__)
 
 
 class MachinePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
@@ -228,7 +228,7 @@ class MachinePhase(CoordinatorCollaborator):
             allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
             reason=barrier_reason,
         )
-        stopped = await self.dispatcher.cancel_inflight_actions(reason=barrier_reason)
+        stopped = await self.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
                 "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
@@ -401,7 +401,7 @@ class MachinePhase(CoordinatorCollaborator):
         # that reading is what the phase acted on.
         if (from_phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             try:
-                self._close_framework_timeline(
+                self.phase_framework.close_timeline(
                     exit_reason=str(reason or ""),
                     evidence=evidence if isinstance(evidence, dict) else None,
                 )
@@ -410,7 +410,7 @@ class MachinePhase(CoordinatorCollaborator):
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:
-            await self._on_enter_framework(from_phase=from_phase)
+            await self.phase_framework.on_enter(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:

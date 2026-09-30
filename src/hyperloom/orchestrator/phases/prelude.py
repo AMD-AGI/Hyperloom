@@ -173,7 +173,7 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
 
 
 class PreludePhase(CoordinatorCollaborator):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
 
     def _internal_analysis_kind(self) -> str:
         """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile."""

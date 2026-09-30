@@ -66,12 +66,8 @@ def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list
 
 
 class _CoordinatorStub:
-    """Minimal stub to bind the FrameworkPhase discover methods to."""
+    """The Coordinator surface the FrameworkPhase discover methods read."""
 
-    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
-    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
-    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
-    _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
     # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
     # (same-framework path).
     _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
@@ -81,9 +77,7 @@ class _CoordinatorStub:
         self.shared_state = _StateStub()
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
-
-    def _framework_known_candidate_ids(self) -> set[str]:
-        return FrameworkPhase._framework_known_candidate_ids(self)  # type: ignore[arg-type]
+        self.phase_framework = FrameworkPhase(self)
 
 
 class _TasksStub:
@@ -101,7 +95,7 @@ class _TasksStub:
 
 
 async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
-    await FrameworkPhase._enqueue_framework_agent_task(stub, cand)  # type: ignore[arg-type]
+    await stub.phase_framework._enqueue_framework_agent_task(cand)
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
@@ -139,7 +133,7 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand_bad))
 
-    nxt = FrameworkPhase._select_next_framework_agent_candidate(stub)  # type: ignore[arg-type]
+    nxt = stub.phase_framework._select_next_framework_agent_candidate()
     assert nxt is not None
     assert nxt["candidate_id"] == "pr-good"
 
@@ -180,8 +174,7 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
         {"batch_id": "b2", "candidates": []},
     ]
 
-    FrameworkPhase._record_framework_agent_phase_done(  # type: ignore[arg-type]
-        stub,
+    stub.phase_framework._record_framework_agent_phase_done(
         reason="discover_retries_exhausted",
         failure_count=3,
     )

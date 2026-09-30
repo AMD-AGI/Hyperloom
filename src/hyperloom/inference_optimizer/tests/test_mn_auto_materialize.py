@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``Coordinator._maybe_materialize_mn_explore``."""
+"""Unit tests for ``FrameworkPhase.maybe_materialize_mn_explore``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from hyperloom.orchestrator.actions.executors import (
     _multi_node_env as mne,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
@@ -25,7 +24,7 @@ class _FakeTasks:
         return SimpleNamespace(task_id="explore-task-1"), False
 
 
-def _fake_self(**state_overrides):
+def _fake_coord(**state_overrides):
     state = SimpleNamespace(
         baseline_config_path="/cfg.yaml",
         current_best={"extra_server_args": "--base-arg 1"},
@@ -35,7 +34,6 @@ def _fake_self(**state_overrides):
     for k, v in state_overrides.items():
         setattr(state, k, v)
     return SimpleNamespace(
-        _MN_AUTO_EXPLORE_GRID_CAP=FrameworkPhase._MN_AUTO_EXPLORE_GRID_CAP,
         shared_state=state,
         tasks=_FakeTasks(),
         # Stands in for the dispatcher's action-catalogue TTL lookup.
@@ -47,10 +45,9 @@ def _task(task_id="task-abcdef1234"):
     return SimpleNamespace(task_id=task_id, params={})
 
 
-def _run(self_obj, *, domain, proposals, task=None):
+def _run(coord, *, domain, proposals, task=None):
     asyncio.run(
-        Coordinator._maybe_materialize_mn_explore(
-            self_obj,
+        FrameworkPhase(coord).maybe_materialize_mn_explore(
             task=task or _task(),
             domain=domain,
             proposals=proposals,
@@ -60,14 +57,14 @@ def _run(self_obj, *, domain, proposals, task=None):
 
 def test_single_node_is_strict_noop(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    s = _fake_self()
+    s = _fake_coord()
     _run(s, domain="moe", proposals=[{"name": "v1", "extra_args": "--x"}])
     assert s.tasks.calls == []
 
 
 def test_empty_proposals_noop(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
+    s = _fake_coord()
     _run(s, domain="moe", proposals=[])
     assert s.tasks.calls == []
 
@@ -75,7 +72,7 @@ def test_empty_proposals_noop(monkeypatch):
 def test_proposals_with_no_args_or_envs_are_dropped(monkeypatch):
     # Research-only proposals (no arg/env) are dropped; all dropped -> no task.
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
+    s = _fake_coord()
     _run(
         s,
         domain="moe",
@@ -89,7 +86,7 @@ def test_proposals_with_no_args_or_envs_are_dropped(monkeypatch):
 
 def test_multi_node_builds_explore_grid(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
+    s = _fake_coord()
     proposals = [
         {"name": "arg-variant", "extra_args": "--enable-foo", "reason": "r1"},
         {"name": "env-variant", "extra_envs": {"MORI_DISPATCH": "2"}},
@@ -126,7 +123,7 @@ def test_multi_node_builds_explore_grid(monkeypatch):
 
 def test_grid_capped_at_grid_cap(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
+    s = _fake_coord()
     proposals = [{"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)]
     _run(s, domain="params", proposals=proposals)
     grid = s.tasks.calls[0]["params"]["grid"]
@@ -136,6 +133,6 @@ def test_grid_capped_at_grid_cap(monkeypatch):
 def test_string_extra_envs_ignored(monkeypatch):
     # Non-dict extra_envs is coerced to {} (variant then dropped if no args).
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-    s = _fake_self()
+    s = _fake_coord()
     _run(s, domain="moe", proposals=[{"name": "v", "extra_envs": "MORI=1"}])
     assert s.tasks.calls == []
