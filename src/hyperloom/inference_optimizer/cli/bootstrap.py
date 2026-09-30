@@ -110,6 +110,45 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
+def latency_budget_scope_error(framework: str | None, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` does not apply to *framework*, or ``\"\"``.
+
+    Scriptable workloads grade on output throughput alone and are the only frameworks compute partitioning places
+    work for, so they are the only place a throughput-only gate can buy throughput with per-request latency. AgentX
+    serving sessions already REVERT that trade on interactivity, and the fixed ISL/OSL serving mode takes no new
+    capability, so the budget is refused there rather than silently doing nothing.
+    """
+    from .. import framework_registry
+
+    if requested_ms is None or framework_registry.is_scriptable(framework):
+        return ""
+    name = str(framework or "").strip() or framework_registry.DEFAULT_FRAMEWORK
+    return (
+        f"--max-latency-ms applies only to scriptable frameworks (xdit, custom); {name!r} is a serving framework. "
+        "On AgentX the interactivity objective already refuses a throughput gain bought with per-request latency"
+    )
+
+
+def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
+    """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
+
+    The recorded KEEPs were graded under the archived budget, so a different
+    value would leave them judged against a constraint the new one does not
+    state. Omitting the flag keeps the archived budget.
+    """
+    if requested_ms is None:
+        return ""
+    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    if float(requested_ms) == archived:
+        return ""
+    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
+    return (
+        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
+
+
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
     from hyperloom.inference_optimizer.agentx.mapping import (
@@ -240,6 +279,9 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
+        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores it without a second source to reconcile.
+        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),

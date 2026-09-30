@@ -354,6 +354,15 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `explore` round to refresh the validated gain. The legacy
   `validate_stack` / `backends` / `params` action names are not in any
   phase's proposable set (use `explore`).
+* **A latency budget changes what a KEEP means.** When
+  `=== Latency budget (constraint) ===` is present (scriptable workloads
+  only), a throughput gain no longer predicts a KEEP: any winner over the
+  ceiling is refused, as is one that reported no end-to-end latency. The
+  refusals are in the ledgers you already read — `reason=latency_budget_exceeded`
+  or `latency_unmeasured` in the explore history, `promotion_refused` in the
+  journal. Many of them before concluding the search is exhausted means the
+  SLA is the binding limit, and the answer is a lever that buys throughput
+  without spending per-request latency, not more of the same.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
