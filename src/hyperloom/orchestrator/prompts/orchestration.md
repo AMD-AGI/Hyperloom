@@ -95,9 +95,11 @@ Five tools close the act->observe loop without waiting for the next tick
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-Nothing in this message reports in-flight specialists: `specialist_progress`
-inbox observations are sparse, and a specialist can hold the
-machine for hours. Never read silence as "nothing is running".
+In-flight tasks are visible in the `=== Tasks in flight ===` projection and
+via `get_running_tasks`. A specialist or benchmark can hold the machine for
+hours; check these before dispatching to avoid redundant parallel work on the
+same gap. Prefer `send_message` or `extend_lease` over re-dispatching a
+specialist that is already in flight.
 
 Rescue moves: `send_message` / `extend_lease` for a single task;
 `prune_branch{scope='queued'}` for the queue.

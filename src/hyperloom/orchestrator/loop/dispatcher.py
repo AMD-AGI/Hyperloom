@@ -123,11 +123,10 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
-#: Kinds the pump dispatches but does not join: it drains what it joins before
-#: returning, and an off-loop compile or the KERNEL phase's whole pipeline there
-#: would hold every reactor turn for its duration. Admission is unchanged — same
-#: budget, lane and lease gates.
-_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
+#: Kinds whose execution manages its own completion: the pump neither awaits
+#: their handle nor books their result. Admission is unchanged — same budget,
+#: lane and lease gates.
+_SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
 class _InflightAction(NamedTuple):
@@ -156,6 +155,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Completions waiting to be booked. Appended by on_complete under asyncio.shield;
         # drained serially by the pump so bookkeeping never interleaves with reactor turns.
         self._completion_queue: "collections.deque[tuple[Task, Any]]" = collections.deque()
+        # When a phase transition is pending the pump must not spawn new tasks.
+        self._admit_frozen: bool = False
 
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
@@ -189,14 +190,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """Append a completed task to the completion queue for deferred bookkeeping."""
         self._completion_queue.append((task, maybe_result, gpu_lease))
 
-    async def _drain_completions(self) -> None:
-        """Book all pending completions from the queue, in order."""
+    async def _drain_completions(self) -> int:
+        """Book all pending completions from the queue, in order.
+
+        Returns the number of completions processed.
+        """
+        count = 0
         while self._completion_queue:
             task, result, gpu_lease = self._completion_queue.popleft()
+            count += 1
             try:
                 await self._reap_dispatched_task(task, result, gpu_lease)
             except Exception:
                 log.exception("dispatcher: bookkeeping failed for task=%s", task.task_id)
+        return count
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
@@ -420,63 +427,45 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
-        newly-fittable tasks while in-flight tasks run.
+        newly-fittable tasks as in-flight tasks complete.
 
-        Re-scans the queue whenever an in-flight task completes
-        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. Everything it joins is drained before it
-        returns; :data:`_NOT_JOINED_KINDS` is dispatched and left running. Each
-        GPU lease is bound to its task_id and released by the runner.
+        Returns as soon as it has booked at least one completion, or when there
+        is nothing to wait for. Tasks whose kind is in :data:`_SELF_SETTLING_KINDS`
+        are spawned but never awaited or booked here. All other tasks are spawned
+        and run until they complete; their bookkeeping enters the completion queue
+        and is drained at the start of each iteration.
 
         Budget guard: once the phase's cyclic budget is spent
-        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
-        phase-scoped variants — drain in-flight, then return so the tick can
-        advance the phase.
+        (:meth:`_dispatch_paused_for_phase_budget`), or while
+        ``_admit_frozen`` is set, stop spawning NEW tasks.
         """
         await self._reclaim_stale_dispatch_state()
-        inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-        # Cumulative across the whole pump, not just the live in-flight set, so a
-        # fast task reaped before its queued->running transition is visible is
-        # not re-dispatched. A task is dispatched at most once per pump.
-        dispatched_ids: set[str] = set()
-        try:
-            while True:
-                # Drain completed tasks before spawning new ones.
-                await self._drain_completions()
-                # Wall-clock guard: a spent session budget (or a shutdown
-                # request) stops the actions already running, because waiting
-                # for them is what the budget no longer allows.
-                shutting_down = await self._cancel_inflight_that_outlived_the_session()
-                # Budget guard: stop launching NEW phase-scoped variants once the
-                # phase's cyclic budget is spent; drain in-flight then return.
-                if not shutting_down and not self._dispatch_paused_for_phase_budget():
-                    spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-                    dispatched_ids.update(t.task_id for t, _, _ in spawned)
-                    inflight.extend(spawned)
-                if not inflight:
-                    return
-                done, _pending = await asyncio.wait(
-                    [atask for _, atask, _ in inflight],
-                    timeout=self._dispatcher_poll_sec,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    # Poll elapsed with no completion; re-scan in case a lane freed.
-                    continue
-                # Execution owns completion too, so a cancelled pump cannot lose it.
-                await asyncio.gather(*done, return_exceptions=True)
-                inflight = [entry for entry in inflight if entry[1] not in done]
-        finally:
-            # ``_inflight_actions`` is dispatcher-wide: the inline path registers
-            # a handle there too, and that action is meant to outlive the caller
-            # that started it. The pump owns exactly the entries still in its own
-            # ``inflight``, so leaving by any door other than the drained one --
-            # cancelled at shutdown, or a raise from the bookkeeping -- takes
-            # those and nothing else. A drained pump has nothing left to cancel.
-            await self.cancel_inflight_actions(
-                reason="dispatcher_pump_exit",
-                only_task_ids={task.task_id for task, _atask, _gpu_lease in inflight},
+        while True:
+            drained = await self._drain_completions()
+            # Return after any successful drain: the tick advances, the LLM
+            # and Critic get a turn, then the next tick calls the pump again.
+            if drained:
+                return
+            shutting_down = await self._cancel_inflight_that_outlived_the_session()
+            if not shutting_down and not self._admit_frozen and not self._dispatch_paused_for_phase_budget():
+                await self._spawn_fitting_queued()
+            # Gather the waitable in-flight handles (non-self-settling).
+            waitable = [
+                entry.atask
+                for entry in self._inflight_actions.values()
+                if entry.kind not in _SELF_SETTLING_KINDS and not entry.atask.done()
+            ]
+            if not waitable:
+                return
+            done, _pending = await asyncio.wait(
+                waitable,
+                timeout=self._dispatcher_poll_sec,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                continue
+            # Execution owns completion; gather to surface any exception via the callback.
+            await asyncio.gather(*done, return_exceptions=True)
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
@@ -549,34 +538,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     break
         return created
 
-    async def _spawn_fitting_queued(
-        self,
-        *,
-        exclude_ids: set[str],
-    ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
+    async def _spawn_fitting_queued(self) -> None:
         """Spawn every currently lane-fitting queued task not already in flight.
 
         Pure dispatch — per-task completion bookkeeping is handled by
         :meth:`_reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
-
-        Args:
-            exclude_ids: Task ids already dispatched this pump pass; skipped so
-                a task is never dispatched twice. A dispatched
-                :data:`_NOT_JOINED_KINDS` task is added here, since it is the
-                only record of it this pass carries back.
-
-        Returns:
-            The ``(task, asyncio_task, gpu_lease)`` tuples the caller must join.
-            A :data:`_NOT_JOINED_KINDS` task is spawned and registered for
-            cancellation but deliberately absent from this list.
+        Tasks already in ``_inflight_actions`` are skipped so a task is never
+        dispatched twice across pump calls.
         """
         queued = await self.tasks.queued()
         if not queued:
-            return []
+            return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Serving priority: pre-compute whether serving-priority is enabled
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
@@ -597,13 +572,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         except Exception:  # noqa: BLE001 — never block dispatch on the probe
             pass
         for task in queued:
-            if task.task_id in exclude_ids:
-                # Already dispatched in a prior pass of this pump.
+            if task.task_id in self._inflight_actions:
                 continue
-            join_in_pump = task.kind not in _NOT_JOINED_KINDS
-            if not join_in_pump and task.task_id in self._inflight_actions:
-                # Still running from an earlier pump that returned without it.
-                continue
+            self_settling = task.kind in _SELF_SETTLING_KINDS
             retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
             if not retired and await self._cancel_queued_task_over_budget(task):
                 continue
@@ -821,26 +792,21 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
                     on_complete=partial(self._queue_completion, task, gpu_lease)
-                    if join_in_pump
+                    if not self_settling
                     else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
-            if join_in_pump:
-                spawned.append((task, atask, gpu_lease))
-            else:
-                # Nothing retrieves this handle's exception, so report it here.
-                atask.add_done_callback(self._report_unjoined_failure(task))
-                exclude_ids.add(task.task_id)
-        return spawned
+            # All handles get the failure callback; the queue-based path does not
+            # suppress exceptions on the asyncio.Task handle.
+            atask.add_done_callback(self._report_spawned_failure(task))
 
     @staticmethod
-    def _report_unjoined_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
-        """Build the done-callback for a handle no caller awaits."""
+    def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
+        """Build the done-callback that logs an unhandled exception from a spawned handle."""
 
         def _report(atask: "asyncio.Task[Any]") -> None:
-            # A cancelled task has no exception to read, and cancelling is how
-            # shutdown reaches it, so it is not a failure worth reporting.
+            # Cancellation is how shutdown reaches tasks; not a reportable failure.
             if atask.cancelled():
                 return
             exc = atask.exception()
@@ -974,7 +940,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
-        execution.add_done_callback(self._report_unjoined_failure(task))
+        execution.add_done_callback(self._report_spawned_failure(task))
         try:
             return await asyncio.shield(execution)
         except asyncio.CancelledError:
