@@ -2834,6 +2834,6 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = state
-    monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", AsyncMock())
-    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome())
+    monkeypatch.setattr(coord, "_maybe_enqueue_watermark_roofline", AsyncMock(), raising=False)
+    await coord._promote_explore(out, None, wb._PromoteOutcome())
     assert state.current_best["variant_name"] == "v_power"
