@@ -62,7 +62,7 @@ def _run_rebench(c, *, measured: float | None, calls: list):
 @pytest.mark.asyncio
 async def test_a_validated_stack_is_not_rebenched(coordinator) -> None:
     c = coordinator
-    assert c.writeback._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert c.writeback.validate(1100.0, {"output_throughput": 1100.0})
     calls: list = []
     c.dispatcher.run_task_registered = _run_rebench(c, measured=1100.0, calls=calls)
 
@@ -82,7 +82,7 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
 
     [task] = calls
     assert task.idempotency_key == "close-stack-revalidate-g1"
-    assert task.params["source"] == "resume_stack_revalidate"
+    assert task.params["source"] == "stack_revalidate"
     assert task.params["recipe_generation"] == 1
     assert "geak_fallback" not in task.params
     state = c.shared_state
@@ -104,7 +104,7 @@ async def test_a_rebench_of_an_older_generation_cannot_overwrite_a_newer_validat
         1300.0,
         {"name": "page32", "extra_server_args": "--page-size 32", "candidate_extra_server_args": "--page-size 32"},
     )
-    assert c.writeback._update_cumulative_gain_validated(1300.0, {"output_throughput": 1300.0})
+    assert c.writeback.validate(1300.0, {"output_throughput": 1300.0})
 
     await c.writeback._promote_to_shared_state(
         "explore",
