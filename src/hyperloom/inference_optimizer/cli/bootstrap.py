@@ -308,7 +308,10 @@ def _snapshot_system_prompts(
     orchestration_phase: str = "",
     macro_cycle: int = 0,
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.cN.snapshot.md``."""
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
+
+    The orchestration role additionally writes a cycle-scoped copy (``system_prompt.cN[.PHASE].snapshot.md``).
+    """
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role, macro_cycle=macro_cycle)
         target.parent.mkdir(parents=True, exist_ok=True)

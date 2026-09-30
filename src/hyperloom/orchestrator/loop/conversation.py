@@ -551,7 +551,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def _load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""
-        override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
+        override = self._coord.orch_prompt.get(agent_name)
         if override is not None:
             return override
         role = self.role_registry[agent_name]

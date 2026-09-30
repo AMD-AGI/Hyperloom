@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.bus.message_bus import MessageBus
@@ -18,6 +18,29 @@ if TYPE_CHECKING:
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
     from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorState
+
+
+class OrchestrationPrompt:
+    """Owns the orchestration system-prompt overrides, rebuild closure, and snapshot writes."""
+
+    def __init__(
+        self,
+        overrides: dict[str, str],
+        *,
+        is_user_supplied: bool = False,
+        rebuild: Callable[..., str] | None = None,
+    ) -> None:
+        self.overrides: dict[str, str] = overrides
+        self.is_user_supplied: bool = is_user_supplied
+        self.rebuild: Callable[..., str] | None = rebuild
+
+    def get(self, agent_name: str) -> str | None:
+        """Return the override for *agent_name*, or None when absent."""
+        return self.overrides.get(agent_name)
+
+    def set(self, agent_name: str, prompt: str) -> None:
+        """Install a new prompt for *agent_name*."""
+        self.overrides[agent_name] = prompt
 
 
 class CoordinatorCollaborator:
@@ -85,6 +108,10 @@ class CoordinatorCollaborator:
     @property
     def state(self) -> "CoordinatorState":
         return self._coord.state
+
+    @property
+    def orch_prompt(self) -> "OrchestrationPrompt":
+        return self._coord.orch_prompt
 
     @property
     def recipe_kb(self):

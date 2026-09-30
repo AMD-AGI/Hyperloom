@@ -83,31 +83,30 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _maybe_run_close_post_opt_roofline(self) -> None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated."""
+        step = "post_opt_roofline"
         if not self._session_integrated_kernel_patch():
+            await self._record_close_step(step, status="skipped", detail="no_integrated_kernel_patch")
             return
-        # Skip on the wall-clock-deadline close path (its grace window is too short for a full profile+TraceLens);
-        # only run on a normal converged close.
         if bool(self.shared_state.closing_phase):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
+            await self._record_close_step(step, status="skipped", detail="closing_phase")
             return
         if str(self.shared_state.stop_reason or "") == PATCH_RECOVERY_INCOMPLETE_STOP_REASON:
-            # Profiling the tree the run just refused to trust would attribute
-            # the reading to a baseline that is not on disk.
             log.info("CLOSE step 0: skipped post-opt roofline (patch recovery incomplete)")
+            await self._record_close_step(step, status="skipped", detail=PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
             return
         if self._coord.phase_prelude._internal_analysis_kind() != "roofline":
-            # Roofline disabled for this run; nothing to profile.
+            await self._record_close_step(step, status="skipped", detail="roofline_disabled")
             return
         task = await self._coord.phase_prelude._enqueue_internal_analysis_task(reason="close_post_opt")
         if task is None:
+            await self._record_close_step(step, status="skipped", detail="task_not_enqueued")
             return
         log.info(
             "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
             task.task_id,
             self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
         )
-        # Hard timeout so a slow profile+TraceLens can't stall the close sequence; on timeout no post-opt snapshot
-        # lands and the chart degrades to baseline-only.
         try:
             result = await asyncio.wait_for(
                 self._coord.dispatcher.run_task_registered(task),
@@ -137,9 +136,15 @@ class ClosePhase(CoordinatorCollaborator):
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
                 )
+            await self._record_close_step(step, status="failed", task_id=task.task_id, detail="timeout")
             return
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
+        await self._record_close_step(
+            step,
+            status="done" if state not in ("failed", "cancelled") else "failed",
+            task_id=task.task_id,
+        )
 
     def _close_stack_revalidation_timeout_sec(self) -> float:
         """How long CLOSE waits for its full-stack revalidation to settle."""
@@ -170,6 +175,7 @@ class ClosePhase(CoordinatorCollaborator):
         state = self.shared_state
         has_unvalidated_keeps = getattr(state, "optimization_stack_has_unvalidated_keeps", None)
         if not (callable(has_unvalidated_keeps) and has_unvalidated_keeps()):
+            await self._record_close_step("stack_revalidation", status="done", detail="no_unvalidated_keeps")
             return
         step = "stack_revalidation"
         stop_reason = str(state.stop_reason or "")
@@ -337,12 +343,10 @@ class ClosePhase(CoordinatorCollaborator):
     async def _do_stack_revalidation(self) -> None:
         """Validate the optimization stack before any close-section records."""
         await self._revalidate_stack_for_close()
-        await self._record_close_step("stack_revalidation", status="done")
 
     async def _do_post_opt_roofline(self) -> None:
         """Profile the final optimized service for the before/after roofline chart."""
         await self._maybe_run_close_post_opt_roofline()
-        await self._record_close_step("post_opt_roofline", status="done")
 
     async def _do_fact_finalize(self) -> None:
         """Recipe KB commit: publishes the terminal outcome before telemetry steps."""

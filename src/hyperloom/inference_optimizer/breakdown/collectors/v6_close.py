@@ -58,6 +58,7 @@ _KNOWN_STEPS = frozenset(
         "sequencer_started",
         "geak_rebench_drain",
         "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",

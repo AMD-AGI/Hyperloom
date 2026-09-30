@@ -58,13 +58,13 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
         """Rebuild the orchestration system prompt for the new macro-cycle.
 
         Injects the freshly-captured ``next_cycle_directive`` and the deterministic
-        cycle strategy into a rebuilt prompt, mutates ``system_prompt_overrides``,
-        and snapshots the installed scope. Skips a user-supplied ``--orch-prompt``.
-        Best-effort; returns True when reseeded.
+        cycle strategy into a rebuilt prompt and snapshots the installed scope.
+        Skips a user-supplied ``--orch-prompt``. Returns True when reseeded.
         """
-        if getattr(self, "_orch_prompt_is_user_supplied", False):
+        orch_prompt = self._coord.orch_prompt
+        if orch_prompt.is_user_supplied:
             return False
-        rebuild = getattr(self, "_rebuild_orch_prompt", None)
+        rebuild = orch_prompt.rebuild
         if rebuild is None:
             return False
         state = self.shared_state
@@ -80,10 +80,7 @@ class CycleMemoryCollaborator(CoordinatorCollaborator):
             cycle_strategy=focus_plan,
             phase=state.phase,
         )
-        overrides = getattr(self, "system_prompt_overrides", None)
-        if not isinstance(overrides, dict):
-            return False
-        overrides["orchestration"] = new_prompt
+        orch_prompt.set("orchestration", new_prompt)
         _write_prompt_snapshot(
             self.session_dir, "orchestration", new_prompt, phase=state.phase, macro_cycle=int(state.macro_cycle or 0)
         )

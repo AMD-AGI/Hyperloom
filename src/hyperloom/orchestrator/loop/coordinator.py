@@ -58,6 +58,7 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
+from ..collaborator import OrchestrationPrompt
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
@@ -239,6 +240,8 @@ class Coordinator:
         self.role_registry = role_registry or default_role_registry()
         # KnowledgePlane owns RecipeKB.
         self.recipe_kb: RecipeKB | None = getattr(knowledge_plane, "recipe_kb", None)
+        # Orchestration prompt overrides, rebuild closure, and snapshot writes.
+        self.orch_prompt = OrchestrationPrompt(overrides={})
         # Per-session optimization journal; lazy-instantiated on first use.
         self._journal: Journal | None = None
         # KnowledgePlane facade; pre-warms PR feed + advisory context.

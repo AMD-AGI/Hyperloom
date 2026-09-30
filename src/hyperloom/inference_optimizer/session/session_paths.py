@@ -286,10 +286,17 @@ def agent_dir(session_dir: Path, role: str) -> Path:
 
 
 def agent_prompt_snapshot(session_dir: Path, role: str, *, phase: str = "", macro_cycle: int = 0) -> Path:
-    """Compute the path to the per-agent system-prompt snapshot."""
-    cycle_part = f"c{macro_cycle}."
-    phase_part = f"{phase.strip().upper()}." if phase.strip() else ""
-    stem = f"system_prompt.{cycle_part}{phase_part}snapshot"
+    """Compute the path to the per-agent system-prompt snapshot.
+
+    Only the orchestration role's snapshot carries the macro-cycle prefix (``cN``);
+    all other roles use a plain ``system_prompt.snapshot.md``.
+    """
+    if role == "orchestration":
+        cycle_part = f"c{macro_cycle}."
+        phase_part = f"{phase.strip().upper()}." if phase.strip() else ""
+        stem = f"system_prompt.{cycle_part}{phase_part}snapshot"
+    else:
+        stem = "system_prompt.snapshot"
     return agent_dir(session_dir, role) / f"{stem}.md"
 
 
