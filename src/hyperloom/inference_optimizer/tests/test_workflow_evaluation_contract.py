@@ -41,6 +41,7 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
             macro_cycle=0,
             baseline_tput=100.0,
             warm_replay_outcome={},
+            phase_budget_pct={},
         ),
         kernel_enabled=True,
         optimize_enabled=True,
