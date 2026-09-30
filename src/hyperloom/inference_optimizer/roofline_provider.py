@@ -25,7 +25,12 @@ if TYPE_CHECKING:  # avoid import cycles at module load; these are only type hin
 
 @runtime_checkable
 class RooflineProvider(Protocol):
-    """Read-only facade over analytical roofline data. Every method is fail-soft (missing -> None)."""
+    """Read-only facade over analytical roofline data.
+
+    The value readers (``arch_peak``/``mem_bw``/``model_meta``/``kernel``) are fail-soft: a miss
+    returns ``None``. ``ceiling`` is the exception — it always yields a breakdown, because native
+    compute is the guaranteed floor (an external miss falls back to it), so it is non-optional.
+    """
 
     def arch_peak(self, device: str, dtype: str) -> float | None:
         """Max-achievable matrix TFLOP/s for ``device``/``dtype`` (None on miss)."""
@@ -35,8 +40,8 @@ class RooflineProvider(Protocol):
         """HBM bandwidth GB/s for ``device`` (None on miss)."""
         ...
 
-    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown | None":
-        """Composed tok/s ceiling (mem/cmp/peak + bound) for the run's ``arm``."""
+    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown":
+        """Composed tok/s ceiling (mem/cmp/peak + bound) for the run's ``arm`` (native floor guaranteed)."""
         ...
 
     def model_meta(
@@ -73,7 +78,7 @@ class NativeRooflineProvider:
         bw = spec.get("hbm_bw_gbps") if spec else None
         return float(bw) if isinstance(bw, (int, float)) and bw > 0 else None
 
-    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown | None":
+    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown":
         from .roofline_ceiling import _compute_roofline_breakdown_native
 
         return _compute_roofline_breakdown_native(state, arm=arm)
@@ -123,9 +128,9 @@ class CsvRooflineProvider:
             return float(v)
         return self._fallback.mem_bw(device)
 
-    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown | None":
+    def ceiling(self, state: Any, *, arm: str | None = None) -> "RooflineBreakdown":
         # _external_ceiling_breakdown reads the external ceiling arm and owns the strict-raise /
-        # trust guards; None means "not in the external CSV" -> native fallback.
+        # trust guards; None means "not in the external CSV" -> native fallback (always yields).
         from .roofline_ceiling import _external_ceiling_breakdown
 
         bd = _external_ceiling_breakdown(state, arm)
