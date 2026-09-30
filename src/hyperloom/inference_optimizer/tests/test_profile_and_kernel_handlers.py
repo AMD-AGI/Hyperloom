@@ -1217,7 +1217,18 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
     ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
     """
-    from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    import sys
+    from pathlib import Path as _Path
+
+    _tools_dir = str(_Path(__file__).resolve().parents[3] / "agents" / "kernel" / "tools")
+    _added = _tools_dir not in sys.path
+    if _added:
+        sys.path.insert(0, _tools_dir)
+    try:
+        from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    finally:
+        if _added and _tools_dir in sys.path:
+            sys.path.remove(_tools_dir)
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
 
     # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
@@ -3974,7 +3985,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -4012,7 +4023,7 @@ async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = True
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -4042,7 +4053,7 @@ async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = False
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
@@ -4073,7 +4084,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": bad_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -4125,7 +4136,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -4172,7 +4183,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
