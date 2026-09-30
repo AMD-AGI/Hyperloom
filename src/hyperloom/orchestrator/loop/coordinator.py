@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_bool, env_flag, env_float, env_int
+from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -236,8 +236,6 @@ class Coordinator:
         _CANONICAL_ORDER = ("orchestration", "critic")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        self._inline_fast_actions_enabled: bool = env_flag("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", default=True)
         self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -266,8 +264,6 @@ class Coordinator:
     # Methods extracted into collaborator objects are delegated back by name here (symmetric to each collaborator's
     # ``__getattr__`` back to this coordinator).
     _DELEGATED = {
-        # router
-        "_handle_update_state": "router",
         # recorder (folded into writeback)
         "_aggregate_research_evidence": "writeback",
         "_harvest_specialist_findings": "writeback",
@@ -609,14 +605,6 @@ class Coordinator:
 
     # Action catalogue mapping action_name -> metadata.
     action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
-
-    # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
-    _INLINE_ACTION_DENY: frozenset[str] = frozenset(
-        {
-            "report",
-            "session_breakdown",
-        }
-    )
 
     # Lifecycle
     async def stop(self) -> None:

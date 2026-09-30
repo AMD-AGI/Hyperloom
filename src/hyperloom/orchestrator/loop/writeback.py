@@ -243,9 +243,8 @@ def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
     makes that outcome diagnostic only — the work it describes may still hold
     resources — so it is not returned.
 
-    TODO: ``bringup.reconcile._terminal_by_observation`` and
-    ``dispatcher.run_action_now`` read the same evidence shape under slightly
-    different rules; the three want one reader.
+    TODO: ``bringup.reconcile._terminal_by_observation`` reads the same evidence
+    shape under slightly different rules; the two want one reader.
     """
     for entry in reversed(getattr(task, "history", None) or []):
         if not isinstance(entry, dict):
