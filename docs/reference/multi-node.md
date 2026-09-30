@@ -155,9 +155,10 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). Flags are authoritative; env vars are not |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` | Enable PD disaggregation (infera only) |
-| `--pd-prefill-nodes`, `--pd-prefill-tp`, `--pd-prefill-ep`, `--pd-prefill-extra-args` | Prefill topology (infera PD) |
-| `--pd-decode-nodes`, `--pd-decode-tp`, `--pd-decode-ep`, `--pd-decode-extra-args` | Decode topology (infera PD) |
+| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
+| `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
+| `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
@@ -198,8 +199,8 @@ inference_optimizer optimize \
 ```
 
 For rayjob, replace `--mn-backend infera` with `--mn-backend rayjob` and omit
-the `--pd-*` flags. The platform supplies `HYPERLOOM_MN_EXT_HEAD_IP` instead of
-the SSH and IP variables.
+the per-role `--pd-*-ep` / `--pd-*-extra-args` flags. The platform supplies
+`HYPERLOOM_MN_EXT_HEAD_IP` instead of the SSH and IP variables.
 
 ## Troubleshooting
 

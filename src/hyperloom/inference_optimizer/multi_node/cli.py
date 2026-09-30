@@ -1283,6 +1283,21 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
+    if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated":
+        # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
+        per_role = [
+            flag
+            for flag, value in (
+                ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
+                ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
+                ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
+                ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
+            )
+            if value
+        ]
+        if per_role:
+            err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
+            return EXIT_CONFIG_ERROR
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 
