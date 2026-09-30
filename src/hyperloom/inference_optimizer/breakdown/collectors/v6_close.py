@@ -31,8 +31,8 @@ its close-out, which is a fact about the session rather than about the record.
 
 A reader wanting to know whether a step genuinely failed must look at
 ``steps[].status``; the absence of a step is not evidence against it.
-``langfuse_flush`` in particular only ever records a step when it fails, so its
-silence is success.
+``langfuse_flush`` records ``done`` on success and ``failed`` when an exception
+escapes; its presence on disk always describes an outcome.
 
 The projection below is the fallback for a session with no recorded close
 fragments, and is retained only for the length of the migration.

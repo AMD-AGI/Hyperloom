@@ -42,6 +42,8 @@ class _StubSharedState:
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
     warm_replay_outcome: dict = field(default_factory=dict)
+    warm_replay_pending: dict = field(default_factory=dict)
+    warm_kernel_kb_attempted: bool = False
     warm_history_injected: bool = False
     auto_roofline_pending_task_id: str = ""
     stop_reason: str = ""

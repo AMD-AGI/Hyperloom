@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any
 from hyperloom.common.deadline import Deadline
 import logging as _logging
